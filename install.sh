@@ -9,7 +9,9 @@ Installs one household into the standard non-root Hermes home. Set HERMES_HOME,
 HERMES_PYTHON, MEAL_CONCIERGE_AGENT_BROWSER, or MEAL_CONCIERGE_BROWSER_EXECUTABLE
 only when the standard locations do not apply. Set MEAL_CONCIERGE_NODE when an
 agent-browser wrapper needs a non-standard Node.js 24+ executable. MENY also
-needs MEAL_CONCIERGE_VIPPS_PHONE_NUMBER, or an interactive private prompt.
+needs the Norwegian mobile number registered with Vipps (the mobile payment
+service used for MENY checkout), supplied through MEAL_CONCIERGE_VIPPS_PHONE_NUMBER
+or an interactive private prompt.
 EOF
 }
 
@@ -47,7 +49,7 @@ if [[ -z "$household" || "$household" == *$'\n'* || "$household" == *$'\r'* ]]; 
 fi
 vipps_phone_number="${MEAL_CONCIERGE_VIPPS_PHONE_NUMBER:-}"
 if [[ "$provider" == "meny" && -z "$vipps_phone_number" && -t 0 ]]; then
-  read -r -s -p "Vipps mobile number (8 digits): " vipps_phone_number
+  read -r -s -p "Norwegian mobile number registered with Vipps for payment (8 digits): " vipps_phone_number
   printf '\n'
 fi
 if [[ "$provider" == "meny" && ! "$vipps_phone_number" =~ ^[0-9]{8}$ ]]; then

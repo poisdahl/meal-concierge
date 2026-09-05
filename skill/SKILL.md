@@ -127,7 +127,8 @@ addition under standing policy; fresh policy still needs its one confirmation.
 Reuse the checkout idempotency key for the same intent. If ensure finds everything
 already ordered and the Oda addition cart is empty, change_abort and report that
 it is already included. MENY edits reopen the whole order, may update all prices,
-and require finishing checkout and the provider's Vipps approval. Resolve a
+and require finishing checkout and user payment approval through Vipps, the
+mobile payment service used by the MENY integration. Resolve a
 pending payment or uncertain change before editing; do not discard it.
 
 ## Ingredients, packages and cart
@@ -200,7 +201,8 @@ recover that attempt. A later intent needs a new key. Begin exact existing-order
 changes before modifying their cart/delivery. No uncertain action is repeated.
 Only bound checkout submit/reconcile `confirmed=true` establishes success.
 
-MENY still requires approval of its actual Vipps request on the user's phone.
+MENY still requires approval of its actual payment request through Vipps on the
+user's phone.
 Keep that attempt for reconciliation. Only an explicit no-dispatch result with
 safe fresh-prepare instructions permits one new standing-authorized submit.
 A confirmed expired delivery reservation can be renewed once with the same exact

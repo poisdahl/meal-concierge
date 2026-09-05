@@ -75,7 +75,7 @@ vary by store.
 |---|---|---|---|
 | Connection | Oda MCP, plus browser for protected order actions | Mathem MCP | Logged-in MENY website |
 | Sign-in | Hermes OAuth **and** browser login to the same Oda account | Separate Mathem OAuth through Hermes | Persistent browser login |
-| Checkout | Configured Oda payment method | Review the cart in chat, then pay on Mathem's website | Home delivery and Vipps approval on your phone |
+| Checkout | Configured Oda payment method | Review the cart in chat, then pay on Mathem's website | Home delivery and payment via Vipps (a Norwegian mobile payment service), approved on your phone |
 | Existing orders | Read, supported changes and cancellation | Read and track; change or cancel on Mathem's website | Read, supported changes and cancellation |
 
 Mathem uses Swedish kronor (SEK). Its `checkout prepare` returns a cart summary
@@ -102,7 +102,7 @@ any further action.
   (installed below).
 - **An Oda, Mathem or MENY account** that supports delivery to your address.
   MENY also
-  needs your eight-digit Vipps mobile number.
+  needs your eight-digit Norwegian mobile number registered with Vipps for payment.
 
 Oda and MENY require a one-time login in a visible browser. A remote headless
 server needs a private graphical session, such as X11 forwarding or a private
@@ -188,7 +188,8 @@ an existing Oda login is not reused. Keep a separate installation/state director
 for each store. The installer refuses to change an existing household's provider.
 
 **For MENY**, run this in an interactive terminal. The installer privately
-prompts for your eight-digit Vipps mobile number:
+prompts for your eight-digit Norwegian mobile number registered with Vipps for
+payment:
 
 ```sh
 ./install.sh --provider meny --household "My household"
@@ -210,7 +211,8 @@ verify the delivery address, then **close that browser** so the service can use
 its profile.
 
 For Oda, use the same account as the OAuth login and make sure it already has a
-payment method configured. For MENY, checkout uses home delivery and Vipps.
+payment method configured. For MENY, checkout uses home delivery and Vipps as the
+payment method.
 
 ### 5. Start and verify
 

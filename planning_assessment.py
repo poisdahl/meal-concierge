@@ -89,7 +89,7 @@ def workflow_status(state):
         next_action = {"operation": "cart", "action": "reconcile_change", "reason": "Read back the pending grocery top-up before any further write; never repeat an uncertain delta."}
     elif pending:
         action = "reconcile" if pending.get("status") in {"clicking", "uncertain", "awaiting_user_payment"} else "confirm"
-        next_action = {"operation": "checkout", "action": action, "reason": "Approve the existing Vipps request on the phone, then reconcile." if pending.get("status") == "awaiting_user_payment" else "Continue the exact existing checkout attempt; confirmation policy still applies."}
+        next_action = {"operation": "checkout", "action": action, "reason": "Approve the existing payment request through Vipps on your phone, then reconcile." if pending.get("status") == "awaiting_user_payment" else "Continue the exact existing checkout attempt; confirmation policy still applies."}
     elif cancellation:
         next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation."}
     elif change:

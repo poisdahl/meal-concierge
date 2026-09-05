@@ -34,7 +34,7 @@ details. Run shell examples from the repository root.
 | Product favorites, recurring items and menus | Local | Local | Local |
 | Delivery selection / read and track orders | Yes | MCP | Yes |
 | Add goods / move or cancel an existing order | Yes | Manual on Mathem | Yes |
-| Protected checkout | Fresh or standing authorization, reconcile | Manual on Mathem | Fresh or standing authorization, Vipps approval, reconcile |
+| Protected checkout | Fresh or standing authorization, reconcile | Manual on Mathem | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
 
 Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
 Hermes OAuth registration `mathem-weekly`. The Oda MCP transport is shared;
@@ -66,15 +66,15 @@ and completed customer flow. No Mathem purchase is part of local validation.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths
-rather than private web endpoints. The service requires a persistent MENY
-login so store, lists, offers, cart and orders all belong to the intended
-account. MENY checkout requires home delivery and Vipps: prepare verifies the
-unchanged cart, final reserved amount, delivery window and selected Vipps
-method; confirm starts one Vipps request; the user approves it on the phone;
-and reconcile verifies the exact new or updated MENY order. Anonymous MENY mode
-is not supported. The private config's `vipps_phone_number` is entered only on
-Vipps's own handoff page; it is never returned by status, written to state or
-included in application logs.
+rather than private web endpoints. The service requires a persistent MENY login
+so store, lists, offers, cart and orders all belong to the intended account.
+MENY checkout requires home delivery and Vipps as the payment method: prepare
+verifies the unchanged cart, final reserved amount, delivery window and
+selected Vipps payment method; confirm starts one payment request through
+Vipps; the user approves it on the phone; and reconcile verifies the exact new
+or updated MENY order. Anonymous MENY mode is not supported. The private
+config's `vipps_phone_number` is entered only on Vipps's own handoff page; it
+is never returned by status, written to state or included in application logs.
 
 Before the payment click, each MENY line is bound to its exact product path.
 MENY's completed-order view omits those paths, so reconciliation uses the
@@ -108,11 +108,11 @@ who wants a standing authorization can set the private config to
 `"confirmation_policy": "standing"` and restart the service. A clear current
 request to order, pay, check out or cancel then proceeds without another Hermes
 confirmation, including when the freshly prepared amount changes. Requests to
-preview or prepare remain read-only. This setting does not bypass a provider,
-Vipps, bank, device or platform approval, and an uncertain result is never
-retried automatically.
-Each standing submit/cancel intent uses one explicit idempotency key. Reuse it
-only to recover that same lost response; use a new key for a later user intent.
+preview or prepare remain read-only. This setting does not bypass approval
+enforced by the store, payment provider (Vipps for MENY), bank, device or
+platform, and an uncertain result is never retried automatically. Each standing
+submit/cancel intent uses one explicit idempotency key. Reuse it only to
+recover that same lost response; use a new key for a later user intent.
 
 ## First-run configuration
 
@@ -229,15 +229,16 @@ from date/start/end and a live click requires exactly one semantic match. This
 keeps the identity stable when price wording changes. Local selection provenance
 is only an observation and is checked against a fresh provider read.
 
-`schedule.delivery.strategy` is `keep_selected` or `cheapest`. Hard weekday/date
-and latest-end limits are applied before price. Cheapest requires every eligible
-candidate to have an exact price, then ranks by price, end nearest
-`preferred_end`, earlier start and bytewise `slot_ref`. Mixed exact/from/missing
-prices stop in `cart_ready`/`needs_input`, and explicit or externally selected
-windows are never replaced. Protected checkout rereads the provider selection
-and price. A strategy-owned window may be reselected/reprepared once after
-drift; a second drift stops before payment. MENY still ends unattended runs in
-`cart_ready` and keeps its manual/Vipps boundary.
+`schedule.delivery.strategy` is `keep_selected` or `cheapest`. Hard
+weekday/date and latest-end limits are applied before price. Cheapest requires
+every eligible candidate to have an exact price, then ranks by price, end
+nearest `preferred_end`, earlier start and bytewise `slot_ref`. Mixed
+exact/from/missing prices stop in `cart_ready`/`needs_input`, and explicit or
+externally selected windows are never replaced. Protected checkout rereads the
+provider selection and price. A strategy-owned window may be
+reselected/reprepared once after drift; a second drift stops before payment.
+MENY still ends unattended runs in `cart_ready` and requires the user to
+initiate checkout and approve payment through Vipps.
 
 The scheduler invokes checkout `auto` for both `cart_ready` and
 `auto_checkout`. A `cart_ready` run may reserve the verified cheapest slot but
@@ -294,12 +295,11 @@ Only the checkout tool's bound `submit` or `reconcile` result can establish a
 successful order. A generic order list or order read after checkout returned an
 error is not proof that the current attempt succeeded. A dispatched click that
 was not acknowledged stays uncertain even after its summary expires; only an
-acknowledged, unapproved Vipps request may expire into an explicitly retryable
-state.
-When a known pre-dispatch check stops checkout, the error states that no payment
-was dispatched. Under standing authorization, the agent may perform exactly one
-fresh submit for the same current request; this is distinct from retrying an
-uncertain dispatched action.
+acknowledged, unapproved Vipps payment request may expire into an explicitly
+retryable state. When a known pre-dispatch check stops checkout, the error
+states that no payment was dispatched. Under standing authorization, the agent
+may perform exactly one fresh submit for the same current request; this is
+distinct from retrying an uncertain dispatched action.
 
 If MENY reports that the selected delivery reservation has expired, list the
 same date and select the same window once to renew it before preparing checkout
@@ -995,7 +995,7 @@ requests, in a safe order, are:
 - “Prepare checkout” or “Prepare cancellation for order …” only prepares a
   summary. Under `fresh`, review it and confirm in the next message. Under
   `standing`, a direct “order/pay/check out/cancel” request submits without a
-  second Hermes question. MENY then waits for one Vipps approval and
+  second Hermes question. MENY then waits for one payment approval through Vipps and
   reconciliation; an expired or uncertain result is never blindly retried.
 - “Send a test recipe email for order …” or run the returned delivery-day
   action. Test email never consumes the due job. A due email gets a short
@@ -1031,17 +1031,17 @@ account.
 ## State and safety
 
 The service stores atomic household/menu state in one private JSON file and
-recipe documents and revisions in one household-bound SQLite file, plus a
-local Unix socket. Reversible cart changes follow clear user requests. Checkout,
+recipe documents and revisions in one household-bound SQLite file, plus a local
+Unix socket. Reversible cart changes follow clear user requests. Checkout,
 payment-bearing changes to one exact existing order, and cancellation always
 bind the action to one freshly prepared summary. The `fresh` policy also
 requires its exact confirmation ID; the `standing` policy lets the same clear
-request authorize immediate submission. An uncertain final action is
-reconciled and never retried automatically. Adding goods preserves
-the existing order identity. Moving a delivery window is kept separate from an
-Oda addition cart so the target cannot become ambiguous. A scheduled checkout
-dispatches only after its configured total and delivery guards, and only under
-standing authorization; MENY always requires the user's Vipps approval.
+request authorize immediate submission. An uncertain final action is reconciled
+and never retried automatically. Adding goods preserves the existing order
+identity. Moving a delivery window is kept separate from an Oda addition cart
+so the target cannot become ambiguous. A scheduled checkout dispatches only
+after its configured total and delivery guards, and only under standing
+authorization; MENY always requires the user's payment approval through Vipps.
 
 Hermes cron owns weekly wakeups and delivery-day email wakeups; this package
 only stores settings and returns the next cron or email action. The email flow
@@ -1433,8 +1433,9 @@ A nonempty Oda cart returns `cart_confirmation_required` with `cart_digest`.
 The unchanged digest may be supplied to `change_begin` only when all those
 items are authorized for the selected order. Goods are never cleared to start
 an edit. Checkout binds and confirms the resulting addition to the same order;
-MENY reopens the full order and requires checkout/Vipps again. Actual provider
-permission is checked during editing and checkout rather than inferred from time.
+MENY reopens the full order and requires checkout and payment approval through
+Vipps again. Actual provider permission is checked during editing and checkout
+rather than inferred from time.
 
 Provider explanations: [Oda additions](https://hjelp.oda.com/no/article/100639),
 [MENY order changes](https://meny.no/faq/bestilling-i-nettbutikken).
