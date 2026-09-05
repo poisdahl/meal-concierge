@@ -1086,14 +1086,14 @@ class PlanningOperations:
             if not isinstance(query_value, str):
                 raise HouseholdError("catalog query must be text")
             query = query_value.strip()
-            return self.oda.call("product_search", {"queries": [query], "page": 1, "size": bounded_limit(request.get("limit"), default=5, maximum=MAX_PRODUCTS)}, **kwargs)
+            return self.provider_client.call("product_search", {"queries": [query], "page": 1, "size": bounded_limit(request.get("limit"), default=5, maximum=MAX_PRODUCTS)}, **kwargs)
         if action == "recipes":
             query = request.get("query", "")
             if not isinstance(query, str):
                 raise HouseholdError("catalog query must be text")
-            return self.oda.call("recipe_search", {"query": query, "page": 1, "size": bounded_limit(request.get("limit"), default=5)}, **kwargs)
+            return self.provider_client.call("recipe_search", {"query": query, "page": 1, "size": bounded_limit(request.get("limit"), default=5)}, **kwargs)
         if action == "usuals":
-            return self.oda.call("likely_to_buy", {}, **kwargs)
+            return self.provider_client.call("likely_to_buy", {}, **kwargs)
         raise HouseholdError("unknown catalog action")
 
     def _product_binding(
@@ -1144,7 +1144,7 @@ class PlanningOperations:
                 "deadline": deadline,
                 "allow_recovery": False,
             } if self.provider == "meny" else {}
-            observation = self.oda.call(
+            observation = self.provider_client.call(
                 "product_search",
                 {"queries": [query], "page": 1, "size": MAX_CANDIDATES_PER_REQUIREMENT},
                 **kwargs,
@@ -1637,11 +1637,11 @@ class PlanningOperations:
         *, deadline: float | None,
     ) -> dict[str, int]:
         for batch in self._meny_cart_batches(operations):
-            before = self.oda.call("get_cart", {}, deadline=deadline)
+            before = self.provider_client.call("get_cart", {}, deadline=deadline)
             before_live, _before_names = self._cart_lines(cart_summary(before))
             if before_live != acknowledged:
                 raise HouseholdError("MENY cart changed between bounded batches")
-            changed_cart = self.oda.call(
+            changed_cart = self.provider_client.call(
                 "manipulate_cart", {"operations": batch}, deadline=deadline
             )
             for operation in batch:
@@ -1787,7 +1787,7 @@ class PlanningOperations:
         if not isinstance(extra_values, list):
             raise HouseholdError("start_as_extra_product_ids must be a list")
         start_as_extra = {self._product_id(value) for value in extra_values}
-        first_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+        first_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
         first_summary = cart_summary(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         if not start_as_extra.issubset(first_live):
@@ -1881,7 +1881,7 @@ class PlanningOperations:
                             if isinstance(guard, Mapping) else None
                         ),
                     }
-            prewrite_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+            prewrite_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
             prewrite_summary = cart_summary(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != self._cart_digest(first_live):
@@ -1904,10 +1904,10 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self.oda.call("manipulate_cart", {"operations": operations})
+                    self.provider_client.call("manipulate_cart", {"operations": operations})
             except HouseholdError as exc:
                 mutation_error = exc
-        verified_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+        verified_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
         verified_summary = cart_summary(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         expected = dict(first_live)
@@ -1970,7 +1970,7 @@ class PlanningOperations:
             raise HouseholdError("cart exclusions and accepted missing products must be lists")
         excluded = {self._product_id(value) for value in excluded_values}
         accepted_missing = {self._product_id(value) for value in accepted_missing_values}
-        first_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+        first_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
         first_summary = cart_summary(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         first_digest = self._cart_digest(first_live)
@@ -2012,7 +2012,7 @@ class PlanningOperations:
         mutation_error = None
         acknowledged_live = dict(first_live)
         if operations:
-            prewrite_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+            prewrite_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
             prewrite_summary = cart_summary(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != supplied_digest:
@@ -2027,10 +2027,10 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self.oda.call("manipulate_cart", {"operations": operations})
+                    self.provider_client.call("manipulate_cart", {"operations": operations})
             except HouseholdError as exc:
                 mutation_error = exc
-        verified_cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {})
+        verified_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
         verified_summary = cart_summary(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         if mutation_error is not None or verified_live != target:
@@ -2213,7 +2213,7 @@ class PlanningOperations:
                     raise HouseholdError("reconcile_change before another cart write")
                 return self._cart_sync(request, deadline) if action == "sync" else self._cart_reconcile(request, deadline)
         if action == "get":
-            cart = self.oda.call("get_cart", {}, deadline=request.get("_deadline"), allow_recovery=request.get("_allow_browser_recovery") is True) if self.provider == "meny" else self.oda.call("get_cart", {})
+            cart = self.provider_client.call("get_cart", {}, deadline=request.get("_deadline"), allow_recovery=request.get("_allow_browser_recovery") is True) if self.provider == "meny" else self.provider_client.call("get_cart", {})
             state = self.store.read()
             plan = state.get("cart_plan")
             return {**cart, **({"cart_write_pending": True} if state.get("pending_cart_change") else {}), **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_summary(cart))} if isinstance(plan, Mapping) else {})}
@@ -2235,7 +2235,7 @@ class PlanningOperations:
                 if self.provider == "meny":
                     change = pending.get("order_change") or {}
                     self.browser.verify_order_change(change.get("order_id"), change.get("code"), deadline=deadline)
-                cart = self.oda.call("get_cart", {}, deadline=deadline)
+                cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 self._complete_cart_write(pending, cart)
                 return {"reconciled": True, "cart_write_pending": False, "cart": cart,
                         "next": "The saved write is verified. Rerun ensure for the original minimum if a multi-batch request was interrupted; never repeat a delta."}
@@ -2260,7 +2260,7 @@ class PlanningOperations:
                     ordered = oda_order_quantities(current["order"])
                     if ordered is None:
                         raise HouseholdError("Oda ordered quantities cannot be verified")
-            cart = self.oda.call("get_cart", {}, deadline=deadline)
+            cart = self.provider_client.call("get_cart", {}, deadline=deadline)
             before, _names = self._cart_lines(cart_summary(cart))
             if change and self.provider == "oda" and before != change.get("expected_cart_quantities", {}):
                 raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true, then review its destination again")
@@ -2290,7 +2290,7 @@ class PlanningOperations:
                     if expected[key] < 0:
                         raise HouseholdError("cart quantity cannot become negative")
                 expected = {key: value for key, value in expected.items() if value}
-                latest = self.oda.call("get_cart", {}, deadline=deadline)
+                latest = self.provider_client.call("get_cart", {}, deadline=deadline)
                 if self._cart_lines(cart_summary(latest))[0] != before:
                     raise HouseholdError("cart changed before the update; read it again without repeating a delta")
                 with self.store.locked() as locked:
@@ -2305,7 +2305,7 @@ class PlanningOperations:
                 if self.provider == "meny" and change:
                     arguments["order_change_code"] = change["code"]
                 try:
-                    self.oda.call("manipulate_cart", arguments, deadline=deadline)
+                    self.provider_client.call("manipulate_cart", arguments, deadline=deadline)
                 except MenyCartStoppedError as exc:
                     acknowledged = dict(before)
                     for item in exc.applied_operations:
@@ -2316,13 +2316,13 @@ class PlanningOperations:
                         locked["pending_cart_change"] = deepcopy(pending)
                     if self.provider == "meny":
                         self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
-                    cart = self.oda.call("get_cart", {}, deadline=deadline)
+                    cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                     self._complete_cart_write(pending, cart)
                     return {"ensured": False, "stopped": True, "reason": str(exc), "cart": cart,
                             "next": "The adapter stopped before the next click. Earlier additions are retained; resolve product availability before a new ensure."}
                 if self.provider == "meny":
                     self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
-                cart = self.oda.call("get_cart", {}, deadline=deadline)
+                cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 self._complete_cart_write(pending, cart)
                 before = expected
                 change = deepcopy(self.store.read().get("order_change"))

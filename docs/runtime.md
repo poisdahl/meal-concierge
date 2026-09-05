@@ -1,0 +1,198 @@
+# Standalone runtime and safe updates
+
+The runtime runs independently of agent conversations on Linux/user-systemd and
+Apple Silicon macOS/launchd. Installation, service lifecycle and agent attachment
+are separate commands. The installer never registers an agent, logs in, transfers
+schedulers, sends messages or performs grocery actions.
+
+## Install and attach
+
+Use Python 3.10+ for the installer and install `uv` on PATH. The installed runtime
+uses Python 3.12.12 and all versions in `runtime-requirements.txt`, including
+`mcp==2.1.1` and `mcp-types==2.1.1`. Installation verifies both SDK versions and
+loaded module paths inside its own virtual environment. Hermes is not required.
+For Oda/MENY, install `agent-browser@0.33.1` and a non-snap Chromium/Chrome.
+The adapter may need Node.js 24+ on the PATH used to install the service.
+Apple Silicon app discovery includes `/Applications/Google Chrome.app` and
+`~/Applications/Google Chrome.app`. Linux ARM64 needs a distribution Chromium;
+the adapter's Chrome for Testing download does not provide Linux ARM64 builds.
+
+From a product checkout **outside the data directory**:
+
+```sh
+./install.sh install --provider meny --household "My household" \
+  --agent-browser "$HOME/.local/lib/meal-concierge/node_modules/.bin/agent-browser"
+./install.sh start
+./install.sh attach
+```
+
+`--browser-executable /absolute/path/to/chromium` overrides browser discovery.
+Installation leaves the service stopped. `attach` checks the running service and
+prints its stdio MCP command/args/env and skill path; register those with each
+trusted owner's agent. It changes neither client configuration nor service
+lifecycle. Platform-specific packages and complete real-client workflows remain
+separate integration work. Additional clients share the same service.
+
+New data defaults to `~/.local/share/meal-concierge`; set `--home` (or
+`MEAL_CONCIERGE_HOME`) for another installation. Code defaults to
+`~/.local/lib/meal-concierge/<service-name>`. `--code-root` must be disjoint from
+data and belongs to one installation. Each release has its own venv; `current`
+selects code. New installations use a short browser instance name; socket paths
+are checked against the native Unix limit before staging. Use shorter explicit
+`--socket`/`--browser-socket-directory` paths when adopting a long legacy layout. Old releases are retained. `--name` selects the native service name
+(default `meal-concierge` on Linux, `com.meal-concierge` on macOS).
+
+| Private path | Contents |
+|---|---|
+| `config.json` | Household/provider configuration; preserved during updates |
+| `state/state.json` | Household state and protected outcome/email journals |
+| `state/recipes.sqlite3` | Own bank, revisions, snapshots and library-operation journals |
+| `state/assets/`, `state/snapshots/` | Reserved durable locations for recipe work; copied with the entire state tree |
+| `browser/` | Dedicated browser home/profile and daemon socket directory |
+| `tokens/` | Future standalone provider-auth location; installation does not populate it |
+| `run/` | Socket-only directory for agent connection; no household data |
+| `backups/` | Private, complete offline state/config copies made before migration |
+| `runtime.json` | Exact installation paths, owner and selected/previous code release |
+
+The runtime's existing Oda/Mathem OAuth implementation still imports Hermes
+helpers. Independent provider OAuth/cutover is MC-04; a healthy standalone core
+does not certify their login/refresh or provider readiness. Do not copy refresh
+credentials to create a second owner. Existing Compose and explicit legacy
+runner paths remain supported by `service.py`; native adoption does not convert
+Compose or claim live parity. MENY login and its private `vipps_phone_number`
+configuration still require a separately authorized provider setup.
+
+## Existing installations
+
+`./install.sh discover` reports the selected home and conventional Hermes home.
+It does not scan arbitrary disks or live Compose services. A detected config or
+state prevents silent replacement. Inspect the old unit/container command and
+preserve **all** effective paths, including tokens and browser socket directory.
+Stop and disable the old supervisor under its owner's authorization first. An
+old launchd plist must be retired from LaunchAgents; systemd must report disabled,
+masked or not found. The installer will not stop or disable an old owner for you.
+
+Then adopt the same data/config with a distinct new native service name:
+
+```sh
+./install.sh install --adopt --legacy-unit OLD_STOPPED_UNIT \
+  --home /private/runtime-metadata --code-root /private/program \
+  --name meal-concierge-replacement \
+  --config /existing/config.json --state /existing/state \
+  --tokens /existing/mcp-tokens --socket /existing/run/service.sock \
+  --browser-home /existing/browser --browser-profile /existing/browser/profile \
+  --browser-socket-directory /existing/browser/run \
+  --agent-browser /absolute/path/to/agent-browser \
+  --browser-executable /absolute/path/to/chromium
+```
+
+Use `--legacy-unit none` only for restored/offline data with no old supervisor.
+No source config, provider, primary recipe library or credentials are rewritten.
+Explicit `HERMES_HOME` in the legacy shell runner retains its token/data fallback;
+new native services pass exact paths and do not use that fallback.
+
+Lifetime locks cover resolved state/JSON/SQLite, browser home/profile/daemon and
+listener paths before initialization. The service also inspects old service
+process arguments before takeover. Ambiguous implicit legacy browser profiles
+require stopping that process. A live listener or non-socket path is never
+unlinked by a competing launcher. Locks are not proof that a pre-lock supervisor
+cannot later restart: disabling/retiring that old owner remains mandatory.
+
+## Updates, failures and recovery
+
+```sh
+./install.sh stop --home /private/household
+./install.sh backup --home /private/household --backup /private/backups/manual-copy
+# Update the product checkout, then:
+./install.sh update --home /private/household
+./install.sh start --home /private/household
+./install.sh attach --home /private/household
+```
+
+The installer refuses updates/backups while the owner is active. It builds and
+checks the candidate venv before migration; under offline lifetime locks it copies
+the full state tree/config, opens and migrates both JSON and SQLite, publishes
+its own native definition and switches code. Updates preserve exact recipe refs,
+local edits, histories and outstanding operations. They do not rerun the selective
+`migrate.py` importer, change primary libraries or reconcile provider effects.
+
+`maintenance.json` blocks service start after a migration/publication failure.
+`pending-install.json` preserves exact paths if first installation is interrupted.
+Retry `update --home ...` to finish from the current data. Native registration is
+an exclusive link to that home's durable definition: retry cannot overwrite a
+foreign service unit. Partial build directories and backups are retained for
+inspection, not automatically pruned. A failed migration can have upgraded one
+store before the other fails; do not manually remove the maintenance marker and
+start old code. Repair the cause and retry, or inspect a private offline restore.
+
+Code rollback is separate from data recovery. Never replace current journals with
+a pre-order/pre-send backup after possible external effects. This installer does
+not offer an automatic data rollback or downgrade. Preserve latest outcomes and
+reconcile their original identities before any recovery decision.
+
+## Complete private data backup and relocated restore
+
+```sh
+./install.sh restore --backup /private/backups/manual-copy \
+  --home /private/new-empty-home
+```
+
+Restore accepts a complete installer backup into a **new** home only; it never
+starts a service or overwrites an existing home. It copies SQLite including its
+sidecars, JSON, all state snapshots/assets and config together. Symbolic links
+and special files in the state tree are rejected: linked files must be deliberately
+relocated before backup, never silently followed or omitted. The completion
+marker is written last; a failed backup cannot be restored as complete.
+
+Browser profiles, OAuth tokens and external recipe-library credentials outside
+the state tree are not included. Preserve their existing paths during adoption;
+re-establish or separately manage credentials under the correct provider owner
+when restoring to another host. Full-tree preservation of synthetic asset files
+is tested; future recipe image resolution is not implemented by this installer.
+
+## Versioned recipe package integration
+
+Own-bank storage is the target. `--recipe-pack PATH` is the reserved local-file
+installer boundary and currently fails explicitly **before opening the archive
+or changing data**. It does not claim a completed importer or supply a fake pack.
+Ordinary RPC frames remain bounded at approximately 2 MiB.
+
+Pending acceptance depends on [#40](https://github.com/poisdahl/meal-concierge/issues/40)
+(version-aware source/quantity schema), [#42](https://github.com/poisdahl/meal-concierge/issues/42)
+(private snapshots/provider binding), [#39](https://github.com/poisdahl/meal-concierge/issues/39)
+(managed assets/origin), [#46](https://github.com/poisdahl/meal-concierge/issues/46)
+(own-bank transition and bounded import), and [#47](https://github.com/poisdahl/meal-concierge/issues/47)
+(the compatible versioned public archive), tracked in [#45](https://github.com/poisdahl/meal-concierge/issues/45).
+
+When those contracts land, replace the explicit unavailable result with a trusted
+compatible pack importer and matching-release acquisition, using staged/batched
+local files. Then verify measured archive/record/image bounds, confined extraction,
+interrupted/repeated import, bundled-origin authority, local edits/favorites/archive
+state, retained historical images and relocated database-plus-assets resolution.
+Do not blindly raise native import limits, stream a whole pack through one RPC,
+retire external recovery routes prematurely, or treat byte-copy tests as this
+later feature acceptance.
+
+## Verification boundary
+
+The native fixture in `tests/test_installer.py --native ROOT NAME ADAPTER CHROME`
+requires fresh scratch paths and a unique native unit name. It exercises install,
+interrupted publication/retry, one service owner, actual SDK discovery/setup,
+same-client reconnect across restart, full offline update/restore and adoption of
+existing configured paths. `--mathem ROOT NAME` checks the core without browser
+or Hermes and reports provider login as unavailable. These are isolated tests,
+not permission to run against a household installation.
+
+The Linux ARM64 browser proof used extracted Chromium 152 with a task-only
+`--no-sandbox` wrapper because the host restricts unprivileged namespaces. It
+opened only a synthetic blank page; this does not certify that host's production
+browser sandbox or any provider login. Install a supported sandboxed browser for
+normal use. Apple Silicon used installed Chrome 152 with its normal sandbox.
+The actual MENY browser wrapper and persisted instance/profile paths were tested.
+
+The separate `--compose-split` fixture passed with a UID-0 service limited to
+SETUID/SETGID and browser-owned mode-0700 directories; locks are opened under the
+configured browser identity before threads start, then the core identity is
+restored. `--socket-container` verified that the same owner-UID container reconnects
+after host service restart with only the socket directory exposed. Neither test
+changes or certifies an existing live Compose installation.

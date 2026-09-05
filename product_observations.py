@@ -436,28 +436,28 @@ def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
     return result
 
 
-def _oda_items(value: Mapping[str, Any]) -> tuple[str, list[Any], bool]:
+def _retail_items(value: Mapping[str, Any]) -> tuple[str, list[Any], bool]:
     batches = value.get("result")
     if not isinstance(batches, list) or len(batches) != 1 or not isinstance(batches[0], Mapping):
-        raise HouseholdError("Oda product search result changed")
+        raise HouseholdError("Product search result changed")
     batch = batches[0]
     query = _bounded_text(batch.get("query"), required=True, maximum=200)
     products = batch.get("products")
     has_more = batch.get("hasMore")
     if not isinstance(products, list) or not isinstance(has_more, bool):
-        raise HouseholdError("Oda product search result changed")
+        raise HouseholdError("Product search result changed")
     return query, products, has_more
 
 
-def _normalize_oda_product(raw: Any, observed_at: str, *, provider: str = "oda") -> dict[str, Any]:
+def _normalize_retail_product(raw: Any, observed_at: str, *, provider: str = "oda") -> dict[str, Any]:
     if not isinstance(raw, Mapping):
-        raise HouseholdError("Oda product result is invalid")
+        raise HouseholdError("Product result is invalid")
     product_id = raw.get("id")
     if isinstance(product_id, bool) or not isinstance(product_id, int):
-        raise HouseholdError("Oda product result id is invalid")
+        raise HouseholdError("Product result id is invalid")
     product_ref_text = str(product_id)
     if not re.fullmatch(r"[1-9]\d{0,19}", product_ref_text):
-        raise HouseholdError("Oda product result id is invalid")
+        raise HouseholdError("Product result id is invalid")
     name = _bounded_text(raw.get("name"), required=True, maximum=300)
     package_text = _display_text(raw.get("description"), maximum=300)
     package = parse_package(package_text, provider=provider)
@@ -535,14 +535,14 @@ def normalize_meny_product_search(value: Any, *, observed_at: str | None = None)
     }
 
 
-def normalize_oda_product_search(value: Any, *, observed_at: str | None = None, provider: str = "oda") -> dict[str, Any]:
+def normalize_retail_product_search(value: Any, *, observed_at: str | None = None, provider: str = "oda") -> dict[str, Any]:
     if not isinstance(value, Mapping):
-        raise HouseholdError("Oda product search result changed")
+        raise HouseholdError("Product search result changed")
     timestamp = _observed_at(observed_at)
-    query, products, has_more = _oda_items(value)
+    query, products, has_more = _retail_items(value)
     if len(products) > MAX_PRODUCTS:
-        raise HouseholdError("Oda product search returned too many products")
-    normalized = _deduplicate([_normalize_oda_product(product, timestamp, provider=provider) for product in products])
+        raise HouseholdError("Product search returned too many products")
+    normalized = _deduplicate([_normalize_retail_product(product, timestamp, provider=provider) for product in products])
     return {
         "provider": provider, "query": query, "observed_at": timestamp,
         "scope": {"kind": "provider_search", "page": 1, "requested_size": len(products), "returned": len(normalized), "has_more": has_more, "semantics": "bounded_relevance_ranked"},

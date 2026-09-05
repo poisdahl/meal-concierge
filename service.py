@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 import socket
 import struct
 import threading
@@ -27,6 +28,8 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from oda_browser import OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from core import (
@@ -48,11 +51,11 @@ from core import (
     validate_delivery_slot,
     valid_email_address,
 )
-from oda import (
-    OdaClient,
-    oda_cart_delivery_matches_slot,
+from retail_mcp import (
+    RetailMcpClient,
+    retail_cart_delivery_matches_slot,
     oda_cart_delivery_window,
-    oda_delivery_slot_date,
+    retail_delivery_slot_date,
 )
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MENY_ORDER_TIMEOUT, MENY_READ_TIMEOUT, MenyClient, MenyOrderChangeDispatchError, meny_checkout_reviews_match, normalize_product_ref
 from recipes import RecipeError, RecipeStore, normalize_recipe, normalize_source_url, recipe_key, scale_recipe, validate_week
@@ -180,7 +183,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.recipe_planner_lock = threading.RLock()
         self.recipe_planner_lock_path = store.directory / "recipe-planner.lock"
         self.product_plan_lock = threading.RLock()
-        self.oda = provider_client
+        self.provider_client = provider_client
         self.provider = str(store.config.get("provider") or "oda").casefold()
         self.email_provider_clients = {**dict(email_provider_clients or {}), self.provider: provider_client}
         self.confirmation_policy = str(store.config.get("confirmation_policy") or "fresh").casefold()
@@ -263,9 +266,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _refresh_integration(self, deadline: float | None = None, *, allow_recovery: bool = False) -> None:
         try:
             if self.provider == "meny" and (deadline is not None or allow_recovery):
-                probe = self.oda.probe(deadline=deadline, allow_recovery=allow_recovery)
+                probe = self.provider_client.probe(deadline=deadline, allow_recovery=allow_recovery)
             else:
-                probe = self.oda.probe()
+                probe = self.provider_client.probe()
             self.integration = {
                 "status": "ready",
                 "provider": self.provider,
@@ -641,7 +644,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return normalize_product_ref(value)
         product_id = str(value or "").strip()
         if not product_id.isdigit() or int(product_id) < 1:
-            raise HouseholdError("saved product_id does not match the configured Oda provider")
+            raise HouseholdError(f"saved product_id does not match the configured {self.provider.capitalize()} provider")
         return product_id
 
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -658,6 +661,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         return self._items({**request, "action": action}, "recurring_items")
 
 
+from runtime_ownership import ownership, listener_ownership
+
+
 class Server:
     def __init__(self, path: Path, group: int, allowed_uid: int, app: Application):
         self.path = path
@@ -667,11 +673,7 @@ class Server:
 
     def run(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        with listener_ownership(self.path), socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
             listener.bind(str(self.path))
             os.chown(self.path, -1, self.group)
             os.chmod(self.path, 0o660)
@@ -698,7 +700,9 @@ class Server:
                 request = strict_json_loads(line)
                 if not isinstance(request, dict):
                     raise HouseholdError("request must be an object")
-                response = {"ok": True, "result": self.app.handle(request)}
+                if request.get("contract", 1) != 1:
+                    raise HouseholdError("incompatible bridge/core contract; update the client package to this service release")
+                response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
             except (HouseholdError, TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as exc:
                 response = {"ok": False, "error": str(exc)}
             try:
@@ -749,6 +753,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--config", type=Path, required=True)
     result.add_argument("--state", type=Path, required=True)
     result.add_argument("--tokens", type=Path)
+    result.add_argument("--maintenance", type=Path)
     result.add_argument("--socket", type=Path, default=Path("/tmp/meal-concierge.sock"))
     result.add_argument("--socket-group", type=int, default=os.getgid())
     result.add_argument("--agent-uid", type=int, default=os.getuid())
@@ -778,6 +783,13 @@ def load_library_secret_for_state(state_directory: Path, library_id: str) -> dic
 
 def main() -> None:
     args = parser().parse_args()
+    if args.maintenance and args.maintenance.exists():
+        raise SystemExit("offline update is incomplete; repair it before starting the service")
+    with ownership(args.state, args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid):
+        run(args)
+
+
+def run(args) -> None:
     settings = config(args.config)
     browser_arguments = {
         "instance": str(settings.get("instance") or "household"),
@@ -792,7 +804,7 @@ def main() -> None:
     if settings["provider"] in {"oda", "mathem"}:
         if args.tokens is None:
             raise SystemExit(f"--tokens is required for provider {settings['provider']}")
-        provider_client = OdaClient(args.tokens, provider=settings["provider"])
+        provider_client = RetailMcpClient(args.tokens, provider=settings["provider"])
     else:
         provider_client = MenyClient(
             **browser_arguments,
@@ -801,7 +813,7 @@ def main() -> None:
         )
     email_provider_clients: dict[str, Any] = {}
     if settings["provider"] == "meny" and args.tokens is not None and args.tokens.is_dir():
-        email_provider_clients["oda"] = OdaClient(args.tokens)
+        email_provider_clients["oda"] = RetailMcpClient(args.tokens)
     recipe_library_adapters: dict[str, RecipeLibraryAdapter] = {}
     for connection in settings["recipe_libraries"]:
         library_id = connection["library_id"]

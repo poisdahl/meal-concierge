@@ -159,7 +159,7 @@ class RecipeOperations:
     def _provider_recipe_candidates(self, provider: str, query: str, limit: int) -> list[dict[str, Any]]:
         if not query:
             return []
-        client = self.oda if provider == self.provider else self.email_provider_clients.get(provider)
+        client = self.provider_client if provider == self.provider else self.email_provider_clients.get(provider)
         if client is None:
             raise HouseholdError(f"{provider.upper()} recipe source has no configured provider session")
         arguments = {"query": query, "page": 1, "size": limit}

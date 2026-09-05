@@ -13,9 +13,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError, StateStore, cart_summary
 from service import Application
-from tests.test_meal_concierge import CONFIG, FakeBrowser, MutableFakeOda
-from tests import test_meal_concierge as flow_fixture
-from tests.test_meal_concierge_recipes import full_recipe, menu
+from test_meal_concierge import CONFIG, FakeBrowser, MutableFakeOda
+import test_meal_concierge as flow_fixture
+from test_meal_concierge_recipes import full_recipe, menu
 
 
 class ReviewAcceptanceTests(unittest.TestCase):
@@ -132,7 +132,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
 
     def test_pantry_aggregation_keeps_gross_and_exact_net_quantities(self):
         from product_planner import menu_requirements
-        from tests import test_meal_concierge_products as products
+        import test_meal_concierge_products as products
         value = products.menu({"item": "Flour", "quantity": 0.5, "unit": "kg"}, {"item": "Flour", "quantity": 300, "unit": "g"})
         source = lambda index: {"collection": "dishes", "recipe_index": 0, "ingredient_index": index}
         requirements, unresolved = menu_requirements(value, ingredient_decisions=[
@@ -147,7 +147,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
             menu_requirements(value, ingredient_decisions=[{"source": source(0), "action": "have_quantity", "quantity": 1, "unit": "dl"}])
 
     def test_unknown_deposit_budget_uses_all_known_minimum_costs(self):
-        from tests import test_meal_concierge_products as products
+        import test_meal_concierge_products as products
         value = products.menu({"item": "A", "quantity": 1, "unit": "stk"}, {"item": "B", "quantity": 1, "unit": "stk"})
         requirements, _ = products.menu_requirements(value)
         observations = {}
@@ -167,7 +167,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(plan["unresolved_requirements"][-1]["known_minimum_ore"], 300)
 
     def test_cart_drift_and_new_requirements_invalidate_product_approval(self):
-        from tests import test_meal_concierge_products as products
+        import test_meal_concierge_products as products
         case = products.ProductRuntimeTests()
         case.setUp()
         self.addCleanup(case.tearDown)
@@ -180,7 +180,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertNotIn("product_plan_digest", case.store.read()["cart_plan"])
 
     def test_all_ingredients_at_home_finishes_without_provider_cart_write(self):
-        from tests import test_meal_concierge_products as products
+        import test_meal_concierge_products as products
         case = products.ProductRuntimeTests()
         case.setUp()
         self.addCleanup(case.tearDown)
@@ -206,7 +206,9 @@ class ReviewAcceptanceTests(unittest.TestCase):
             def tool(self, **kwargs): return lambda function: function
         module = types.ModuleType("mcp.server.mcpserver")
         module.MCPServer = ToolServer
-        with mock.patch.dict(sys.modules, {"mcp.server.mcpserver": module}):
+        exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
+        exceptions.ToolError = RuntimeError
+        with mock.patch.dict(sys.modules, {"mcp.server.mcpserver": module, "mcp.server.mcpserver.exceptions": exceptions}):
             surface = runpy.run_path(str(Path(__file__).resolve().parents[1] / "mcp_server.py"))
         for name in ("meal_concierge_cooking", "meal_concierge_feedback"):
             surface[name].__globals__["rpc"] = lambda operation, **arguments: case.app.handle({"operation": operation, **arguments})
@@ -225,7 +227,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(assessment["dinner_days"], {"expected": 3, "verified": 3})
 
     def test_mealie_crash_recovery_cleanup_and_new_intent_use_real_adapter(self):
-        from tests import test_meal_concierge_recipes as recipes_fixture
+        import test_meal_concierge_recipes as recipes_fixture
         from recipe_libraries import RecipeLibraryExternalMissingError
         fixture = recipes_fixture.MealieAdapterTests()
         fixture.setUp()
@@ -290,7 +292,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(counts, {"POST": 2, "PATCH": 2, "DELETE": 1})
 
     def test_lost_mealie_post_response_recovers_marker_without_creating_again(self):
-        from tests import test_meal_concierge_recipes as recipes_fixture
+        import test_meal_concierge_recipes as recipes_fixture
         from recipe_library_mealie import _marker
         fixture = recipes_fixture.MealieAdapterTests()
         fixture.setUp()
@@ -310,7 +312,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual([method for method, _ in calls], ["GET", "GET"])
 
     def test_pantry_completion_cannot_hide_existing_or_later_cart_goods(self):
-        from tests import test_meal_concierge_products as products
+        import test_meal_concierge_products as products
         case = products.ProductRuntimeTests()
         case.setUp()
         self.addCleanup(case.tearDown)
@@ -573,7 +575,10 @@ class GroceryTopupTests(unittest.TestCase):
         self.assertEqual(caught.exception.applied_operations, [])
         client._click_cart_control.assert_not_called()
         client._product_control.return_value = {"authenticated": True, "ready": True, "quantity": 1, "label": "add"}
-        client._click_cart_control.side_effect = HouseholdError("transport response lost")
+        def dispatched_then_failed(_product, _label, before_dispatch):
+            before_dispatch()
+            raise HouseholdError("transport response lost")
+        client._click_cart_control.side_effect = dispatched_then_failed
         with self.assertRaises(HouseholdError) as caught:
             client._change_cart({"operations": [{"productId": flow_fixture.MENY_PRODUCT, "quantity": 1}]})
         self.assertNotIsInstance(caught.exception, MenyCartStoppedError)

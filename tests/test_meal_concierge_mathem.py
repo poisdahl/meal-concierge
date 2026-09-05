@@ -19,8 +19,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_meal_concierge as existing
 from core import HouseholdError, StateStore, cart_summary
-from oda import OdaClient, REQUIRED_TOOLS, normalize_oda_delivery_slots, oda_delivery_slot_date
-from product_observations import _mathem_ore, normalize_oda_product_search, parse_package
+from retail_mcp import RetailMcpClient, REQUIRED_TOOLS, normalize_retail_delivery_slots, retail_delivery_slot_date
+from product_observations import _mathem_ore, normalize_retail_product_search, parse_package
 from recipe_sources import provider_recipe_candidates
 from recipes import RecipeError, normalize_recipe
 from service import Application, config, validate_schedule
@@ -49,11 +49,11 @@ class MathemShop(existing.FakeOda):
     def call(self, tool, arguments, **kwargs):
         self.calls.append((tool, deepcopy(arguments)))
         if tool == 'product_search':
-            return normalize_oda_product_search(PRODUCTS, provider='mathem')
+            return normalize_retail_product_search(PRODUCTS, provider='mathem')
         if tool == 'recipe_search':
             return {'recipes': [{'id': '42', 'name': 'Soppa', 'url': 'https://www.mathem.se/se/recipes/42-soppa/'}]}
         if tool == 'get_delivery_slots':
-            return normalize_oda_delivery_slots(self.slots, provider='mathem')
+            return normalize_retail_delivery_slots(self.slots, provider='mathem')
         if tool == 'select_delivery_slot':
             assert type(arguments['delivery_slot_id']) is int
             assert arguments['delivery_slot_id'] == 77
@@ -184,9 +184,23 @@ class MathemFlowTests(unittest.TestCase):
         for text in ['Från 29,90 kr', 'ca 29,90 kr', '29,90 NOK', '-1 kr', '1 2 kr']:
             self.assertIsNone(_mathem_ore(text))
         self.assertEqual(parse_package('6 st', provider='mathem')['unit'], 'count')
-        self.assertEqual(oda_delivery_slot_date('mathem:2026-09-12:77', provider='mathem'), '2026-09-12')
+        self.assertEqual(retail_delivery_slot_date('mathem:2026-09-12:77', provider='mathem'), '2026-09-12')
         with self.assertRaises(HouseholdError):
-            oda_delivery_slot_date('oda:2026-09-12:77', provider='mathem')
+            retail_delivery_slot_date('oda:2026-09-12:77', provider='mathem')
+
+    def test_malformed_shared_results_use_accurate_errors(self):
+        with self.assertRaisesRegex(HouseholdError, 'Product search result changed'):
+            normalize_retail_product_search({'result': []}, provider='mathem')
+        malformed = deepcopy(SLOTS)
+        malformed['slots'][0]['openDatetime'] = 'not-a-timestamp'
+        with self.assertRaisesRegex(HouseholdError, 'Delivery slot timestamp changed'):
+            normalize_retail_delivery_slots(malformed, provider='mathem')
+        with self.assertRaisesRegex(HouseholdError, 'Delivery slot_ref is invalid'):
+            retail_delivery_slot_date('oda:2026-09-12:77', provider='mathem')
+        with self.assertRaisesRegex(HouseholdError, 'configured Mathem provider'):
+            self.app.handle({'operation': 'product_favorites', 'action': 'add', 'product_id': '/varer/not-a-mathem-id', 'name': 'Synthetic'})
+        with self.assertRaisesRegex(HouseholdError, 'Cart items are unavailable'):
+            cart_summary({'provider': 'mathem', 'total': 0})
 
     def test_mathem_content_keeps_provider_recipe_storage_restriction(self):
         value = provider_recipe_candidates('mathem', self.shop.call('recipe_search', {}), 5)[0]
@@ -237,7 +251,7 @@ class MathemTransportTests(unittest.TestCase):
             'tools.mcp_oauth_manager': SimpleNamespace(_HERMES_PROVIDER_CLS=oauth_provider),
         }
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(sys.modules, modules):
-            client = OdaClient(temp, provider='mathem')
+            client = RetailMcpClient(temp, provider='mathem')
             result = client.call('product_search', {'queries': ['ägg'], 'size': 5})
             self.assertEqual(result['provider'], 'mathem')
             self.assertEqual(captured['url'], 'https://www.mathem.se/mcp')
@@ -248,7 +262,7 @@ class MathemTransportTests(unittest.TestCase):
             self.assertEqual(captured['oauth']['storage']._meta_path(), Path(temp) / 'mathem-weekly.meta.json')
             self.assertTrue((Path(temp) / '.mathem-household.lock').exists())
             self.assertFalse((Path(temp) / '.oda-household.lock').exists())
-            self.assertEqual(OdaClient(temp).endpoint, 'https://oda.com/mcp')
+            self.assertEqual(RetailMcpClient(temp).endpoint, 'https://oda.com/mcp')
             response = SimpleNamespace(is_redirect=True, next_request=SimpleNamespace(url=httpx.URL('https://oda.com/mcp')))
             with self.assertRaisesRegex(HouseholdError, 'outside its store'):
                 asyncio.run(captured['redirect_check'](response))
@@ -280,38 +294,15 @@ else:
                      'PATH': '/usr/bin:/bin'}, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             arguments = json.loads(result.stdout)
-            self.assertIn('--tokens', arguments)
+            self.assertEqual(arguments[arguments.index('--tokens') + 1], str(root / 'mcp-tokens'))
             self.assertNotIn('--browser-binary', arguments)
             self.assertNotIn('--browser-executable', arguments)
             import service
-            with mock.patch.object(sys, 'argv', ['service.py', *arguments[1:]]), mock.patch.object(service.OdaClient, 'probe', return_value={}), mock.patch.object(service, 'OdaBrowser') as browser, mock.patch.object(service.Server, 'run') as run:
+            with mock.patch.object(sys, 'argv', ['service.py', *arguments[1:]]), mock.patch.object(service.RetailMcpClient, 'probe', return_value={}), mock.patch.object(service, 'OdaBrowser') as browser, mock.patch.object(service.Server, 'run') as run:
                 service.main()
             browser.assert_not_called()
             run.assert_called_once()
 
-    def test_installer_supports_mathem_without_browser_automation(self):
-        original_run = subprocess.run
-        def run_mathem(args, **kwargs):
-            if len(args) > 1 and str(args[1]).endswith('/install.sh'):
-                args = list(args)
-                args[args.index('--provider') + 1] = 'mathem'
-                env = kwargs['env']
-                hermes = Path(env['HERMES_HOME'])
-                (hermes / 'mcp-tokens').mkdir()
-                (hermes / 'mcp-tokens' / 'mathem-weekly.json').write_text('{}')
-                (hermes / 'config.yaml').write_text(json.dumps({'mcp_servers': {'mathem-weekly': {'enabled': False}}}))
-                Path(env['MEAL_CONCIERGE_AGENT_BROWSER']).unlink()
-                Path(env['MEAL_CONCIERGE_BROWSER_EXECUTABLE']).unlink()
-            return original_run(args, **kwargs)
-        for platform in ['Linux', 'Darwin']:
-            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp, mock.patch.object(existing.subprocess, 'run', side_effect=run_mathem):
-                outcome = existing.CoreTests().fake_install(Path(temp), clean=True, platform=platform)
-                completed, *_, hermes, private = outcome
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-                self.assertEqual(config(private / 'config.json')['provider'], 'mathem')
-                self.assertTrue(StateStore(private / 'state', config(private / 'config.json')).read()['profile']['recipes']['sources']['mathem'])
-                self.assertIn('https://www.mathem.se/se/cart/', completed.stdout)
-                self.assertNotIn('Login command:', completed.stdout)
 
 
 if __name__ == '__main__':

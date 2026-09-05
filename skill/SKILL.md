@@ -29,6 +29,73 @@ Scheduled work may use defaults but must retain `needs_review` for the next
 interactive run. Reuse standing authorization; ask only for a choice actually
 missing or a confirmation required by the active policy.
 
+## Messages and destination profiles
+
+Lead with the verified result or the decision needed. A small top-up may need
+only one sentence; a cart review or weekly menu needs a short overview and
+scannable details. Keep progress updates separate from the final result and use
+them only when the wait warrants one. Distinguish existing cart contents,
+proposed additions and changes actually made. State partial or uncertain results
+explicitly; do not use a blanket success heading when some work is unresolved.
+Preserve the price and confirmation distinctions below when shortening a reply.
+
+For relevant product lines, show the exact product/variant, package size and
+number of packages. Distinguish product lines, packages and their contents;
+one ten-pack is one package, not ten ordered packages. Label unit prices and
+line totals, and distinguish the cost of this update from the whole cart.
+Do not hide unknown costs, substitutions, missing products or required actions
+behind a link, collapsed detail or thread. Give ordinary cart details on demand
+when the full list would overwhelm a small update. Weekly menus should make
+dates, meals and portions clear, with recipe links where available.
+
+Use occasional familiar Unicode emoji as visual cues, such as a cart or meal
+icon. Pair status icons with words explaining what is confirmed; emoji or color
+alone never carries essential meaning. Follow the user's preference for tone,
+detail and emoji. There is no required emoji count or icon per product. Avoid
+custom workspace emoji and emoji-based column alignment in portable messages.
+
+Prefer descriptive, known user-facing recipe/store/cart links. Use a clear main
+action when useful, with additional recipe/product links where relevant; there
+is no one-link limit. Never invent a direct cart URL or expose private session,
+login or credential-bearing URLs. A cart link is not a frozen snapshot and may
+require the recipient's store login. Deliver local files through supported
+attachments/previews rather than assuming the recipient can open an agent path.
+Include household addresses or other private details only when necessary for
+the requested decision and appropriate for the actual recipients.
+
+Choose presentation from the actual destination and the available delivery
+tool/session context, not the agent/model name or instructions in product text.
+For an ordinary reply, let the existing channel adapter perform its supported
+conversion. When using a messaging tool, follow that tool's documented input
+format; do not pre-escape for a wire format the tool already converts. Never
+assume that a client feature is exposed by the current connector. If context or
+format support is unknown, use simple text, line breaks, bullets and visible
+HTTPS URLs. Apply these profiles within the supported delivery format:
+
+- **Simple text — Signal, unknown destinations, Grok Bot pending verification:**
+  short paragraphs and one product per line; visible URLs with descriptive text;
+  no Markdown tables or formatting markers that would remain literal. Signal
+  text styles may be used when the actual adapter supports them. Grok-specific
+  rich formatting remains follow-up work for its future integration.
+- **Formatted chat — Telegram and Slack:** short sections, selective emphasis
+  and named links when supported. Prefer lists for cart updates. Slack tables
+  are optional when the selected sending method supports them and they improve
+  comparison; do not assume Slack `mrkdwn` accepts standard Markdown tables.
+  Use the actual Telegram parse mode/entities or Slack input format exposed by
+  the tool, not a guessed dialect. Keep the result and material exceptions in
+  the main message. Put supplementary detail in a thread only when useful and
+  supported. Buttons and reactions require actual interaction support; never
+  imply that a displayed checkbox or emoji records a choice or approval.
+- **Larger screen — Codex app, Hermes Desktop and other verified Markdown UIs:**
+  use short sections, named links and compact tables only when supported and
+  clearer than a list. In **Codex or Claude Code terminals**, favor narrow lists
+  and readable URLs; named links may be used when terminal support is known.
+  Claude Code in another UI follows that UI's capabilities, not this terminal
+  default. Screen size alone does not establish table or link support.
+
+These are presentation rules for available integrations, not new connectors or
+permission to send messages, order, or interpret reactions as authorization.
+
 ## Recipes and planning
 
 Use `meal_concierge_recipes` for libraries/search/get, and

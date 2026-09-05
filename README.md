@@ -62,8 +62,8 @@ your usual Hermes chat. No separate web app or database server is required.
 **Available now:** Hermes Agent.
 
 **Coming soon:** OpenClaw, NanoClaw, Codex, Claude Code and Grok Bot integrations.
-These integrations are planned and are not available to install yet. The
-installation instructions below are for Hermes Agent.
+These integrations are planned and are not available to install yet. The standalone runtime below can serve trusted local MCP clients; this does not
+certify the pending platform packages or their complete workflows.
 
 ## Supported stores
 
@@ -90,158 +90,31 @@ any further action.
 
 ## Requirements
 
-- **Hermes Agent 0.20.5 or newer**, installed for your normal user, with `hermes`
-  available in your terminal. Set up Hermes first using its
-  [installation guide](https://github.com/NousResearch/hermes-agent#quick-install).
-- **Linux with a running user systemd manager**, or **Apple Silicon macOS**.
-  These are the supported installation paths.
-- **Git. Oda and MENY also need Node.js 24+ and npm.** The steps below use
-  Hermes's bundled Node/npm
-  when available, otherwise the versions on your `PATH`.
-- **For Oda and MENY:** Google Chrome or Chromium, plus `agent-browser`
-  (installed below).
-- **An Oda, Mathem or MENY account** that supports delivery to your address.
-  MENY also
-  needs your eight-digit Norwegian mobile number registered with Vipps for payment.
-
-Oda and MENY require a one-time login in a visible browser. A remote headless
-server needs a private graphical session, such as X11 forwarding or a private
-remote desktop, to complete that step.
+The standalone core requires Linux with a running user systemd manager or Apple
+Silicon macOS, Python 3.10+ to bootstrap, and `uv`. It installs its own pinned
+Python 3.12.12 runtime with `mcp==2.1.1` and `mcp-types==2.1.1`.
+Oda/MENY also require `agent-browser@0.33.1` and non-snap Chrome/Chromium.
+Existing Oda/Mathem OAuth still uses Hermes helpers; standalone OAuth and the new
+agent packages remain separate integration work.
 
 ## Installation
 
-Run these steps as the same non-root user who runs Hermes.
-
-### 1. Install the browser and browser adapter
-
-**Mathem:** install Git and skip to step 2. No local browser adapter or Node.js
-is needed. Hermes OAuth opens the Mathem sign-in flow separately.
-
-On **Linux**, install Git and a **non-snap** Chrome or Chromium package for your
-distribution. For example, on Debian:
+Clone this repository outside the private data directory. Install the browser
+adapter if using Oda/MENY:
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y git chromium
+npm install --prefix "$HOME/.local/lib/meal-concierge" agent-browser@0.33.1
+./install.sh install --provider meny --household "My household" \
+  --agent-browser "$HOME/.local/lib/meal-concierge/node_modules/.bin/agent-browser"
+./install.sh start
+./install.sh attach
 ```
 
-Ubuntu's Chromium package may install a snap that cannot access the private
-Hermes browser profile. Use a non-snap Chrome/Chromium package there.
-
-On **macOS**, install Google Chrome or Chromium in `/Applications` or
-`~/Applications`, and make sure Git is available. The installer discovers these
-normal app locations.
-
-Then, on **either platform**, install the tested browser adapter:
-
-```sh
-mkdir -p "$HOME/.local/lib/meal-concierge"
-node_bin="${HERMES_HOME:-$HOME/.hermes}/node/bin/node"
-npm_bin="${HERMES_HOME:-$HOME/.hermes}/node/bin/npm"
-if [ ! -x "$node_bin" ] || [ ! -x "$npm_bin" ]; then
-  node_bin="$(command -v node)"
-  npm_bin="$(command -v npm)"
-fi
-"$node_bin" -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("Node.js 24+ is required"); process.exit(1) }' &&
-PATH="$(dirname "$node_bin"):$PATH" "$npm_bin" install \
-  --prefix "$HOME/.local/lib/meal-concierge" \
-  agent-browser@0.33.1
-export MEAL_CONCIERGE_AGENT_BROWSER="$HOME/.local/lib/meal-concierge/node_modules/.bin/agent-browser"
-```
-
-### 2. Clone the repository
-
-Keep the clone at this location: the installed service runs its code from here.
-
-```sh
-mkdir -p "$HOME/.local/share"
-git clone https://github.com/poisdahl/meal-concierge.git \
-  "$HOME/.local/share/meal-concierge"
-cd "$HOME/.local/share/meal-concierge"
-```
-
-### 3. Install for your store
-
-**For Oda**, authenticate with Hermes, disable its direct Oda tools so grocery
-requests go through Meal Concierge, and install:
-
-```sh
-hermes mcp add oda-weekly --url https://oda.com/mcp --auth oauth
-hermes mcp login oda-weekly
-hermes config set mcp_servers.oda-weekly.enabled false
-./install.sh --provider oda --household "My household"
-```
-
-Meal Concierge continues to use and refresh those private OAuth token files.
-
-**For Mathem**, authenticate its separate account and install:
-
-```sh
-hermes mcp add mathem-weekly --url https://www.mathem.se/mcp --auth oauth
-hermes mcp login mathem-weekly
-hermes config set mcp_servers.mathem-weekly.enabled false
-./install.sh --provider mathem --household "My household"
-```
-
-Use the `www` address shown above. Mathem tokens are stored separately from Oda's;
-an existing Oda login is not reused. Keep a separate installation/state directory
-for each store. The installer refuses to change an existing household's provider.
-
-**For MENY**, run this in an interactive terminal. The installer privately
-prompts for your eight-digit Norwegian mobile number registered with Vipps for
-payment:
-
-```sh
-./install.sh --provider meny --household "My household"
-```
-
-Replace `My household` with your household's name. The installer checks the
-required dependencies, creates private configuration and storage, registers the
-Hermes skill and MCP connection, and installs the platform's background service.
-For a new installation, complete login and start the service next.
-
-### 4. Log in to your store
-
-**Mathem:** OAuth login is complete from step 3; continue to step 5. Use your
-normal Mathem browser session when finishing payment or managing existing orders.
-
-Run the **exact browser login command printed by the installer**. This opens
-the dedicated profile Meal Concierge will use. Log in to your chosen store,
-verify the delivery address, then **close that browser** so the service can use
-its profile.
-
-For Oda, use the same account as the OAuth login and make sure it already has a
-payment method configured. For MENY, checkout uses home delivery and Vipps as the
-payment method.
-
-### 5. Start and verify
-
-On **Linux**:
-
-```sh
-systemctl --user enable --now meal-concierge.service
-systemctl --user status meal-concierge.service
-hermes mcp test meal_concierge
-```
-
-On **macOS**, with the default service name and path:
-
-```sh
-launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/com.hermes-agent.meal-concierge.plist"
-launchctl print "gui/$(id -u)/com.hermes-agent.meal-concierge"
-hermes mcp test meal_concierge
-```
-
-If you customized paths or the LaunchAgent name, use the commands printed by
-the installer. The MCP test should discover the `meal_concierge_*` tools.
-Restart your Hermes CLI or gateway, then ask:
-
-> “Show my meal-concierge status and household profile.”
-
-Check that the household and store are correct and the service reports `ready`.
-If it reports `awaiting_login` or `unavailable`, see
-[troubleshooting](#troubleshooting).
+Installation leaves the service stopped; start and agent registration are separate.
+`attach` prints the running service's MCP configuration and skill path without
+changing either. Provider login is not performed by installation. See the
+[standalone runtime guide](docs/runtime.md) for exact paths, prerequisites,
+provider limitations, existing-installation adoption and safe data handling.
 
 ## First use
 
@@ -267,10 +140,9 @@ For MENY, also approve the payment in Vipps when prompted.
 
 ## Configuration and optional features
 
-The default private directory is `~/.hermes/meal-concierge` (or
-`$HERMES_HOME/meal-concierge` with a custom Hermes home). It contains
-`config.json`, household state, a SQLite recipe bank and the dedicated browser
-profile. Oda OAuth tokens stay in Hermes's private token directory.
+New standalone data defaults to `~/.local/share/meal-concierge`. The separate
+program directory is replaceable; state, recipe snapshots and assets are retained.
+Existing installations keep their configured paths through explicit adoption.
 
 Use Hermes to change everyday meal preferences. See
 [example-config.json](example-config.json) for configuration fields; the
@@ -285,47 +157,38 @@ bound to its store: use a separate installation to connect another provider.
 | Custom paths, service management and uninstall | [Service lifecycle](docs/reference.md#provider-login-and-startup) |
 | Planner behavior and product-price limits | [Technical reference](docs/reference.md) |
 
-For non-standard installations, the installer accepts `HERMES_HOME`,
-`HERMES_PYTHON`, `MEAL_CONCIERGE_HOME`, `MEAL_CONCIERGE_AGENT_BROWSER`,
-`MEAL_CONCIERGE_BROWSER_EXECUTABLE` and `MEAL_CONCIERGE_NODE`. It uses Hermes's
-managed Python with MCP/OAuth support; a system Python is not a replacement.
+For custom paths and service ownership, use the [runtime guide](docs/runtime.md).
 
 ## Updating
 
-Keep a private backup of the installation data before upgrading. In the stable
-clone, pull the update and rerun the installer with your **existing store and
-household name**; for example, for the Oda setup above:
+Stop the exact installation before updating its core:
 
 ```sh
-cd "$HOME/.local/share/meal-concierge"
-git pull --ff-only
-./install.sh --provider oda --household "My household"
+./install.sh stop
+./install.sh update
+./install.sh start
+./install.sh attach
 ```
 
-For MENY, use `--provider meny` instead. The installer preserves the existing
-config, stops the Meal Concierge service, migrates state with private backups,
-refreshes the skill and MCP registration, and restarts and verifies the service.
-Restart Hermes too so it receives the updated tools.
-
-If migration fails, the service stays stopped. Consult the
-[upgrade details](docs/reference.md#upgrade-and-confirmation-details) before
-restoring a backup or running older code against upgraded data.
+The updater makes a full offline state/config backup and migrates JSON and SQLite.
+It does not register agents, change provider logins, or restart automatically.
+A failed migration blocks startup until repaired. Never restore older outcome
+journals after possible orders or sends. See [recovery and restore](docs/runtime.md#updates-failures-and-recovery).
 
 ## Troubleshooting
 
 | Symptom | What to check |
 |---|---|
-| `awaiting_login` | Sign in using the installer's dedicated browser-profile command, then close the visible browser before starting the service. |
+| `awaiting_login` | Complete authorized provider setup using the configured dedicated browser profile. |
 | `unavailable` | Check the service logs and whether the configured store and browser dependencies are reachable. |
 | Hermes cannot find the tools | Run `hermes mcp test meal_concierge` and restart Hermes. If you restrict `platform_toolsets`, include `meal_concierge` for that platform. |
-| Hermes managed Python not found | Set `HERMES_PYTHON` to the Hermes virtual environment's `bin/python`. |
-| Browser missing or snap rejected | Install non-snap Chrome/Chromium; set `MEAL_CONCIERGE_BROWSER_EXECUTABLE` if it is in a custom location. |
+| Standalone runtime missing | Install with `uv` available on PATH; inspect the runtime guide. |
+| Browser missing or snap rejected | Install non-snap Chrome/Chromium; pass `--browser-executable` for a custom location. |
 | MENY is waiting for payment | Check Vipps on your phone, then let Hermes reconcile the result. An uncertain result must not trigger another payment attempt. |
 
 On Linux, inspect logs with `journalctl --user -u meal-concierge.service -n 100`.
-On macOS, the default logs are in `~/Library/Logs/` as
-`com.hermes-agent.meal-concierge.out.log` and
-`com.hermes-agent.meal-concierge.err.log`.
+On macOS, standalone logs are `service.out.log` and `service.err.log` in the
+private installation home. Existing installations retain their configured logs.
 
 ## Privacy and limitations
 
@@ -357,7 +220,11 @@ Contributions are welcome through
 repository root, run the test suite:
 
 ```sh
-python3 -m unittest discover -s tests
+MC_TEST_ENV="$(mktemp -d)"
+uv venv --python 3.12.12 "$MC_TEST_ENV"
+uv pip sync --python "$MC_TEST_ENV/bin/python" tests/mcp-requirements.txt
+"$MC_TEST_ENV/bin/python" -I -m unittest discover -s tests
+"$MC_TEST_ENV/bin/python" -I tests/test_mcp_runtime.py
 ```
 
 Licensed under the [MIT License](LICENSE).

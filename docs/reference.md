@@ -6,6 +6,7 @@ details. Run shell examples from the repository root.
 
 ## Contents
 
+- [Message presentation](#message-presentation)
 - [Provider support](#provider-support)
 - [Upgrade and confirmation details](#upgrade-and-confirmation-details)
 - [First-run configuration](#first-run-configuration)
@@ -25,6 +26,38 @@ details. Run shell examples from the repository root.
 - [Explicit recipe-library copy](#explicit-recipe-library-copy)
 - [Complete household workflow](#complete-household-workflow)
 
+## Message presentation
+
+The shared [skill's destination profiles](../skill/SKILL.md#messages-and-destination-profiles)
+control meal-concierge replies. The installer copies this self-contained skill. There is no separate renderer,
+per-household formatting setting or duplicated agent instruction file.
+
+The profiles cover simple text, formatted chat and larger-screen interfaces,
+with terminal defaults and channel-specific differences. Grok Bot uses simple
+text pending verification of its future integration. These instructions do not
+change the [available agent integrations](../README.md#agent-support): preparing
+a profile for Codex, Claude Code or Grok does not install its connector.
+
+The agent selects content and style; the existing messaging adapter/tool owns
+the supported output format and conversion. A platform feature is usable only
+when the actual delivery path exposes it. Do not add a second conversion layer
+or advertise buttons, reaction-based choices or tables from client support alone.
+
+Before claiming a destination is verified, exercise its real delivery path in
+a sandbox/test conversation, or an explicitly authorized recipient conversation:
+
+- A short cart update: distinguish package count/size and update/whole-cart
+  totals; check a known cart link and product names containing `&`, `_`, `(`,
+  `)`, `*` and Norwegian characters.
+- A seven-day menu: retain dates, portions and recipe links through wrapping,
+  any message splitting and the recipient's narrow/mobile view.
+- A partial or uncertain result: keep the unresolved product, unknown price or
+  pending payment action visible without claiming complete success.
+
+Inspect the received message, including link labels/targets and any raw markup.
+Instruction review and local package tests do not establish end-to-end channel
+compatibility. Fall back to simple text when a richer feature is unverified.
+
 ## Provider support
 
 | Capability | Oda | Mathem | MENY |
@@ -37,10 +70,13 @@ details. Run shell examples from the repository root.
 | Protected checkout | Fresh or standing authorization, reconcile | Manual on Mathem | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
 
 Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
-Hermes OAuth registration `mathem-weekly`. The Oda MCP transport is shared;
-endpoint, OAuth token/client/metadata files, operation lock, product identities,
-recipe sources and delivery references remain bound to the selected provider.
+Hermes OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`
+transport supports Oda and Mathem; endpoint, OAuth token/client/metadata files,
+operation lock, product identities, recipe sources and delivery references remain bound to the selected provider.
 No Oda token is reused and redirects outside the configured origin are rejected.
+The shared client is not a general adapter for arbitrary MCP stores; MENY uses
+its own browser client. `oda.py` remains a compatibility entrypoint for the
+shipped read-only preflight command; new imports use `retail_mcp`.
 The service checks the required tools through authenticated `initialize` and
 `tools/list` at startup. Missing tools or changed response shapes fail explicitly.
 
@@ -60,8 +96,9 @@ requires no `agent-browser`, Node.js or private automated browser login.
 
 Unauthenticated endpoint/OAuth discovery has been checked against Mathem.
 Local transport, installer and household-flow tests use synthetic responses
-based on the shared Oda contract. An authenticated Mathem account is still
-required to validate the actual tool schemas, product/cart/delivery responses
+based on the observed Oda MCP contract with provider-specific Mathem adaptations.
+An authenticated Mathem account is still required to validate the actual tool
+schemas, product/cart/delivery responses
 and completed customer flow. No Mathem purchase is part of local validation.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
@@ -83,24 +120,16 @@ if two different paths share that identity.
 
 ## Upgrade and confirmation details
 
-For non-interactive MENY installation, set
-`MEAL_CONCIERGE_VIPPS_PHONE_NUMBER` only for the installer process. Interactive
-installation uses a hidden prompt instead.
+Use the [standalone installer/update guide](runtime.md) for native service
+ownership, exact existing-path adoption, full offline backup and failed-upgrade
+recovery. Installation does not perform provider login or prompt for payment
+configuration. MENY's private `vipps_phone_number` belongs in its config when
+provider setup is separately authorized.
 
-Clean installations create household state v12 with only the
-`product_favorites` list and expose the
-`meal_concierge_product_favorites` tool. When rerun for an existing installation,
-the installer stops only the meal-concierge service, creates the non-overwriting
-private migration backups, including `state-v6.backup.json` immediately before
-the v6→v7 delivery-preference migration and `state-v7.backup.json` before
-renaming saved email automation identities, migrates state atomically, refreshes
-the installed skill and MCP registration, restarts the service, and verifies
-both status and the new tool schema. This also starts an existing installation
-that was stopped before the update. If migration fails, the old state and its
-backup remain usable and the service stays stopped. Existing v6 households gain
-`delivery.strategy="keep_selected"`; clean state and newly replaced delivery
-preferences default to `"cheapest"`. Restore the matching backup before running
-older code; do not open upgraded state with code that does not support its version.
+JSON and SQLite migrations run offline. Clean state is v12; existing v6
+households gain `delivery.strategy="keep_selected"`, while new installations
+use `"cheapest"`. Preserve original operation identities and latest outcome
+journals. Do not restore old journals over possible external effects.
 
 New installations use `"confirmation_policy": "fresh"`: Hermes prepares the
 exact checkout or cancellation summary and asks once before dispatch. An owner
@@ -308,13 +337,11 @@ control and verifies the renewed selection before payment.
 
 ## Provider login and startup
 
-Before starting the service, run the exact provider-login command printed by
-the installer. It uses the resolved Chromium/Chrome executable and the actual
-private profile even when `HERMES_HOME` or `MEAL_CONCIERGE_HOME` is customized.
-Open that profile in the visible browser and log in to the selected account. A remote headless host therefore
-needs a private graphical session such as X11 forwarding or a private remote
-desktop for this one-time step; do not copy cookies or credentials between
-machines.
+The [runtime guide](runtime.md) defines install/start/stop/restart/attachment and
+existing-installation migration. Provider login remains separate. Use the exact
+configured private profile for authorized browser login; a remote headless host
+needs a private graphical session. Do not clone refresh credentials or cookies
+between installations. Standalone Oda/Mathem OAuth remains pending MC-04.
 
 Close visible Chromium after login so the supervised browser can own that
 profile. For Oda protected checkout, verify that this profile shows the
@@ -324,29 +351,10 @@ protected Oda summary includes the browser-verified address and only the
 payment method's last four digits so the user can catch a wrong profile before
 confirming; the meal concierge never stores full payment data.
 
-On systemd Linux, start and verify the service:
-
-```sh
-systemctl --user enable --now meal-concierge.service
-systemctl --user status meal-concierge.service
-hermes mcp test meal_concierge
-```
-
-On macOS, the installer prints the exact LaunchAgent path and label. With the
-defaults, start and verify it with:
-
-```sh
-launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/com.hermes-agent.meal-concierge.plist"
-launchctl print "gui/$(id -u)/com.hermes-agent.meal-concierge"
-hermes mcp test meal_concierge
-```
-
-Restart with `launchctl kickstart -k
-"gui/$(id -u)/com.hermes-agent.meal-concierge"`. Stop and unload it with
-`launchctl bootout "gui/$(id -u)/com.hermes-agent.meal-concierge"`; start it
-again with the `bootstrap` command above. Standard output and errors go to
-`~/Library/Logs/com.hermes-agent.meal-concierge.out.log` and `.err.log`.
+For either native platform, use `./install.sh start` and `./install.sh attach`
+with the installation's `--home`. Attachment prints configuration and changes no
+agent settings. Existing services keep their prior supervisor until explicitly
+stopped and adopted; do not apply a new unit to live data implicitly.
 
 Restart the Hermes CLI or gateway after adding the MCP server. Current Hermes
 registers the tools as `mcp__meal_concierge__meal_concierge_*` and makes them
@@ -365,13 +373,9 @@ unattended server, enable the user's systemd
 lingering according to the distribution's policy so user services start before
 interactive login.
 
-For rollback, stop the service, keep a private copy of the config/state/profile,
-check out the previously working public commit in the stable clone, rerun the
-installer, and start the service again. For uninstall, stop and disable/unload
-the service, run `hermes mcp remove meal_concierge`, and move its service
-definition aside before removing the installed skill, stable clone and private
-meal-concierge directory. The private directory contains provider state and must
-not be deleted before its backup is verified.
+For recovery and uninstall, stop the exact service and preserve data before
+removing its native registration or agent attachment. Code rollback must not
+restore stale provider outcomes; consult [offline recovery](runtime.md#updates-failures-and-recovery).
 
 Status reports pending checkout, cancellation and order-change status
 explicitly without exposing their private payloads, so an uncertain protected

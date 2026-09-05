@@ -15,7 +15,7 @@ import unicodedata
 from zoneinfo import ZoneInfo
 from oda_browser import OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
-from oda import oda_cart_delivery_matches_slot, oda_cart_delivery_window, oda_delivery_slot_date
+from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
 from planning_assessment import assess_menu
 from service_common import (
@@ -155,11 +155,11 @@ class OrderOperations:
             if address_id is not None:
                 arguments["delivery_address_id"] = address_id
             if self.provider == "meny":
-                result = self.oda.call(
+                result = self.provider_client.call(
                     "get_delivery_slots", arguments, deadline=deadline, allow_recovery=allow_recovery,
                 )
             else:
-                result = self.oda.call("get_delivery_slots", arguments, deadline=deadline)
+                result = self.provider_client.call("get_delivery_slots", arguments, deadline=deadline)
             raw_slots = result.get("slots") if isinstance(result, Mapping) else None
             if not isinstance(raw_slots, list):
                 raise HouseholdError(f"{self.provider.upper()} delivery slots are not normalized")
@@ -215,9 +215,9 @@ class OrderOperations:
         preference = schedule["delivery"]
         state = self.store.read()
         scope_cart = (
-            self.oda.call("get_cart", {}, deadline=deadline)
+            self.provider_client.call("get_cart", {}, deadline=deadline)
             if self.provider == "meny"
-            else self.oda.call("get_cart", {}, deadline=deadline)
+            else self.provider_client.call("get_cart", {}, deadline=deadline)
         )
         observation = state.get("delivery_selection")
         applicable = self._delivery_observation_applies(
@@ -239,11 +239,11 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     selected_slot is None
-                    or not oda_cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
+                    or not retail_cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
                 ):
-                    raise HouseholdError("Oda cart and selected delivery listing disagree")
+                    raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected_slot is not None:
-                raise HouseholdError("Oda cart and selected delivery listing disagree")
+                raise HouseholdError("Cart and selected delivery listing disagree")
         if selected_slot is not None and not applicable:
             return {
                 "ready": True,
@@ -374,15 +374,15 @@ class OrderOperations:
             ) from selection_error
         verified = fresh_selected[0]
         fresh_scope_cart = (
-            self.oda.call("get_cart", {}, deadline=deadline)
+            self.provider_client.call("get_cart", {}, deadline=deadline)
             if self.provider == "meny"
-            else self.oda.call("get_cart", {}, deadline=deadline)
+            else self.provider_client.call("get_cart", {}, deadline=deadline)
         )
         if self.provider in {"oda", "mathem"}:
             cart_delivery = cart_summary(fresh_scope_cart).get("delivery")
             if (
                 not isinstance(cart_delivery, Mapping)
-                or not oda_cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
+                or not retail_cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
             ):
                 raise HouseholdError(
                     "automatic delivery selection is uncertain; provider cart and slots disagree"
@@ -415,11 +415,11 @@ class OrderOperations:
         state = self.store.read()
         if scope_cart is None:
             scope_cart = (
-                self.oda.call(
+                self.provider_client.call(
                     "get_cart", {}, deadline=deadline, allow_recovery=allow_recovery,
                 )
                 if self.provider == "meny"
-                else self.oda.call("get_cart", {}, deadline=deadline)
+                else self.provider_client.call("get_cart", {}, deadline=deadline)
             )
         observation = state.get("delivery_selection")
         applicable = self._delivery_observation_applies(
@@ -443,11 +443,11 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     len(selected) != 1
-                    or not oda_cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
+                    or not retail_cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
                 ):
-                    raise HouseholdError("Oda cart and selected delivery listing disagree")
+                    raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected:
-                raise HouseholdError("Oda cart and selected delivery listing disagree")
+                raise HouseholdError("Cart and selected delivery listing disagree")
         if len(selected) != 1:
             raise HouseholdError("select one unambiguous provider delivery slot before checkout")
         slot = selected[0]
@@ -766,12 +766,12 @@ class OrderOperations:
                     raise HouseholdError("the order change is still starting")
                 if self.provider in {"oda", "mathem"}:
                     if change:
-                        cart = cart_summary(self.oda.call("get_cart", {}, deadline=deadline))
+                        cart = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                         if cart["items"]:
                             raise HouseholdError("an Oda delivery-window change must be prepared without staged item additions")
                     requested_dates = None
                     if isinstance(slot_ref, str) and slot_ref.startswith(f"{self.provider}:"):
-                        requested_dates = [oda_delivery_slot_date(slot_ref, provider=self.provider)]
+                        requested_dates = [retail_delivery_slot_date(slot_ref, provider=self.provider)]
                     available = self._normalized_provider_slots(requested_dates, deadline=deadline)
                     candidates = [slot for slot in available if slot["slot_ref"] == slot_ref]
                     if len(candidates) != 1:
@@ -781,7 +781,7 @@ class OrderOperations:
                     if provider_slot_id is None:
                         raise HouseholdError("the requested provider delivery slot has no provider id")
                     arguments["delivery_slot_id"] = provider_slot_id
-                    self.oda.call("select_delivery_slot", arguments, deadline=deadline)
+                    self.provider_client.call("select_delivery_slot", arguments, deadline=deadline)
                     selected_date = self._delivery_slot_date(candidate)
                     fresh = [
                         slot for slot in self._normalized_provider_slots([selected_date], deadline=deadline)
@@ -794,12 +794,12 @@ class OrderOperations:
                     ):
                         raise HouseholdError(f"{self.provider.upper()} delivery selection is uncertain; inspect the provider selection")
                     normalized = fresh[0]
-                    raw_cart = self.oda.call("get_cart", {}, deadline=deadline)
+                    raw_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                     cart = cart_summary(raw_cart)
                     delivery = cart.get("delivery")
                     if (
                         not isinstance(delivery, Mapping)
-                        or not oda_cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
+                        or not retail_cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
                     ):
                         raise HouseholdError(f"{self.provider.upper()} delivery selection is uncertain; inspect the provider selection")
                     if change:
@@ -842,7 +842,7 @@ class OrderOperations:
                         change.get("code") if change else None,
                         deadline=deadline,
                     )
-                    result = self.oda.call("select_delivery_slot", arguments, deadline=deadline)
+                    result = self.provider_client.call("select_delivery_slot", arguments, deadline=deadline)
                     self.browser.verify_order_change(
                         change.get("order_id") if change else None,
                         change.get("code") if change else None,
@@ -858,7 +858,7 @@ class OrderOperations:
                     if normalized["slot_ref"] != slot_ref or normalized["selected"] is not True:
                         raise HouseholdError("MENY selected delivery does not match the requested slot")
                     if request.get("_defer_record") is not True:
-                        scope_cart = self.oda.call("get_cart", {}, deadline=deadline)
+                        scope_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                         self._record_delivery_selection(
                             normalized,
                             origin=str(request.get("_origin") or "explicit"),
@@ -877,20 +877,20 @@ class OrderOperations:
         cancellation_deadline = time.monotonic() + CANCELLATION_OPERATION_TIMEOUT if action in {"cancel_prepare", "cancel_confirm", "cancel_reconcile", "cancel_submit"} else None
         if action == "list":
             limit = bounded_limit(request.get("limit"), default=10)
-            return self.oda.call("get_orders", {"page": 1, "size": limit}, deadline=request.get("_deadline"), allow_recovery=request.get("_allow_browser_recovery") is True) if self.provider == "meny" else self.oda.call("get_orders", {"page": 1, "size": limit})
+            return self.provider_client.call("get_orders", {"page": 1, "size": limit}, deadline=request.get("_deadline"), allow_recovery=request.get("_allow_browser_recovery") is True) if self.provider == "meny" else self.provider_client.call("get_orders", {"page": 1, "size": limit})
         supplied_order_id = request.get("order_id")
         order_id = safe_order_id(supplied_order_id) if supplied_order_id is not None and supplied_order_id != "" else ""
         if action == "get":
             deadline = request.get("_deadline") if self.provider == "meny" else None
             if self.provider == "meny":
-                order = self.oda.call("get_order", {"order_number": order_id}, deadline=deadline, allow_recovery=request.get("_allow_browser_recovery") is True)
+                order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline, allow_recovery=request.get("_allow_browser_recovery") is True)
                 require_provider_identity(order, order_id)
                 return {
                     "order": order,
                     "tracking": {"order_id": order_id, "status": str(order.get("status") or "unknown")},
                 }
-            order = self.oda.call("get_order", {"order_number": order_id})
-            tracking = self.oda.call("order_tracking", {"order_number": order_id})
+            order = self.provider_client.call("get_order", {"order_number": order_id})
+            tracking = self.provider_client.call("order_tracking", {"order_number": order_id})
             require_provider_identity(order, order_id)
             require_provider_identity(tracking, order_id, tracking=True)
             return {"order": order, "tracking": tracking}
@@ -939,7 +939,7 @@ class OrderOperations:
                     status = str((current.get("tracking") or {}).get("status") or "").casefold()
                     if status != "paid_and_modifiable":
                         raise HouseholdError("Oda order is not currently modifiable")
-                    cart = cart_summary(self.oda.call("get_cart", {}))
+                    cart = cart_summary(self.provider_client.call("get_cart", {}))
                     quantities, _names = self._cart_lines(cart)
                     digest = self._cart_digest(quantities)
                     if cart["items"] and request.get("cart_digest") != digest:
@@ -1041,7 +1041,7 @@ class OrderOperations:
                         result = {"provider": "oda", "order_id": change["order_id"], "aborted": True, "recovered": True}
                     elif request.get("retain_cart") is True:
                         result = {"provider": "oda", "order_id": change["order_id"], "aborted": True, "cart_retained": True}
-                    elif self._cart_lines(cart_summary(self.oda.call("get_cart", {})))[0] != change.get("starting_cart_quantities", {}):
+                    elif self._cart_lines(cart_summary(self.provider_client.call("get_cart", {})))[0] != change.get("starting_cart_quantities", {}):
                         raise HouseholdError("abort with retain_cart=true to preserve the staged Oda additions, or remove them before aborting")
                     else:
                         result = {"provider": "oda", "order_id": change["order_id"], "aborted": True}
@@ -1191,7 +1191,7 @@ class OrderOperations:
                     before_click,
                     deadline=deadline,
                 )
-                tracking = self.oda.call("order_tracking", {"order_number": order_id}, deadline=deadline) if self.provider == "meny" else self.oda.call("order_tracking", {"order_number": order_id})
+                tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("order_tracking", {"order_number": order_id})
                 require_provider_identity(tracking, order_id, tracking=True)
                 current = {"order": current["order"], "tracking": tracking}
             except CancellationPreconditionError:
@@ -1489,9 +1489,9 @@ class OrderOperations:
                             **delivery_choice,
                         }
                     cart = (
-                        self.oda.call("get_cart", {}, deadline=deadline)
+                        self.provider_client.call("get_cart", {}, deadline=deadline)
                         if self.provider == "meny"
-                        else self.oda.call("get_cart", {}, deadline=deadline)
+                        else self.provider_client.call("get_cart", {}, deadline=deadline)
                     )
                     summary = self._bind_delivery_summary(cart_summary(cart), delivery_choice)
                     with self.store.locked() as state:
@@ -1562,7 +1562,7 @@ class OrderOperations:
                 state = self.store.read()
                 if state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change"):
                     raise HouseholdError("finish the pending provider operation before manual checkout")
-                summary = cart_summary(self.oda.call("get_cart", {}, deadline=deadline))
+                summary = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                 return {
                     "provider": "mathem", "currency": "SEK", "confirmed": False,
                     "manual_checkout_required": True,
@@ -1622,7 +1622,7 @@ class OrderOperations:
             fresh_target = self._orders({"action": "get", "order_id": order_change["order_id"]})
             if canonical(fresh_target) != canonical(order_change["before"]):
                 raise HouseholdError("the target Oda order changed; begin the order change again")
-        cart = self.oda.call("get_cart", {}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.oda.call("get_cart", {}, deadline=deadline)
+        cart = self.provider_client.call("get_cart", {}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
         summary = cart_summary(cart)
         if order_change and self.provider == "oda" and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
             raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
@@ -1641,7 +1641,7 @@ class OrderOperations:
             if not isinstance(address, str) or not address.strip():
                 raise HouseholdError("select a delivery address before checkout")
             summary["delivery"]["address"] = unicodedata.normalize("NFC", " ".join(address.split()))
-        before = self.oda.call("get_orders", {"page": 1, "size": 20}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.oda.call("get_orders", {"page": 1, "size": 20})
+        before = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_orders", {"page": 1, "size": 20})
         with self._browser_operation(deadline):
             state = self.store.read()
             if (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
@@ -1676,7 +1676,7 @@ class OrderOperations:
                     try:
                         review = self.browser.review_checkout(cart, deadline=deadline)
                     except OdaCheckoutMismatchError:
-                        refreshed_cart = self.oda.call("get_cart", {}, deadline=deadline)
+                        refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                         refreshed_summary = cart_summary(refreshed_cart)
                         if canonical(refreshed_summary) == canonical(summary):
                             raise
@@ -1690,7 +1690,7 @@ class OrderOperations:
                 if not isinstance(reviewed_summary, Mapping):
                     raise HouseholdError("MENY checkout returned no verified summary")
                 summary = deepcopy(dict(reviewed_summary))
-                refreshed_cart = self.oda.call(
+                refreshed_cart = self.provider_client.call(
                     "get_cart",
                     {},
                     deadline=deadline,
@@ -1732,7 +1732,7 @@ class OrderOperations:
                 else:
                     raise HouseholdError("MENY checkout summary did not settle")
             elif not order_change:
-                refreshed_cart = self.oda.call("get_cart", {}, deadline=deadline)
+                refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 refreshed_summary = cart_summary(refreshed_cart)
                 if canonical(refreshed_summary) != canonical(summary):
                     if isinstance(menu_baseline, Mapping):
@@ -1845,7 +1845,7 @@ class OrderOperations:
             raise
         if reprepared is not None:
             return reprepared
-        cart = self.oda.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_cart", {}, deadline=deadline)
+        cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
         pending_change = pending.get("order_change") or {}
         expected_cart = cart_summary(pending["cart"])
         if canonical(cart_summary(cart)) != canonical(expected_cart):
@@ -1878,7 +1878,7 @@ class OrderOperations:
                     # MENY's provider client is this same locked browser tab;
                     # submit_checkout performs its own exact fresh review.
                     if self.provider == "oda":
-                        fresh = self.oda.call("get_cart", {}, deadline=deadline)
+                        fresh = self.provider_client.call("get_cart", {}, deadline=deadline)
                         expected = cart_summary(pending["cart"])
                         if canonical(cart_summary(fresh)) != canonical(expected):
                             raise CheckoutPreconditionError("cart or delivery changed before the final click")
@@ -2073,7 +2073,7 @@ class OrderOperations:
             and self.browser.checkout_payment_not_dispatched(pending["browser_review"], deadline=deadline)
         )
         confirmation_order_id = self.browser.checkout_confirmation_order_id(deadline=deadline) if self.provider == "meny" else None
-        after = self.oda.call("get_orders", {"page": 1, "size": 20}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_orders", {"page": 1, "size": 20})
+        after = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_orders", {"page": 1, "size": 20})
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
         candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping) and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids]
         order = None
@@ -2085,8 +2085,8 @@ class OrderOperations:
             candidates = [item for item in candidates if str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == confirmation_order_id]
         if len(candidates) == 1:
             candidate_id = str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or "")
-            details = self.oda.call("get_order", {"order_number": candidate_id}, deadline=deadline) if self.provider == "meny" else self.oda.call("get_order", {"order_number": candidate_id})
-            tracking = self.oda.call("order_tracking", {"order_number": candidate_id}, deadline=deadline) if self.provider == "meny" else self.oda.call("order_tracking", {"order_number": candidate_id})
+            details = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_order", {"order_number": candidate_id})
+            tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("order_tracking", {"order_number": candidate_id})
             details_id = str(details.get("orderNumber") or details.get("order_number") or details.get("id") or "")
             tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
             order = {**candidates[0], **details}

@@ -26,7 +26,7 @@ sys.path.insert(0, str(CORE))
 
 from core import DEFAULT_PROFILE, HouseholdError, StateStore, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, due_recurring, oslo_local_timestamp, put_item, validate_delivery_slot  # noqa: E402
 from migrate import migrate  # noqa: E402
-from oda import normalize_oda_delivery_slot, normalize_oda_delivery_slots, oda_cart_delivery_matches_slot, oda_cart_delivery_window, oda_delivery_slot_date  # noqa: E402
+from retail_mcp import normalize_retail_delivery_slot, normalize_retail_delivery_slots, retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date  # noqa: E402
 from oda_browser import (  # noqa: E402
     CART_URL,
     CANCELLATION_BROWSER_ARGS,
@@ -53,6 +53,8 @@ from meny import DEFAULT_BROWSER_ARGS as MENY_BROWSER_ARGS, MenyClient, MenyOrde
 
 CONFIG = {"instance": "test", "household": "Test", "email_automation_profile": "test-email", "profile_overrides": {}}
 MENY_PRODUCT = "/varer/frukt-gront/gronnsaker/kal/brokkoli/brokkoli-2000434900004"
+# Oda's yearless "5. sep" cart display belongs to the dated September 2026 fixture.
+ODA_FIXTURE_NOW = datetime(2026, 9, 3, 13, 5, tzinfo=timezone.utc)
 
 
 class FakeOda:
@@ -397,12 +399,15 @@ class CoreTestsBase:
         mcp_server_package = types.ModuleType("mcp.server")
         mcp_server_module = types.ModuleType("mcp.server.mcpserver")
         mcp_server_module.MCPServer = FakeMCPServer
+        mcp_exceptions = types.ModuleType("mcp.server.mcpserver.exceptions")
+        mcp_exceptions.ToolError = RuntimeError
         spec = importlib.util.spec_from_file_location("meal_concierge_mcp_server_test", CORE / "mcp_server.py")
         module = importlib.util.module_from_spec(spec)
         with mock.patch.dict(sys.modules, {
             "mcp": mcp,
             "mcp.server": mcp_server_package,
             "mcp.server.mcpserver": mcp_server_module,
+            "mcp.server.mcpserver.exceptions": mcp_exceptions,
         }):
             spec.loader.exec_module(module)
         self.assertEqual(module.rpc_timeout("cart", {"action": "change"}), 300)
@@ -544,7 +549,7 @@ class CoreTestsBase:
 
     def test_fixture_backed_oda_slots_preserve_ids_offsets_and_confirmed_free_price(self):
         fixture = json.loads((ROOT / "tests/fixtures/delivery/oda_slots.json").read_text(encoding="utf-8"))
-        result = normalize_oda_delivery_slots(fixture["response"])
+        result = normalize_retail_delivery_slots(fixture["response"])
         self.assertEqual(result["provider"], "oda")
         self.assertEqual(result["delivery_date"], "2026-09-09")
         self.assertEqual(len(result["slots"]), 20)
@@ -559,7 +564,7 @@ class CoreTestsBase:
             "selected": True,
         })
         self.assertEqual(delivery_price_display(free), "0 kr")
-        self.assertEqual(oda_delivery_slot_date(free["slot_ref"]), "2026-09-09")
+        self.assertEqual(retail_delivery_slot_date(free["slot_ref"]), "2026-09-09")
         self.assertTrue(all(set(slot) == {
             "slot_ref", "provider_slot_id", "start_at", "end_at",
             "price_ore", "price_kind", "selected",
@@ -570,7 +575,7 @@ class CoreTestsBase:
         raw = fixture["response"]["slots"][1]
         for price in (None, "", "kr 49", "49 kr", "kr\u00a049,00", "fra kr\u00a049", "kr\u00a0-1", "kr\u00a0NaN", 49):
             with self.subTest(price=price):
-                slot = normalize_oda_delivery_slot({**raw, "price": price})
+                slot = normalize_retail_delivery_slot({**raw, "price": price})
                 self.assertEqual(slot["price_kind"], "unavailable")
                 self.assertIsNone(slot["price_ore"])
 
@@ -579,7 +584,7 @@ class CoreTestsBase:
         response = deepcopy(fixture["response"])
         response["slots"][0]["isFull"] = True
         response["slots"][1]["isUnavailable"] = True
-        result = normalize_oda_delivery_slots(response)
+        result = normalize_retail_delivery_slots(response)
         self.assertEqual(len(result["slots"]), 18)
         for changed, message in (
             ({"id": True}, "id changed"),
@@ -588,9 +593,9 @@ class CoreTestsBase:
             ({"isSelected": "false"}, "availability changed"),
         ):
             with self.subTest(changed=changed), self.assertRaisesRegex(HouseholdError, message):
-                normalize_oda_delivery_slot({**fixture["response"]["slots"][0], **changed})
+                normalize_retail_delivery_slot({**fixture["response"]["slots"][0], **changed})
         with self.assertRaisesRegex(HouseholdError, "date changed"):
-            normalize_oda_delivery_slots({**fixture["response"], "deliveryDate": "2026-09-10"})
+            normalize_retail_delivery_slots({**fixture["response"], "deliveryDate": "2026-09-10"})
 
     def test_fixture_backed_meny_from_price_is_not_exact_and_excludes_label_from_identity(self):
         fixture = json.loads((ROOT / "tests/fixtures/delivery/meny_slots.json").read_text(encoding="utf-8"))
@@ -708,7 +713,7 @@ class CoreTestsBase:
         fixture = json.loads((ROOT / "tests/fixtures/delivery/checkout_summaries.json").read_text(encoding="utf-8"))
         cart_delivery = fixture["providers"]["oda"]["cart"]["selected_delivery"]
         slot_fixture = json.loads((ROOT / "tests/fixtures/delivery/oda_slots.json").read_text(encoding="utf-8"))
-        slot = normalize_oda_delivery_slot(slot_fixture["response"]["slots"][0])
+        slot = normalize_retail_delivery_slot(slot_fixture["response"]["slots"][0])
 
         parsed = oda_cart_delivery_window(cart_delivery, today=date(2026, 9, 2))
 
@@ -719,12 +724,12 @@ class CoreTestsBase:
             "end": "09:00",
         })
         self.assertTrue(
-            oda_cart_delivery_matches_slot(
+            retail_cart_delivery_matches_slot(
                 cart_delivery, slot, today=date(2026, 9, 2),
             )
         )
         self.assertFalse(
-            oda_cart_delivery_matches_slot(
+            retail_cart_delivery_matches_slot(
                 cart_delivery,
                 {**slot, "end_at": "2026-09-09T08:00:00Z"},
                 today=date(2026, 9, 2),
@@ -744,6 +749,27 @@ class CoreTestsBase:
         ):
             with self.subTest(changed=changed), self.assertRaisesRegex(HouseholdError, "selected cart delivery changed"):
                 oda_cart_delivery_window(changed, today=date(2026, 9, 2))
+
+    def test_cart_summary_preserves_meny_total_when_delivery_fee_appears(self):
+        cart = {
+            "items": [{"product_id": MENY_PRODUCT, "name": "Testvare", "quantity": 1, "price": 33.9}],
+            "count": 1, "subtotal": 33.9, "total": 92.9,
+            "amounts": {
+                "product_subtotal": 33.9, "delivery_price": None,
+                "discounts": None, "deposits": None, "bags": None,
+                "other_fees": None, "provider_total": 92.9,
+            },
+        }
+        summary = cart_summary(cart)
+        self.assertEqual(summary["total"], 92.9)
+        self.assertEqual(summary["amounts"]["product_subtotal"], 33.9)
+        self.assertIsNone(summary["amounts"]["delivery_price"])
+        cart["amounts"]["provider_total"] = 33.9
+        with self.assertRaisesRegex(HouseholdError, "total is inconsistent"):
+            cart_summary(cart)
+        # The native Oda total remains authoritative when present.
+        cart["totalGrossAmount"] = 33.9
+        self.assertEqual(cart_summary(cart)["total"], 33.9)
 
     def test_checkout_amounts_require_named_other_fees(self):
         cart = {
@@ -1748,242 +1774,9 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         path.chmod(0o755)
 
-    def fake_install(self, root, *, conflicting=False, clean=False, active=True, platform="Linux"):
-        fake_bin = root / "bin"
-        fake_modules = root / "modules"
-        hermes_home = root / "hermes"
-        private_root = root / "private"
-        fake_bin.mkdir()
-        fake_modules.mkdir()
-        hermes_home.mkdir()
-        (hermes_home / "skills" / "meal-concierge").mkdir(parents=True)
-        (hermes_home / "config.yaml").touch()
-        private_root.mkdir()
-
-        settings = {
-            **CONFIG,
-            "provider": "meny",
-            "vipps_phone_number": "90000000",
-            "confirmation_policy": "fresh",
-        }
-        config_path = private_root / "config.json"
-        state_path = private_root / "state" / "state.json"
-        state = None
-        product_items = []
-        if not clean:
-            config_path.write_text(json.dumps(settings), encoding="utf-8")
-            state_store = StateStore(private_root / "state", settings)
-            state = state_store.read()
-            product_items = [{"product_id": MENY_PRODUCT, "product_name": "Brokkoli", "quantity": 2}]
-            state["version"] = 5
-            state.pop("menu_planning", None)
-            state.pop("planning_feedback", None)
-            state.pop("batch_outcomes", None)
-            state["favorites"] = deepcopy(product_items)
-            del state["product_favorites"]
-            if conflicting:
-                state["product_favorites"] = [{"product_id": "/varer/frukt-epler-1234", "product_name": "Eple", "quantity": 1}]
-            state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-        systemctl_log = root / "systemctl.log"
-        python_log = root / "python.log"
-        hermes_log = root / "hermes.log"
-        python_wrapper = fake_bin / "python"
-        self.write_executable(python_wrapper, f"""#!{sys.executable}
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-
-arguments = sys.argv[1:]
-if arguments == [\"-c\", \"import mcp; import tools.mcp_oauth\"]:
-    raise SystemExit(0)
-if arguments and arguments[0] == \"-\":
-    source = sys.stdin.read()
-    if 'status = rpc(\"status\")' in source:
-        state_path = Path(os.environ[\"MEAL_CONCIERGE_HOME\"]) / \"state\" / \"state.json\"
-        state = json.loads(state_path.read_text(encoding=\"utf-8\"))
-        if state.get(\"version\") != 12 or \"product_favorites\" not in state or \"favorites\" in state:
-            raise SystemExit(1)
-        with open({str(python_log)!r}, \"a\", encoding=\"utf-8\") as handle:
-            handle.write(\"status-probe\\n\")
-        raise SystemExit(0)
-    completed = subprocess.run([{sys.executable!r}, *arguments], input=source, text=True)
-    raise SystemExit(completed.returncode)
-os.execv({sys.executable!r}, [{sys.executable!r}, *arguments])
-""")
-        (fake_modules / "yaml.py").write_text(
-            "import json\n\ndef safe_load(value):\n    return json.loads(value) if value.strip() else None\n",
-            encoding="utf-8",
-        )
-        self.write_executable(fake_bin / "uname", f"#!/bin/sh\nprintf '%s\\n' {platform}\n")
-        self.write_executable(fake_bin / "agent-browser", "#!/bin/sh\nexit 0\n")
-        self.write_executable(fake_bin / "chromium", "#!/bin/sh\nexit 0\n")
-        self.write_executable(fake_bin / "systemctl", f"""#!/bin/sh
-printf '%s\\n' \"$*\" >> {str(systemctl_log)!r}
-if [ \"$*\" = \"--user is-active --quiet meal-concierge.service\" ] && [ \"${{FAKE_SERVICE_ACTIVE:-false}}\" != true ]; then
-  exit 3
-fi
-exit 0
-""")
-        self.write_executable(fake_bin / "launchctl", f"""#!/bin/sh
-printf '%s\\n' \"$*\" >> {str(systemctl_log)!r}
-if [ \"$1\" = print ] && [ \"${{FAKE_SERVICE_ACTIVE:-false}}\" != true ]; then
-  exit 3
-fi
-exit 0
-""")
-        self.write_executable(fake_bin / "plutil", "#!/bin/sh\nexit 0\n")
-        self.write_executable(fake_bin / "hermes", f"""#!{sys.executable}
-import json
-import os
-from pathlib import Path
-import re
-import sys
-
-arguments = sys.argv[1:]
-with open({str(hermes_log)!r}, "a", encoding="utf-8") as handle:
-    handle.write(" ".join(arguments) + "\\n")
-if arguments == ["mcp", "add", "--help"]:
-    print("--connect-timeout")
-elif arguments[:3] == ["mcp", "add", "meal_concierge"]:
-    command = arguments[arguments.index("--command") + 1]
-    socket = arguments[arguments.index("--env") + 1].split("=", 1)[1]
-    script = arguments[arguments.index("--args") + 1]
-    config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
-    raw = config_path.read_text(encoding="utf-8")
-    value = json.loads(raw) if raw.strip() else dict()
-    value.setdefault("mcp_servers", dict())["meal_concierge"] = dict(
-        command=command,
-        args=[script],
-        env=dict([("MEAL_CONCIERGE_SOCKET", socket)]),
-        enabled=True,
-    )
-    config_path.write_text(json.dumps(value), encoding="utf-8")
-elif arguments == ["mcp", "test", "meal_concierge"]:
-    config_path = Path(os.environ["HERMES_HOME"]) / "config.yaml"
-    value = json.loads(config_path.read_text(encoding="utf-8"))
-    script = value["mcp_servers"]["meal_concierge"]["args"][0]
-    source = Path(script).read_text(encoding="utf-8")
-    for name in re.findall(r"^def (meal_concierge_[A-Za-z0-9_]+)\\(", source, re.MULTILINE):
-        print(name)
-else:
-    raise SystemExit(1)
-""")
-
-        socket_path = private_root / "service.sock"
-        if not clean:
-            (hermes_home / "config.yaml").write_text(json.dumps({
-                "mcp_servers": {
-                    "meal_concierge": {
-                        "command": str(python_wrapper),
-                        "args": [str(CORE / "mcp_server.py")],
-                        "env": {"MEAL_CONCIERGE_SOCKET": str(socket_path)},
-                        "enabled": True,
-                    },
-                },
-            }), encoding="utf-8")
-            (hermes_home / "skills" / "meal-concierge" / "SKILL.md").write_text("old installed skill\n", encoding="utf-8")
-
-        environment = {
-            **os.environ,
-            "HOME": str(root / "home"),
-            "PATH": f"{fake_bin}:/usr/bin:/bin",
-            "PYTHONPATH": str(fake_modules),
-            "HERMES_HOME": str(hermes_home),
-            "HERMES_PYTHON": str(python_wrapper),
-            "MEAL_CONCIERGE_HOME": str(private_root),
-            "MEAL_CONCIERGE_AGENT_BROWSER": str(fake_bin / "agent-browser"),
-            "MEAL_CONCIERGE_BROWSER_EXECUTABLE": str(fake_bin / "chromium"),
-            "MEAL_CONCIERGE_VIPPS_PHONE_NUMBER": "90000000",
-            "FAKE_SERVICE_ACTIVE": "true" if active else "false",
-            "XDG_CONFIG_HOME": str(root / "config"),
-            "XDG_RUNTIME_DIR": str(root / "runtime"),
-        }
-        completed = subprocess.run(
-            ["/bin/bash", str(CORE / "install.sh"), "--provider", "meny", "--household", "Test"],
-            cwd=CORE, env=environment, capture_output=True, text=True,
-        )
-        return completed, state, product_items, state_path, systemctl_log, python_log, hermes_log, hermes_home, private_root
-
-    def test_active_upgrade_migrates_refreshes_restarts_and_verifies_the_new_schema(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            completed, old_state, product_items, state_path, systemctl_log, python_log, hermes_log, hermes_home, private_root = self.fake_install(root)
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            migrated = json.loads(state_path.read_text(encoding="utf-8"))
-            backup = private_root / "state" / "state-v5.backup.json"
-            self.assertEqual(migrated["version"], 12)
-            self.assertEqual(migrated["product_favorites"], product_items)
-            self.assertNotIn("favorites", migrated)
-            self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), old_state)
-            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
-            commands = systemctl_log.read_text(encoding="utf-8").splitlines()
-            self.assertLess(commands.index("--user stop meal-concierge.service"), commands.index("--user start meal-concierge.service"))
-            self.assertEqual([line for line in commands if " stop " in f" {line} "], ["--user stop meal-concierge.service"])
-            self.assertEqual([line for line in commands if " start " in f" {line} "], ["--user start meal-concierge.service"])
-            self.assertEqual(python_log.read_text(encoding="utf-8"), "status-probe\n")
-            self.assertIn("mcp test meal_concierge", hermes_log.read_text(encoding="utf-8"))
-            installed_skill = (hermes_home / "skills" / "meal-concierge" / "SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("meal_concierge_product_favorites", installed_skill)
-
-    def test_inactive_existing_linux_and_macos_installs_are_started_and_verified(self):
-        for platform in ("Linux", "Darwin"):
-            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
-                root = Path(temp)
-                completed, _old_state, product_items, state_path, service_log, python_log, _hermes_log, _hermes_home, _private_root = self.fake_install(
-                    root, active=False, platform=platform,
-                )
-                self.assertEqual(completed.returncode, 0, completed.stderr)
-                migrated = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(migrated["product_favorites"], product_items)
-                commands = service_log.read_text(encoding="utf-8").splitlines()
-                if platform == "Linux":
-                    self.assertNotIn("--user stop meal-concierge.service", commands)
-                    self.assertIn("--user start meal-concierge.service", commands)
-                else:
-                    self.assertFalse(any(command.startswith("bootout ") for command in commands))
-                    self.assertTrue(any(command.startswith("bootstrap gui/") for command in commands))
-                self.assertEqual(python_log.read_text(encoding="utf-8"), "status-probe\n")
-
-    def test_clean_install_creates_v8_skill_registration_and_new_tool_schema(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            completed, old_state, product_items, state_path, service_log, python_log, hermes_log, hermes_home, private_root = self.fake_install(
-                root, clean=True, active=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIsNone(old_state)
-            self.assertEqual(product_items, [])
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            self.assertEqual(state["version"], 12)
-            self.assertEqual(state["product_favorites"], [])
-            self.assertNotIn("favorites", state)
-            self.assertFalse((private_root / "state" / "state-v5.backup.json").exists())
-            commands = service_log.read_text(encoding="utf-8").splitlines()
-            self.assertNotIn("--user stop meal-concierge.service", commands)
-            self.assertNotIn("--user start meal-concierge.service", commands)
-            self.assertFalse(python_log.exists())
-            hermes_commands = hermes_log.read_text(encoding="utf-8")
-            self.assertIn("mcp add meal_concierge", hermes_commands)
-            self.assertIn("mcp test meal_concierge", hermes_commands)
-            installed_skill = (hermes_home / "skills" / "meal-concierge" / "SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("meal_concierge_product_favorites", installed_skill)
-
-    def test_failed_v5_migration_leaves_state_and_backup_and_does_not_restart(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            completed, old_state, _product_items, state_path, systemctl_log, python_log, hermes_log, _hermes_home, private_root = self.fake_install(root, conflicting=True)
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertIn("conflict", completed.stderr)
-            self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), old_state)
-            self.assertEqual(json.loads((private_root / "state" / "state-v5.backup.json").read_text(encoding="utf-8")), old_state)
-            commands = systemctl_log.read_text(encoding="utf-8").splitlines()
-            self.assertIn("--user stop meal-concierge.service", commands)
-            self.assertNotIn("--user start meal-concierge.service", commands)
-            self.assertFalse(python_log.exists())
-            self.assertNotIn("mcp test meal_concierge", hermes_log.read_text(encoding="utf-8"))
+    def test_standalone_installer_boundaries(self):
+        # Exercise the real offline installer/ownership tests in the fleet profile.
+        subprocess.run([sys.executable, str(CORE / "tests/test_installer.py")], check=True)
 
     def test_checkout_starts_from_the_exact_cart_page(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -3124,7 +2917,8 @@ class MenyClientTests(unittest.TestCase):
         self.assertIn("label.match(/^Behold levering", scripts[2])
         self.assertIn("confirm.length + keep.length !== 1", scripts[2])
         self.assertNotIn("startsWith('Bekreft levering ')", scripts[2])
-        self.assertIn("endsWith(expectedSuffix)", scripts[2])
+        self.assertIn(".split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix", scripts[2])
+        self.assertNotIn("endsWith(expectedSuffix)", "\n".join(scripts))
         client._sleep.assert_called_once_with(0.25)
         self.assertEqual(client._invoke.call_args_list, [
             mock.call("click", '[data-meal-concierge-action="delivery-slot"]'),
@@ -4345,12 +4139,12 @@ process.stdout.write(eval(script));
         client._open = mock.Mock()
         client._assert_authenticated = mock.Mock()
         client._product_control = mock.Mock(return_value={"ready": True, "authenticated": True, "quantity": 0, "label": "Legg Brokkoli i handlevognen"})
-        client._click_cart_control = mock.Mock()
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
         client._resolve_order_route = mock.Mock()
         client._wait_for_quantity = mock.Mock(return_value=1)
         client._change_one(MENY_PRODUCT, 1)
         self.assertEqual(client._assert_authenticated.call_count, 2)
-        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Legg Brokkoli i handlevognen")
+        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.ANY)
 
     def test_cart_change_waits_for_the_product_controls_to_render(self):
         client = self.client()
@@ -4361,14 +4155,14 @@ process.stdout.write(eval(script));
             {"ready": False, "page_ready": False, "authenticated": True},
             {"ready": True, "page_ready": True, "authenticated": True, "quantity": 1, "label": "Fjern Brokkoli fra handlevognen"},
         ])
-        client._click_cart_control = mock.Mock()
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
         client._resolve_order_route = mock.Mock()
         client._wait_for_quantity = mock.Mock(return_value=0)
 
         client._change_one(MENY_PRODUCT, -1)
 
         client._sleep.assert_called_once_with(0.25)
-        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Fjern Brokkoli fra handlevognen")
+        client._click_cart_control.assert_called_once_with(MENY_PRODUCT, "Fjern Brokkoli fra handlevognen", mock.ANY)
 
     def test_cart_remove_falls_back_to_the_exact_cart_control(self):
         client = self.client()
@@ -4722,7 +4516,7 @@ process.stdout.write(eval(script));
         client._open = mock.Mock()
         client._assert_authenticated = mock.Mock()
         client._product_control = mock.Mock(return_value={"ready": True, "authenticated": True, "quantity": 0, "label": "Legg Brokkoli i handlevognen"})
-        client._click_cart_control = mock.Mock()
+        client._click_cart_control = mock.Mock(side_effect=lambda _product, _label, before_dispatch: before_dispatch())
         client._wait_for_quantity = mock.Mock(side_effect=HouseholdError("MENY operation deadline reached"))
         with self.assertRaisesRegex(HouseholdError, "uncertain.*do not retry"):
             client._change_one(MENY_PRODUCT, 1)
@@ -4736,7 +4530,7 @@ process.stdout.write(eval(script));
         calls = []
         client._invoke = lambda *arguments, **_kwargs: calls.append(arguments) or ({"box": {"x": 1, "y": 2, "width": 20, "height": 10}} if arguments[:2] == ("get", "box") else {})
         with self.assertRaisesRegex(HouseholdError, "obscured or changed"):
-            client._click_cart_control(MENY_PRODUCT, "Legg Brokkoli i handlevognen")
+            client._click_cart_control(MENY_PRODUCT, "Legg Brokkoli i handlevognen", mock.Mock())
         self.assertNotIn(("mouse", "down"), calls)
         self.assertIn("location.pathname ===", scripts[0])
         self.assertIn("aria-disabled", scripts[0])
@@ -4744,6 +4538,64 @@ process.stdout.write(eval(script));
         self.assertIn("Brukermeny", scripts[0])
         self.assertIn("elementFromPoint", scripts[1])
         self.assertIn("Brukermeny", scripts[1])
+
+    def test_cart_change_classifies_failures_at_the_mouse_dispatch_boundary(self):
+        from meny import MenyCartStoppedError
+        for failure in ("identity", "box", "occlusion", "move", "down", "up", "readback"):
+            with self.subTest(failure=failure):
+                client = self.client()
+                client._open = mock.Mock()
+                client._assert_authenticated = mock.Mock()
+                client._product_control = mock.Mock(return_value={
+                    "ready": True, "authenticated": True, "quantity": 7,
+                    "label": "Legg til 1 stk Brokkoli i handlevognen",
+                })
+                client._eval = mock.Mock(side_effect=[
+                    {"ready": failure != "identity"}, {"clear": failure != "occlusion"},
+                ])
+                client._resolve_order_route = mock.Mock()
+                client._wait_for_quantity = mock.Mock(side_effect=HouseholdError("readback failed"))
+                calls = []
+
+                def invoke(*arguments):
+                    calls.append(arguments)
+                    if arguments[:2] == ("get", "box"):
+                        return {} if failure == "box" else {"box": {"x": 1, "y": 2, "width": 20, "height": 10}}
+                    if arguments[:2] == ("mouse", failure):
+                        raise HouseholdError("mouse command failed")
+                    return {}
+
+                client._invoke = invoke
+                with self.assertRaises(HouseholdError) as caught:
+                    client._change_one(MENY_PRODUCT, 1)
+                if failure in {"identity", "box", "occlusion", "move"}:
+                    self.assertIsInstance(caught.exception, MenyCartStoppedError)
+                    self.assertEqual(caught.exception.applied_operations, [])
+                    self.assertNotIn(("mouse", "down"), calls)
+                else:
+                    self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
+                    self.assertIn("uncertain", str(caught.exception))
+                    self.assertIn(("mouse", "down"), calls)
+
+    def test_cart_batch_preserves_first_click_when_second_is_obscured(self):
+        from meny import MenyCartStoppedError
+        client = self.client()
+        client._open = mock.Mock()
+        client._assert_authenticated = mock.Mock()
+        client._product_control = mock.Mock(side_effect=[{
+            "ready": True, "authenticated": True, "quantity": quantity,
+            "label": "Legg til 1 stk Brokkoli i handlevognen",
+        } for quantity in (7, 8)])
+        client._eval = mock.Mock(side_effect=[
+            {"ready": True}, {"clear": True}, {"ready": True}, {"clear": False},
+        ])
+        client._invoke = mock.Mock(side_effect=lambda *args: {"box": {"x": 1, "y": 2, "width": 20, "height": 10}} if args[:2] == ("get", "box") else {})
+        client._resolve_order_route = mock.Mock()
+        client._wait_for_quantity = mock.Mock(return_value=8)
+        with self.assertRaises(MenyCartStoppedError) as caught:
+            client._change_cart({"operations": [{"productId": MENY_PRODUCT, "quantity": 2}]})
+        self.assertEqual(caught.exception.applied_operations, [{"productId": MENY_PRODUCT, "quantity": 1}])
+        self.assertEqual(client._invoke.call_args_list.count(mock.call("mouse", "down")), 1)
 
     def test_checkout_control_scrolls_and_hit_tests_before_mouse_activation(self):
         client = self.client()
@@ -4824,7 +4676,7 @@ process.stdout.write(eval(script));
 
     def test_checkout_submit_revalidates_exact_gate_after_hover_before_dispatch(self):
         client = self.client()
-        review = self.checkout_review(target_order_code="XY-CODE-1")
+        review = self.checkout_review(target_order_id="123", target_order_code="XY-CODE-1")
         events = []
 
         def evaluate(script):
@@ -4844,7 +4696,8 @@ process.stdout.write(eval(script));
             "count": 1,
             "subtotal": 19.9,
         }
-        client._close_checkout_cart = lambda: events.append(("close_cart",))
+        client._open = lambda url: events.append(("open", url))
+        client._review_checkout = lambda cart, **kwargs: events.append(("review_checkout", cart, kwargs)) or deepcopy(review)
         client._require_time = lambda value: events.append(("require_time", value))
         client._wait_for_vipps_dispatch = lambda *args: events.append(("wait_for_vipps_dispatch", *args))
         client._click_checkout_submit(
@@ -4855,14 +4708,17 @@ process.stdout.write(eval(script));
 
         kinds = [event[0] for event in events]
         self.assertEqual(kinds, [
-            "eval", "before_dispatch", "read_cart", "close_cart", "eval",
+            "eval", "before_dispatch", "open", "read_cart", "review_checkout", "eval",
             "scrollintoview", "get", "eval", "mouse", "eval", "require_time", "network",
             "before_dispatch", "eval", "dispatch_fence", "mouse", "mouse", "wait_for_vipps_dispatch",
         ])
-        self.assertEqual(events[8], ("mouse", "move", "26", "41"))
-        self.assertEqual(events[11], ("network", "requests", "--clear"))
-        self.assertEqual(events[15:17], [("mouse", "down"), ("mouse", "up")])
-        second_gate = events[9][1]
+        self.assertEqual(events[9], ("mouse", "move", "26", "41"))
+        self.assertEqual(events[12], ("network", "requests", "--clear"))
+        self.assertEqual(events[16:18], [("mouse", "down"), ("mouse", "up")])
+        self.assertEqual(events[2], ("open", "https://meny.no/varer"))
+        self.assertEqual(events[4][1]["delivery"], review["summary"]["delivery"])
+        self.assertEqual(events[4][2], {"order_change": {"order_id": "123", "code": "XY-CODE-1"}})
+        second_gate = events[10][1]
         self.assertIn("elementFromPoint(26, 41)", second_gate)
         self.assertIn("location.href ===", second_gate)
         self.assertIn("123456", second_gate)
@@ -4886,7 +4742,8 @@ process.stdout.write(eval(script));
         }
         client._eval = mock.Mock(return_value={"ready": True})
         client._read_cart = mock.Mock(side_effect=lambda: deepcopy(observed))
-        client._close_checkout_cart = mock.Mock()
+        client._open = mock.Mock()
+        client._review_checkout = mock.Mock()
         client._invoke = mock.Mock()
 
         def before_dispatch():
@@ -4902,9 +4759,39 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "cart items changed"):
             client._click_checkout_submit(review, before_dispatch, dispatch_fence)
 
-        client._close_checkout_cart.assert_called_once_with()
+        client._open.assert_called_once_with("https://meny.no/varer")
+        client._review_checkout.assert_not_called()
         dispatch_fence.assert_not_called()
         client._invoke.assert_not_called()
+
+    def test_checkout_submit_rejects_changed_review_after_returning_from_store(self):
+        for change in ("total", "delivery", "target"):
+            with self.subTest(change=change):
+                client = self.client()
+                review = self.checkout_review()
+                fresh = deepcopy(review)
+                if change == "total":
+                    fresh["summary"]["total"] += 1
+                elif change == "delivery":
+                    fresh["summary"]["delivery"]["display"] = "torsdag 3. september Kl. 10:00-12:00"
+                else:
+                    fresh["target_order_id"] = "123"
+                    fresh["target_order_code"] = "TEST-CODE"
+                client._eval = mock.Mock(return_value={"ready": True})
+                client._open = mock.Mock()
+                client._read_cart = mock.Mock(return_value={
+                    "items": deepcopy(review["summary"]["items"]),
+                    "count": 1, "subtotal": 19.9, "delivery": None,
+                })
+                client._review_checkout = mock.Mock(return_value=fresh)
+                client._invoke = mock.Mock()
+                fence = mock.Mock()
+                with self.assertRaisesRegex(HouseholdError, "checkout changed after the final cart read"):
+                    client._click_checkout_submit(review, mock.Mock(), fence)
+                self.assertEqual(client._review_checkout.call_args.args[0]["delivery"], review["summary"]["delivery"])
+                client._review_checkout.assert_called_once_with(mock.ANY, order_change=None)
+                fence.assert_not_called()
+                client._invoke.assert_not_called()
 
     def test_checkout_cart_close_returns_to_the_exact_payment_page(self):
         client = self.client()
@@ -5189,7 +5076,8 @@ process.stdout.write(eval(script));
         client._read_cart = mock.Mock(return_value={
             "items": deepcopy(review["summary"]["items"]), "count": 1, "subtotal": 19.9,
         })
-        client._close_checkout_cart = mock.Mock()
+        client._open = mock.Mock()
+        client._review_checkout = mock.Mock(return_value=deepcopy(review))
         before_dispatch = mock.Mock()
         dispatch_fence = mock.Mock()
         with self.assertRaisesRegex(HouseholdError, "changed or is obscured"):
@@ -5582,6 +5470,7 @@ class CartPlanTests(unittest.TestCase):
             self.assertEqual(result["reason"], "cart_requires_owner_decision")
             self.assertIsNone(store.read()["pending_checkout"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_combines_start_extras_and_missing_then_binds_explicit_keep_current_digest(self):
         for provider_name in ("oda", "meny"):
             with self.subTest(provider=provider_name), tempfile.TemporaryDirectory() as directory:
@@ -6742,6 +6631,7 @@ class FlowTests(unittest.TestCase):
                 app.handle({"operation": "cart", "action": "get"})
             self.assertEqual(app.integration["status"], "awaiting_login")
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_adds_to_one_exact_existing_order_without_creating_another(self):
         self.oda.orders = [{
             "orderNumber": "test-oda-order",
@@ -6920,6 +6810,7 @@ class FlowTests(unittest.TestCase):
             self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_manual_checkout_has_one_prepare_and_one_confirm(self):
         with mock.patch("service.time.monotonic", return_value=10.0):
             prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
@@ -6939,6 +6830,7 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(repeated["idempotent"])
         self.assertEqual(self.browser.checkout_clicks, 1)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_checkout_preserves_browser_supplied_named_amounts(self):
         self.oda.cart["subtotal"] = 107.95
         self.oda.delivery_slots["slots"][0]["price_ore"] = 0
@@ -6961,6 +6853,7 @@ class FlowTests(unittest.TestCase):
 
         self.assertEqual(prepared["summary"]["amounts"], amounts)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_checkout_rejects_browser_delivery_price_that_disagrees_with_slot(self):
         self.browser.review_checkout = lambda _cart, *, deadline=None: {
             "page_digest": "a" * 64,
@@ -6980,6 +6873,7 @@ class FlowTests(unittest.TestCase):
             self.app.handle({"operation": "checkout", "action": "prepare"})
         self.assertIsNone(self.store.read()["pending_checkout"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_live_shaped_oda_cart_does_not_false_drift_after_delivery_price_binding(self):
         self.oda.cart = {
             "groups": [{"items": [{
@@ -7043,6 +6937,7 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(result["confirmed"])
         self.assertEqual(self.browser.checkout_clicks, 1)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_standing_authorization_submits_oda_with_the_fresh_amount(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "confirmation_policy": "standing"})
@@ -7071,6 +6966,7 @@ class FlowTests(unittest.TestCase):
             self.assertEqual(browser.checkout_clicks, 1)
         self.assertIsNone(self.store.read()["pending_checkout"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_reconcile_rejects_ambiguous_compact_delivery_hours(self):
         def live_shaped_submit(cart, review, before_click=None, *, deadline=None):
             if before_click:
@@ -7094,6 +6990,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 1)
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_cart_change_requires_new_checkout_summary(self):
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
         self.oda.cart["subtotal"] = 36.0
@@ -7101,6 +6998,7 @@ class FlowTests(unittest.TestCase):
             self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_concurrent_checkout_confirm_reserves_one_click(self):
         entered = threading.Event()
         release = threading.Event()
@@ -7151,6 +7049,7 @@ class FlowTests(unittest.TestCase):
         self.assertRegex(str(reconcile_errors[0]), "no checkout attempt is pending")
         self.assertEqual(self.browser.checkout_clicks, 1)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_reconcile_rejects_unrelated_new_order(self):
         def unrelated_submit(cart, review, before_click=None, *, deadline=None):
             if before_click:
@@ -7171,6 +7070,7 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(result["retry_allowed"])
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_known_preclick_failure_requires_new_prepare(self):
         def stop_before_click(cart, review, before_click=None, *, deadline=None):
             raise CheckoutPreconditionError("checkout changed")
@@ -7181,6 +7081,7 @@ class FlowTests(unittest.TestCase):
             self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
         self.assertIsNone(self.store.read()["pending_checkout"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_changed_cart_clears_an_unsubmitted_checkout_confirmation(self):
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
         self.oda.cart["subtotal"] = 36.0
@@ -7195,6 +7096,7 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(self.store.read()["pending_checkout"])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_expiration_is_rechecked_at_the_final_click(self):
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
         started = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
@@ -7208,6 +7110,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 0)
         self.assertIsNone(self.store.read()["pending_checkout"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_lock_timeout_does_not_create_false_uncertain_state(self):
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
 
@@ -7225,12 +7128,14 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "awaiting_confirmation")
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_reconcile_requires_a_click_attempt(self):
         self.app.handle({"operation": "checkout", "action": "prepare"})
         with self.assertRaisesRegex(HouseholdError, "has not reached reconciliation"):
             self.app.handle({"operation": "checkout", "action": "reconcile"})
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "awaiting_confirmation")
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_stale_checkout_confirmation_cannot_confirm_a_newer_prepare(self):
         first = self.app.handle({"operation": "checkout", "action": "prepare"})
         second = self.app.handle({"operation": "checkout", "action": "prepare"})
@@ -7242,6 +7147,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["pending_checkout"]["confirmation_id"], second["confirmation_id"])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_cart_change_is_blocked_while_checkout_is_uncertain(self):
         self.app.handle({"operation": "checkout", "action": "prepare"})
         with self.store.locked() as state:
@@ -7349,6 +7255,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.browser.cancel_clicks, 0)
         self.assertIsNone(self.store.read()["pending_cancellation"])
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_cancellation_holds_browser_until_post_click_tracking_reconciles(self):
         prepared = self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "old"})
         tracking_started = threading.Event()
@@ -8192,6 +8099,7 @@ class FlowTests(unittest.TestCase):
             result = self.app.handle({"operation": "checkout", "action": "auto", "occurrence": "2026-W36"})
         self.assertEqual(result["summary"]["delivery"]["selection_origin"], "external")
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_standing_submit_rebinds_idempotency_to_reprepared_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "confirmation_policy": "standing"})

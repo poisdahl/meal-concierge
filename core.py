@@ -1068,23 +1068,23 @@ def masked_status(state: Mapping[str, Any], integration: Mapping[str, Any]) -> d
 
 
 def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize the live camelCase Oda cart without making its schema local authority."""
+    """Normalize supported provider carts without making their schema local authority."""
     raw_lines: list[Any] = []
     groups = cart.get("groups")
     if isinstance(groups, list):
         for group in groups:
             if not isinstance(group, Mapping) or not isinstance(group.get("items"), list):
-                raise HouseholdError("Oda cart group is invalid")
+                raise HouseholdError("Cart group is invalid")
             raw_lines.extend(group["items"])
     elif isinstance(cart.get("items"), list):
         raw_lines = list(cart["items"])
     else:
-        raise HouseholdError("Oda cart items are unavailable")
+        raise HouseholdError("Cart items are unavailable")
 
     lines = []
     for item in raw_lines:
         if not isinstance(item, Mapping):
-            raise HouseholdError("Oda cart line is invalid")
+            raise HouseholdError("Cart line is invalid")
         product = item.get("product") if isinstance(item.get("product"), Mapping) else item
         quantity = item.get("quantity", 1)
         try:
@@ -1099,20 +1099,20 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
             or numeric_quantity > 1_000_000
             or not numeric_quantity.is_integer()
         ):
-            raise HouseholdError("Oda cart quantity is invalid")
+            raise HouseholdError("Cart quantity is invalid")
         lines.append({
             "product_id": str(product.get("id") or product.get("product_id") or ""),
             "name": str(product.get("name") or product.get("product_name") or ""),
             "quantity": int(numeric_quantity),
             "price": item.get("totalGrossAmount", item.get("price", product.get("price"))),
         })
-    total = cart.get("totalGrossAmount", cart.get("subtotal", cart.get("total")))
+    total = cart.get("totalGrossAmount", cart.get("total", cart.get("subtotal")))
     try:
         numeric_total = float(str(total).replace(",", "."))
     except (TypeError, ValueError) as exc:
-        raise HouseholdError("Oda cart total is unavailable") from exc
+        raise HouseholdError("Cart total is unavailable") from exc
     if not math.isfinite(numeric_total) or numeric_total < 0:
-        raise HouseholdError("Oda cart total is unavailable")
+        raise HouseholdError("Cart total is unavailable")
     slot = cart.get("deliverySlot", cart.get("delivery"))
     if isinstance(slot, Mapping):
         delivery = {

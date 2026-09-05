@@ -22,7 +22,7 @@ from product_observations import (  # noqa: E402
     MAX_PRODUCTS,
     compare_unit_prices,
     normalize_meny_product_search,
-    normalize_oda_product_search,
+    normalize_retail_product_search,
     parse_package,
 )
 from product_planner import (  # noqa: E402
@@ -174,7 +174,7 @@ class ProductObservationTests(unittest.TestCase):
         fixture = json.loads((FIXTURES / "oda_product_observations.json").read_text(encoding="utf-8"))
         products = {}
         for response in fixture["responses"]:
-            result = normalize_oda_product_search(response, observed_at=OBSERVED_AT)
+            result = normalize_retail_product_search(response, observed_at=OBSERVED_AT)
             products.update({item["product_ref"]: item for item in result["products"]})
 
         ordinary = products[1131]
@@ -321,7 +321,7 @@ class ProductObservationTests(unittest.TestCase):
             "price": "10.00", "unitPrice": "20.00", "unitName": "kilogram",
             "availability": {"isAvailable": True},
         }
-        result = normalize_oda_product_search(
+        result = normalize_retail_product_search(
             {"result": [{"query": "fixture", "hasMore": False, "products": [item]}]},
             observed_at=OBSERVED_AT,
         )
@@ -331,12 +331,12 @@ class ProductObservationTests(unittest.TestCase):
         changed = deepcopy(item)
         changed["name"] = "Other"
         with self.assertRaisesRegex(HouseholdError, "conflicting duplicate"):
-            normalize_oda_product_search(
+            normalize_retail_product_search(
                 {"result": [{"query": "fixture", "hasMore": False, "products": [item, changed]}]},
                 observed_at=OBSERVED_AT,
             )
         with self.assertRaisesRegex(HouseholdError, "result changed"):
-            normalize_oda_product_search(
+            normalize_retail_product_search(
                 {"result": [{"query": "fixture", "hasMore": False, "products": []}, {"query": "other", "hasMore": False, "products": []}]},
                 observed_at=OBSERVED_AT,
             )
@@ -1277,7 +1277,7 @@ class MenuCostComparisonTests(unittest.TestCase):
                 if owner.bad_size:
                     result["scope"]["requested_size"] = 1
                 return result
-        self.app.oda = Provider()
+        self.app.provider_client = Provider()
         self.request = {"operation": "products", "action": "lowest_cost",
                         "planner_input": self.fixture.request(self.candidates, alternatives=3)}
         initial = self.app.handle(self.request)["cost_comparison"]

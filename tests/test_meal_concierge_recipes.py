@@ -70,8 +70,8 @@ from service import (  # noqa: E402
     Application, MAX_REQUEST, Server, canonical, load_library_secret_for_state,
     menu_email_html, money_cents, strict_json_loads,
 )
-from tests.test_meal_concierge import (  # noqa: E402
-    CONFIG, MENY_PRODUCT, FakeBrowser, FakeMeny, FakeOda, MutableFakeMeny, MutableFakeOda,
+from test_meal_concierge import (  # noqa: E402
+    CONFIG, MENY_PRODUCT, ODA_FIXTURE_NOW, FakeBrowser, FakeMeny, FakeOda, MutableFakeMeny, MutableFakeOda,
 )
 
 
@@ -2705,6 +2705,7 @@ class RecipeFlowTests(unittest.TestCase):
     def save_bank_recipe(self, name: str = "Bankfisk", external_id: str = "bank-1") -> dict:
         return self.app.handle({"operation": "recipes", "action": "save", "recipe": full_recipe(name, external_id=external_id), "idempotency_key": f"save-{external_id}"})["recipe"]
 
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def prepare_checkout_with_current_cart(self):
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
         if prepared.get("cart_reconciliation_required"):

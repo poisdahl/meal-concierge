@@ -1238,15 +1238,23 @@ class MenyClient:
                 return
             raise MenyCartStoppedError("MENY product control is unavailable")
         expected = previous + delta
+        dispatched = False
+
+        def before_dispatch() -> None:
+            nonlocal dispatched
+            dispatched = True
+
         try:
-            self._click_cart_control(product, str(before.get("label") or ""))
+            self._click_cart_control(product, str(before.get("label") or ""), before_dispatch)
             self._resolve_order_route(order_change_code)
             observed = self._wait_for_quantity(expected, previous, product)
             if observed != expected:
                 raise HouseholdError("MENY product quantity did not settle")
             self._assert_authenticated()
         except HouseholdError as exc:
-            raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            if dispatched:
+                raise HouseholdError("MENY cart change is uncertain; read the cart and do not retry this request") from exc
+            raise MenyCartStoppedError(str(exc)) from exc
 
     def _resolve_order_route(self, order_change_code: str | None) -> None:
         result = self._eval(r"""
@@ -1435,7 +1443,7 @@ class MenyClient:
 })()
 """.replace("ACTION", json.dumps(action)).replace("DELTA", str(delta)).replace("PRODUCT", json.dumps(product)))
 
-    def _click_cart_control(self, product: str, label: str) -> None:
+    def _click_cart_control(self, product: str, label: str, before_dispatch: Any) -> None:
         if not label:
             raise HouseholdError("MENY cart control identity is unavailable")
         selector = '[data-meal-concierge-action="cart"]'
@@ -1473,6 +1481,7 @@ class MenyClient:
             raise HouseholdError("MENY cart control is obscured or changed")
         self._require_time(3)
         self._invoke("mouse", "move", str(round(x)), str(round(y)))
+        before_dispatch()
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
 
@@ -1623,8 +1632,10 @@ __DELIVERY_BINDING__
         if self._eval(render_gate(False)) != {"ready": True}:
             raise HouseholdError("MENY Vipps payment control changed")
         before_dispatch()
+        # MENY disables the cart opener on the payment step. Read the cart
+        # on its normal surface, then return through the exact checkout review.
+        self._open(STORE_URL)
         observed_cart = self._read_cart()
-        self._close_checkout_cart()
         review_summary = review.get("summary")
         if not isinstance(review_summary, Mapping) or not isinstance(review_summary.get("items"), list):
             raise HouseholdError("MENY checkout item identity is unavailable")
@@ -1645,6 +1656,14 @@ __DELIVERY_BINDING__
             or review_summary.get("count") != observed_summary.get("count")
         ):
             raise HouseholdError("MENY cart items changed before the final payment click")
+        refreshed_cart = dict(observed_cart)
+        refreshed_cart["delivery"] = dict(review_summary["delivery"])
+        target = {"order_id": review.get("target_order_id"), "code": review.get("target_order_code")}
+        fresh = self._review_checkout(
+            refreshed_cart, order_change=target if any(target.values()) else None,
+        )
+        if not meny_checkout_reviews_match(review, fresh):
+            raise HouseholdError("MENY checkout changed after the final cart read")
         if self._eval(render_gate(False)) != {"ready": True}:
             raise HouseholdError("MENY Vipps payment control changed")
         x, y = self._wait_for_checkout_hit(
@@ -1879,19 +1898,23 @@ __DELIVERY_BINDING__
   const deliveryPrefix = 'Du har valgt at varene leveres på døren';
   const deliveryHint = norm(cart.innerText).toLocaleLowerCase('nb-NO').includes(deliveryPrefix.toLocaleLowerCase('nb-NO'));
   const deliveryParagraphs = [...cart.querySelectorAll('p')].filter(visible).filter(x => norm(x.innerText).toLocaleLowerCase('nb-NO').startsWith(deliveryPrefix.toLocaleLowerCase('nb-NO')));
-  let delivery = null, deliveryReady = !deliveryHint && deliveryParagraphs.length === 0;
+  let delivery = null, deliveryCount = deliveryParagraphs.length, deliveryReady = !deliveryHint && deliveryParagraphs.length === 0;
   if (deliveryHint && deliveryParagraphs.length === 1) {
     const text = norm(deliveryParagraphs[0].innerText);
+    const methodOnly = /^Du har valgt at varene leveres på døren\. Du kan endre dette i kassen eller her\s*\.$/.test(text);
     const selected = text.match(/^Du har valgt at varene leveres på døren (.+)\. Du kan endre dette i kassen eller her\s*\.$/);
     const display = selected?.[1] || '';
     const validDisplay = /^(?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(?:[1-9]|[12]\d|3[01])\.\s+(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+kl\.\s+(?:[01]\d|2[0-3]):[0-5]\d[-–](?:[01]\d|2[0-3]):[0-5]\d$/i.test(display);
     if (selected && validDisplay) {
       delivery = {display};
       deliveryReady = true;
+    } else if (methodOnly) {
+      deliveryCount = 0;
+      deliveryReady = true;
     }
   }
   const ready = authenticated.length === 1 && itemRoots.length === controls.length && items.length === itemRoots.length && (items.length > 0 || empty) && totalReady && subtotalReady && deliveryReady;
-  return JSON.stringify({ready, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryParagraphs.length, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
+  return JSON.stringify({ready, authenticated:authenticated.length === 1, root_count:1, item_root_count:itemRoots.length, control_count:controls.length, empty, total_count:totals.length, subtotal_count:subtotalRows.length, subtotal, delivery_count:deliveryCount, delivery, items, count:items.reduce((sum,item) => sum + item.quantity, 0), total});
 })()
 """)
             if result.get("ready") is True:
@@ -2175,7 +2198,7 @@ __DELIVERY_BINDING__
   const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const buttons = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
-    return slotPattern.test(label) && label.toLocaleLowerCase('nb-NO').endsWith(expectedSuffix);
+    return slotPattern.test(label) && label.split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix;
   });
   if (dismiss.length !== 1 || buttons.length !== 1) return JSON.stringify({ready:false, identity, authenticated:true});
   if (buttons[0].getAttribute('aria-pressed') === 'true') {
@@ -2241,7 +2264,7 @@ __DELIVERY_BINDING__
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
   const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
-  const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).toLocaleLowerCase('nb-NO').endsWith(expectedSuffix));
+  const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
   const confirm = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => {
     const label = norm(x.getAttribute('aria-label') || x.innerText);
     const parts = label.match(/^Bekreft levering (?:mandag|tirsdag|onsdag|torsdag|fredag|lørdag|søndag)\s+(.+)$/i);
@@ -2292,7 +2315,7 @@ __DELIVERY_BINDING__
   if (!identity || authenticated.length !== 1 || dialogs.length !== 1) return JSON.stringify({ready:false, identity, authenticated:authenticated.length === 1});
   const slotPattern = /^(?:[^,\r\n]{1,200},\s*)?(?:0?[1-9]|[12]\d|3[01])\.\s*(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)\s+klokka\s+(?:[01]?\d|2[0-3]):[0-5]\d\s+til\s+(?:[01]?\d|2[0-3]):[0-5]\d$/i;
   const allSelected = [...dialogs[0].querySelectorAll('button[aria-pressed="true"]')].filter(visible).filter(x => slotPattern.test(norm(x.getAttribute('aria-label') || x.innerText)));
-  const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).toLocaleLowerCase('nb-NO').endsWith(expectedSuffix));
+  const selected = allSelected.filter(x => norm(x.getAttribute('aria-label') || x.innerText).split(',').at(-1).trim().toLocaleLowerCase('nb-NO') === expectedSuffix);
   const dismiss = [...dialogs[0].querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText) === 'Lukk');
   if (allSelected.length !== 1 || selected.length !== 1 || dismiss.length !== 1) return JSON.stringify({ready:false, identity, authenticated:true, selected_count:selected.length, total_selected_count:allSelected.length});
   dismiss[0].setAttribute('data-meal-concierge-action', 'delivery-dismiss');

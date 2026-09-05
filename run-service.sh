@@ -4,26 +4,29 @@ set -Eeuo pipefail
 source_root="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$source_root"
 hermes_home="${HERMES_HOME:-$HOME/.hermes}"
-private_root="${MEAL_CONCIERGE_HOME:-$hermes_home/meal-concierge}"
+private_root="${MEAL_CONCIERGE_HOME:-${HERMES_HOME:+$HERMES_HOME/meal-concierge}}"
+private_root="${private_root:-$HOME/.local/share/meal-concierge}"
 config_path="${MEAL_CONCIERGE_CONFIG:-$private_root/config.json}"
 state_path="${MEAL_CONCIERGE_STATE:-$private_root/state}"
 socket_path="${MEAL_CONCIERGE_SOCKET:-$private_root/service.sock}"
+token_path="${MEAL_CONCIERGE_TOKENS:-${HERMES_HOME:+$HERMES_HOME/mcp-tokens}}"
+token_path="${token_path:-$private_root/tokens}"
 browser_home="${MEAL_CONCIERGE_BROWSER_HOME:-$private_root/browser}"
 browser_profile="${MEAL_CONCIERGE_BROWSER_PROFILE:-$browser_home/profile}"
 browser_socket_directory="${MEAL_CONCIERGE_BROWSER_SOCKET_DIR:-${XDG_RUNTIME_DIR:-/tmp}/meal-concierge-$(id -u)}"
 
-find_hermes_python() {
+find_runtime_python() {
   local candidate
   for candidate in \
-    "${HERMES_PYTHON:-}" \
-    "$hermes_home/hermes-agent/venv/bin/python" \
-    /usr/local/lib/hermes-agent/venv/bin/python; do
+    "${MEAL_CONCIERGE_PYTHON:-}" \
+    "$source_root/venv/bin/python" \
+    "${HERMES_PYTHON:-}"; do
     if [[ -n "$candidate" && -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
   done
-  echo "Hermes managed Python was not found; set HERMES_PYTHON to its venv/bin/python" >&2
+  echo "Standalone runtime missing; run install.sh install, or supply MEAL_CONCIERGE_PYTHON" >&2
   return 1
 }
 
@@ -79,7 +82,7 @@ find_chromium() {
   return 1
 }
 
-python="$(find_hermes_python)"
+python="$(find_runtime_python)"
 provider="$("$python" -c 'from pathlib import Path; from service import config; import sys; print(config(Path(sys.argv[1]))["provider"])' "$config_path")"
 
 if [[ "$provider" != "mathem" ]]; then
@@ -95,7 +98,7 @@ service_args=(
   "$python" "$source_root/service.py"
   --config "$config_path"
   --state "$state_path"
-  --tokens "$hermes_home/mcp-tokens"
+  --tokens "$token_path"
   --socket "$socket_path"
   --agent-uid "$(id -u)"
   --socket-group "$(id -g)"

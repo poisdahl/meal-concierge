@@ -3,47 +3,26 @@
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
-import socket
+import sys
 from typing import Any, Literal
 
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 
-SOCKET = Path(os.environ.get("MEAL_CONCIERGE_SOCKET", "/run/meal-concierge/service.sock"))
-
-
-def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
-    order_operation = operation == "orders"
-    cart_change = operation == "cart" and arguments.get("action") != "get"
-    delivery_operation = operation == "delivery"
-    if operation == "checkout":
-        return 660
-    return 300 if order_operation or cart_change or delivery_operation or operation == "products" else 120
+# Keep isolated Python launches able to import the adjacent transport.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rpc_client import ServiceError, rpc as service_rpc, rpc_timeout
 
 
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
-    request = {"operation": operation, **arguments}
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(rpc_timeout(operation, arguments))
-        connection.connect(str(SOCKET))
-        connection.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
-        data = b""
-        while b"\n" not in data and len(data) <= 2 * 1024 * 1024:
-            chunk = connection.recv(65536)
-            if not chunk:
-                break
-            data += chunk
     try:
-        response = json.loads(data.split(b"\n", 1)[0])
-    except (json.JSONDecodeError, IndexError) as exc:
-        raise RuntimeError("meal concierge service returned no valid response") from exc
-    if response.get("ok") is not True:
-        raise RuntimeError(str(response.get("error") or "meal concierge operation failed"))
-    return response["result"]
-
+        return service_rpc(operation, **arguments)
+    except ServiceError as exc:
+        # SDK v2 masks unexpected exceptions; explicit service rejections must
+        # preserve their actionable message. Transport failures stay distinct.
+        raise ToolError(str(exc)) from exc
 
 server = MCPServer(
     "meal-concierge",
