@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_recipe_pack import Covers, PackBuildError, build, confined, digest, encoded, read_file, write_file
+from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, write_file
 from recipe_pack_sources import SourceParseError, SourceHTML, mealdb_recipe, readiness, wikibooks_recipe
 
 
@@ -214,6 +214,73 @@ class SourceMappingTests(unittest.TestCase):
                 self.assertEqual(readiness(recipe)[0], 'draft')
 
 
+class ImageCreditTests(unittest.TestCase):
+    def image(self, **values):
+        return {'description_url': 'https://commons.wikimedia.org/wiki/File:Example.jpg',
+                'license_metadata': {k: {'value': v} for k, v in {
+                    'LicenseShortName': 'CC BY-SA 3.0',
+                    'LicenseUrl': 'https://creativecommons.org/licenses/by-sa/3.0/',
+                    **values}.items()}}
+
+    def test_named_attribution_is_not_shadowed_by_own_work(self):
+        image = self.image(Credit='Own work', Attribution='<a href="https://example.org/author">Named beneficiary</a>',
+                           ObjectName='Original title', AttributionRequired='true',
+                           Categories='Meals|Files with no machine-readable author|Photographs by Someone|Files moved to Commons requiring review')
+        record, notices = _image_credit(image)
+        self.assertIsNone(record['creator'])
+        self.assertEqual(record['credit'], 'Own work; Named beneficiary')
+        self.assertEqual(notices['ObjectName'], 'Original title')
+        self.assertEqual(notices['AttributionRequired'], 'true')
+        self.assertEqual(notices['Credit'], 'Own work')
+        self.assertEqual(notices['Attribution'], 'Named beneficiary')
+        self.assertIn('https://example.org/author', notices['links'])
+        self.assertNotIn('Meals', notices['Categories'])
+        self.assertIn('requiring review', notices['Categories'])
+
+    def test_combined_display_limit_preserves_image_and_complete_notices(self):
+        record, notices = _image_credit(self.image(Credit='C' * 300, Attribution='A' * 300))
+        self.assertIsNotNone(record)
+        self.assertLessEqual(len(record['credit']), 500)
+        self.assertEqual(notices['Credit'], 'C' * 300)
+        self.assertEqual(notices['Attribution'], 'A' * 300)
+
+    def test_reviewed_creator_needs_matching_original_and_description(self):
+        sha, reviewed = next((s, r) for s, r in REVIEWED_IMAGE_CREDITS.items() if r['creator'] == 'Samuel Mellert')
+        image = self.image()
+        image.update(file={'sha256': sha}, description_url=reviewed['description_url'])
+        record, notices = _image_credit(image)
+        self.assertEqual(record['creator'], 'Samuel Mellert')
+        self.assertIn('Commons upload by Schnee', record['credit'])
+        self.assertIn(reviewed['revision_url'], notices['links'])
+        image['description_url'] += '?different'
+        record, notices = _image_credit(image)
+        self.assertIsNone(record['creator'])
+        self.assertNotIn('reviewed_source', notices)
+        image['description_url'] = reviewed['description_url']
+        image['file']['sha256'] = '0' * 64
+        self.assertIsNone(_image_credit(image)[0]['creator'])
+
+    def test_copyright_holder_does_not_become_photographer(self):
+        sha, reviewed = next((s, r) for s, r in REVIEWED_IMAGE_CREDITS.items() if 'David Monniaux' in r['notice'])
+        image = self.image()
+        image.update(file={'sha256': sha}, description_url=reviewed['description_url'])
+        record, notices = _image_credit(image)
+        self.assertIsNone(record['creator'])
+        self.assertIn('Copyright © 2006 David Monniaux', record['credit'])
+        self.assertEqual(notices['reviewed_source']['notice'], reviewed['notice'])
+
+    def test_only_exact_reviewed_sn1_is_omitted_with_full_notices(self):
+        sha, reviewed = next((s, r) for s, r in REVIEWED_IMAGE_CREDITS.items() if r.get('omission_reason'))
+        image = self.image(Artist='own work', Credit='Own work', Attribution='Serendipity1987 at English Wikibooks')
+        image.update(file={'sha256': sha}, description_url=reviewed['description_url'])
+        record, notices = _image_credit(image)
+        self.assertIsNone(record)
+        self.assertEqual(notices['Attribution'], 'Serendipity1987 at English Wikibooks')
+        self.assertEqual(notices['reviewed_source']['omission_reason'], 'unresolved_transfer_source_verification')
+        image['file']['sha256'] = '0' * 64
+        self.assertIsNotNone(_image_credit(image)[0])
+
+
 class FileBoundaryTests(unittest.TestCase):
     def test_traversal_and_symlink_never_escape(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -300,6 +367,7 @@ class BuildRoundtripTests(unittest.TestCase):
             self.assertEqual(original, (root / 'resume' / first['archive']).read_bytes())
             with open_archive(path) as archive:
                 self.assertEqual(archive.verify()['records_count'], 2)
+                self.assertEqual(first['expanded_bytes'], sum(info.file_size for info in archive.entries.values()))
                 records = list(archive.records())
                 self.assertEqual([r['recipe_id'] for r in records], ['wikibooks:123', 'wikibooks:124'])
                 self.assertTrue(all(r['recipe']['source_provider'] is None for r in records))

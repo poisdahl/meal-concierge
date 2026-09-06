@@ -70,7 +70,15 @@ synthetic; live provider behavior is not verified by this probe. A deliberately
 stalled native probe also verifies cleanup of its exact detached bridge after a
 timeout, while the independently owned service remains healthy.
 
-Model-driven setup/menu/presentation, file/photo/document attachment extraction
+An isolated model run also verified the native embedded `openai/gpt-5.4-mini`
+route with subscription OAuth on this OpenClaw version. The native trace records
+successful Meal Concierge status and menu tool calls against the synthetic
+household, with no fallback. A native workspace-file read produced recipe JSON
+preserving the text fixture's servings, amounts, units and method; its hostile
+checkout/favorite instructions triggered no mutation tools. This establishes
+model access, MCP reads and text extraction, not a completed recipe import.
+
+Full model-driven setup/menu/presentation, file/photo/document attachment extraction
 through the shared import contract, durable scheduling and local-sender email
 acceptance remain pending. A client-local attachment path is not automatically
 readable by the service. Keep normalization on the client and use the declared

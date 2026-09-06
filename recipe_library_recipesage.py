@@ -122,6 +122,22 @@ class _RecipeSageTransportFailure(Exception):
     pass
 
 
+def _response_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def _response_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite JSON number")
+    return number
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(
         value,
@@ -299,8 +315,9 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         if not raw:
             return None
         try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            return json.loads(raw.decode("utf-8"), object_pairs_hook=_response_pairs,
+                              parse_float=_response_number, parse_constant=_response_number)
+        except (UnicodeError, ValueError, RecursionError) as exc:
             raise RecipeLibraryError("RecipeSage response is invalid") from exc
 
     @staticmethod
@@ -837,7 +854,6 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         if self.read_only:
             capabilities["create_from_discovery"] = False
             capabilities["delete"] = False
-            capabilities["reconcile_create"] = False
             capabilities["label_create"] = False
         return {
             "provider": "recipesage",
@@ -1697,8 +1713,8 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
     def reconcile_create(
         self, snapshot: Mapping[str, Any], operation: Mapping[str, Any]
     ) -> Mapping[str, Any] | None:
-        if self.read_only:
-            return None
+        # Recovery only searches/reads the exact owned marker and native payload.
+        # It remains available when new writes have been disabled.
         try:
             payload, document = self._native_payload(snapshot, operation)
             origin = self._origin(operation)

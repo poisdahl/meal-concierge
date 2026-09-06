@@ -56,6 +56,22 @@ class _MealieTransportFailure(Exception):
     pass
 
 
+def _response_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def _response_number(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("nonfinite JSON number")
+    return number
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -196,8 +212,9 @@ class MealieAdapter(RecipeLibraryAdapter):
         if not raw:
             return None
         try:
-            return json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+            return json.loads(raw.decode("utf-8"), object_pairs_hook=_response_pairs,
+                              parse_float=_response_number, parse_constant=_response_number)
+        except (UnicodeError, ValueError, RecursionError) as exc:
             raise RecipeLibraryError("Mealie response is invalid") from exc
 
     @staticmethod
@@ -305,7 +322,6 @@ class MealieAdapter(RecipeLibraryAdapter):
         if self.read_only:
             capabilities["create_from_discovery"] = False
             capabilities["delete"] = False
-            capabilities["reconcile_create"] = False
         self._favorite_read = favorite_read
         self._favorite_user_id = favorite_user_id
         self._label_read = label_read
@@ -1197,8 +1213,8 @@ class MealieAdapter(RecipeLibraryAdapter):
     def reconcile_create(
         self, snapshot: Mapping[str, Any], operation: Mapping[str, Any]
     ) -> Mapping[str, Any] | None:
-        if self.read_only:
-            return None
+        # Recovery only searches/reads the exact owned marker and native payload.
+        # It remains available when new writes have been disabled.
         try:
             payload, document = self._native_payload(snapshot, operation)
             origin = self._origin(document, operation)

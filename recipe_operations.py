@@ -17,10 +17,12 @@ import threading
 import time
 from typing import Any, Mapping
 import unicodedata
+from urllib.error import HTTPError
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
-from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem
+from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value
 from recipe_libraries import CAPABILITY_NAMES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
+from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
 from service_common import (
     LIBRARY_SEARCH_CURSOR_PREFIX,
@@ -56,7 +58,7 @@ class RecipeOperations:
                 if new_keys is None or recipe.get("recipe_key") in new_keys:
                     self._require_recipe_provider(recipe)
 
-    def _recipe_detail(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def _recipe_detail(self, request: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         """Enrich one service-owned search snapshot; no personal save."""
         snapshot = self.recipes.resolve_discovery(request.get("discovery_ref"))
         source_recipe = snapshot["recipe"]
@@ -66,7 +68,10 @@ class RecipeOperations:
             raise RecipeError("verified recipe details are currently supported only for MENY; this source remains readable")
         if not self.store.read()["profile"]["recipes"]["sources"].get(provider):
             raise RecipeError("the recipe source is disabled")
-        deadline = time.monotonic() + 15
+        cached = self.recipes.cached_discovery_transform(snapshot["discovery_ref"], "detail")
+        if cached is not None:
+            return {**cached, "cache": "exact_source_version"}
+        deadline = min(deadline, time.monotonic() + 15) if deadline is not None else time.monotonic() + 15
         with self._browser_operation(deadline):
             state = self.store.read()
             if any(state.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change")):
@@ -78,7 +83,9 @@ class RecipeOperations:
         if any(recipe["source"].get(field) != source_recipe["source"].get(field) for field in ("url", "external_id")):
             raise RecipeError("recipe detail source identity changed")
         self._require_recipe_provider(recipe)
-        return {**self.recipes.persist_discovery(recipe), "capabilities": deepcopy(response.get("capabilities", {}))}
+        result = self.recipes.persist_discovery(recipe)
+        self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "detail")
+        return {**result, "capabilities": deepcopy(response.get("capabilities", {}))}
 
     @staticmethod
     def _week_index(week: str) -> int:
@@ -206,7 +213,7 @@ class RecipeOperations:
                 results.append(recipe)
         return results
 
-    def _provider_recipe_candidates(self, provider: str, query: str, limit: int) -> list[dict[str, Any]]:
+    def _provider_recipe_candidates(self, provider: str, query: str, limit: int, *, deadline: float | None = None) -> list[dict[str, Any]]:
         if provider != self.provider:
             return []
         if not query:
@@ -215,43 +222,130 @@ class RecipeOperations:
         if client is None:
             raise HouseholdError(f"{provider.upper()} recipe source has no configured provider session")
         arguments = {"query": query, "page": 1, "size": limit}
+        deadline = min(deadline, time.monotonic() + 10) if deadline is not None else time.monotonic() + 10
         if provider == "meny":
-            deadline = time.monotonic() + 10
             with self._browser_operation(deadline):
                 current = self.store.read()
                 if current.get("pending_checkout") or current.get("pending_cancellation") or current.get("order_change"):
                     raise HouseholdError("finish the pending provider operation before recipe discovery")
                 response = client.call("recipe_search", arguments, deadline=deadline, allow_recovery=True)
         else:
-            response = client.call("recipe_search", arguments, deadline=time.monotonic() + 10)
+            response = client.call("recipe_search", arguments, deadline=deadline)
         return provider_recipe_candidates(provider, response, limit)
 
     @staticmethod
     def _discovery_identities(recipe: Mapping[str, Any]) -> set[str]:
-        source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
-        publisher = " ".join(str(source.get("publisher") or source.get("kind") or "").casefold().split())
-        external_id = " ".join(str(source.get("external_id") or "").casefold().split())
-        identities = set()
-        if publisher and external_id:
-            identities.add(f"source:{publisher}:{external_id}")
-        url = str(source.get("url") or "")
-        if url:
-            identities.add(f"url:{url}")
-        ingredients = recipe.get("ingredients") if isinstance(recipe.get("ingredients"), list) else []
-        name = " ".join(str(recipe.get("name") or "").casefold().split())
-        normalized_ingredients = [
-                " ".join(str(item.get("item") if isinstance(item, Mapping) else item).casefold().split())
-                for item in ingredients
-        ]
-        if name and normalized_ingredients:
-            exact = {"name": name, "ingredients": normalized_ingredients}
-            identities.add("content:" + hashlib.sha256(canonical(exact).encode()).hexdigest())
-        return identities or {"fallback:" + hashlib.sha256(canonical(recipe).encode()).hexdigest()}
+        return source_identities(recipe) or {"exact-content:" + hashlib.sha256(canonical(recipe).encode()).hexdigest()}
+
+    def _selection_page(self, source, query, cursor, limit, deadline):
+        """Local continuation is supported; retailer pagination is unverified."""
+        if time.monotonic() >= deadline:
+            raise TimeoutError("recipe search deadline exceeded")
+        if source == "internal":
+            cursor = cursor or {"status": "active", "offset": 0}
+            if (not isinstance(cursor, Mapping) or set(cursor) != {"status", "offset"}
+                    or cursor["status"] not in {"active", "draft"}
+                    or type(cursor["offset"]) is not int or cursor["offset"] < 0):
+                raise RecipeError("invalid local recipe cursor")
+            rows = self.recipes.search(query, limit=limit + 1, offset=cursor["offset"],
+                                       status_filter=cursor["status"])
+            more = len(rows) > limit
+            next_cursor = ({"status": cursor["status"], "offset": cursor["offset"] + limit}
+                           if more else {"status": "draft", "offset": 0}
+                           if cursor["status"] == "active" else None)
+            return {"candidates": [compact_candidate(row, {"recipe_ref": {"id": row["id"], "revision": row["revision"]}})
+                                   for row in rows[:limit]],
+                    "next_cursor": next_cursor, "exhausted": next_cursor is None}
+        if source not in {"oda", "meny", "mathem"} or source != self.provider:
+            return {"candidates": [], "status": "unavailable"}
+        if cursor is not None:
+            return {"candidates": [], "status": "search_limit"}
+        values = self._provider_recipe_candidates(source, query, limit, deadline=deadline)
+        summaries = []
+        for value in values:
+            snapshot = self.recipes.persist_discovery(value)
+            summaries.append(compact_candidate(snapshot["recipe"], {"discovery_ref": snapshot["discovery_ref"]}))
+        # Even a short page is not evidence that the retailer search is exhausted.
+        return {"candidates": summaries, "exhausted": False}
+
+    def _compact_discovery(self, request):
+        source = request.get("source") or "internal"
+        if source not in {"internal", "oda", "meny", "mathem"}:
+            raise RecipeError("compact discovery source must be internal or a retailer")
+        query = request.get("query") or ""
+        if not isinstance(query, str) or len(query) > 200:
+            raise RecipeError("recipe query must be at most 200 characters")
+        state = self.store.read()
+        enabled = state["profile"]["recipes"]["sources"].get(source, False)
+        if not enabled or source != "internal" and source != self.provider:
+            return {"recipes": [], "sources": [{"source": source, "status": "disabled" if not enabled else "ineligible"}], "next_cursor": None}
+        limit = bounded_limit(request.get("limit"), default=20)
+        if limit > 20:
+            raise RecipeError("compact discovery limit is at most 20")
+        try:
+            page = self._selection_page(source, query, request.get("cursor"), limit, time.monotonic() + 10)
+        except TimeoutError:
+            page = {"candidates": [], "status": "timeout"}
+        except HTTPError as exc:
+            page = {"candidates": [], "status": "rate_limited" if exc.code == 429 else "unavailable"}
+        except (OSError, HouseholdError):
+            if source == "internal":
+                raise
+            page = {"candidates": [], "status": "unavailable"}
+        return {"recipes": page["candidates"], "next_cursor": page.get("next_cursor"),
+                "sources": [{"source": source, "status": page.get("status", "ready" if page["candidates"] else "empty" if page.get("exhausted") else "search_limit")}],
+                "exhausted": page.get("exhausted", False), "projection": "summary"}
+
+    def _cached_recipe_conversion(self, reference):
+        seen = set()
+        for _ in range(8):
+            ref = reference["discovery_ref"]
+            if ref in seen:
+                raise RecipeError("cached recipe conversion cycle; resolve the exact returned version")
+            seen.add(ref)
+            cached = self.recipes.cached_discovery_transform(ref, "conversion")
+            if cached is None or cached["discovery_ref"] == ref:
+                return reference
+            reference = {"discovery_ref": cached["discovery_ref"]}
+        raise RecipeError("cached recipe conversion work limit; resolve the exact returned version")
+
+    def _collect_planner_candidates(self, request, state):
+        settings = state["profile"]["recipes"]["sources"]
+        # Installed imports and packs live in the local bank; upstream API switches
+        # do not disable installed data or require an upstream network session.
+        queries = {"internal": [""] if settings.get("internal") else None}
+        for source in ("oda", "meny", "mathem"):
+            queries[source] = context_queries(state["profile"], source) if settings.get(source) and source == self.provider else None
+        history = self._planner_history_index(state)
+        def resolve(summary, deadline):
+            reference = {key: summary[key] for key in ("recipe_ref", "discovery_ref") if key in summary}
+            detail_error = None
+            if "discovery_ref" in reference:
+                reference = self._cached_recipe_conversion(reference)
+                original = self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
+                if not original.get("ingredients") or not original.get("steps"):
+                    try:
+                        detailed = self._recipe_detail(reference, deadline=deadline)
+                        reference = {"discovery_ref": detailed["discovery_ref"]}
+                        reference = self._cached_recipe_conversion(reference)
+                    except HouseholdError as exc:
+                        detail_error = str(exc)
+            candidate = self._resolve_planner_candidates({**request, "candidates": [reference]}, state, history_index=history)[0]
+            if detail_error is not None:
+                candidate["materialization_error"] = detail_error
+            self._planner_feedback(candidate, state, request["as_of_date"])
+            return candidate
+        return collect_candidates(source_queries=queries, fetch_page=self._selection_page,
+                                  resolve=resolve, request=request, profile=state["profile"])
 
     def _discover_recipes(self, request: Mapping[str, Any]) -> dict[str, Any]:
         gate = self._setup_gate(request)
         if gate is not None:
             return gate
+        if request.get("projection") == "summary":
+            return self._compact_discovery(request)
+        if request.get("projection") not in {None, "full"}:
+            raise RecipeError("projection must be full or summary")
         query_value = request.get("query", "")
         if not isinstance(query_value, str):
             raise HouseholdError("recipe discovery query must be text")
@@ -335,8 +429,6 @@ class RecipeOperations:
                     break
             if len(results) == total_limit:
                 break
-        if not results:
-            raise HouseholdError("no enabled recipe source returned a usable candidate")
         return {
             "week": week,
             "query": query,
@@ -2695,12 +2787,33 @@ class RecipeOperations:
                 original = self.recipes.get(request["recipe_id"], request["expected_revision"])
             accepted = accept_recipe_estimates(original, request.get("recipe_digest"), request.get("estimate_fields"), request.get("confirmation_statement"))
             if has_discovery:
-                return {**self.recipes.persist_discovery(accepted), "personal_entry_created": False}
+                result = self.recipes.persist_discovery(accepted)
+                self.recipes.remember_discovery_transform(request["discovery_ref"], result["discovery_ref"], "conversion")
+                return {**result, "personal_entry_created": False}
             if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():
                 raise RecipeError("estimate acceptance requires an idempotency_key")
             return {"recipe": self.recipes.update(request["recipe_id"], request["expected_revision"], accepted, idempotency_key=request["idempotency_key"])}
         if action == "discover":
             return self._discover_recipes(request)
+        if action == "convert":
+            snapshot = self.recipes.resolve_discovery(request.get("discovery_ref"))
+            original = snapshot["recipe"]
+            if request.get("recipe_digest") != recipe_digest(original) or request.get("source_schema_version") != original["schema_version"]:
+                raise RecipeError("conversion requires the exact source digest and schema version")
+            value = request.get("recipe")
+            if not isinstance(value, Mapping) or value.get("schema_version") != 2:
+                raise RecipeError("client-assisted conversion requires schema_version 2 and explicit quantity evidence")
+            converted = self.recipes.prepare_input(value, prior=original)
+            original_evidence = recipe_evidence_fields(original)
+            for path, evidence in recipe_evidence_fields(converted).items():
+                if evidence["basis"] == "user" and (evidence != original_evidence.get(path) or _evidence_value(converted, path) != _evidence_value(original, path)):
+                    raise RecipeError("client-assisted conversion cannot assert new user evidence; retain unknown or estimate evidence")
+            if canonical(converted["source"]) != canonical(original["source"]):
+                raise RecipeError("conversion must preserve the exact source attribution")
+            self._require_recipe_provider(converted)
+            result = self.recipes.persist_discovery(converted)
+            self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
+            return {**result, "personal_entry_created": False}
         if action == "detail":
             return self._recipe_detail(request)
         if action == "libraries":

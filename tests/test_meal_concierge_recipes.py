@@ -2842,7 +2842,12 @@ class RecipeFlowTests(unittest.TestCase):
         cross_deduplicated = app.handle({
             "operation": "recipes", "action": "discover", "query": "Duplicate", "limit": 4,
         })
-        self.assertEqual(len(cross_deduplicated["recipes"]), 1)
+        self.assertEqual(len(cross_deduplicated["recipes"]), 2)
+        self.assertEqual({item["discovery_source"] for item in cross_deduplicated["recipes"]}, {"themealdb", "wikibooks"})
+        self.assertEqual(len({item["discovery_ref"] for item in cross_deduplicated["recipes"]}), 2)
+        self.assertTrue(app._discovery_identities(duplicate).isdisjoint(
+            app._discovery_identities(cross_source)
+        ))
 
         class DisabledSource:
             def search(self, _query, _limit):
@@ -6525,7 +6530,7 @@ class MealieAdapterTests(unittest.TestCase):
         self.assertTrue(checked["favorite_reconcile"])
         self.assertTrue(checked["label_read"])
         self.assertFalse(checked["create_from_discovery"])
-        self.assertFalse(checked["reconcile_create"])
+        self.assertTrue(checked["reconcile_create"])
         self.assertFalse(checked["delete"])
         self.assertTrue(checked["reconcile_delete"])
         self.assertFalse(checked["favorite_write_desired_state"])
@@ -7381,7 +7386,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         self.assertTrue(checked["reconcile_delete"])
         self.assertTrue(checked["label_read"])
         self.assertFalse(checked["label_create"])
-        self.assertFalse(checked["reconcile_create"])
+        self.assertTrue(checked["reconcile_create"])
 
     def test_exact_delete_and_authenticated_absence_reconciliation(self):
         reference = {

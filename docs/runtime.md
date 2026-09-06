@@ -47,7 +47,7 @@ are checked against the native Unix limit before staging. Use shorter explicit
 | `config.json` | Household/provider configuration; preserved during updates |
 | `state/state.json` | Household state and protected outcome/email journals |
 | `state/recipes.sqlite3` | Own bank, revisions, snapshots and library-operation journals |
-| `state/assets/`, `state/snapshots/` | Reserved durable locations for recipe work; copied with the entire state tree |
+| `state/recipe-assets/` | Managed recipe images; copied with the entire state tree |
 | `browser/` | Dedicated browser home/profile and daemon socket directory |
 | `tokens/` | Private provider OAuth state; populated only by explicit login |
 | `run/` | Socket-only directory for agent connection; no household data |
@@ -222,31 +222,35 @@ marker is written last; a failed backup cannot be restored as complete.
 Browser profiles, OAuth tokens and external recipe-library credentials outside
 the state tree are not included. Preserve their existing paths during adoption;
 re-establish or separately manage credentials under the correct provider owner
-when restoring to another host. Full-tree preservation of synthetic asset files
-is tested; future recipe image resolution is not implemented by this installer.
+when restoring to another host. Complete relocated database-plus-assets restoration has been exercised with
+managed images, historical recipe references and frozen menus on both native
+platforms. This does not restore credentials omitted from the backup.
 
 ## Versioned recipe package integration
 
-Own-bank storage is the target. `--recipe-pack PATH` is the reserved local-file
-installer boundary and currently fails explicitly **before opening the archive
-or changing data**. It does not claim a completed importer or supply a fake pack.
-Ordinary RPC frames remain bounded at approximately 2 MiB.
+The installer stages and verifies a release-pinned archive before taking the
+offline installation locks, then imports it into the built-in recipe bank using
+the shared bounded archive codec. It verifies the descriptor's hash, size and
+format; `--recipe-pack PATH` accepts only a local artifact matching that descriptor
+and only during `install` or `update`. Archive data does not pass through RPC.
 
-Pending acceptance depends on [#40](https://github.com/poisdahl/meal-concierge/issues/40)
-(version-aware source/quantity schema), [#42](https://github.com/poisdahl/meal-concierge/issues/42)
-(private snapshots/provider binding), [#39](https://github.com/poisdahl/meal-concierge/issues/39)
-(managed assets/origin), [#46](https://github.com/poisdahl/meal-concierge/issues/46)
-(own-bank transition and bounded import), and [#47](https://github.com/poisdahl/meal-concierge/issues/47)
-(the compatible versioned public archive), tracked in [#45](https://github.com/poisdahl/meal-concierge/issues/45).
+**This source build has no default recipe pack pinned.** An explicit
+`--recipe-pack` therefore currently fails before opening the archive or changing
+data. Ordinary installation remains usable without a pack. Publishing a verified
+archive and pinning its exact release descriptor remain separate acceptance gates
+under [#47](https://github.com/poisdahl/meal-concierge/issues/47).
 
-When those contracts land, replace the explicit unavailable result with a trusted
-compatible pack importer and matching-release acquisition, using staged/batched
-local files. Then verify measured archive/record/image bounds, confined extraction,
-interrupted/repeated import, bundled-origin authority, local edits/favorites/archive
-state, retained historical images and relocated database-plus-assets resolution.
-Do not blindly raise native import limits, stream a whole pack through one RPC,
-retire external recovery routes prematurely, or treat byte-copy tests as this
-later feature acceptance.
+The implemented path has been exercised with a synthetic pinned descriptor and
+the actual candidate archive on macOS and Linux ARM64: 3,779 bundled recipes,
+managed images, exact historical references, favorites, archived entries and
+frozen menus survived import, update and relocated restore. Interrupted imports
+resume against current data; two observed Linux disk-full failures were resumed.
+Changed upstream or locally edited entries report conflicts and preserve existing
+content. An unchanged archive is idempotent. An optional pack acquisition failure
+reports that the pack needs attention while leaving the core runtime usable.
+These results do not certify acquisition of a published default release or
+external-library retirement, tracked in
+[#46](https://github.com/poisdahl/meal-concierge/issues/46).
 
 ## Verification boundary
 

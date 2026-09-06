@@ -404,5 +404,200 @@ class HistorySourceTests(unittest.TestCase):
         self.assertEqual(index["status"], "partial")
 
 
+class ApplicationSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = StateStore(Path(self.temp.name), {**CONFIG, "provider": "meny"})
+        self.provider = NoProviderCalls()
+        self.app = Application(self.store, self.provider, object())
+        with self.store.locked() as state:
+            state["setup"]["status"] = "complete"
+            state["profile"]["recipes"]["sources"] = {key: key == "internal" for key in state["profile"]["recipes"]["sources"]}
+
+    def test_legacy_bank_key_and_frozen_snapshot_preserve_case_distinct_ids(self):
+        import recipes as storage
+        from unittest import mock
+        upper = candidate(1, source_id="ABC")["recipe"]
+        lower = candidate(2, source_id="abc")["recipe"]
+        modern = storage.source_key
+        # Populate precisely the historical lookup format, then reopen current code.
+        with mock.patch.object(storage, "source_key", side_effect=lambda recipe: modern(recipe).casefold()):
+            saved = self.app.recipes.save(upper)
+            snapshot = self.app.recipes.persist_discovery(upper)
+        reopened = storage.RecipeStore(self.app.recipes.path, self.app.recipes.household)
+        self.assertEqual(reopened.resolve_discovery(snapshot["discovery_ref"])["recipe"], upper)
+        self.assertEqual(reopened.save(upper)["id"], saved["id"])
+        self.assertNotEqual(reopened.save(lower)["id"], saved["id"])
+        self.assertEqual(len(reopened.search()), 2)
+        self.assertNotEqual(storage.recipe_key(upper), storage.recipe_key(lower))
+        self.assertNotEqual(reopened.persist_discovery(lower)["discovery_ref"], snapshot["discovery_ref"])
+        self.assertEqual(reopened.save_discovery(snapshot["discovery_ref"])["id"], saved["id"])
+
+    def test_exact_conversion_cache_survives_restart_and_rejects_changed_binding(self):
+        from recipes import RecipeStore, recipe_digest
+        original = self.app.recipes.persist_discovery(normalize_recipe({**candidate(1)["recipe"], "schema_version": 2}))
+        converted = deepcopy(original["recipe"])
+        converted["steps"] = ["An explicit corrected instruction."]
+        request_value = {"operation": "recipes", "action": "convert", "discovery_ref": original["discovery_ref"],
+                         "recipe_digest": recipe_digest(original["recipe"]), "source_schema_version": original["recipe"]["schema_version"], "recipe": converted}
+        result = self.app.handle(request_value)
+        self.assertNotEqual(result["discovery_ref"], original["discovery_ref"])
+        reopened = RecipeStore(self.app.recipes.path, self.app.recipes.household)
+        cached = reopened.cached_discovery_transform(original["discovery_ref"], "conversion")
+        self.assertEqual(cached["discovery_ref"], result["discovery_ref"])
+        self.assertEqual(reopened.search(), [])
+        self.assertEqual(reopened.resolve_discovery(original["discovery_ref"])["recipe"]["steps"], original["recipe"]["steps"])
+        for changes in ({"recipe_digest": "0" * 64}, {"source_schema_version": 999}, {"recipe": {**converted, "schema_version": 1}}):
+            with self.assertRaises(RecipeError):
+                self.app.handle({**request_value, **changes})
+        converted["source"]["external_id"] = "different"
+        with self.assertRaises(RecipeError):
+            self.app.handle(request_value)
+
+    def test_auto_refills_after_ineligible_page_and_retains_saved_metadata(self):
+        for index in range(21):
+            saved = self.app.recipes.save(candidate(index + 1)["recipe"])
+            if index == 0:
+                first = saved
+        # Newest twenty are archived revisions' draft replacements; active first
+        # query still reaches the sole ready version without consuming draft quota.
+        for row in self.app.recipes.search(limit=50):
+            if row["id"] != first["id"]:
+                self.app.recipes.update(row["id"], row["revision"], row, status="draft")
+        self.app.handle({"operation": "recipes", "action": "set_favorite", "library_recipe_ref": first["library_recipe_ref"], "is_favorite": True, "idempotency_key": "favorite"})
+        planned, resolved, _ = self.app._plan_menu({"week": "2026-W37", "dates": ["2026-09-07"]})
+        self.assertEqual(planned["status"], "planned")
+        self.assertTrue(resolved[0]["is_favorite"])
+        self.assertEqual(resolved[0]["entry_origin"], "user")
+        self.assertEqual(planned["discovery"]["shortfall"], 0)
+
+    def test_known_non_dinners_do_not_fill_weekly_dinner_slots(self):
+        for index, name in enumerate(("Chocolate cookies", "Mango smoothie", "Potatoes with butter", "Basic pizza crust")):
+            item = candidate(index + 1)
+            item["recipe"]["name"] = name
+            checked = prepare_candidate(item, DEFAULT_PROFILE, {}, 2)
+            self.assertIn("meal_role:non_dinner", [reason["code"] for reason in checked["hard_constraints"]["reasons"]])
+        for index, name in enumerate(("Chicken with tomato sauce", "Fish cakes", "Crab cakes", "Chicken in bread sauce", "Bread soup", "Vegetable cakes", "Potato cakes", "Bread pizza"), 7):
+            item = candidate(index)
+            item["recipe"]["name"] = name
+            saved = self.app.recipes.save(item["recipe"], idempotency_key=name)
+            planned = self.app.handle({"operation": "menu", "action": "plan", "planner_input": {
+                "week": "2026-W37", "dates": ["2026-09-07"], "candidates": [{"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}]}})["plan"]
+            self.assertEqual(planned["status"], "planned", name)
+
+
+    def test_unknown_source_measure_stays_unready_through_saved_menu_and_products(self):
+        from recipes import source_ingredient
+        from product_planner import menu_requirements
+        recipe = normalize_recipe({**candidate(1)["recipe"], "schema_version": 2})
+        recipe["ingredients"] = [source_ingredient("2 ladles ris", item="ris", measure="2 ladles")]
+        snapshot = self.app.recipes.persist_discovery(recipe)
+        saved = self.app.handle({"operation": "recipes", "action": "save", "discovery_ref": snapshot["discovery_ref"], "idempotency_key": "unknown-unit"})["recipe"]
+        menu = self.app.handle({"operation": "menu", "action": "save", "interactive": False,
+            "menu": {"week": "2026-W37", "dishes": [{"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}, "portions": 4}], "salads": []}})["menu"]
+        dish = menu["dishes"][0]
+        self.assertFalse(dish["readiness"]["scaling_ready"])
+        self.assertIn("ingredients.0.quantity", dish["readiness"]["missing_decisions"])
+        self.assertEqual(dish["ingredients"][0]["original_text"], "2 ladles ris")
+        self.assertIsNone(dish["ingredients"][0]["quantity"])
+        self.assertEqual(dish["ingredients"][0]["unit"], "ladles")
+        needs, unresolved = menu_requirements(menu)
+        self.assertEqual(needs, [])
+        self.assertEqual(len(unresolved), 1)
+        product = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(menu)})
+        self.assertEqual(product["product_plan"]["status"], "needs_input")
+        self.assertEqual(self.provider.calls, [])
+
+    def test_optional_unknown_garnish_does_not_block_required_scaling(self):
+        from recipes import source_ingredient
+        value = normalize_recipe({**candidate(1)["recipe"], "schema_version": 2})
+        garnish = source_ingredient("parsley to taste", item="parsley", measure="to taste")
+        garnish["optional"] = True
+        value["ingredients"].append(garnish)
+        scaled = scale_recipe(value, 4)
+        self.assertTrue(scaled["readiness"]["scaling_ready"])
+        self.assertIsNone(scaled["ingredients"][1]["quantity"])
+        self.assertTrue(scaled["ingredients"][1]["optional"])
+
+    def test_saved_source_rice_preserves_exact_two_and_four_portion_quantities(self):
+        recipe = normalize_recipe({**candidate(1)["recipe"], "schema_version": 2})
+        saved = self.app.recipes.save(recipe)
+        for target, expected in ((2, 200), (4, 400)):
+            menu = self.app._materialize_menu({"week": "2026-W37", "dishes": [{"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}, "portions": target}], "salads": []})
+            self.assertEqual(menu["dishes"][0]["shopping_requirements"][0]["quantity"], {"numerator": expected, "denominator": 1})
+            self.assertTrue(menu["dishes"][0]["readiness"]["scaling_ready"])
+
+    def test_compact_retailer_failures_remain_source_statuses(self):
+        from urllib.error import HTTPError
+        with self.store.locked() as state:
+            state["profile"]["recipes"]["sources"]["meny"] = True
+        for error, status in ((TimeoutError(), "timeout"), (RecipeError("unavailable"), "unavailable"),
+                              (HTTPError("https://meny.no", 429, "rate limited", {}, None), "rate_limited")):
+            def call(*args, **kwargs):
+                raise error
+            self.provider.call = call
+            result = self.app.handle({"operation": "recipes", "action": "discover", "projection": "summary", "source": "meny", "query": "dinner"})
+            self.assertEqual(result["sources"][0]["status"], status)
+            self.assertEqual(result["recipes"], [])
+
+    def test_actual_meny_detail_is_reused_after_restart_without_personal_save(self):
+        from unittest import mock
+        from meny import MenyClient
+        from test_meal_concierge_retailer_recipes import page, browser_evaluate, RECIPE_PATH, RECIPE_URL
+        document = page()
+        raw = json.loads(document["scripts"][0])
+        raw["recipeIngredient"] = ["200 g ris"]
+        document["scripts"] = [json.dumps(raw)]
+        reader = MenyClient(instance="synthetic", binary="unused", executable="unused", profile="unused",
+                            home="unused", socket_directory="unused", uid=1000, gid=1000)
+        reader._require_login = mock.Mock()
+        reader._assert_authenticated = mock.Mock()
+        reader._open = mock.Mock()
+        reader._eval = lambda script: browser_evaluate(script, document)
+        calls = []
+        def call(tool, args, **kwargs):
+            calls.append(tool)
+            if tool == "recipe_search":
+                return {"provider": "meny", "query": args["query"], "recipes": [{"recipe_id": RECIPE_PATH,
+                        "recipe_url": RECIPE_URL, "name": "Synthetic rice", "summary": "Synthetic recipe"}]}
+            if tool == "recipe_detail":
+                return reader.call(tool, args, **kwargs)
+            self.fail("Unexpected provider effect: " + tool)
+        self.provider.call = call
+        with self.store.locked() as state:
+            state["profile"]["recipes"]["sources"]["meny"] = True
+        request_value = {"operation": "menu", "action": "plan", "planner_input": {"week": "2026-W37", "dates": ["2026-09-07"], "portions": 2}}
+        first = self.app.handle(request_value)["plan"]
+        self.assertEqual(first["status"], "planned", first)
+        self.assertEqual(calls.count("recipe_detail"), 1)
+        second = Application(self.store, self.provider, object()).handle(request_value)["plan"]
+        self.assertEqual(second["selection_digest"], first["selection_digest"])
+        self.assertEqual(calls.count("recipe_detail"), 1)
+        self.assertEqual(self.app.recipes.search(), [])
+        self.assertFalse(first["discovery"]["ai_fallback_eligible"])
+        exact = first["selection"]["slots"][0]["reference"]["discovery_ref"]
+        full = self.app.recipes.resolve_discovery(exact)["recipe"]
+        self.assertEqual(full["source_provider"], "meny")
+        self.assertEqual(scale_recipe(full, 2)["ingredients"][0]["quantity"], {"numerator": 100, "denominator": 1})
+        from recipes import recipe_digest, ESTIMATE_CONFIRMATION
+        changed = deepcopy(full)
+        changed["portions"] = 6
+        changed["portions_evidence"] = {"basis": "estimate", "input": "synthetic conversion", "assumptions": "Six smaller synthetic servings."}
+        conversion = self.app.handle({"operation": "recipes", "action": "convert", "discovery_ref": exact,
+            "recipe_digest": recipe_digest(full), "source_schema_version": 2, "recipe": changed})
+        pending = self.app.handle(request_value)["plan"]
+        self.assertNotEqual(pending["status"], "planned")
+        self.assertFalse(pending["discovery"]["ai_fallback_eligible"])
+        accepted = self.app.handle({"operation": "recipes", "action": "accept_estimates",
+            "discovery_ref": conversion["discovery_ref"], "recipe_digest": conversion["recipe_digest"],
+            "estimate_fields": ["portions"], "confirmation_statement": ESTIMATE_CONFIRMATION})
+        final = Application(self.store, self.provider, object()).handle(request_value)["plan"]
+        self.assertEqual(final["status"], "planned")
+        self.assertEqual(final["selection"]["slots"][0]["reference"]["discovery_ref"], accepted["discovery_ref"])
+        self.assertEqual(calls.count("recipe_detail"), 1)
+        self.assertEqual(self.app.recipes.search(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

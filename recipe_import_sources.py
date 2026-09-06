@@ -30,7 +30,7 @@ from recipe_import_readers import (
     read_mealie_json, read_recipesage_export, read_webpage, source_candidate,
 )
 from recipe_libraries import (
-    normalize_library_origin, require_authenticated_origin,
+    RecipeLibraryError, normalize_library_origin, require_authenticated_origin,
     validate_library_recipe_ref,
 )
 
@@ -431,6 +431,35 @@ def _recipesage_record(raw: Mapping[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _native_record(adapter: Any, raw: Mapping) -> tuple[dict, int]:
+    from recipe_library_mealie import MealieAdapter
+    encoded = _wire_json(raw)
+    record = read_mealie_json(encoded) if isinstance(adapter, MealieAdapter) else _recipesage_record(raw)
+    record["source_annotations"] = {"favorite_status": "unavailable", "label_status": "native_recipe_labels"}
+    if record["image_status"] != "none":
+        record["image_status"] = "native_image_pending"
+    return record, len(encoded)
+
+
+def read_native_recipe(adapter: Any, reference: Mapping[str, str]) -> dict[str, Any]:
+    """Read one exact native recipe without searching or using editable sidecars."""
+    from recipe_library_mealie import MealieAdapter
+    from recipe_library_recipesage import RecipeSageAdapter
+    if not isinstance(adapter, (MealieAdapter, RecipeSageAdapter)):
+        raise RecipeImportSourceError("native source requires an existing Mealie or RecipeSage adapter")
+    checked = validate_library_recipe_ref(reference)
+    if checked["library_id"] != adapter.library_id:
+        raise RecipeImportSourceError("native reference names a different source")
+    raw = adapter._get_raw(checked["recipe_id"])
+    actual = validate_library_recipe_ref(adapter._reference(raw))
+    if "version" in checked and checked["version"] != actual.get("version"):
+        raise RecipeImportSourceError("native recipe version changed or is unavailable")
+    record, _ = _native_record(adapter, raw)
+    return _source_result(record, {"kind": "mealie" if isinstance(adapter, MealieAdapter) else "recipesage",
+        "configured_origin": adapter.base_url, "library_id": adapter.library_id,
+        "external_id": actual["recipe_id"], "library_recipe_ref": actual})
+
+
 def iter_native_recipes(adapter: Any, *, query: str = "", filters: Mapping[str, Any] | None = None,
                         page_size: int = MAX_PAGE_SIZE, start_cursor: str | None = None) -> Iterator[dict[str, Any]]:
     """Read existing configured adapters only, retaining native culinary fields.
@@ -472,17 +501,13 @@ def iter_native_recipes(adapter: Any, *, query: str = "", filters: Mapping[str, 
                 raise RecipeImportSourceError("native source exceeds the recipe limit")
             raw = adapter._get_raw(reference["recipe_id"])
             actual_reference = validate_library_recipe_ref(adapter._reference(raw))
-            encoded = _wire_json(raw)
-            total_bytes += len(encoded)
+            record, record_bytes = _native_record(adapter, raw)
+            total_bytes += record_bytes
             if total_bytes > MAX_EXPORT_BYTES:
                 raise RecipeImportSourceError("native source exceeds total import bytes")
-            record = read_mealie_json(encoded) if kind == "mealie" else _recipesage_record(raw)
-            record["source_annotations"] = {"favorite_status": "unavailable", "label_status": "native_recipe_labels"}
             if type(row.get("is_favorite")) is bool:
                 record["source_annotations"]["favorite"] = row["is_favorite"]
                 record["source_annotations"]["favorite_status"] = "observed"
-            if record["image_status"] != "none":
-                record["image_status"] = "native_image_pending"
             yield _source_result(record, {"kind": kind, "configured_origin": adapter.base_url,
                                            "library_id": adapter.library_id, "external_id": reference["recipe_id"],
                                            "library_recipe_ref": actual_reference, "page_cursor": cursor})
@@ -497,8 +522,8 @@ def fetch_native_cover(adapter: Any, reference: Mapping[str, str], *, image_url:
 
     Mealie's pinned media route is /api/media/recipes/<UUID>/images/original.webp
     (v3.24.0 mealie/routes/media/{__init__,media_recipe}.py); it needs no bearer.
-    RecipeSage images are external locations: never forward source credentials,
-    allow public HTTPS only, and require a selection when multiple images exist.
+    RecipeSage images use the configured origin or public HTTPS. Never forward
+    source credentials; require a selection when multiple images exist.
     A supplied source version must match the exact recipe re-read before fetching
     bytes. Sources without version metadata cannot offer that version check.
     """
@@ -528,7 +553,14 @@ def fetch_native_cover(adapter: Any, reference: Mapping[str, str], *, image_url:
         if image_url is None or image_url not in candidates:
             raise RecipeImportSourceError("RecipeSage cover requires an exact native image selection")
         url = image_url
+        try:
+            require_authenticated_origin(adapter.base_url, url)
+        except RecipeLibraryError:
+            configured_origin = None
+        else:
+            configured_origin = adapter.base_url
         body, content_type = _get_bytes(url, maximum=MAX_MEALIE_COVER_BYTES,
+                                       configured_origin=configured_origin,
                                        accept="image/jpeg, image/png, image/webp")
     if content_type not in {"image/jpeg", "image/png", "image/webp"}:
         raise RecipeImportSourceError("native cover has unsupported image content type")

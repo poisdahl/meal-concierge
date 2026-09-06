@@ -7,6 +7,7 @@ import math
 import time
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError
 
 from core import HouseholdError
 from recipes import normalize_attribution_url
@@ -385,6 +386,8 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
                     cursors[source].clear()
             except TimeoutError:
                 state["status"] = "timeout"
+            except HTTPError as exc:
+                state["status"] = "rate_limited" if exc.code == 429 else "unavailable"
             except (OSError, ValueError, TypeError, HouseholdError):
                 state["status"] = "unavailable"
         selection = shortlist(resolved, request, profile)

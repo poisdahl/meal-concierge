@@ -19,6 +19,7 @@ from copy import deepcopy
 from contextlib import contextmanager
 from html.parser import HTMLParser
 import json
+import hashlib
 import math
 from pathlib import Path
 import re
@@ -458,6 +459,131 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         "portions_evidence": {"basis": "source" if portions is not None else "unknown", "input": portions_input},
         "notes": notes or None, "times": deepcopy(raw["times"]) or None,
     }
+
+
+def read_transcript(value: Any) -> dict[str, Any]:
+    """Build a candidate from quoted supplied text, never from caller evidence.
+
+    Photo/PDF text is transcribed by the host. This validates excerpts against
+    that supplied text, not against original image pixels or document bytes.
+    No file, network, bank or provider operation occurs here.
+    """
+    from recipes import bind_recipe_source, normalize_recipe, source_ingredient, source_yield
+    from recipe_quantities import UNITS, normalized_unit, quantity_json, read_quantity
+    if not isinstance(value, dict) or set(value) - {"kind", "pages", "interpretation", "attribution"}:
+        raise RecipeImportReaderError("transcript contains unsupported fields")
+    kind = value.get("kind")
+    if not isinstance(kind, str) or kind not in {"pasted_text", "photo_transcript", "pdf_transcript"}:
+        raise RecipeImportReaderError("transcript kind is unsupported")
+    pages = value.get("pages")
+    if not isinstance(pages, list) or not 1 <= len(pages) <= 20:
+        raise RecipeImportReaderError("transcript requires one to 20 pages")
+    page_text, page_issues, byte_count = {}, {}, 0
+    for page in pages:
+        if (not isinstance(page, dict) or set(page) - {"page", "text", "issue"}
+                or type(page.get("page")) is not int or not 1 <= page["page"] <= 100_000
+                or page["page"] in page_text):
+            raise RecipeImportReaderError("transcript page identity is invalid or repeated")
+        text = _text(page.get("text"), "page text", MAX_WEBPAGE_TEXT_BYTES)
+        issue = _text(page.get("issue"), "page issue", 500)
+        if not text.strip() and not issue.strip():
+            raise RecipeImportReaderError("an unreadable page requires an explicit issue")
+        byte_count += len(text.encode("utf-8")) + len(issue.encode("utf-8"))
+        if byte_count > MAX_WEBPAGE_TEXT_BYTES:
+            raise RecipeImportReaderError("transcript exceeds 64 KiB of source text")
+        page_text[page["page"]] = text
+        if issue:
+            page_issues[page["page"]] = issue
+    attribution = value.get("attribution", {})
+    if not isinstance(attribution, dict) or set(attribution) - {"url", "publisher", "title", "author"}:
+        raise RecipeImportReaderError("transcript attribution contains unsupported fields")
+    attribution = {key: _url(attribution.get(key), "attribution URL") if key == "url" else
+                   _text(attribution.get(key), "attribution " + key, 200 if key in {"publisher", "author"} else 300) or None
+                   for key in ("url", "publisher", "title", "author")}
+    interpretation = value.get("interpretation")
+    if not isinstance(interpretation, dict) or set(interpretation) - {"name", "language", "ingredients", "steps", "yield", "notes", "tags"}:
+        raise RecipeImportReaderError("transcript requires an allowlisted interpretation")
+
+    def excerpt(item, field, *, maximum=500, extra=()):
+        if (not isinstance(item, dict) or set(item) - {"page", "quote", *extra}
+                or type(item.get("page")) is not int or item["page"] not in page_text):
+            raise RecipeImportReaderError(f"{field} requires an exact transcript page and quote")
+        quote = _text(item.get("quote"), field + " quote", maximum, required=True)
+        if quote not in page_text[item["page"]]:
+            raise RecipeImportReaderError(f"{field} quote is absent from its supplied page")
+        return quote, f"Page {item['page']}: {quote}"
+
+    def selected(field, maximum, *, optional=False):
+        items = interpretation.get(field, [] if optional else None)
+        if not isinstance(items, list) or not (0 if optional else 1) <= len(items) <= maximum:
+            raise RecipeImportReaderError(f"{field} selection is missing or oversized")
+        return items
+
+    def estimate(value, *, unit):
+        fields = {"quantity", "assumptions", *(('unit',) if unit else ())}
+        if not isinstance(value, dict) or set(value) != fields:
+            raise RecipeImportReaderError("estimate requires quantity and explicit assumptions")
+        assumptions = _text(value["assumptions"], "estimate assumptions", 1000, required=True)
+        try:
+            quantity = quantity_json(read_quantity(value["quantity"]))
+        except ValueError as exc:
+            raise RecipeImportReaderError("estimate quantity is invalid") from exc
+        normalized = normalized_unit(value["unit"]) if unit else None
+        if unit and normalized not in UNITS:
+            raise RecipeImportReaderError("estimate unit is unsupported")
+        return quantity, normalized, assumptions
+
+    ingredients = []
+    ingredient_excerpts = selected("ingredients", 200)
+    for item in ingredient_excerpts:
+        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount",))
+        ingredient = source_ingredient(quote)
+        for evidence in ingredient["evidence"].values():
+            evidence["input"] = evidence_input
+        if "estimated_amount" in item:
+            quantity, unit, assumptions = estimate(item["estimated_amount"], unit=True)
+            ingredient.update(quantity=quantity, unit=unit, scalable=True)
+            ingredient["evidence"] = {field: {"basis": "estimate", "input": evidence_input,
+                "assumptions": assumptions} for field in ("quantity", "unit")}
+        ingredients.append(ingredient)
+    step_excerpts = selected("steps", 100)
+    steps = [excerpt(item, "step", maximum=MAX_TEXT)[0] for item in step_excerpts]
+    note_excerpts = selected("notes", 100, optional=True)
+    notes = "\n\n".join(excerpt(item, "note", maximum=MAX_TEXT)[0] for item in note_excerpts)
+    notes = _text(notes, "combined transcript notes", MAX_TEXT) or None
+    yield_value, portions, portions_evidence = None, None, {"basis": "unknown"}
+    if interpretation.get("yield") is not None:
+        item = interpretation["yield"]
+        quote, evidence_input = excerpt(item, "yield", extra=("estimated_portions",))
+        yield_value, portions = source_yield(quote)
+        for evidence in yield_value["evidence"].values():
+            evidence["input"] = evidence_input
+        portions_evidence = {"basis": "source" if portions is not None else "unknown", "input": evidence_input}
+        if "estimated_portions" in item:
+            quantity, _, assumptions = estimate(item["estimated_portions"], unit=False)
+            portions = float(read_quantity(quantity))
+            portions_evidence = {"basis": "estimate", "input": evidence_input, "assumptions": assumptions}
+    tags = selected("tags", 50, optional=True)
+    tags = [_text(tag, "tag", 80, required=True) for tag in tags]
+    source_pages = [{"page": page, "text": text, "issue": page_issues.get(page)} for page, text in sorted(page_text.items())]
+    source_digest = hashlib.sha256(json.dumps({"kind": kind, "pages": source_pages, "attribution": attribution},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    candidate = normalize_recipe(bind_recipe_source({
+        "schema_version": 2, "name": _text(interpretation.get("name"), "name", 300, required=True),
+        "language": _text(interpretation.get("language"), "language", 20) or "und",
+        "source": {"kind": kind, "external_id": "sha256:" + source_digest,
+                   "relationship": "user_supplied", "original": attribution},
+        "rights": {"storage": "full"}, "ingredients": ingredients, "steps": steps,
+        "yield": yield_value, "portions": portions, "portions_evidence": portions_evidence,
+        "tags": tags, "notes": notes,
+    }))
+    return {"candidate": candidate, "source_context": {"kind": kind, "content_sha256": source_digest,
+        "source_mode": "supplied_text" if kind == "pasted_text" else "host_transcript",
+        "attribution_status": "declared" if any(attribution.values()) else "unknown"},
+        "page_issues": [{"page": page, "issue": issue} for page, issue in sorted(page_issues.items())],
+        "source_excerpts": {"ingredients": [{"page": item["page"], "quote": item["quote"]} for item in ingredient_excerpts],
+                            "steps": deepcopy(step_excerpts), "notes": deepcopy(note_excerpts)},
+        "image_status": "none", "personal_entry_created": False}
 
 
 # Mealie 3.24.0 Recipe/RecipeIngredient models and export writers:

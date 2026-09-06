@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded native JSON/JSONL import for one household recipe bank."""
+"""Native recipe imports and explicitly offline private recipe export."""
 
 from __future__ import annotations
 
@@ -51,30 +51,88 @@ def _json_records(path: Path) -> Iterator[Any]:
     yield from values
 
 
+def _household_state(state_directory: Path) -> dict:
+    try:
+        state = json.loads((state_directory / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError) as exc:
+        raise RecipeError("state directory has no readable household state") from exc
+    household = state.get("household") if isinstance(state, dict) else None
+    if not isinstance(household, str) or not household:
+        raise RecipeError("state directory has no household identity")
+    return state
+
+
+def _export_private(args) -> dict:
+    import install
+    from recipe_portable import export_private_archive
+    from runtime_ownership import file_lock
+
+    home = args.installation_home.expanduser().resolve()
+    if not home.is_dir():
+        raise RecipeError("private export requires an existing installation home")
+    with file_lock(home / ".installer.lock"):
+        try:
+            meta = json.loads((home / "runtime.json").read_text(encoding="utf-8"))
+            paths = meta["paths"]
+            if (meta.get("format") != 1 or Path(meta["home"]).resolve() != home
+                    or meta.get("manager") not in {"systemd", "launchd"}
+                    or not isinstance(meta.get("name"), str)
+                    or any(not isinstance(paths[key], str) or not Path(paths[key]).is_absolute()
+                           for key in ("state", "browser_profile", "browser_home", "browser_socket_directory", "socket"))):
+                raise ValueError()
+            state_directory = Path(paths["state"])
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+            raise RecipeError("private export requires a readable matching runtime.json installation manifest") from exc
+        if args.state_directory is not None and args.state_directory.resolve() != state_directory.resolve():
+            raise RecipeError("--state-directory differs from the installation manifest")
+        # The exporting process retains both installer and runtime lifetime
+        # ownership. It never stops, restarts or adopts an existing service.
+        with install.offline(meta):
+            state = _household_state(state_directory)
+            manifest = export_private_archive(args.export_private,
+                RecipeStore(state_directory / "recipes.sqlite3", state["household"]))
+    return {"exported": True, "kind": "private", "destination": str(args.export_private),
+            "recipes_count": manifest["recipes_count"], "records_count": manifest["records_count"]}
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Import native Hermes Recipe JSON or JSONL")
+    parser = argparse.ArgumentParser(description="Import native recipe JSON/JSONL or export private recipes offline")
     parser.add_argument("path", type=Path, nargs="?")
     parser.add_argument("--image", help="import one explicitly supplied relative image attachment")
     parser.add_argument("--import-root", type=Path, help="trusted local root containing that image attachment")
-    parser.add_argument("--state-directory", type=Path, required=True)
+    parser.add_argument("--state-directory", type=Path)
+    parser.add_argument("--export-private", type=Path, help="write a new private recipe/history archive from a stopped installation")
+    parser.add_argument("--installation-home", type=Path, help="explicit installation home containing runtime.json; required for private export")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--status", choices=("active", "draft"), default="active")
+    parser.add_argument("--status", choices=("active", "draft"))
     parser.add_argument("--backup", type=Path, help="write a verified SQLite backup before a committed import")
     args = parser.parse_args()
+    if args.export_private is not None:
+        if (args.installation_home is None or args.path is not None or args.image is not None
+                or args.import_root is not None or args.backup is not None or args.dry_run or args.status is not None):
+            parser.error("--export-private requires --installation-home and cannot be combined with import/image/backup/dry-run/status options")
+        try:
+            result = _export_private(args)
+        except (RecipeError, RecipeAssetError) as exc:
+            raise SystemExit(str(exc)) from exc
+        except RuntimeError as exc:
+            raise SystemExit("private export requires a stopped installation with available ownership locks") from exc
+        except OSError as exc:
+            raise SystemExit("private export input or destination is unavailable") from exc
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return
+    if args.installation_home is not None or args.state_directory is None:
+        parser.error("normal imports require --state-directory; --installation-home is only used with --export-private")
     if args.image is not None:
         if args.path is not None or args.import_root is None or args.backup is not None:
             parser.error("--image requires --import-root and cannot be combined with a recipe path or --backup")
     elif args.path is None or args.import_root is not None:
         parser.error("supply a recipe path, or --image with --import-root")
-    state_path = args.state_directory / "state.json"
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, RecursionError) as exc:
-        raise SystemExit("state directory has no readable household state") from exc
-    household = state.get("household") if isinstance(state, dict) else None
-    if not isinstance(household, str) or not household:
-        raise SystemExit("state directory has no household identity")
-    store = RecipeStore(args.state_directory / "recipes.sqlite3", household)
+        state = _household_state(args.state_directory)
+    except RecipeError as exc:
+        raise SystemExit(str(exc)) from exc
+    store = RecipeStore(args.state_directory / "recipes.sqlite3", state["household"])
     try:
         if args.image is not None:
             if args.dry_run:
@@ -89,7 +147,7 @@ def main() -> None:
             if args.dry_run:
                 raise RecipeError("--backup is not used with --dry-run")
             backup = str(store.backup(args.backup))
-        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status, provider=state.get("provider"))
+        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status or "active", provider=state.get("provider"))
     except (OSError, RecipeError, RecipeAssetError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps({**result, "backup": backup}, ensure_ascii=False, sort_keys=True))

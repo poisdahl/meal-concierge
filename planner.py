@@ -258,11 +258,40 @@ def _profile_rules(profile: Mapping[str, Any], field: str) -> list[str]:
     return sorted({_bounded_token(item, f"profile diet.{field}") for item in values})
 
 
+def _non_dinner_role(recipe: Mapping[str, Any]) -> str | None:
+    """Conservative culinary labels, never allergen/nutritional evidence."""
+    name = str(recipe.get("name") or "").casefold()
+    tags = {str(tag).casefold() for tag in recipe.get("tags", [])}
+    if tags.intersection({"dessert", "desserts", "drink", "drinks", "beverage", "breakfast", "side dish", "condiment"}):
+        return "source_tag_non_dinner"
+    # Savory compound dish names override ambiguous words such as 'cakes' and
+    # 'bread sauce'. This vocabulary is culinary, never safety evidence.
+    if re.search(r"\b(fish|crab|salmon|tuna|cod|shrimp|prawn|chicken|duck|beef|pork|lamb|sausage|sausages|tofu|lentil|lentils|bean|beans)\b", name):
+        return None
+    if re.search(r"\b(cookies?|macaroons?|pudding|mousse|sorbet|ice cream|mush|confectionery|baklava|sachertorte|gingerbread|dessert|kake|kjeks|cinnamon bun|lassi|juice|grenadine|soda|smoothie)\b", name):
+        return "dessert_or_beverage"
+    if re.search(r"\b(chocolate|vanilla|sponge|birthday|fruit|carrot|lemon|coffee|pound) cakes?\b", name):
+        return "dessert"
+    if re.search(r"\b(porridge|pizza crust|grøt|soda bread|sandwich bread|white bread|brown bread|garlic bread)\b", name) and not re.search(r"\b(soup|stew|curry|casserole|salad|suppe|gryte)\b", name):
+        return "breakfast_or_component"
+    # A sauce alone is a condiment; 'chicken with sauce' remains a dish.
+    if re.search(r"^(?:barbecue|bbq|tomato|hot|chocolate|caramel|hollandaise|béarnaise) sauce\b", name):
+        return "condiment"
+    if re.search(r"\bpotatoes?\b", name) and not re.search(r"\b(soup|stew|curry|casserole|hash|salad|cakes?)\b", name):
+        ingredients = " ".join(str(item.get("item") or "").casefold() for item in recipe.get("ingredients", []))
+        if not re.search(r"\b(chicken|duck|beef|lamb|pork|sausage|sausages|salmon|fish|cod|tuna|beans?|lentils?|chickpeas?|tofu|egg|eggs)\b", ingredients):
+            return "potato_side_dish"
+    return None
+
+
 def _hard_evaluation(
     candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str]
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     status = "pass"
+    if role := _non_dinner_role(candidate["recipe"]):
+        status = "fail"
+        reasons.append({"code": "meal_role:non_dinner", "status": "fail", "detail": role})
     error = candidate.get("materialization_error")
     if error:
         status = "fail"
@@ -517,7 +546,7 @@ def _slot_reasons(
         reasons.append(_reason("recency:history_incomplete", 0, usage["history_coverage"]))
     elif not any(usage.get(field) for field in ("last_planned_week", "last_ordered_week", "last_cooked_week")):
         reasons.append(_reason("recency:no_recorded_use", 5, "no matching recorded use"))
-    else:
+    if any(usage.get(field) for field in ("last_planned_week", "last_ordered_week", "last_cooked_week")):
         weeks_since = None
         recorded_weeks = []
         for field in ("last_cooked_week", "last_ordered_week", "last_planned_week"):
@@ -670,7 +699,7 @@ def _selection(
     return payload
 
 
-def _validate_request(value: Any) -> dict[str, Any]:
+def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
         "week", "dates", "portions", "candidates", "strict_targets",
         "cooldown_overrides", "alternatives", "as_of_date",
@@ -706,7 +735,7 @@ def _validate_request(value: Any) -> dict[str, Any]:
     if isinstance(portions, bool) or not isinstance(portions, int) or not 1 <= portions <= 100:
         raise PlannerError("planner portions must be an integer from one to 100")
     candidates = value.get("candidates")
-    if not isinstance(candidates, list) or not 1 <= len(candidates) <= MAX_CANDIDATES:
+    if not (allow_discovery and candidates is None) and (not isinstance(candidates, list) or not 1 <= len(candidates) <= MAX_CANDIDATES):
         raise PlannerError(f"planner candidates must contain one to {MAX_CANDIDATES} entries")
     strict = value.get("strict_targets", [])
     if not isinstance(strict, list) or len(strict) > len(SUPPORTED_STRICT_TARGETS):

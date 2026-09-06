@@ -15,6 +15,8 @@ import re
 import secrets
 import stat
 import struct
+import sqlite3
+import tempfile
 from typing import Any, BinaryIO, Iterator, Mapping
 import unicodedata
 import zipfile
@@ -32,6 +34,8 @@ MAX_RECORD_BYTES = 2 * MAX_RECIPE_BYTES
 MAX_ASSET_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_REPORT_BYTES = 16 * 1024 * 1024
+MAX_PRIVATE_RECORDS = 100_000
+MAX_PRIVATE_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_MEMBERS = MAX_IMPORT_RECORDS + 4
 CHUNK_BYTES = 128 * 1024
 _ASSET = re.compile(r"assets/([0-9a-f]{64})\.jpg\Z")
@@ -97,6 +101,11 @@ def _manifest(value: Any) -> dict:
     count = value.get("records_count")
     if type(count) is not int or not 0 <= count <= MAX_IMPORT_RECORDS:
         raise RecipeError("portable recipe count is invalid")
+    _inventory(value)
+    return value
+
+
+def _inventory(value: dict) -> None:
     files = value.get("files")
     if not isinstance(files, list) or not 1 <= len(files) < MAX_MEMBERS:
         raise RecipeError("portable file inventory is invalid")
@@ -120,7 +129,6 @@ def _manifest(value: Any) -> dict:
         total += item["bytes"]
     if "records.jsonl" not in seen or total > MAX_EXPANDED_BYTES:
         raise RecipeError("portable archive inventory is incomplete or oversized")
-    return value
 
 
 @contextmanager
@@ -201,6 +209,8 @@ def _check_local_header(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> None
 class PortableArchive:
     """A validated file inventory; all reads stay inside the opened ZIP handle."""
 
+    _validate_manifest = staticmethod(_manifest)
+
     def __init__(self, archive: zipfile.ZipFile):
         self.archive = archive
         self.entries = {}
@@ -220,7 +230,7 @@ class PortableArchive:
             total += info.file_size
         if not 2 <= len(self.entries) <= MAX_MEMBERS or total > MAX_EXPANDED_BYTES or "manifest.json" not in self.entries:
             raise RecipeError("portable archive is incomplete or oversized")
-        self.manifest = _manifest(_json(self._read("manifest.json")))
+        self.manifest = self._validate_manifest(_json(self._read("manifest.json")))
         self.inventory = {item["path"]: item for item in self.manifest["files"]}
         if set(self.entries) != {"manifest.json", *self.inventory}:
             raise RecipeError("portable archive inventory differs from its contents")
@@ -327,6 +337,10 @@ def write_archive(destination: Path | str, manifest: Mapping, files: Mapping[str
     Managed JPEG bytes must already have passed RecipeAssets. This writer makes
     no publication/rights decision and never copies directories implicitly.
     """
+    return _write_archive(destination, manifest, files, _manifest, open_archive)
+
+
+def _write_archive(destination, manifest, files, validate_manifest, opener) -> dict:
     value = dict(manifest)
     value["files"] = []
     for name, path in sorted(files.items()):
@@ -342,7 +356,7 @@ def write_archive(destination: Path | str, manifest: Mapping, files: Mapping[str
                     raise RecipeError("portable builder input is oversized")
                 digest.update(chunk)
         value["files"].append({"path": name, "bytes": size, "sha256": digest.hexdigest()})
-    _manifest(value)
+    validate_manifest(value)
     encoded = canonical_bytes(value)
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise RecipeError("portable manifest is oversized")
@@ -366,13 +380,343 @@ def write_archive(destination: Path | str, manifest: Mapping, files: Mapping[str
                                 raise RecipeError("portable output is oversized")
             handle.flush()
             os.fsync(handle.fileno())
-        with open_archive(output) as archive:
+        with opener(output) as archive:
             archive.verify()
         return value
     except BaseException:
         if created:
             output.unlink(missing_ok=True)
         raise
+
+
+def _private_manifest(value: Any) -> dict:
+    fields = {"format", "format_version", "kind", "private_schema_version", "recipes_count", "records_count", "files"}
+    if (not isinstance(value, dict) or set(value) != fields or value["format"] != FORMAT
+            or type(value["format_version"]) is not int or value["format_version"] != FORMAT_VERSION
+            or value["kind"] != "private" or type(value["private_schema_version"]) is not int
+            or value["private_schema_version"] != 1):
+        raise RecipeError("unsupported private recipe format")
+    for field, maximum in (("recipes_count", MAX_IMPORT_RECORDS), ("records_count", MAX_PRIVATE_RECORDS)):
+        if type(value[field]) is not int or not 0 <= value[field] <= maximum:
+            raise RecipeError("private recipe count is invalid")
+    if value["records_count"] < 2 * value["recipes_count"]:
+        raise RecipeError("private recipe history is incomplete")
+    _inventory(value)
+    if any(item["path"] != "records.jsonl" and not _ASSET.fullmatch(item["path"]) for item in value["files"]):
+        raise RecipeError("private archive cannot contain installation reports")
+    return value
+
+
+def _private_text(value: Any, field: str, maximum: int = 200) -> str:
+    if (not isinstance(value, str) or not value.strip() or len(value) > maximum
+            or any(ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in value)):
+        raise RecipeError(f"private {field} is invalid")
+    from recipe_import_readers import RecipeImportReaderError, _text as source_text
+    try:
+        source_text(value, "private recipe text", maximum)
+    except RecipeImportReaderError as exc:
+        raise RecipeError("private recipe text contains an unsafe URL") from exc
+    return value
+
+
+def _private_identity(value: Any, field: str, maximum: int) -> str:
+    result = _private_text(value, field, maximum)
+    if unicodedata.normalize("NFC", result).strip() != result:
+        raise RecipeError("private identity must use canonical bank text")
+    return result
+
+
+def _private_entry(value: Any) -> dict:
+    fields = {"type", "id", "revision", "status", "source_key", "created_at", "updated_at",
+              "created_via", "entry_origin", "pack", "favorite"}
+    if not isinstance(value, dict) or set(value) != fields or value["type"] != "entry":
+        raise RecipeError("private entry envelope is invalid")
+    _private_identity(value["id"], "id", 80)
+    for field in ("created_at", "updated_at", "created_via"):
+        _private_text(value[field], field)
+    if type(value["revision"]) is not int or not 1 <= value["revision"] <= 2**63 - 1:
+        raise RecipeError("private recipe revision is invalid")
+    if value["status"] not in ("active", "draft", "archived") or value["entry_origin"] not in ("user", "bundled", "unknown"):
+        raise RecipeError("private recipe status/origin is invalid")
+    if value["source_key"] is not None:
+        _private_text(value["source_key"], "source_key", 4096)
+    pack = value["pack"]
+    if value["entry_origin"] == "bundled":
+        if not isinstance(pack, dict) or set(pack) != {"pack_id", "recipe_id", "version", "baseline_hash"}:
+            raise RecipeError("private bundled origin is incomplete")
+        for field in ("pack_id", "recipe_id", "version"):
+            _private_identity(pack[field], field, 256 if field == "recipe_id" else 128)
+        if not isinstance(pack["baseline_hash"], str) or not _DIGEST.fullmatch(pack["baseline_hash"]):
+            raise RecipeError("private pack baseline is invalid")
+    elif pack is not None:
+        raise RecipeError("private non-bundled recipe cannot have pack metadata")
+    favorite = value["favorite"]
+    if favorite is not None:
+        if (not isinstance(favorite, dict) or set(favorite) != {"is_favorite", "favorite_revision", "created_at", "updated_at"}
+                or type(favorite["is_favorite"]) is not bool or type(favorite["favorite_revision"]) is not int
+                or not 1 <= favorite["favorite_revision"] <= 2**63 - 1):
+            raise RecipeError("private favorite is invalid")
+        for field in ("created_at", "updated_at"):
+            _private_text(favorite[field], field)
+    return value
+
+
+def _private_revision(value: Any) -> dict:
+    from recipes import _stored_recipe_document
+    if (not isinstance(value, dict) or set(value) != {"type", "recipe_id", "revision", "status", "document", "created_at"}
+            or value["type"] != "revision" or type(value["revision"]) is not int
+            or not 1 <= value["revision"] <= 2**63 - 1 or value["status"] not in ("active", "draft", "archived")):
+        raise RecipeError("private revision envelope is invalid")
+    _private_identity(value["recipe_id"], "recipe_id", 80)
+    _private_text(value["created_at"], "created_at")
+    document = value["document"]
+    if not isinstance(document, dict) or len(canonical_bytes(document)) > MAX_RECIPE_BYTES:
+        raise RecipeError("private recipe document is invalid or oversized")
+    _stored_recipe_document(canonical_bytes(document))
+    from recipe_import_readers import RecipeImportReaderError, _text as source_text
+    pending = [document]
+    while pending:
+        child = pending.pop()
+        if isinstance(child, dict):
+            pending.extend(child.values())
+        elif isinstance(child, list):
+            pending.extend(child)
+        elif isinstance(child, str):
+            try:
+                source_text(child, "private recipe text", len(child))
+            except RecipeImportReaderError as exc:
+                raise RecipeError("private recipe text contains an unsafe URL") from exc
+    return value
+
+
+class PrivatePortableArchive(PortableArchive):
+    """Explicit private recipe/history codec; opening grants no restore authority.
+
+    Only recipe content and the four recipe tables are represented. Household
+    identity, account principals, discovery references, operation journals and
+    installer reports belong to the separate full-installation backup.
+    """
+
+    _validate_manifest = staticmethod(_private_manifest)
+
+    def _rows(self) -> Iterator[tuple[dict, int]]:
+        pending = b""
+        count = 0
+        for chunk in self.chunks("records.jsonl"):
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if not line or len(line) > MAX_RECORD_BYTES:
+                    raise RecipeError("private record line is empty or oversized")
+                count += 1
+                if count > self.manifest["records_count"]:
+                    raise RecipeError("private archive has extra records")
+                yield _json(line), len(line) + 1
+            if len(pending) > MAX_RECORD_BYTES:
+                raise RecipeError("private record line is oversized")
+        if pending or count != self.manifest["records_count"]:
+            raise RecipeError("private records are truncated or count differs")
+
+    def recipe_entries(self) -> Iterator[dict]:
+        """Yield {entry, revisions} groups, bounded to 64 MiB of encoded rows.
+
+        Revisions stay in increasing original-number order; gaps are preserved.
+        Call verify() completely before applying any group to a destination.
+        """
+        identities, source_keys, pack_keys = set(), set(), set()
+        entry = None
+        revisions = []
+        size = 0
+
+        def complete():
+            if (not revisions or revisions[-1]["revision"] != entry["revision"]
+                    or revisions[-1]["status"] != entry["status"]
+                    or revisions[-1]["created_at"] != entry["updated_at"]
+                    or revisions[0]["created_at"] != entry["created_at"]):
+                raise RecipeError("private recipe head/history differs")
+            return {"entry": entry, "revisions": revisions}
+
+        for row, row_size in self._rows():
+            if isinstance(row, dict) and row.get("type") == "entry":
+                if entry is not None:
+                    yield complete()
+                entry = _private_entry(row)
+                if entry["id"] in identities:
+                    raise RecipeError("private recipe identity is duplicated")
+                identities.add(entry["id"])
+                if len(identities) > self.manifest["recipes_count"]:
+                    raise RecipeError("private archive has extra recipes")
+                key = entry["source_key"]
+                if key is not None:
+                    if key in source_keys:
+                        raise RecipeError("private source identity is duplicated")
+                    source_keys.add(key)
+                if entry["pack"] is not None:
+                    key = (entry["pack"]["pack_id"], entry["pack"]["recipe_id"])
+                    if key in pack_keys:
+                        raise RecipeError("private pack identity is duplicated")
+                    pack_keys.add(key)
+                revisions, size = [], row_size
+            else:
+                row = _private_revision(row)
+                if (entry is None or row["recipe_id"] != entry["id"] or row["revision"] > entry["revision"]
+                        or (revisions and row["revision"] <= revisions[-1]["revision"])):
+                    raise RecipeError("private revisions are misplaced or duplicated")
+                size += row_size
+                if size > MAX_PRIVATE_ENTRY_BYTES:
+                    raise RecipeError("private recipe history is oversized")
+                image = row["document"].get("image")
+                if image and f"assets/{image['asset_id'][7:]}.jpg" not in self.inventory:
+                    raise RecipeError("private revision references a missing asset")
+                revisions.append(row)
+        if entry is not None:
+            yield complete()
+        if len(identities) != self.manifest["recipes_count"]:
+            raise RecipeError("private recipe count differs")
+
+    def records(self) -> Iterator[dict]:
+        for group in self.recipe_entries():
+            yield group["entry"]
+            yield from group["revisions"]
+
+    def verify(self) -> dict:
+        from recipe_assets import validate_managed
+        for name in self.inventory:
+            if match := _ASSET.fullmatch(name):
+                validate_managed(self._read(name), "sha256:" + match[1])
+            else:
+                for _ in self.chunks(name):
+                    pass
+        count = sum(1 for _ in self.records())
+        return {"recipes_count": self.manifest["recipes_count"], "records_count": count,
+                "files_count": len(self.entries), "expanded_bytes": sum(info.file_size for info in self.entries.values())}
+
+
+@contextmanager
+def open_private_archive(path: Path | str):
+    """Read private recipe state only through this explicitly selected API."""
+    try:
+        with _regular_file(Path(path)) as handle:
+            _directory_bound(handle)
+            with zipfile.ZipFile(handle) as archive:
+                yield PrivatePortableArchive(archive)
+    except (zipfile.BadZipFile, EOFError, UnicodeError, struct.error, NotImplementedError) as exc:
+        raise RecipeError("private recipe archive is invalid") from exc
+
+
+def write_private_archive(destination: Path | str, manifest: Mapping, files: Mapping[str, Path]) -> dict:
+    """Create a mode-0600 private archive exclusively; validate every history/asset."""
+    return _write_archive(destination, manifest, files, _private_manifest, open_private_archive)
+
+
+def export_private_archive(destination: Path | str, store) -> dict:
+    """Export one coherent read-only recipe snapshot under caller offline locks.
+
+    The exact household and schema 6 are checked locally and never exported.
+    SQLite WAL mode is rejected: a read-only SQLite connection can otherwise
+    create source-side shared-memory files. No checkpoint, migration, cleanup or
+    RecipeStore connection helper is used. Temporary files stay beneath the
+    caller-selected output parent and are removed when this call finishes.
+    """
+    from recipes import RecipeStore, _stored_recipe_document
+    if not isinstance(store, RecipeStore):
+        raise RecipeError("private export requires an explicit recipe store")
+    output = Path(destination)
+    with _regular_file(store.path) as handle:
+        header = handle.read(100)
+        if len(header) != 100 or header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+            raise RecipeError("private export requires a checkpointed rollback-journal recipe bank")
+    for suffix in ("-wal", "-journal"):
+        sidecar = Path(str(store.path) + suffix)
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise RecipeError("private export requires an idle recipe bank")
+    try:
+        with tempfile.TemporaryDirectory(prefix=".private-recipes-", dir=output.parent) as temporary:
+            staging = Path(temporary)
+            files = {"records.jsonl": staging / "records.jsonl"}
+            counts = {"recipes_count": 0, "records_count": 0}
+            total_bytes = 0
+            asset_bytes = 0
+            connection = sqlite3.connect(store.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("BEGIN")
+                metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
+                if metadata != {"household": store.household, "schema_version": "6"}:
+                    raise RecipeError("private export household/schema differs")
+                for table, maximum in (("recipes", MAX_IMPORT_RECORDS), ("revisions", MAX_PRIVATE_RECORDS)):
+                    if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > maximum:
+                        raise RecipeError("private recipe snapshot is oversized")
+                    if connection.execute(f"SELECT 1 FROM {table} WHERE typeof(document) != 'text' OR length(CAST(document AS BLOB)) > ? LIMIT 1", (MAX_RECIPE_BYTES,)).fetchone():
+                        raise RecipeError("private stored recipe document is invalid or oversized")
+                for table in ("revisions", "recipe_entry_metadata", "recipe_favorites"):
+                    if connection.execute(f"SELECT 1 FROM {table} t LEFT JOIN recipes r ON r.id=t.recipe_id WHERE r.id IS NULL LIMIT 1").fetchone():
+                        raise RecipeError("private recipe snapshot contains orphan rows")
+                with files["records.jsonl"].open("xb") as records:
+                    os.chmod(files["records.jsonl"], 0o600)
+                    for current in connection.execute("SELECT id,revision,status,source_key,document,created_at,updated_at,created_via FROM recipes ORDER BY id"):
+                        identity = current["id"]
+                        origin = connection.execute("SELECT entry_origin,pack_id,pack_recipe_id,pack_version,baseline_hash FROM recipe_entry_metadata WHERE recipe_id=?", (identity,)).fetchone()
+                        if origin is None:
+                            raise RecipeError("private recipe origin metadata is missing")
+                        pack = None
+                        if any(origin[key] is not None for key in ("pack_id", "pack_recipe_id", "pack_version", "baseline_hash")):
+                            pack = {"pack_id": origin["pack_id"], "recipe_id": origin["pack_recipe_id"], "version": origin["pack_version"], "baseline_hash": origin["baseline_hash"]}
+                        favorite = connection.execute("SELECT library_id,is_favorite,favorite_revision,created_at,updated_at FROM recipe_favorites WHERE recipe_id=?", (identity,)).fetchall()
+                        if len(favorite) > 1 or (favorite and (favorite[0]["library_id"] != "builtin" or favorite[0]["is_favorite"] not in (0, 1))):
+                            raise RecipeError("private favorite state is invalid")
+                        favorite = {key: favorite[0][key] for key in ("is_favorite", "favorite_revision", "created_at", "updated_at")} if favorite else None
+                        if favorite is not None:
+                            favorite["is_favorite"] = bool(favorite["is_favorite"])
+                        entry = _private_entry({"type": "entry", **{key: current[key] for key in ("id", "revision", "status", "source_key", "created_at", "updated_at", "created_via")}, "entry_origin": origin["entry_origin"], "pack": pack, "favorite": favorite})
+                        entry_bytes = 0
+
+                        def emit(row):
+                            nonlocal entry_bytes, total_bytes
+                            line = canonical_bytes(row)
+                            entry_bytes += len(line) + 1
+                            total_bytes += len(line) + 1
+                            counts["records_count"] += 1
+                            if len(line) > MAX_RECORD_BYTES or entry_bytes > MAX_PRIVATE_ENTRY_BYTES or total_bytes > MAX_RECORDS_BYTES or total_bytes + asset_bytes > MAX_EXPANDED_BYTES - MAX_MANIFEST_BYTES or counts["records_count"] > MAX_PRIVATE_RECORDS:
+                                raise RecipeError("private recipe snapshot is oversized")
+                            records.write(line + b"\n")
+
+                        emit(entry)
+                        last = first = None
+                        for version in connection.execute("SELECT recipe_id,revision,status,document,created_at FROM revisions WHERE recipe_id=? ORDER BY revision", (identity,)):
+                            # Strict JSON duplicate/nonfinite detection precedes the shared stored decoder.
+                            document = _stored_recipe_document(canonical_bytes(_json(version["document"].encode("utf-8"))))
+                            row = _private_revision({"type": "revision", **{key: version[key] for key in ("recipe_id", "revision", "status", "created_at")}, "document": document})
+                            emit(row)
+                            first = first or row
+                            last = row
+                            image = document.get("image")
+                            if image:
+                                name = f"assets/{image['asset_id'][7:]}.jpg"
+                                if name not in files:
+                                    if len(files) + 1 >= MAX_MEMBERS:
+                                        raise RecipeError("private archive has too many historical assets")
+                                    data = store.assets.read(image["asset_id"])
+                                    asset_bytes += len(data)
+                                    if total_bytes + asset_bytes > MAX_EXPANDED_BYTES - MAX_MANIFEST_BYTES:
+                                        raise RecipeError("private recipe assets are oversized")
+                                    path = staging / (image["asset_id"][7:] + ".jpg")
+                                    path.write_bytes(data)
+                                    os.chmod(path, 0o600)
+                                    files[name] = path
+                        current_document = _stored_recipe_document(canonical_bytes(_json(current["document"].encode("utf-8"))))
+                        if (last is None or last["revision"] != entry["revision"] or last["status"] != entry["status"]
+                                or last["document"] != current_document or last["created_at"] != entry["updated_at"]
+                                or first["created_at"] != entry["created_at"]):
+                            raise RecipeError("private recipe head/history differs")
+                        counts["recipes_count"] += 1
+            finally:
+                connection.close()
+            return write_private_archive(output, {"format": FORMAT, "format_version": FORMAT_VERSION,
+                "kind": "private", "private_schema_version": 1, **counts}, files)
+    except sqlite3.Error as exc:
+        raise RecipeError("private recipe snapshot is unavailable") from exc
 
 
 @contextmanager
@@ -422,7 +766,7 @@ def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
 
 def _preflight(archive: PortableArchive) -> dict:
     from recipe_assets import validate_managed
-    from recipes import evidence_inputs, normalize_recipe, recipe_evidence_fields, scale_recipe
+    from recipes import evidence_inputs, normalize_recipe, recipe_evidence_fields, recipe_source_provider, scale_recipe
     result = archive.verify()
     for field in ("pack_id", "pack_version"):
         value = archive.manifest[field]
@@ -437,7 +781,7 @@ def _preflight(archive: PortableArchive) -> dict:
         recipe = normalize_recipe(record["recipe"])
         if canonical_bytes(recipe) != canonical_bytes(record["recipe"]):
             raise RecipeError("pack recipe differs from its declared normalized schema")
-        if recipe.get("source_provider") is not None:
+        if recipe_source_provider(recipe) is not None:
             raise RecipeError("a bundled pack cannot contain store-bound recipes")
         if any(item.get("acceptance") for value in recipe_evidence_fields(recipe).values() for item in evidence_inputs(value)):
             raise RecipeError("a bundled pack cannot supply local estimate acceptance")

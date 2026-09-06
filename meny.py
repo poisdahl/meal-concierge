@@ -3561,7 +3561,7 @@ __DELIVERY_BINDING__
         if expected is None:
             return False
         wait_ms = max(1, min(1500, int(max(0, remaining - 0.2) * 1000)))
-        script = """import os, select, signal, stat, sys
+        script = """import ctypes, os, select, signal, stat, sys
 path, expected, uid_text, wait_text = sys.argv[1:]
 uid = int(uid_text)
 fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -3572,10 +3572,27 @@ raw = os.read(fd, 32).decode('ascii').strip()
 if not raw.isdigit() or not 1 <= int(raw) <= 99_999_999:
     raise SystemExit(2)
 pid = int(raw)
-pidfd = os.pidfd_open(pid)
+if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+    library = ctypes.CDLL(None, use_errno=True)
+if hasattr(os, 'pidfd_open'):
+    pidfd = os.pidfd_open(pid)
+else:
+    open_pidfd = library.pidfd_open
+    open_pidfd.argtypes = (ctypes.c_int, ctypes.c_uint)
+    open_pidfd.restype = ctypes.c_int
+    pidfd = open_pidfd(pid, 0)
+    if pidfd < 0:
+        raise OSError(ctypes.get_errno(), 'pidfd_open failed')
 if os.path.realpath(os.readlink(f'/proc/{pid}/exe')) != os.path.realpath(expected):
     raise SystemExit(2)
-signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+if hasattr(signal, 'pidfd_send_signal'):
+    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+else:
+    send_pidfd = library.pidfd_send_signal
+    send_pidfd.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint)
+    send_pidfd.restype = ctypes.c_int
+    if send_pidfd(pidfd, signal.SIGTERM, None, 0) < 0:
+        raise OSError(ctypes.get_errno(), 'pidfd_send_signal failed')
 poller = select.poll()
 poller.register(pidfd, select.POLLIN)
 raise SystemExit(0 if poller.poll(int(wait_text)) else 3)

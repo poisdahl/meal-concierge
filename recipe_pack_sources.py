@@ -277,6 +277,48 @@ def _reviewed_dinner_mapping(entry: dict, recipe: dict) -> bool:
     return True
 
 
+# These sealed revisions failed parsing; none is an existing pack document.
+# Keep repairs revision-bound until a future source shape is independently read.
+# The count also checks that the demonstrated structural defect is still present.
+_WIKIBOOKS_RECOVERY = {
+    ("9016", 4510241): ("related_notice", 1),
+    ("12749", 4518408): ("related_notice", 1),
+    ("88223", 4541034): ("related_notice", 1),
+    ("289230", 4501415): ("related_notice", 1),
+    ("295837", 4518590): ("related_notice", 1),
+    ("448083", 4523785): ("related_notice", 1),
+    ("18354", 4617976): ("metric_notice", 1),
+    ("23267", 4522414): ("vegetarian_notice", 1),
+    ("38535", 4532021): ("nutrition_table", 1),
+    ("33062", 4514693): ("heading_citations", 1),
+    ("370360", 4518142): ("heading_citations", 2),
+    ("372273", 4587429): ("heading_citations", 2),
+    ("18111", 4636790): ("notes_headings", 1),
+    ("415629", 4630845): ("notes_headings", 2),
+    ("461702", 4511022): ("notes_headings", 1),
+    ("476040", 4658398): ("notes_headings", 1),
+    ("415349", 4517861): ("process_heading", 1),
+    ("462355", 4613690): ("process_heading", 1),
+    ("462387", 4508979): ("process_heading", 1),
+    ("254237", 4509833): ("people_heading", 1),
+    ("447194", 4535488): ("procedures_ingredients", 1),
+    ("456925", 4587492): ("procedure_ingredients", 1),
+    ("476395", 4522969): ("recipe_ingredients", 1),
+    ("479750", 4601579): ("recipes_ingredients", 1),
+    ("479752", 4601580): ("recipes_ingredients", 1),
+    ("483186", 4634713): ("misspelled_ingredients", 1),
+    ("412220", 4587440): ("recipe_procedure", 1),
+    ("483114", 4634633): ("empty_list_wrapper", 1),
+}
+
+
+def _heading_without_citations(node: Node) -> str:
+    if node.tag == "sup" and "reference" in node.attrs.get("class", "").split():
+        return ""
+    return " ".join(child if isinstance(child, str) else _heading_without_citations(child)
+                    for child in node.children)
+
+
 def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
     from recipes import normalize_recipe, source_yield
     parsed = payload.get("parse", {})
@@ -285,6 +327,8 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
     tree = SourceHTML(parsed["text"])
     result = _base(entry)
     ingredients, steps, headings, notes = [], [], [], []
+    recovery, expected_repairs = _WIKIBOOKS_RECOVERY.get((entry["source_id"], entry["revision"]), (None, 0))
+    repairs = 0
     section, section_level = None, None
     servings, yields = [], []
     infobox_rows = [row for box in tree.root.walk()
@@ -301,10 +345,22 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
                     yields.append(value)
 
     def visit(node: Node):
-        nonlocal section, section_level
+        nonlocal section, section_level, repairs
         if 'infobox' in node.attrs.get('class', '').split():
             return
         if node.tag == 'table':
+            classes = set(node.attrs.get('class', '').split())
+            text = node.text()
+            if ((recovery == 'related_notice' and 'mbox-side-notice' in classes
+                 and text.startswith('Wikipedia has related information at '))
+                or (recovery == 'metric_notice' and 'box-Metricate' in classes
+                    and text.startswith('This article or section exclusively uses non- SI units'))
+                or (recovery == 'nutrition_table' and text.startswith('NUTRITION FACTS Serving Size:'))
+                or (recovery == 'vegetarian_notice' and text ==
+                    'vg This recipe is vegetarian ; it contains no meat. Milk is present.')):
+                # The original tree is retained intact for source attribution.
+                repairs += 1
+                return
             if section == 'ingredients':
                 ingredients.extend(_ingredient_table(node))
             elif section == 'steps':
@@ -313,6 +369,28 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
         if re.fullmatch(r"h[1-6]", node.tag):
             level, heading = int(node.tag[1]), node.text()
             kind = heading.casefold().strip(" :")
+            if recovery == 'heading_citations':
+                clean = " ".join(_heading_without_citations(node).split()).casefold().strip(" :")
+                if clean != kind and clean in {'ingredients', 'procedure', 'preparation'}:
+                    kind = clean
+                    repairs += 1
+            if (recovery == 'notes_headings' and section == 'notes' and level > section_level
+                    and kind in {'ingredients', 'method'}):
+                repairs += 1
+                return
+            renamed = {
+                'process_heading': ('process', 'procedure'),
+                'people_heading': ('ingredients for 4 people', 'ingredients'),
+                'procedures_ingredients': ('procedures', 'ingredients'),
+                'procedure_ingredients': ('procedure', 'ingredients'),
+                'recipe_ingredients': ('recipe', 'ingredients'),
+                'recipes_ingredients': ('recipes', 'ingredients'),
+                'misspelled_ingredients': ('ingrdients', 'ingredients'),
+                'recipe_procedure': ('recipe', 'procedure'),
+            }.get(recovery)
+            if renamed and kind == renamed[0]:
+                kind = renamed[1]
+                repairs += 1
             if re.fullmatch(r"ingredients?(?:\s*\(.*\))?", kind):
                 headings.append(heading)
                 section, section_level = "ingredients", level
@@ -324,6 +402,11 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
             elif section_level is not None and level <= section_level:
                 section, section_level = None, None
             return
+        if recovery == 'empty_list_wrapper' and section == 'ingredients' and node.tag == 'li':
+            if len(node.children) == 1 and isinstance(node.children[0], Node) and node.children[0].tag == 'ul':
+                repairs += 1
+                visit(node.children[0])
+                return
         if section and node.tag in {"li", "p"}:
             if section == 'ingredients' and any(child is not node and child.tag in {'li', 'table', 'dl'} for child in node.walk()):
                 raise SourceParseError('nested ingredient list requires explicit grouping or alternatives')
@@ -335,6 +418,8 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
             if isinstance(child, Node):
                 visit(child)
     visit(tree.root)
+    if repairs != expected_repairs:
+        raise SourceParseError("reviewed source structure changed")
     if len(headings) != 1:
         raise SourceParseError("missing or multiple ingredient sections; requires explicit recipe splitting")
     if not ingredients or not steps:
@@ -375,6 +460,12 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
     if (entry['source_id'], entry['revision']) in procedure_gaps and not reviewed_dinner:
         issues.append('procedure_ingredient_quantity_unresolved')
         result['notes'] = procedure_gaps[(entry['source_id'], entry['revision'])] + '\n' + (result['notes'] or '')
+    if (entry['source_id'], entry['revision']) == ('461702', 4511022):
+        issues.append('source_quantity_guidance_conflict')
+        result['notes'] = ('Source gives conflicting ratio guidance ("about 1:10 or 5% w/w") '
+                           'and mentions optional rinsing milk without a quantity. '
+                           'Keep draft until clarified; original ingredients and instructions are unchanged.\n'
+                           + (result['notes'] or ''))
     return normalize_recipe(result), {
         "text_rights": "CC-BY-SA-4.0", "history_url": entry.get("history_url"),
         "normalization_issues": issues,

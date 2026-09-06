@@ -136,6 +136,13 @@ cannot authorize overwriting local edits, favorites or archive state.
 
 Use `meal_concierge_recipes` for libraries/search/get, and
 `meal_concierge_recipe_discovery` for discover/resolve. Search the target week.
+For browsing many local results, use discover `projection=summary`,
+`source=internal`, `limit<=20` and return `next_cursor` unchanged. Summaries omit
+ingredients and steps; resolve the exact details before using quantities.
+Client-assisted conversion uses action `convert` with the returned exact
+`discovery_ref`, `recipe_digest`, `source_schema_version` and a schema-2 recipe.
+Keep source attribution unchanged and inferred quantities explicitly unknown or
+estimated. Only the separate exact estimate-acceptance action records consent.
 Source outages are soft failures; unavailable exact selected references are not.
 Preserve `discovery_ref`, built-in `recipe_ref={id,revision}`, and external
 `library_recipe_ref={library_id,recipe_id,version?}` unchanged. They are distinct
@@ -144,9 +151,14 @@ Provider names, titles, URLs, list position and “latest” never choose an ID.
 Favorites-only search requires the selected library's `favorite_read` capability;
 it does not relax archive, cooldown, rights or meal constraints.
 
-For a complete dated plan, use menu `plan` with up to 12 exact candidates and the
-requested dates/portions. If the assignment budget is exceeded, narrow the scope
-and explain it. Use the ranked winner; request up to three alternatives only
+For an ordinary weekly request, call menu `plan` with `planner_input` containing
+the week and requested dates/portions; omit `candidates` so the server collects
+and resolves the local bank/packs and enabled selected retailer. Do not build a
+manual shortlist first. Report returned source failures, shortfalls and unknowns;
+these never authorize automatic AI generation. Only a returned
+`ai_fallback_eligible=true` permits the separate clearly marked generation flow.
+For an explicit selected scope, up to 12 exact candidates remain supported; if
+the assignment budget is exceeded, narrow that scope and explain it. Use the ranked winner; request up to three alternatives only
 when useful to the request. Ranking is only within those candidates and the
 returned policy. Preserve the complete `save_handoff` as `planner_handoff` for
 save. Stale facts require a fresh plan. Never invent structured time, nutrition,

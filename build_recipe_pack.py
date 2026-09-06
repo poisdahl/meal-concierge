@@ -21,13 +21,231 @@ from recipe_pack_sources import SourceHTML, SourceParseError, attribution_links,
 
 FORMAT = 'meal-concierge-recipes'
 NORMALIZER_VERSION = '1'
-RIGHTS_POLICY = 'wikibooks-cc-text-explicit-cc-pd-images-v1'
+RIGHTS_POLICY = 'wikibooks-cc-text-explicit-cc-pd-images-v2'
 MAX_RECORD_BYTES = 512 * 1024
 MAX_SOURCE_BODY = 32 * 1024 * 1024
 MAX_ENTRIES = 10_000
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * MAX_ARCHIVE_BYTES
 
+
+# Reviewed Commons description pages supplement absent machine-readable fields.
+# Original image bytes and exact description URL bind each correction; the
+# builder fingerprint also binds these reviewed data. Names retain source roles.
+REVIEWED_IMAGE_CREDITS = {
+    '1f7d2ad6c173c5bfd7aa9e739de16c3cbd5e2c4968f6d27b9b24b1cd1eb509be': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Feuerzangenbowle.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Feuerzangenbowle.jpg&oldid=1228706312',
+        'creator': 'Soebe',
+        'notice': 'Photographer: Soebe; photograph taken on 19 November 2004. Uploaded to Commons by Merkel.',
+    },
+    '41b10a1b230439bf3c76cef47bb1e5e94ca23fb9bbc6528781a48aa997e033da': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Concasse_de_tomate2.JPG',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Concasse_de_tomate2.JPG&oldid=1051694340',
+        'creator': None,
+        'notice': 'Source description: préparation du concassé de tomates. Par Antoine. The preparation credit is retained without assigning a photographer.',
+    },
+    'fd4ac7ccb2382994c1bce9ed630aa283b9f1fb3f07a2986f384f0e990b156530': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Semmelwuerfel_geroestet.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Semmelwuerfel_geroestet.jpg&oldid=1215282393',
+        'creator': 'Hutschi',
+        'notice': 'Author: Hutschi.',
+    },
+    'f2184f325e0af2f1bc3030f413f2aa2af21216284b80caed16681dbbe5d73f30': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Hartkeks_offen.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Hartkeks_offen.jpg&oldid=1221220238',
+        'creator': 'Samuel Mellert',
+        'notice': 'Photograph by Samuel Mellert; Commons upload by Schnee (Schneelocke).',
+    },
+    '3c61e75bbdd446d2abf3dabf6548137fc1c5f2ad4448e0b537234e643e13596c': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Sarmi.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Sarmi.jpg&oldid=1246493124',
+        'creator': 'Kiril Kapustin',
+        'notice': 'Author: Kiril Kapustin; source: imagesfrombulgaria.com.',
+    },
+    '88c0e8f257013db7b700c10a20ca0634a9e46fbc8701b3c22d30f1415fcf6b80': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Jelebi_close.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/cayce/19431431/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Jelebi_close.jpg&oldid=1262719507',
+        'creator': 'Cayce',
+        'notice': 'Photograph by Cayce; cropped by Ranveig.',
+    },
+    'dc205083594434eb78acd9844142f9e4757188c80199632abfa115a669225eb2': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Tortilla_patatas.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Tortilla_patatas.jpg&oldid=1264492156',
+        'creator': 'LLuisa Nunez',
+        'notice': 'Photograph taken by LLuisa Nunez on 19 July 2005; levels adjusted by Hohum.',
+    },
+    'f0564a87cef5b3e893056098e7f9140e90b6d080aafbc78722456554ba6f3454': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:BLT_sandwich_(1).jpg',
+        'evidence_links': ['https://www.flickr.com/photos/ollie_lizard/274401804/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:BLT_sandwich_(1).jpg&oldid=1121478409',
+        'creator': 'Ollylain',
+        'notice': 'Photographer: Ollylain. Original Flickr title: Lucky Boy BLT. The Commons page records that Flickr later stopped distributing this image under CC; it retains the earlier CC license.',
+    },
+    '34c465df73cc704dd7970432f99bb2cafc8d2b95b46573db3fffe5a7bf9cfcc1': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Mushy_peas_19_july_05.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Mushy_peas_19_july_05.jpg&oldid=1228037729',
+        'creator': 'Caroline Ford (Secretlondon)',
+        'notice': 'Photographer: Caroline Ford (Secretlondon).',
+    },
+    'd04bcfed8ec7c4587c3c2ed4e9cb81621166337af49726a301e7b69447882063': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:23-pies_finished.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:23-pies_finished.jpg&oldid=766087552',
+        'creator': 'Kellen',
+        'notice': 'Photographer: Kellen; colours corrected by Doodledoo.',
+    },
+    'a8ecf25ada2e62c8a5e82509a9c4b8d4325336e92cd192fd2dc801377edec34c': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Aloo_gobi.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/pgoyette/339987980/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Aloo_gobi.jpg&oldid=789586471',
+        'creator': None,
+        'notice': 'Originally posted to Flickr by paul goyette; named source attribution is retained without assigning a photographer.',
+    },
+    'd28b84660f9871f737163dcb983860036a1a553d4511f0d7108828392bd17d62': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Peru_Anticuchos.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Peru_Anticuchos.jpg&oldid=1185480208',
+        'creator': 'Håkan Svensson (Xauxa)',
+        'notice': 'Photograph taken on 31 July 2004 by Håkan Svensson (Xauxa).',
+    },
+    '9d835fbfcc89a8c2a55ad7345236695752c7ab2b34c9ea4cdec4bd710c1d3c47': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Potstickers_RTE.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Potstickers_RTE.jpg&oldid=702420813',
+        'creator': None,
+        'notice': 'Original photographer unresolved. Gene.arboit transferred the image from English Wikipedia; Nesnad later attempted an AI resize.',
+    },
+    '829e6b5efffb007089e90ac63d0fa006b32ef4923375e7c5ccfaa6fab91354ab': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Banana-Nut-Muffins-2005-Aug-24.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Banana-Nut-Muffins-2005-Aug-24.jpg&oldid=950756379',
+        'creator': 'Mark Fickett',
+        'notice': 'Prepared and photographed by Mark Fickett. Source permission requires attribution to Mark Fickett; notification of use is requested, not required.',
+    },
+    '1d3a2bc63fdfd2f3471c00bda7f6f4af0b6faf25d94671f4de7e03eaee6dcac8': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Rainbow-Jello-Cut-2004-Jul-30.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Rainbow-Jello-Cut-2004-Jul-30.jpg&oldid=1080202603',
+        'creator': 'Mark Fickett',
+        'notice': 'Prepared in part and photographed by Mark Fickett. Source permission requires attribution to Mark Fickett; notification of use is requested, not required.',
+    },
+    'bd2152534d66ab488d321243dd5d320e1d5013baedd7725fc197e4320c0a4599': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Chocolate-Cake-2006-Jan-04.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Chocolate-Cake-2006-Jan-04.jpg&oldid=856923875',
+        'creator': 'Mark Fickett',
+        'notice': 'Prepared and photographed by Mark Fickett.',
+    },
+    '30e97b1ff22292731a4934f1d7f0e821f1c725f8192f67a2726acb956c85197e': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Bowl%27o%27Coleslaw_modified.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/stuart_spivack/53197420/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Bowl%27o%27Coleslaw_modified.jpg&oldid=831880976',
+        'creator': None,
+        'notice': 'Photo courtesy of Stu Spivack; modified by AlMare and colour/contrast adjusted by Rainer Zenz.',
+    },
+    '1e2196bd091dc814bccc749d280bfe6decd4cbc8535addf89d5a04454cb1b7a2': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Korean_food_7.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Korean_food_7.jpg&oldid=1082541169',
+        'creator': None,
+        'notice': 'Original upload by Feth includes the declaration “I took the picture”; retained as source context without assigning a named photographer.',
+    },
+    'f8a44ea375dd31fa7d450c71e540068c44ae55b34bec7aee78e2811a360b51ad': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:East-asian-food-spring-rolls-3.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:East-asian-food-spring-rolls-3.jpg&oldid=1051351393',
+        'creator': None,
+        'notice': 'Original upload by Anonymous Cow~commonswiki declares “Source: My mother. Photograph taken by me.”; retained as source context without assigning a named photographer.',
+    },
+    '215b62aa347dec47fd08ccbcfecc3a4510a1189c10a7b612d9d293a2f47e70d2': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Mapo_tofu.JPG',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Mapo_tofu.JPG&oldid=1124672819',
+        'creator': None,
+        'notice': 'Original upload by Yaoleilei declares “cook and photo by my self”; retained as source context without assigning a named photographer.',
+    },
+    'a112937aff379f32f7c6738432e02ca494c24f68089b845664becad452a2c732': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Mixed_spices_01_Pengo.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Mixed_spices_01_Pengo.jpg&oldid=951609928',
+        'creator': None,
+        'notice': 'Photo credit: Peter Halasz (User:Pengo).',
+    },
+    '760e8d0ebd6253a72808ed7cda5c6e8cd3c592f5e28bbd1db227b3318cf781e7': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:20000227--calzone.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:20000227--calzone.jpg&oldid=1239564291',
+        'creator': 'Paul Vlaar',
+        'notice': 'Author: Paul Vlaar; later cropped by Sebastian Wallroth.',
+    },
+    'baafaa2b8a1e951b7121919ad505139736edb29263a258532e16957c9fc32a3d': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Corn_chowder_bowl.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/stuart_spivack/121028785/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Corn_chowder_bowl.jpg&oldid=1053342101',
+        'creator': None,
+        'notice': 'Photo courtesy of Stu Spivack.',
+    },
+    '407e730a1416382ccdca923899d1b55f2024914af11c1b7baa229f2239d6e296': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Chinese_fried_bread.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/stuart_spivack/121633136/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Chinese_fried_bread.jpg&oldid=953572145',
+        'creator': None,
+        'notice': 'Photo courtesy of Stu Spivack.',
+    },
+    'a72fc1d5c25f5256df0c446a127fa19f46bf4f90b9f4d2211bf9087129b20a63': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Springerle_with_typical_foot_swabian_Fuessle.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Springerle_with_typical_foot_swabian_Fuessle.jpg&oldid=1056637064',
+        'creator': 'Andreas Bauerle',
+        'notice': 'Author: Andreas Bauerle.',
+    },
+    '78cc99f6ceb672f581c406ef864168598472348148aae8e9907f82663187c6a6': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Hot_chocolate_p1150797.jpg',
+        'evidence_links': ['https://commons.wikimedia.org/wiki/User:David.Monniaux'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Hot_chocolate_p1150797.jpg&oldid=1142875522',
+        'creator': None,
+        'notice': 'Copyright © 2006 David Monniaux. This identifies the declared copyright holder; no separate photographer name is inferred.',
+    },
+    'f8ecd98c2380ec7d28f54fce44deba898fdeeb6d06803d665b85143039aead80': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Sweet_beef_07.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Sweet_beef_07.jpg&oldid=1192979998',
+        'creator': None,
+        'notice': 'The source explicitly lacks author information. Raul654 uploaded the image with a self-made declaration; retained as source context without assigning a named photographer.',
+    },
+    'c7e63d27d1be4214e037eab9e1169b1626de5e62722fb2c445501f612f992183': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Zippule.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Zippule.jpg&oldid=994861581',
+        'creator': None,
+        'notice': 'Original photographer unresolved. Uploaded by Marcuscalabresus; watermark fixed by FischX; cropped by Hohum.',
+    },
+    'd14d51a8acae294bf0c6b244faf09d5536ad66bc9ce0a8af674ef863b81d286c': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Marzipan_cake.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Marzipan_cake.jpg&oldid=1236874826',
+        'creator': 'color line',
+        'notice': 'Photograph by color line; cropped by Ranveig; levels adjusted by Hohum.',
+    },
+    '3014834cc9e28edd2d7a5a61e01d919b32dde14e6e883d575f0aa78b3e13a359': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Banana_pudding,_homemade.jpg',
+        'evidence_links': ['https://www.flickr.com/photos/stuart_spivack/54200701/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Banana_pudding,_homemade.jpg&oldid=1121841639',
+        'creator': None,
+        'notice': 'Photo courtesy of Stu Spivack; white balance adjusted by Belbury and brightened by ReneeWrites.',
+    },
+    'c6ee503448bea7f46154b5a7b4db5327c09d345c7d373ef0ba832395aa612fb5': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Libyan_Asida.jpg',
+        'evidence_links': ['https://www.flickr.com/people/lovelytripoli/'],
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Libyan_Asida.jpg&oldid=1269901154',
+        'creator': None,
+        'notice': 'Photograph source: Hibo1976 (Flickr alias LovelyHibo).',
+    },
+    '684b7c174d85150615e52b5389bafdf35e91f22a7802f1529a6fd3cabae0b41e': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:Kitfo.jpg',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:Kitfo.jpg&oldid=914507267',
+        'creator': None,
+        'notice': 'The source explicitly lacks author information. Uploaded by Diádoco; later brightness/white balance adjusted by ReneeWrites. The Stu Spivack category remains context, not a photographer assignment.',
+    },
+    '75891d809dc62fe0cb457807ef270f299255e259384b08e748639b21f9b1e01b': {
+        'description_url': 'https://commons.wikimedia.org/wiki/File:SN1.JPG',
+        'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:SN1.JPG&oldid=844877492',
+        'creator': None,
+        'notice': 'Declared copyright holder and requested attribution: Serendipity1987 at English Wikibooks. Commons retains an unreviewed bot-transfer warning. Original Wikibooks description was deleted after transfer; its public upload log says own work and permission below, but the original permission text cannot be independently recovered. Optional cover omitted for unresolved transfer-source verification; no infringement finding.',
+        'omission_reason': 'unresolved_transfer_source_verification',
+        'evidence_links': [
+            'https://commons.wikimedia.org/w/index.php?title=File:SN1.JPG&oldid=255804028',
+            'https://en.wikibooks.org/w/index.php?title=Special:Log&page=File:SN1.JPG',
+        ],
+    },
+}
 
 class PackBuildError(ValueError):
     pass
@@ -118,8 +336,20 @@ def fingerprint():
 def _image_credit(image):
     metadata = image.get('license_metadata', {})
     values = {key: plain(str(metadata[key].get('value', ''))) for key in
-              ('Artist', 'Credit', 'LicenseShortName', 'LicenseUrl', 'UsageTerms', 'Permission', 'Attribution', 'Restrictions', 'Copyrighted', 'License') if key in metadata}
+              ('Artist', 'Credit', 'LicenseShortName', 'LicenseUrl', 'UsageTerms', 'Permission', 'Attribution',
+               'Restrictions', 'Copyrighted', 'Copyright', 'License', 'ObjectName', 'AttributionRequired') if key in metadata}
     values['links'] = attribution_links(SourceHTML(' '.join(str(metadata[key].get('value', '')) for key in values)).root)
+    # Preserve attribution and source-review context, without unrelated taxonomy.
+    categories = plain(str(metadata.get('Categories', {}).get('value', ''))).split('|')
+    relevant = [c for c in categories if re.search(r'author|attribut|copyright|photographs (?:by|and images by)|requiring review', c, re.I)]
+    if relevant:
+        values['Categories'] = '|'.join(relevant)
+    reviewed = REVIEWED_IMAGE_CREDITS.get(image.get('file', {}).get('sha256'))
+    if reviewed and image.get('description_url') != reviewed['description_url']:
+        reviewed = None
+    if reviewed:
+        values['reviewed_source'] = reviewed.copy()
+        values['links'] = sorted(set(values['links'] + [reviewed['revision_url']] + reviewed.get('evidence_links', [])))
     license_name = values.get('LicenseShortName', '')
     license_url = values.get('LicenseUrl') or None
     if license_url and license_url.startswith('http://creativecommons.org/'):
@@ -128,19 +358,24 @@ def _image_credit(image):
                      and license_url and license_url.startswith('https://creativecommons.org/licenses/'))
     permitted |= license_name == 'CC0' and bool(license_url and license_url.startswith('https://creativecommons.org/publicdomain/zero/'))
     permitted |= license_name == 'Public domain' and values.get('Copyrighted', '').casefold() == 'false'
-    if values.get('Restrictions'):
+    if values.get('Restrictions') or (reviewed and reviewed.get('omission_reason')):
         permitted = False
     if not permitted:
         return None, values
-    # The full ordinary notices remain in attribution.json if the wire field is
-    # shorter; never truncate the only copy of a required credit.
-    credit = values.get('Credit') or values.get('Attribution') or None
-    record = {'alt': None, 'source_url': image.get('description_url') or image.get('source_url'),
-              'creator': values.get('Artist') or None, 'credit': credit,
-              'license': license_name, 'license_url': license_url,
-              'changes': 'EXIF orientation applied; resized to at most 1600 pixels; JPEG quality 85; embedded metadata removed.'}
-    if any(len(record[key] or '') > 500 for key in ('creator', 'credit', 'license')):
+    original_credit = values.get('Credit') or values.get('Attribution') or None
+    # Preserve the existing bounds on original metadata eligibility. Combining
+    # independently supplied notices must not newly exclude an eligible image.
+    if any(len(v or '') > 500 for v in (values.get('Artist'), original_credit, license_name)):
         return None, values
+    parts = list(dict.fromkeys(v for v in (values.get('Credit'), values.get('Attribution'),
+                                         reviewed.get('notice') if reviewed else None) if v))
+    credit = '; '.join(parts) or None
+    if credit and len(credit) > 500:
+        credit = 'Complete image credit and source notices are preserved in attribution.json.'
+    record = {'alt': None, 'source_url': image.get('description_url') or image.get('source_url'),
+              'creator': (reviewed.get('creator') if reviewed else None) or values.get('Artist') or None,
+              'credit': credit, 'license': license_name, 'license_url': license_url,
+              'changes': 'EXIF orientation applied; resized to at most 1600 pixels; JPEG quality 85; embedded metadata removed.'}
     return record, values
 
 
@@ -201,7 +436,7 @@ class Covers:
 
 def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None):
     from recipe_assets import RecipeAssetError
-    from recipe_portable import write_archive
+    from recipe_portable import canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe
     started = time.monotonic()
     # Resolve only after rejecting symlinks in every root component.
@@ -286,7 +521,7 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                     image_record, notices = _image_credit(entry['image'])
                     credit['image_notices'] = notices
                     credit['image_source_url'] = entry['image'].get('description_url') or entry['image'].get('source_url')
-                    image_status = 'rights_unresolved'
+                    image_status = notices.get('reviewed_source', {}).get('omission_reason') or 'rights_unresolved'
                     if image_record:
                         image_status = 'awaiting_reviewed_derivative'
                         if covers:
@@ -410,7 +645,7 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         manifest = write_archive(temp, manifest, {f['path']: confined(output, f'{release}/{f["path"]}') for f in files})
         os.replace(temp, confined(output, archive_name))
     result = {'complete': True, 'archive': archive_name, 'archive_bytes': (output / archive_name).stat().st_size,
-              'expanded_bytes': sum(f['bytes'] for f in files) + len(encoded(manifest)),
+              'expanded_bytes': sum(f['bytes'] for f in files) + len(canonical_bytes(manifest)),
               'records': len(record_paths), 'assets': len(asset_ids), 'counts': manifest['counts'],
               'cache_reused': reused, 'seconds': round(time.monotonic() - started, 3)}
     write_file(output, 'build-report.json', encoded(result))

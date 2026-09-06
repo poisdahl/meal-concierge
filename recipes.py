@@ -701,7 +701,7 @@ def _stored_recipe_document(value: Any) -> dict[str, Any]:
 
 def source_key(recipe: Mapping[str, Any]) -> str | None:
     source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
-    external_id = _normalized_text(source.get("external_id"))
+    external_id = str(source.get("external_id") or "").strip()
     publisher = _normalized_text(source.get("publisher"))
     if external_id and publisher:
         return f"{publisher}:{external_id}"
@@ -723,7 +723,7 @@ def recipe_key(recipe: Mapping[str, Any]) -> str:
         return f"bank:{recipe['id']}"
     source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
     if source.get("publisher") and source.get("external_id"):
-        return f"source:{_normalized_text(source['publisher'])}:{_normalized_text(source['external_id'])}"
+        return f"source:{_normalized_text(source['publisher'])}:{str(source['external_id']).strip()}"
     if source.get("url"):
         return f"source-url:{source['url']}"
     return f"content:{content_fingerprint(recipe)}"
@@ -895,8 +895,13 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
                     "input_portions": previous.get("input_portions", serving_calculation.get("input_quantity", quantity_json(read_quantity(base)))),
                     "portions_evidence": previous.get("portions_evidence", serving_evidence),
                 }
+        if item.get("scalable") is not True and not item.get("optional", False):
+            path = f"ingredients.{index}.quantity" if amount is None else f"ingredients.{index}.unit"
+            if path not in missing:
+                missing.append(path)
         reason = "person_servings_unknown" if base is None else (
             "serving_evidence_needs_input" if "portions" in missing else
+            "non_scalable_quantity_unresolved" if item.get("scalable") is not True else
             "ingredient_evidence_needs_input" if any(f"ingredients.{index}.{key}" in missing for key in ("quantity", "unit")) else None
         )
         scaled.append(item)
@@ -1724,6 +1729,11 @@ class RecipeStore:
     def _snapshot_parts(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str, str, str]:
         document = normalize_recipe(recipe)
         source_identity = source_key(document)
+        source = document.get("source") or {}
+        if source.get("publisher") and source.get("external_id"):
+            # Preserve the established frozen-snapshot digest format. Its full
+            # attribution digest already distinguishes case-sensitive IDs.
+            source_identity = f"{_normalized_text(source['publisher'])}:{_normalized_text(source['external_id'])}"
         if not source_identity:
             raise RecipeError("discovered recipes require an exact source identity")
         stable_document = deepcopy(document)
@@ -3798,6 +3808,41 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
+    @staticmethod
+    def _transform_cache_key(snapshot, kind):
+        return "recipe_transform:v1:" + _hash({"kind": kind, "discovery_ref": snapshot["discovery_ref"],
+            "recipe_digest": snapshot["recipe_digest"], "schema_version": snapshot["recipe"]["schema_version"]})
+
+    def cached_discovery_transform(self, discovery_ref, kind):
+        """Optional exact-version memo; expired source/detail refs are never reused."""
+        with self._connection() as connection:
+            source = self._resolved_snapshot(connection, self._discovery_ref(connection, discovery_ref))
+            key = self._transform_cache_key(source, kind)
+            row = connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+            if row is None:
+                return None
+            try:
+                return self._resolved_snapshot(connection, row["value"])
+            except RecipeError:
+                return None
+
+    def remember_discovery_transform(self, discovery_ref, result_ref, kind):
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            source = self._resolved_snapshot(connection, self._discovery_ref(connection, discovery_ref))
+            result = self._resolved_snapshot(connection, self._discovery_ref(connection, result_ref))
+            fields = ("kind", "publisher", "url", "external_id")
+            if any(source["recipe"]["source"].get(field) != result["recipe"]["source"].get(field) for field in fields) or recipe_source_provider(source["recipe"]) != recipe_source_provider(result["recipe"]):
+                raise RecipeError("recipe transform changed source identity")
+            key = self._transform_cache_key(source, kind)
+            # This is disposable memo metadata, never a personal entry or binding.
+            connection.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", (key, result_ref))
+            connection.execute("DELETE FROM metadata WHERE key LIKE 'recipe_transform:v1:%' "
+                               "AND value NOT IN (SELECT discovery_ref FROM discovery_snapshots)")
+            connection.execute("DELETE FROM metadata WHERE key IN (SELECT key FROM metadata "
+                               "WHERE key LIKE 'recipe_transform:v1:%' ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
+                               (MAX_UNBOUND_DISCOVERY_SNAPSHOTS,))
+
     def persist_discovery(self, value: Any) -> dict[str, Any]:
         document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(value)
         serialized = _canonical(document)
@@ -3972,7 +4017,7 @@ class RecipeStore:
                 resolved = self._resolved_snapshot(connection, ref)
                 recipe = resolved["recipe"]
                 source_identity = source_key(recipe)
-                existing = connection.execute("SELECT * FROM recipes WHERE source_key=?", (source_identity,)).fetchone() if source_identity else None
+                existing = self._source_duplicate(connection, recipe)
                 if existing is not None:
                     _, _, existing_content_hash, existing_attribution_digest = self._snapshot_parts(
                         _stored_recipe_document(existing["document"])
@@ -4014,6 +4059,30 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
+    @staticmethod
+    def _source_duplicate(connection, recipe):
+        """Reconcile pre-case-preserving lookup keys from exact stored evidence.
+
+        Runs only within an existing explicit bank-write transaction. Recipe
+        documents, revisions, frozen references and usage keys are unchanged.
+        """
+        identity = source_key(recipe)
+        if identity is None:
+            return None
+        source = recipe.get("source") or {}
+        legacy = (f"{_normalized_text(source['publisher'])}:{_normalized_text(source['external_id'])}"
+                  if source.get("publisher") and source.get("external_id") else identity)
+        rows = connection.execute("SELECT * FROM recipes WHERE source_key IN (?,?)", (identity, legacy)).fetchall()
+        match = None
+        for row in rows:
+            stored_identity = source_key(_stored_recipe_document(row["document"]))
+            if stored_identity != row["source_key"]:
+                # An uppercase legacy ID may occupy the lowercase ID's key.
+                connection.execute("UPDATE recipes SET source_key=? WHERE id=?", (stored_identity, row["id"]))
+            if stored_identity == identity:
+                match = row
+        return match
+
     def _save(self, connection: sqlite3.Connection, recipe: Mapping[str, Any], status: str, key: str | None, created_via: str, *, migration_identity: str | None = None) -> dict[str, Any]:
         request_hash = _hash({"recipe": recipe, "status": status})
         if existing := self._idem(connection, key, "save", request_hash):
@@ -4021,7 +4090,8 @@ class RecipeStore:
         content_hash = _hash(recipe)
         source_identity = migration_identity or source_key(recipe)
         if source_identity:
-            duplicate = connection.execute("SELECT * FROM recipes WHERE source_key=?", (source_identity,)).fetchone()
+            duplicate = (connection.execute("SELECT * FROM recipes WHERE source_key=?", (source_identity,)).fetchone()
+                         if migration_identity else self._source_duplicate(connection, recipe))
             if duplicate is not None:
                 if duplicate["content_hash"] != content_hash:
                     raise RecipeError("source identity already belongs to a different recipe revision")
@@ -4122,7 +4192,7 @@ class RecipeStore:
                         return {"outcome": "conflict", "reason": "pack_content_changed", "recipe": result}
                     return {"outcome": "unchanged", "recipe": result}
                 identity = source_key(recipe)
-                duplicate = connection.execute("SELECT * FROM recipes WHERE source_key=?", (identity,)).fetchone() if identity else None
+                duplicate = self._source_duplicate(connection, recipe)
                 if duplicate is not None:
                     return {"outcome": "conflict", "reason": "source_identity_exists", "recipe": self._record(connection, duplicate, created=False)}
                 result = self._save(connection, recipe, "active" if status == "ready" else "draft", None, "pack")
@@ -4173,6 +4243,7 @@ class RecipeStore:
         favorites_only: bool = False,
         entry_origin: str | None = None,
         offset: int = 0,
+        status_filter: str | None = None,
     ) -> list[dict[str, Any]]:
         text = _bounded_text(query, "query", maximum=200) or ""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
@@ -4183,9 +4254,13 @@ class RecipeStore:
             raise RecipeError("search offset must be a non-negative integer")
         if entry_origin is not None and entry_origin not in ("user", "bundled", "unknown"):
             raise RecipeError("entry_origin must be user, bundled or unknown")
+        if status_filter not in {None, "active", "draft", "archived"}:
+            raise RecipeError("invalid recipe status filter")
         literal = _normalized_text(text).replace("!", "!!").replace("%", "!%").replace("_", "!_")
         needle = f"%{literal}%"
         status = "" if include_archived else "AND status != 'archived'"
+        if status_filter is not None:
+            status += " AND status = ?"
         favorite = (
             "AND EXISTS (SELECT 1 FROM recipe_favorites AS favorite "
             "WHERE favorite.library_id='builtin' AND favorite.recipe_id=recipes.id "
@@ -4197,8 +4272,8 @@ class RecipeStore:
             with self._connection() as connection:
                 connection.execute("BEGIN")
                 rows = connection.execute(
-                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (needle, needle, *([entry_origin] if entry_origin is not None else []), limit, offset),
+                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
+                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), limit, offset),
                 ).fetchall()
                 return [self._record(connection, row) for row in rows]
         except sqlite3.Error as exc:
@@ -4383,8 +4458,8 @@ class RecipeStore:
                     bind_recipe_source(recipe, prior=previous)
                 validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(current["document"]))
                 identity = source_key(recipe)
-                collision = connection.execute("SELECT id FROM recipes WHERE source_key=? AND id != ?", (identity, recipe_id)).fetchone() if identity else None
-                if collision:
+                collision = self._source_duplicate(connection, recipe)
+                if collision is not None and collision["id"] != recipe_id:
                     raise RecipeError("source identity already belongs to another recipe")
                 revision = expected_revision + 1
                 updated_at = _now()

@@ -19,6 +19,8 @@ from core import HouseholdError, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem
+from recipe_selection import history_source_index, family_history_usage, compact_candidate
+from planner import _validate_request
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
 from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
@@ -656,8 +658,19 @@ class PlanningOperations:
             reference = {"discovery_ref": discovery_ref}
         return reference, canonical(reference)
 
+    def _planner_history_index(self, state):
+        def resolve(reference):
+            if "recipe_ref" in reference:
+                ref = reference["recipe_ref"]
+                return self.recipes.get(ref["id"], ref["revision"])
+            return self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
+        return history_source_index(state, resolve)
+
+    def _planner_family_usage(self, candidate, state, week, index):
+        return family_history_usage(candidate, index, lambda key: self._usage_summary(state, key, week))
+
     def _resolve_planner_candidates(
-        self, request: Mapping[str, Any], state: Mapping[str, Any]
+        self, request: Mapping[str, Any], state: Mapping[str, Any], *, history_index=None
     ) -> list[dict[str, Any]]:
         history = state.get("recipe_usage")
         if not isinstance(history, Mapping) or len(history) > MAX_HISTORY_RECORDS:
@@ -670,12 +683,14 @@ class PlanningOperations:
                 f"planner candidates must contain one to {MAX_CANDIDATES} entries"
             )
         resolved = []
+        history_index = history_index if history_index is not None else self._planner_history_index(state)
         seen = set()
         for raw in raw_candidates:
             reference, reference_key = self._planner_reference(raw)
             if reference_key in seen:
                 raise PlannerError("planner candidates contain a duplicate exact reference")
             seen.add(reference_key)
+            metadata = {}
             if "recipe_ref" in reference:
                 exact = reference["recipe_ref"]
                 stored = self.recipes.get(exact["id"], exact["revision"])
@@ -687,6 +702,7 @@ class PlanningOperations:
                     materialization_error = "only active built-in recipe revisions can be planned"
                 key = stored["recipe_key"]
                 recipe = normalize_recipe(stored)
+                metadata = {field: deepcopy(stored[field]) for field in ("is_favorite", "entry_origin", "locally_modified") if field in stored}
             else:
                 snapshot = self.recipes.resolve_discovery(reference["discovery_ref"])
                 recipe = snapshot["recipe"]
@@ -700,6 +716,7 @@ class PlanningOperations:
                 materialization_error = problem
             supplied_facts = deepcopy(raw.get("facts", {})) if isinstance(raw, Mapping) else {}
             resolved.append({
+                **metadata,
                 "reference": reference,
                 "reference_key": reference_key,
                 "recipe": recipe,
@@ -711,7 +728,19 @@ class PlanningOperations:
                 "supplied_facts": supplied_facts,
                 "materialization_error": materialization_error,
             })
+            resolved[-1]["usage"] = self._planner_family_usage(resolved[-1], state, request["week"], history_index)
         return resolved
+
+    @staticmethod
+    def _planner_feedback(candidate, state, as_of_date, feedback=None):
+        feedback = feedback if feedback is not None else pf.effective(state["planning_feedback"], as_of_date)
+        keys = set(candidate.get("usage", {}).get("family_recipe_keys", [candidate["recipe_key"]]))
+        signals = [feedback["signals"][key] for key in keys if key in feedback["signals"]]
+        candidate.pop("planning_feedback", None)
+        if signals:
+            candidate["planning_feedback"] = {"weight": max(-6, min(6, sum(signals))),
+                "policy_version": pf.POLICY_VERSION,
+                "events": [event for event in feedback["events"] if event["recipe_key"] in keys]}
 
     def _run_planner(
         self, request: Mapping[str, Any], resolved: list[Mapping[str, Any]],
@@ -724,14 +753,11 @@ class PlanningOperations:
             )
         feedback = pf.effective(state["planning_feedback"], request["as_of_date"])
         refreshed = []
+        index = self._planner_history_index(state)
         for candidate in resolved:
             item = deepcopy(dict(candidate))
-            item["usage"] = self._usage_summary(
-                state, item["recipe_key"], request["week"]
-            )
-            if item["recipe_key"] in feedback["signals"]:
-                item["planning_feedback"] = {"weight": feedback["signals"][item["recipe_key"]],
-                    "policy_version": pf.POLICY_VERSION, "events": [e for e in feedback["events"] if e["recipe_key"] == item["recipe_key"]]}
+            item["usage"] = self._planner_family_usage(item, state, request["week"], index)
+            self._planner_feedback(item, state, request["as_of_date"], feedback)
             refreshed.append(item)
         profile = state.get("profile")
         if not isinstance(profile, Mapping):
@@ -748,8 +774,19 @@ class PlanningOperations:
         request = self._effective_planner_request(
             value, snapshot, anchor_current_date=anchor_current_date
         )
-        resolved = self._resolve_planner_candidates(request, snapshot)
-        result = self._run_planner(request, resolved, snapshot)
+        collection = None
+        if request["candidates"] is None:
+            _validate_request(request, allow_discovery=True)
+            collection = self._collect_planner_candidates(request, snapshot)
+            request["candidates"] = [{**item["reference"], **({"facts": item["supplied_facts"]} if item.get("supplied_facts") else {})}
+                                     for item in collection["candidates"]]
+        resolved = self._resolve_planner_candidates(request, snapshot) if collection is None or request["candidates"] else []
+        result = self._run_planner(request, resolved, snapshot) if resolved else {"status": "needs_input", "save_handoffs": []}
+        if collection is not None:
+            result["discovery"] = {key: deepcopy(value) for key, value in collection.items() if key not in {"candidates", "unknown", "rejected"}}
+            for category in ("unknown", "rejected"):
+                result["discovery"][category] = [{**compact_candidate(item["recipe"], item["reference"]), "recipe_digest": item["content_digest"], "hard_constraints": item["hard_constraints"]}
+                                                  for item in collection[category]]
         result["cooking_experiences"] = pf.experiences(snapshot["planning_feedback"], {r["recipe_key"] for r in resolved})[-36:]
         if len(json.dumps({"ok": True, "result": {"plan": result}}, ensure_ascii=True).encode()) > MAX_REQUEST - 4_096:
             raise PlannerError("planner result cannot fit the response transport")

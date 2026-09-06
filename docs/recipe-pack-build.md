@@ -91,6 +91,26 @@ notes. It treats image rights separately. Explicit supported CC/CC0/public-domai
 image metadata can establish eligibility; absent or unsupported notices remain
 unresolved. License labels do not grant trusted pack origin.
 
+Image notices retain the supplied title, attribution requirement, separate
+credit and requested attribution, copyright notices, and attribution/source-review
+categories. Missing machine-readable authors do not automatically disqualify an
+image. Reviewed Commons description-page supplements bind the original image
+SHA-256 and exact description URL and retain a revision permalink. They distinguish
+photographers, copyright holders, uploaders and later editors; unknown creators
+remain unknown. Complete notices survive in `attribution.json` even when their
+combined display credit exceeds the recipe field limit.
+The supplements were reviewed on 6 September 2026. A Commons revision permalink
+pins the description; editor notes can come from the separately displayed file
+history, which MediaWiki does not freeze with the description revision.
+
+One reviewed exception omits the optional `SN1.JPG` cover for unresolved
+transfer-source verification. Its original Wikibooks description was deleted
+after transfer; the public upload log cannot recover the original permission
+text, and Commons still carries the transfer-review warning. This is not a finding
+of infringement. The recipe and its supplied Serendipity1987 attribution, declared
+licenses, warning and source references remain in the pack. Other unknown-author
+images retain their existing eligibility.
+
 TheMealDB text is normalized locally but withheld from the initial public ZIP
 pending a supported redistribution basis. Entries with upstream attribution and
 entries with unknown authorship receive different reasons. An empty `strSource`

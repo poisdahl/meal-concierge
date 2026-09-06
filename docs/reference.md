@@ -773,8 +773,8 @@ changed content retains the existing explicit conflict workflow.
 Recipe `discover` fetches enabled sources concurrently with bounded result,
 response-size and time limits. A slow, empty or failed source is reported per
 source and does not suppress usable results from another source. Results are
-round-robin balanced and conservatively deduplicated by exact source identity
-or exact normalized name-and-ingredient content. No arbitrary recipe URL is
+round-robin balanced and deduplicated by known exact source aliases, preserving
+opaque external-ID case. Similar names or ingredient lists do not merge sources. No arbitrary recipe URL is
 fetched.
 
 Every external discovery result carries an opaque, store-bound `discovery_ref`
@@ -807,8 +807,14 @@ ID and revision even after cleanup or a later explicit recipe update.
 ## Deterministic weekly-menu planning
 
 `meal_concierge_menu(action="plan")` is the server-owned whole-week planner.
-Its `planner_input` contains a week, optional exact dates and portions, and a
-bounded `candidates` list. Each candidate must contain exactly one built-in
+Its `planner_input` contains a week and optional exact dates and portions.
+Omit `candidates` for automatic discovery through the enabled local bank (including
+installed user/imported/bundled entries) and selected enabled retailer. The server
+returns per-source statuses and bounded work counts in `plan.discovery`, loads
+exact details and shortlists at most eight candidates before planning. Missing
+native detail/pagination contracts, shortfalls and unknowns never enable AI
+fallback. Installed packs do not require upstream API switches or sessions.
+A supplied bounded `candidates` list retains explicit-scope behavior. Each candidate must contain exactly one built-in
 `recipe_ref: {id, revision}` or one still-valid frozen `discovery_ref`; names,
 URLs, ordinals, copied recipe documents and “latest” are rejected. Dates omitted
 by the caller are derived once from the saved dinner/eat-day profile and then
@@ -817,11 +823,23 @@ returned as exact ISO dates in the canonical request. The service derives one
 current household date for the initial plan. That exact date is frozen in the
 handoff; ranking and save do not compare it with a later wall clock.
 
-The planner resolves every exact candidate locally once per plan or save. It
-does not refetch recipe sources or call Oda/Mathem/MENY. A candidate must be an active,
-full, materializable recipe that can be scaled to the exact requested portions.
-Original provider `link_only` candidates are reported as ineligible rather than
-being promoted from a title or summary. Candidate revisions, frozen discovery
+After automatic collection, the planner and its save handoff resolve exact
+candidate snapshots locally. Save revalidation does not repeat source discovery
+or retailer calls. Source-family history and explicit feedback apply before
+shortlisting and again at save revalidation. A candidate must be active and have a full recipe document with known person
+servings. Known ingredient quantities are scaled to the requested portions.
+Unknown or non-scalable measures stay visible with `scaling_ready=false` and
+unresolved product needs; they never establish a purchasable amount.
+Automatic MENY collection enriches exact link snapshots through the verified
+reader; unsupported detail readers remain explicit failed details. A title or
+summary cannot establish readiness. Compact discovery uses `projection=summary`,
+`source=internal|meny|oda|mathem`, `limit<=20` and unchanged `next_cursor`; local
+pages enumerate active entries before drafts. Default full discovery remains
+compatible. The `convert` action binds a client-assisted schema-2 recipe to the
+source `discovery_ref`, `recipe_digest` and `source_schema_version`, preserves
+attribution and rejects newly asserted source/user quantity evidence. Exact
+source/version transforms are cached within existing snapshot lifetime/bounds;
+accepted estimates can be reused after restart without creating personal entries. Candidate revisions, frozen discovery
 content digests, the complete bounded recipe-usage history, the complete current
 profile, current request overrides and every effective fact are included in the
 canonical input and `input_digest`.
