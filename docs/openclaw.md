@@ -70,20 +70,53 @@ synthetic; live provider behavior is not verified by this probe. A deliberately
 stalled native probe also verifies cleanup of its exact detached bridge after a
 timeout, while the independently owned service remains healthy.
 
-An isolated model run also verified the native embedded `openai/gpt-5.4-mini`
-route with subscription OAuth on this OpenClaw version. The native trace records
-successful Meal Concierge status and menu tool calls against the synthetic
-household, with no fallback. A native workspace-file read produced recipe JSON
-preserving the text fixture's servings, amounts, units and method; its hostile
-checkout/favorite instructions triggered no mutation tools. This establishes
-model access, MCP reads and text extraction, not a completed recipe import.
+Isolated model runs verified native embedded `openai/gpt-5.4-mini` with
+subscription OAuth and no fallback. Native setup kept the existing settings.
+Text and photo reads, plus the PDF utility over all three pages of one document,
+produced typed import previews through the shared MCP contract. The PDF utility
+used local extraction and model analysis; this does not establish provider-native
+PDF transport. Source instructions requesting checkout or favorites remained inert.
 
-Full model-driven setup/menu/presentation, file/photo/document attachment extraction
-through the shared import contract, durable scheduling and local-sender email
-acceptance remain pending. A client-local attachment path is not automatically
-readable by the service. Keep normalization on the client and use the declared
-bounded import boundary when available; do not expose household databases or
-credentials through a broad filesystem mount.
+After the serving-evidence correction, one native invocation imported all three
+retained extraction records through the actual MCP interface. Every request
+preserved its original quoted data. All three previews returned schema 2, two
+portions supported by `Page 1: Serves 2`, unchanged 200 g and 1.5 dl amounts, and
+an unknown, nonscalable tomato quantity. Each suggested draft status and created
+no personal entry. This verifies corrected native imports using retained records;
+it does not repeat photo or PDF extraction.
+
+Native draft save/read, seven-dinner menu plan/save and exact stored-menu readback
+passed. The saved menu contains seven dates and two portions per dinner. The
+planning response retained unavailable-source and unknown-quantity facts. A saved
+recipe response displayed its managed image and credit in the native UI;
+immediate display during the preceding save transition was not established.
+
+One native weekly timer reached synthetic `cart_ready` without payment. Separate
+native email occurrences verified image-free fallback and inline-image delivery
+to a local SMTP fixture. Each occurrence delivered exactly once, with a durable
+receipt matching the accepted MIME bytes and frozen recipe/image credits in plain
+text and HTML. The inline message contained the exact managed JPEG, matching
+Content-ID and HTML `cid:` reference. An injected lost `mark_sent` acknowledgment
+recovered through native replay of its original token and receipt, without
+another delivery. Completed occurrences were not resent.
+
+Inline capability is per call: an image-capable sender must explicitly supply
+`images_supported=true` to both `due` and `begin_send`. A true value in `due`
+is not inherited by `begin_send`; omission uses the conservative image-free
+fallback. The actual acceptance used the production payload and MIME builder,
+with an exact sender executable allowed by native policy.
+
+All four task jobs were removed through native APIs and acknowledged through the
+shared scheduler cleanup protocol. Revoked and wrong-job weekly invocations
+produced no provider or SMTP effects; unrelated disabled native jobs remained
+unchanged. Temporary model profiles and owned runtime processes were removed.
+These acceptance runs used synthetic provider responses and recipients, and do
+not establish live retailer or production email-provider behavior.
+
+Client-local attachment paths are not automatically readable by the service.
+Keep extraction on the client and transfer typed, quoted source records through
+the bounded import interface. Do not expose household databases or credentials
+through a broad filesystem mount.
 
 Upstream contracts: [MCP registry and cleanup](https://docs.openclaw.ai/cli/mcp)
 and [skill loading](https://docs.openclaw.ai/tools/skills).
