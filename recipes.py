@@ -404,7 +404,7 @@ def _quantity(value: Any, field: str) -> dict[str, int] | None:
 def _evidence(value: Any, field: str, *, original: str | None = None, basis: str = "unknown") -> dict[str, Any]:
     if value is None:
         value = {"basis": basis, "input": original}
-    if not isinstance(value, Mapping) or set(value) - {"basis", "input", "assumptions", "conversion", "calculation", "acceptance"}:
+    if not isinstance(value, Mapping) or set(value) - {"basis", "input", "assumptions", "conversion", "calculation", "acceptance", "project_review"}:
         raise RecipeError(f"{field} contains unsupported evidence fields")
     basis = value.get("basis", "unknown")
     if not isinstance(basis, str) or basis not in {"source", "user", "estimate", "unknown"}:
@@ -432,6 +432,12 @@ def _evidence(value: Any, field: str, *, original: str | None = None, basis: str
             if result["calculation"]["input_portions"] is None or not isinstance(portion_evidence, Mapping) or "calculation" in portion_evidence:
                 raise RecipeError(f"{field}.calculation needs original serving evidence")
             result["calculation"]["portions_evidence"] = _evidence(portion_evidence, f"{field}.calculation.portions_evidence")
+    review = value.get("project_review")
+    if review is not None:
+        if basis != "estimate" or not result["assumptions"] or not isinstance(review, Mapping) or set(review) != {"publisher", "pack_id", "pack_version"}:
+            raise RecipeError(f"{field}.project_review requires an estimate with explicit assumptions")
+        result["project_review"] = {key: _bounded_text(review.get(key), f"{field}.project_review.{key}", required=True, maximum=128)
+                                    for key in ("publisher", "pack_id", "pack_version")}
     acceptance = value.get("acceptance")
     if acceptance is not None:
         if basis != "estimate" or not isinstance(acceptance, Mapping) or set(acceptance) != {"recipe_digest", "statement"}:
@@ -752,7 +758,7 @@ def evidence_inputs(evidence: Any) -> list[Mapping[str, Any]]:
 
 
 def _unaccepted(evidence: Any) -> bool:
-    return any(item.get("basis") == "estimate" and not item.get("acceptance") for item in evidence_inputs(evidence))
+    return any(item.get("basis") == "estimate" and not item.get("acceptance") and not item.get("project_review") for item in evidence_inputs(evidence))
 
 
 def recipe_digest(recipe: Mapping[str, Any]) -> str:
@@ -810,6 +816,8 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
             raise RecipeError(f"{path}: an estimate cannot be relabeled as user, source or unknown evidence")
         if evidence.get("calculation") is not None and not inherited:
             raise RecipeError(f"{path}: calculation provenance is service-owned; scale an exact recipe version")
+        if any(item.get("project_review") is not None for item in evidence_inputs(evidence)) and not inherited:
+            raise RecipeError(f"{path}: project review requires a verified bundled import or unchanged exact field")
         if evidence.get("acceptance") is not None and not inherited:
             raise RecipeError(f"{path}: estimate acceptance is service-owned; use accept_estimates on an exact version")
         if evidence.get("basis") == "source" and not (inherited and recipe["source"] == prior["source"]):
@@ -4250,8 +4258,8 @@ class RecipeStore:
         prepared = prepare_recipe_input(value, prior=originals[0] if originals else None)
         if prior is None:
             for evidence in recipe_evidence_fields(prepared).values():
-                if evidence.get("acceptance") is not None or evidence.get("calculation") is not None:
-                    raise RecipeError("estimate acceptance and calculation are service-owned; save the exact discovery instead")
+                if evidence.get("acceptance") is not None or evidence.get("calculation") is not None or evidence.get("project_review") is not None:
+                    raise RecipeError("estimate acceptance, project review and calculation are service-owned; save the exact discovery instead")
         return prepared
 
     def save(self, value: Any, *, status: str = "active", idempotency_key: Any = None) -> dict[str, Any]:
@@ -4293,9 +4301,30 @@ class RecipeStore:
                     result = self._record(connection, existing, created=False)
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
-                    if content_hash != existing["baseline_hash"]:
-                        return {"outcome": "conflict", "reason": "pack_content_changed", "recipe": result}
-                    return {"outcome": "unchanged", "recipe": result}
+                    if content_hash == existing["baseline_hash"]:
+                        connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?", (version, existing["id"]))
+                        result.update(self._entry_metadata(connection, existing["id"]))
+                        return {"outcome": "unchanged", "recipe": result}
+                    # Publisher updates always change content. A same-content
+                    # status transition in history is a durable local decision,
+                    # including after any number of intervening pack upgrades.
+                    history = list(connection.execute(
+                        "SELECT revision,status,document FROM revisions WHERE recipe_id=? ORDER BY revision", (existing["id"],)))
+                    local_status = any(old["status"] != new["status"] and old["document"] == new["document"]
+                                       for old, new in zip(history, history[1:]))
+                    next_status = existing["status"] if local_status or existing["status"] == "archived" else ("active" if status == "ready" else "draft")
+                    validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(existing["document"]))
+                    duplicate = self._source_duplicate(connection, recipe)
+                    if duplicate is not None and duplicate["id"] != existing["id"]:
+                        return {"outcome": "conflict", "reason": "source_identity_exists", "recipe": result}
+                    revision, updated_at = existing["revision"] + 1, _now()
+                    connection.execute(
+                        "UPDATE recipes SET revision=?,status=?,name=?,search_text=?,source_key=?,content_fingerprint=?,content_hash=?,document=?,updated_at=? WHERE id=?",
+                        (revision, next_status, recipe["name"], self._search_text(recipe), source_key(recipe), content_fingerprint(recipe), content_hash, _canonical(recipe), updated_at, existing["id"]))
+                    connection.execute("INSERT INTO revisions VALUES(?,?,?,?,?)", (existing["id"], revision, next_status, _canonical(recipe), updated_at))
+                    connection.execute("UPDATE recipe_entry_metadata SET pack_version=?,baseline_hash=? WHERE recipe_id=?", (version, content_hash, existing["id"]))
+                    result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (existing["id"],)).fetchone(), created=False)
+                    return {"outcome": "updated", "recipe": result}
                 identity = source_key(recipe)
                 duplicate = self._source_duplicate(connection, recipe)
                 if duplicate is not None:

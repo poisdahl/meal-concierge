@@ -17,10 +17,11 @@ import tempfile
 import time
 import unicodedata
 
+from recipe_curation import SourceMethodExcluded
 from recipe_pack_sources import THEMEALDB_POLICY, THEMEALDB_TERMS, SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
 
 FORMAT = 'meal-concierge-recipes'
-NORMALIZER_VERSION = '1'
+NORMALIZER_VERSION = '2'
 RIGHTS_POLICY = 'wikibooks-cc-themealdb-attribution-v3'
 MAX_RECORD_BYTES = 512 * 1024
 MAX_SOURCE_BODY = 32 * 1024 * 1024
@@ -323,7 +324,7 @@ def write_file(root, relative, data):
 
 
 def fingerprint():
-    modules = ['recipes', 'recipe_quantities', 'recipe_assets', 'recipe_pack_sources', 'recipe_portable']
+    modules = ['recipes', 'recipe_quantities', 'recipe_assets', 'recipe_pack_sources', 'recipe_portable', 'recipe_curation']
     values = {name: digest(Path(importlib.import_module(name).__file__).read_bytes()) for name in modules}
     values['builder'] = digest(Path(__file__).read_bytes())
     for name in ['PIL', 'simplejpeg', 'numpy']:
@@ -456,7 +457,7 @@ class Covers:
         return data
 
 
-def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None):
+def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None):
     from recipe_assets import RecipeAssetError
     from recipe_portable import canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe
@@ -493,7 +494,25 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
     covers = Covers(covers_root, covers_manifest_sha256, snapshot_sha256, entries) if covers_root else None
     if covers_manifest_sha256 and covers is None:
         raise PackBuildError('cover checksum requires its root')
+    amendments = None
+    if curation is not None:
+        curation = Path(curation)
+        if not curation.is_absolute() or not re.fullmatch(r'[a-f0-9]{64}', curation_sha256 or ''):
+            raise PackBuildError('curation requires an absolute file and pinned SHA-256')
+        data = read_file(curation.parent, curation.name, 16 * 1024 * 1024)
+        if digest(data) != curation_sha256:
+            raise PackBuildError('curation digest mismatch')
+        document = load_json(data)
+        if not isinstance(document, dict) or set(document) != {'schema', 'records'} or document['schema'] != 1 or not isinstance(document['records'], dict):
+            raise PackBuildError('unsupported curation input')
+        amendments = document['records']
+        if set(amendments) - {f'{source}:{identity}' for source, identity in identities}:
+            raise PackBuildError('curation contains unknown source identities')
+    elif curation_sha256:
+        raise PackBuildError('curation checksum requires its file')
     versions = fingerprint()
+    if amendments is not None:
+        versions['curation_input_sha256'] = curation_sha256
     if covers:
         versions['covers_manifest_sha256'] = covers.manifest_sha256
     run_key = digest(encoded({'snapshot': snapshot_sha256, 'versions': versions, 'policy': RIGHTS_POLICY, 'pack_version': pack_version}))
@@ -522,8 +541,18 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         cached = None
         try:
             stored = load_json(read_file(output, filename, 2 * MAX_RECORD_BYTES))
+            if not isinstance(stored, dict) or not isinstance(stored.get('result'), dict):
+                raise ValueError('invalid cache object')
             if stored['key'] == key and stored['sha256'] == digest(encoded(stored['result'])):
                 cached = stored['result']
+                cached_status = cached.get('status')
+                if not isinstance(cached_status, str):
+                    raise ValueError('invalid cached status type')
+                if cached_status in {'ready', 'draft'}:
+                    if not isinstance(cached.get('recipe'), dict) or not isinstance(cached.get('credit'), dict) or not isinstance(cached.get('reasons'), list) or not isinstance(cached.get('image_status'), str):
+                        raise ValueError('incomplete cached recipe')
+                elif cached_status not in {'failed_parse', 'excluded_missing_source_method'}:
+                    raise ValueError('invalid cached status')
                 if cached.get('image_status') == 'invalid_derivative':
                     cached = None
                 else:
@@ -534,6 +563,12 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             try:
                 reader = wikibooks_recipe if entry['source'] == 'wikibooks' else mealdb_recipe
                 recipe, credit = reader(entry, payloads.get('rendered', payloads['raw']))
+                if amendments is not None:
+                    from recipe_curation import curate
+                    try:
+                        recipe, credit = curate(recipe, credit, pack_version=pack_version, amendments=amendments)
+                    except (RecipeError, KeyError, TypeError, ValueError) as exc:
+                        raise PackBuildError('curation failed for '+entry['source']+':'+entry['source_id']+': '+str(exc)) from exc
                 status, reasons = readiness(recipe)
                 reasons.extend(credit.get('normalization_issues', []))
                 if reasons:
@@ -545,6 +580,9 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                     credit['image_notices'] = notices
                     credit['image_source_url'] = entry['image'].get('description_url') or entry['image'].get('source_url')
                     image_status = notices.get('reviewed_source', {}).get('omission_reason') or 'not_selected_by_image_policy'
+                    if credit.get('image_omission'):
+                        image_record = None
+                        image_status = 'omitted_after_adaptation'
                     if image_record:
                         image_status = 'awaiting_reviewed_derivative'
                         if covers:
@@ -563,6 +601,10 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                                 image_status = 'invalid_derivative'
                                 credit['image_error'] = 'managed_cover_unavailable_or_invalid'
                 cached = {'recipe': recipe, 'status': status, 'reasons': reasons, 'credit': credit, 'image_status': image_status}
+            except SourceMethodExcluded as exc:
+                cached = {'status': 'excluded_missing_source_method', 'reason': str(exc)}
+            except PackBuildError:
+                raise
             except (SourceParseError, RecipeError, KeyError, TypeError, ValueError) as exc:
                 cached = {'status': 'failed_parse', 'error': str(exc)}
             cached_bytes = encoded({'key': key, 'sha256': digest(encoded(cached)), 'result': cached})
@@ -707,9 +749,12 @@ def main():
     parser.add_argument('--pack-version', required=True)
     parser.add_argument('--covers-root', type=Path)
     parser.add_argument('--covers-manifest-sha256')
+    parser.add_argument('--curation', type=Path)
+    parser.add_argument('--curation-sha256')
     args = parser.parse_args()
     print(json.dumps(build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
-                           covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256), indent=2))
+                           covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256,
+                           curation=args.curation, curation_sha256=args.curation_sha256), indent=2))
 
 
 if __name__ == '__main__':

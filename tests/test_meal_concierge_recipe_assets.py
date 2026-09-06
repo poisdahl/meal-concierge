@@ -294,7 +294,7 @@ class RecipeAssetBankTests(unittest.TestCase):
         self.assertEqual(repeat["outcome"], "unchanged")
         self.assertEqual((repeat["recipe"]["revision"], repeat["recipe"]["status"]), (2, "archived"))
         self.assertTrue(repeat["recipe"]["is_favorite"])
-        self.assertEqual(repeat["recipe"]["pack"]["version"], "1")
+        self.assertEqual(repeat["recipe"]["pack"]["version"], "2")
         self.assertFalse(repeat["recipe"]["locally_modified"])
         changed = deepcopy(first)
         changed["name"] = "Local edit"
@@ -309,24 +309,26 @@ class RecipeAssetBankTests(unittest.TestCase):
         self.assertTrue(historical["locally_modified"])
         self.assertTrue(historical["is_favorite"])
 
-    def test_changed_pack_conflicts_and_interrupted_per_record_import_resumes(self):
+    def test_changed_untouched_pack_upgrades_and_interrupted_per_record_import_resumes(self):
         first = self.pack(status="draft")["recipe"]
         changed = deepcopy(self.recipe)
         changed["name"] = "New upstream edition"
-        conflict = self.pack(changed, version="2")
-        self.assertEqual(conflict["reason"], "pack_content_changed")
-        self.assertEqual(conflict["recipe"]["status"], "draft")
+        updated = self.pack(changed, version="2")
+        self.assertEqual(updated["outcome"], "updated")
+        self.assertEqual(updated["recipe"]["status"], "active")
+        self.assertEqual(updated["recipe"]["id"], first["id"])
+        self.assertEqual(self.bank.get(first["id"], 1)["name"], first["name"])
         bad = deepcopy(changed)
         bad["source"]["url"] = "https://example.invalid/other"
         bad["image"]["asset_id"] = "sha256:" + "a" * 64
         with self.assertRaisesRegex(RecipeError, "available managed asset"):
             self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="other", version="1")
-        self.assertEqual(self.pack()["outcome"], "unchanged")
+        self.assertEqual(self.pack(changed, version="2")["outcome"], "unchanged")
         bad["image"] = None
         second = self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="other", version="1")
         self.assertEqual(second["outcome"], "created")
         self.assertEqual(second["recipe"]["status"], "active")
-        self.assertEqual(self.bank.get(first["id"])["revision"], 1)
+        self.assertEqual(self.bank.get(first["id"])["revision"], 2)
         bad["source_provider"] = "oda"
         with self.assertRaisesRegex(RecipeError, "store-bound"):
             self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="bound", version="1")

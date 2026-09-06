@@ -234,22 +234,25 @@ the shared bounded archive codec. It verifies the descriptor's hash, size and
 format; `--recipe-pack PATH` accepts only a local artifact matching that descriptor
 and only during `install` or `update`. Archive data does not pass through RPC.
 
-This runtime pins [recipe pack 2026-09-06.4](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.4).
-It contains 4,600 English recipes: 3,807 from Wikibooks and 793 from TheMealDB,
-with 1,576 compressed JPEGs used by 1,586 recipes. The download is 186,706,769
-bytes (about 178 MiB); archive contents occupy 223,672,835 bytes (about 213 MiB)
-before import into the bank. Twenty Wikibooks pages could not be parsed.
+This runtime pins [recipe pack 2026-09-06.5](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.5).
+It contains 4,599 English recipes: 3,807 from Wikibooks and 792 from TheMealDB,
+with 1,570 compressed JPEGs used by 1,580 recipes. Twenty additional Wikibooks
+pages could not be parsed and are excluded. One TheMealDB placeholder without an
+actionable source method is also excluded. Existing saved copies are preserved.
 
-Twenty-five recipes meet the pack’s quantity and serving checks. The other 4,575
-remain readable drafts; portions or quantities must be completed before scaling
-and shopping. Source links, revision information where available, and separate
+All included recipes have quantified ingredients and person-serving values.
+Publisher estimates remain labelled as estimates, with assumptions available;
+they do not represent personal user acceptance or nutritional validation.
+Recipes with source omissions include explicit editorial adaptations.
+Source links, revision information where available, and separate
 text and image credits are included. TheMealDB content uses attribution-based
 redistribution; its supplied upstream recipe links are retained.
 
 Use the latest repository code when installing or updating. The installer
 verifies the published digest and format for both the default HTTPS download
-and a local `--recipe-pack` file. Repeated imports are idempotent; local edits,
-favorites, archived entries and recipe history are preserved. Conflicts are
+and a local `--recipe-pack` file. Repeated imports are idempotent. An unchanged bundled recipe advances to the new
+publisher version with a new history revision. Local content edits produce a
+conflict; favorites, explicit local status and archived entries are preserved. Conflicts are
 reported for explicit resolution. A pack download failure leaves the core
 runtime usable and reports that the recipe collection needs attention.
 

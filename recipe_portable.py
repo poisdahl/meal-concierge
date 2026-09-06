@@ -868,6 +868,11 @@ def _preflight(archive: PortableArchive) -> dict:
             raise RecipeError("a bundled pack cannot contain store-bound recipes")
         if any(item.get("acceptance") for value in recipe_evidence_fields(recipe).values() for item in evidence_inputs(value)):
             raise RecipeError("a bundled pack cannot supply local estimate acceptance")
+        for evidence in recipe_evidence_fields(recipe).values():
+            for item in evidence_inputs(evidence):
+                if item.get("project_review") is not None and item["project_review"] != {
+                    "publisher": "Meal Concierge", "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"]}:
+                    raise RecipeError("project review does not match the verified release")
         if record["status"] == "ready":
             scaled = scale_recipe(recipe)
             if not scaled["readiness"]["scaling_ready"] or not all(item["scalable"] for item in scaled["shopping_requirements"]):
@@ -935,7 +940,7 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
 
     The installer owns the service/state lifetime locks throughout this call.
     This internal API is not an ordinary upload tool. It never restores state
-    or operation journals and never changes favorites or existing recipe rows.
+    or operation journals. Favorites, archives and locally edited recipes are preserved.
     """
     from recipe_assets import RecipeAssetError, RecipeAssets
     from recipes import RecipeStore
@@ -954,7 +959,7 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
             report = {"status": "in_progress", "archive_sha256": expected_descriptor["sha256"],
                       "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
                       "total": checked["records_count"], "processed": 0, "created": 0,
-                      "unchanged": 0, "conflicts": 0, "failed": 0,
+                      "updated": 0, "unchanged": 0, "conflicts": 0, "failed": 0,
                       "report_directory": relative}
             results = []
             _report_bytes(directory, "status.json", canonical_bytes(report))
@@ -967,7 +972,7 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
                         assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
                     outcome = store.import_pack_record(record["recipe"], pack_id=archive.manifest["pack_id"],
                         recipe_id=current, version=archive.manifest["pack_version"], status=record["status"])
-                    category = {"created": "created", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
+                    category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
                     report[category] += 1
                     report["processed"] += 1
                     result = {"recipe_id": current, "outcome": outcome["outcome"],

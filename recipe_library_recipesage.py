@@ -1323,7 +1323,7 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         user_notes: str | None = None
         if metadata is not None:
             origin, _raw_stored, document, user_notes = metadata
-            if any(e.get("acceptance") is not None for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
+            if any(e.get("acceptance") is not None or e.get("project_review") is not None for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
                 raise RecipeLibraryError("external recipe metadata cannot establish local estimate acceptance")
             if document.get("schema_version") == 2 and document["source"]["relationship"] == "generated" and any(e["basis"] != "estimate" for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
                 raise RecipeLibraryError("generated external metadata cannot relabel estimate evidence")

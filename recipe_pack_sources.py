@@ -490,14 +490,13 @@ def wikibooks_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
 
 
 def readiness(recipe: dict) -> tuple[str, list[str]]:
-    """Conservative pack eligibility; runtime still evaluates its own constraints."""
-    reasons = []
-    if recipe.get("portions") is None:
-        reasons.append("person_servings_unknown")
-    for i, ingredient in enumerate(recipe["ingredients"]):
-        if not ingredient.get("scalable"):
-            reasons.append(f"ingredients.{i}.quantity_or_unit_unresolved")
-        for key in ("quantity", "unit"):
-            if ingredient["evidence"][key]["basis"] not in {"source", "user"}:
-                reasons.append(f"ingredients.{i}.{key}_evidence_unresolved")
-    return ("draft" if reasons else "ready"), reasons
+    """Use the runtime evidence/quantity contract for bundled eligibility too."""
+    from recipes import scale_recipe
+    scaled = scale_recipe(recipe)
+    reasons = list(scaled['readiness']['missing_decisions'])
+    for index, requirement in enumerate(scaled['shopping_requirements']):
+        if not requirement['scalable']:
+            reason = f'ingredients.{index}.quantity_or_unit_unresolved'
+            if reason not in reasons:
+                reasons.append(reason)
+    return ('draft' if reasons else 'ready'), reasons

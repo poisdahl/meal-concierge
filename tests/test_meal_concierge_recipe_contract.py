@@ -438,6 +438,28 @@ class RecipeContractTests(unittest.TestCase):
             with self.subTest(library=library), self.assertRaises(RecipeLibraryError):
                 adapter._mapped_recipe({**payload, "id": "11111111-1111-4111-8111-111111111111"})
 
+    def test_publisher_estimates_render_distinctly_and_external_sidecars_cannot_forge_them(self):
+        recipe = authored_recipe()
+        recipe["portions_evidence"] = {"basis": "estimate", "input": "two loaves",
+            "assumptions": "Twelve person servings from two loaves.",
+            "project_review": {"publisher": "Meal Concierge", "pack_id": "test", "pack_version": "1"}}
+        saved = self.app.recipes.import_pack_record(recipe, pack_id="test", recipe_id="bread", version="1")["recipe"]
+        scaled = scale_recipe(saved, 2)
+        rendered = menu_email_html({"week": "2026-W40", "dishes": [scaled], "salads": []})
+        self.assertIn("anslag fra Meal Concierge", rendered)
+        self.assertNotIn("må avklares", rendered)
+        self.assertNotIn("godkjent anslag", rendered)
+        self.assertNotIn("acceptance", saved["portions_evidence"])
+        for cls, library in ((MealieAdapter, "mealie"), (RecipeSageAdapter, "recipesage")):
+            adapter = cls({"library_id": "fixture-" + library, "provider": library,
+                "base_url": "https://recipes.example", "read_only": False}, {"token": "synthetic"})
+            operation = {"operation_id": "libop:v1:abcdefghijklmnop", "library_id": "fixture-" + library,
+                "snapshot_digest": "a" * 64, "source_identity": "fixture:source"}
+            for value in (recipe, scaled):
+                payload, _ = adapter._native_payload(value, operation)
+                with self.subTest(library=library), self.assertRaises(RecipeLibraryError):
+                    adapter._mapped_recipe({**payload, "id": "11111111-1111-4111-8111-111111111111"})
+
     def test_both_native_sidecars_cannot_forge_acceptance(self):
         for cls, library in ((MealieAdapter, "mealie"), (RecipeSageAdapter, "recipesage")):
             adapter = cls({"library_id": "fixture-" + library, "provider": library, "base_url": "https://recipes.example", "read_only": False}, {"token": "synthetic"})

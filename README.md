@@ -127,15 +127,15 @@ provider limitations, existing-installation adoption and safe data handling.
 
 The English recipe collection includes Wikibooks Cookbook and TheMealDB recipes,
 compressed cover images where available, and source credits. It works offline.
-Recipes with missing portions or quantities remain drafts until completed for
-scaling and shopping.
+The 4,599 recipes include editable estimates for portions and quantities, clearly
+marked where used. Some recipes have been completed or adapted by Meal Concierge.
 
 Use the latest repository code. `install` downloads the matching recipe release
 automatically; existing installations receive it with `./install.sh update`.
 Your saved recipes and favorites are preserved; conflicting changes are reported.
 
-For an offline installation, download `meal-concierge-recipes-2026-09-06.4.zip`
-from the [recipe release](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.4)
+For an offline installation, download `meal-concierge-recipes-2026-09-06.5.zip`
+from the [recipe release](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.5)
 and add `--recipe-pack /absolute/path/to/the.zip` to your `install` or `update`
 command. Choose the recipe ZIP in **Assets**; GitHub's “Source code” downloads
 contain the program source. See [installation](#installation) for prerequisites.

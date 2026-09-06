@@ -235,7 +235,12 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 text = " ".join(part for part in (amount, item) if part) if amount else raw or item
                 estimates = [e for evidence in value.get("evidence", {}).values() for e in evidence_inputs(evidence) if e.get("basis") == "estimate"]
                 if estimates:
-                    text += " (godkjent anslag)" if all(e.get("acceptance") for e in estimates) else " (anslag; må avklares)"
+                    if all(e.get("acceptance") for e in estimates):
+                        text += " (godkjent anslag)"
+                    elif all(e.get("acceptance") or e.get("project_review") for e in estimates):
+                        text += " (anslag fra Meal Concierge)"
+                    else:
+                        text += " (anslag; må avklares)"
             else:
                 text = str(value).strip()
             if text:
@@ -384,7 +389,12 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             portions_text = f"{recipe['portions']} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
             portion_evidence = recipe.get("portions_evidence") or {}
             if portion_evidence.get("basis") == "estimate":
-                portions_text += " (godkjent anslag)" if portion_evidence.get("acceptance") else " (anslag; må avklares)"
+                if portion_evidence.get("acceptance"):
+                    portions_text += " (godkjent anslag)"
+                elif portion_evidence.get("project_review"):
+                    portions_text += " (anslag fra Meal Concierge)"
+                else:
+                    portions_text += " (anslag; må avklares)"
                 if portion_evidence.get("assumptions"):
                     portions_text += ": " + portion_evidence["assumptions"]
             source_yield = recipe.get("yield") or {}

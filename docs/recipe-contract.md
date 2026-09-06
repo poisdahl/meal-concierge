@@ -108,13 +108,22 @@ A calculation depending on an estimate remains estimated: readiness and display
 inspect both its quantity and serving evidence, retaining each acceptance and
 assumption. Original ingredient/yield wording is bounded to 500 characters.
 
+A verified bundled pack may attach `project_review` to an estimate with explicit
+assumptions: `{"publisher":"Meal Concierge","pack_id":"…","pack_version":"…"}`.
+The marker must match the trusted archive descriptor. It permits scaling while
+retaining the estimated basis, including dependencies of later calculations.
+It is separate from personal `acceptance`; menus label it “anslag fra Meal
+Concierge”. Ordinary input and editable external-library metadata cannot create
+it. An unchanged exact field may retain it during a local edit. Changing the
+estimated value requires new evidence and the usual local decision process.
+
 Normalization is a version-aware decoder, not an authority check. At actual
 caller/import boundaries, source claims require trusted source context or the
 unchanged exact prior field. A culinary payload cannot create acceptance,
 create or change service-owned calculation provenance,
 relabel a known estimate, downgrade its version, remove known provider binding
 or replace original attribution. Generated new input is estimated. Editable
-external-library metadata cannot establish local user acceptance.
+external-library metadata cannot establish local user acceptance or publisher review.
 
 Recipes can be read and saved with unknown servings or unaccepted estimates.
 Automatic scaling rejects unresolved relevant evidence. Product preparation

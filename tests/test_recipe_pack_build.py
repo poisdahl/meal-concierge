@@ -373,6 +373,50 @@ class BuildRoundtripTests(unittest.TestCase):
                 self.assertTrue(all(r['recipe']['source_provider'] is None for r in records))
                 self.assertFalse(any('cache' in name or name.startswith('/') for name in archive.entries))
 
+    def test_malformed_cache_shapes_are_rebuilt_without_changing_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source,sha=self.fixture(root)
+            output=root/'output';options={'snapshot_sha256':sha,'pack_version':'test.1'}
+            first=build(source,output,**options);original=(output/first['archive']).read_bytes()
+            cache=next((output/'cache').glob('*/wikibooks-123.json'))
+            valid=json.loads(cache.read_bytes())
+            for bad in [[], {**valid,'result':[],'sha256':digest(encoded([]))},
+                        {**valid,'result':{'status':[]},'sha256':digest(encoded({'status':[]}))},
+                        {**valid,'result':{'status':'ready'},'sha256':digest(encoded({'status':'ready'}))}]:
+                with self.subTest(bad=bad):
+                    cache.write_bytes(encoded(bad))
+                    rebuilt=build(source,output,**options)
+                    self.assertEqual(rebuilt['cache_reused'],1)
+                    self.assertEqual(original,(output/first['archive']).read_bytes())
+
+    def test_source_bound_method_exclusion_survives_resume_and_does_not_hide_bad_hash(self):
+        from recipe_portable import open_archive
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            source,sha=self.fixture(root)
+            baseline=build(source,root/'baseline',snapshot_sha256=sha,pack_version='test.1')
+            with open_archive(root/'baseline'/baseline['archive']) as archive:
+                first=next(archive.records())
+            document={'schema':1,'records':{first['recipe_id']:{
+                'source_hash':first['recipe']['external_snapshot']['content_hash'],
+                'exclude_reason':'missing_source_method'}}}
+            curation=root/'curation.json';curation.write_bytes(encoded(document))
+            options={'snapshot_sha256':sha,'pack_version':'test.2','curation':curation,
+                     'curation_sha256':digest(curation.read_bytes())}
+            partial=build(source,root/'curated',stop_after=1,**options)
+            self.assertFalse(partial['complete'])
+            result=build(source,root/'curated',**options)
+            self.assertEqual(result['cache_reused'],1)
+            self.assertEqual(result['records'],1)
+            self.assertEqual(result['counts']['wikibooks.excluded_missing_source_method'],1)
+            with open_archive(root/'curated'/result['archive']) as archive:
+                self.assertNotIn(first['recipe_id'],[r['recipe_id'] for r in archive.records()])
+            document['records'][first['recipe_id']]['source_hash']='0'*64
+            curation.write_bytes(encoded(document));options['curation_sha256']=digest(curation.read_bytes())
+            with self.assertRaisesRegex(PackBuildError,'sealed recipe source'):
+                build(source,root/'bad',**options)
+            self.assertFalse(list((root/'bad').glob('*.zip')))
+
     def test_mealdb_text_and_cover_survive_build_resume_and_policy_cache_change(self):
         from unittest.mock import patch
         import build_recipe_pack

@@ -14,6 +14,7 @@ MAX_DENOMINATOR = 10**12
 # A bare cup, fluid ounce, pinch or volume-to-mass conversion is deliberately
 # absent: the source must supply its measurement convention or density.
 UNITS = {
+    "mg": ("g", Fraction(1, 1000)),
     **{unit: ("g", Fraction(1)) for unit in ("g", "gram", "grams", "gramme", "grammes")},
     **{unit: ("g", Fraction(1000)) for unit in ("kg", "kilogram", "kilograms")},
     **{unit: ("ml", Fraction(1)) for unit in ("ml", "milliliter", "milliliters", "millilitre", "millilitres")},
@@ -86,7 +87,7 @@ def parse_measure(value: str) -> tuple[dict[str, int] | None, str | None]:
     """Read an unambiguous source amount and unit without interpreting prose."""
     value = re.sub(r"(?<=\d)([¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])", r" \1", value)
     text = unicodedata.normalize("NFKC", value).replace("⁄", "/").strip()
-    match = re.fullmatch(r"(\d+\s+\d+/\d+|\d+/\d+|\d+(?:[.,]\d+)?)\s+(.+)", text)
+    match = re.fullmatch(r"(\d+\s+\d+/\d+|\d+/\d+|\d+(?:[.,]\d+)?)\s*([A-Za-z].*)", text)
     if not match:
         return None, None
     amount, unit = match.groups()

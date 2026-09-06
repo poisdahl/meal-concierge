@@ -30,12 +30,12 @@ RECIPE_PACK = {
     'format': 'meal-concierge-recipes',
     'format_version': 1,
     'recipe_schema_version': 2,
-    'normalizer_version': '1',
+    'normalizer_version': '2',
     'pack_id': 'wikibooks-themealdb-en',
-    'pack_version': '2026-09-06.4',
-    'bytes': 186706769,
-    'sha256': '08b3cd051208e0e2146eca512b2f751e4ee1a86af13fd069e4dcc321019afca7',
-    'url': 'https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-06.4/meal-concierge-recipes-2026-09-06.4.zip',
+    'pack_version': '2026-09-06.5',
+    'bytes': 186678225,
+    'sha256': '03454e61818d3c7de4c42abc56cbbfc2341da374c1fc911ac630e93b197e74a3',
+    'url': 'https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-06.5/meal-concierge-recipes-2026-09-06.5.zip',
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
 

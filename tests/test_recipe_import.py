@@ -766,7 +766,7 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
         self.assertEqual(store.get(saved["id"]), edited)
 
-    def test_new_version_content_conflicts_without_replacing_prior_record(self):
+    def test_new_version_updates_unmodified_record_with_history(self):
         from recipes import RecipeStore
         path = self.package()
         first = self.apply(path)
@@ -779,9 +779,13 @@ class PackInstallationTests(unittest.TestCase):
         updated = self.root / "updated.zip"
         write_archive(updated, self.manifest, {"records.jsonl": records})
         report = self.apply(updated)
-        self.assertEqual((report["status"], report["conflicts"]), ("partial", 1))
-        self.assertEqual(report["results"][0]["reason"], "pack_content_changed")
-        self.assertEqual(store.get(reference["recipe_id"]), before)
+        self.assertEqual((report["status"], report["updated"], report["conflicts"]), ("complete", 1, 0))
+        after = store.get(reference["recipe_id"])
+        self.assertEqual(after["id"], before["id"])
+        self.assertEqual(after["revision"], before["revision"] + 1)
+        self.assertEqual(after["notes"], "New release wording")
+        self.assertEqual(normalize_recipe(store.get(before["id"], before["revision"])), normalize_recipe(before))
+        self.assertEqual(self.apply(updated)["unchanged"], 1)
 
     def test_existing_user_source_identity_is_never_relabelled_bundled(self):
         from recipes import RecipeStore

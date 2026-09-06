@@ -54,6 +54,24 @@ are reported as parse failures. Source IDs remain distinct even when their
 content or cover hashes match. Complete source coverage includes redirects and
 non-recipes; produced recipe counts must not be substituted for page counts.
 
+### Editorial completion
+
+The optional `--curation /absolute/path/to/editorial-amendments.json` and
+`--curation-sha256 SHA256` inputs enable the offline completion pass. The JSON
+has `schema: 1` and `records` keyed by stable source identity. Each amendment
+binds the original content hash and lists its current source issues, changed
+culinary fields and explanation. Identity, source attribution and covers cannot
+be replaced by an amendment. A mismatch aborts the build. The input digest and
+curation code fingerprint bind caches and build resumption.
+
+The pass recovers source measures before applying documented cooking estimates.
+Source wording remains available separately; changed active recipes carry their
+current editorial instructions. Unrecognised foods remain unresolved. The
+builder uses runtime scaling readiness, including every shopping requirement,
+and never creates personal acceptance. Only the reviewed release introduces
+publisher estimate markers through the verified bundled-import path. Culinary
+review is required in addition to numeric completeness before publication.
+
 ### Reviewed dinner mappings
 
 Five narrow mappings bind source page, revision and rendered SHA-256 after
@@ -145,3 +163,8 @@ limits are unchanged.
 Installer discovery, trusted bundled origin, database updates, conflict handling,
 offline menu behavior, backup and relocated restore are separate integration
 paths. A passing builder test or a text-only archive does not certify them.
+
+Recipes without an actionable source method are excluded by a source-hash-bound
+curation decision, including previously completed placeholders. Short but real
+preparation methods remain eligible. Changed recipe yields retain their original
+value in attribution; covers that no longer represent an adaptation are omitted.
