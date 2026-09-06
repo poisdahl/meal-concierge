@@ -263,69 +263,38 @@ class RetailMcpClient:
             except HouseholdError:
                 raise
             except Exception as exc:
-                raise HouseholdError(f"{self.label} MCP is unavailable") from exc
+                # AnyIO groups transport failures; retain our actionable auth
+                # status without exposing third-party response/exception text.
+                errors = [exc]
+                while errors:
+                    error = errors.pop(0)
+                    if isinstance(error, HouseholdError):
+                        raise error from None
+                    if isinstance(error, BaseExceptionGroup):
+                        errors.extend(error.exceptions)
+                raise HouseholdError(f"{self.label} MCP is unavailable") from None
 
-    async def _run_async(self, tool: str | None, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
+    async def _run_async(self, tool: str | None, arguments: dict[str, Any], timeout: float, *, auth=None) -> dict[str, Any]:
         try:
             import httpx2 as httpx
             from mcp import ClientSession
             from mcp.client.streamable_http import streamable_http_client
-            from tools.mcp_oauth import (
-                HermesTokenStorage,
-                _build_client_metadata,
-                _configure_callback_port,
-                _make_callback_waiter,
-                _make_redirect_handler,
-            )
-            from tools.mcp_oauth_manager import _HERMES_PROVIDER_CLS
+            from provider_oauth import build_auth
         except ImportError as exc:
-            raise HouseholdError("Hermes MCP runtime is unavailable") from exc
+            raise HouseholdError("Meal Concierge MCP runtime is unavailable") from exc
 
-        token_directory = self.token_directory
-        server_name = self.server_name
-
-        class ExactStorage(HermesTokenStorage):
-            def __init__(self) -> None:
-                super().__init__(server_name, hermes_home=token_directory.parent)
-
-            def _tokens_path(self) -> Path:
-                return token_directory / f"{server_name}.json"
-
-            def _client_info_path(self) -> Path:
-                return token_directory / f"{server_name}.client.json"
-
-            def _meta_path(self) -> Path:
-                return token_directory / f"{server_name}.meta.json"
-
-        storage = ExactStorage()
-        if not storage.has_cached_tokens() or _HERMES_PROVIDER_CLS is None:
-            raise HouseholdError(f"{self.label} login is required")
-        oauth_config: dict[str, Any] = {}
-        _configure_callback_port(oauth_config, storage)
-        port = oauth_config.get("_resolved_port", 0)
-        provider = _HERMES_PROVIDER_CLS(
-            server_name=self.server_name,
-            preregistered=False,
-            server_url=self.endpoint,
-            client_metadata=_build_client_metadata(oauth_config),
-            storage=storage,
-            redirect_handler=_make_redirect_handler(port),
-            callback_handler=_make_callback_waiter(port, timeout=min(30.0, timeout)),
-        )
-        provider._hermes_home = str(token_directory.parent.resolve())
-        original = httpx.URL(self.endpoint)
-
-        async def same_origin(response: Any) -> None:
-            if response.is_redirect and response.next_request is not None:
-                target = response.next_request.url
-                if (target.scheme, target.host, target.port) != (original.scheme, original.host, original.port):
-                    raise HouseholdError(f"{self.label} MCP redirected outside its store")
+        provider = auth or build_auth(self.token_directory, self.server_name, self.label, self.endpoint)
+        async def reject_redirect(response: Any) -> None:
+            # httpx response hooks run before next_request is populated. Never
+            # forward credential-bearing POST bodies to a redirect destination.
+            if response.is_redirect:
+                raise HouseholdError(f"{self.label} MCP redirect is unsupported")
 
         async with httpx.AsyncClient(
             auth=provider,
-            follow_redirects=True,
+            follow_redirects=False,
             timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
-            event_hooks={"response": [same_origin]},
+            event_hooks={"response": [reject_redirect]},
         ) as client:
             async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
                 async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:

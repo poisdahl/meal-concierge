@@ -1,8 +1,8 @@
 """Real MCP/HTTP client negotiation against a synthetic provider transport.
 
 Run with Python 3.12 and tests/mcp-requirements.txt, outside the fleet roots.
-Only the Hermes OAuth boundary and HTTP provider are synthetic; no credentials
-or external network are used. Both providers share RetailMcpClient's transport.
+Only HTTP provider responses and stored credentials are synthetic; the native
+OAuth and MCP code run without Hermes or external network. Both providers share RetailMcpClient's transport.
 """
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -27,36 +26,17 @@ class ProviderProtocolTests(unittest.TestCase):
         negotiated = "2025-11-25"
         self.assertNotEqual(LATEST_PROTOCOL_VERSION, negotiated)
 
-        class Storage:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def has_cached_tokens(self):
-                return True
-
-        class SyntheticAuth(httpx2.Auth):
-            def __init__(self, **kwargs):
-                pass
-
-        oauth = {
-            "tools.mcp_oauth": SimpleNamespace(
-                HermesTokenStorage=Storage,
-                _build_client_metadata=lambda _: {},
-                _configure_callback_port=lambda *args: None,
-                _make_callback_waiter=lambda *args, **kwargs: None,
-                _make_redirect_handler=lambda *args: None,
-            ),
-            "tools.mcp_oauth_manager": SimpleNamespace(
-                _HERMES_PROVIDER_CLS=SyntheticAuth,
-            ),
-        }
         real_client = httpx2.AsyncClient
         for provider in ("oda", "mathem"):
             with self.subTest(provider=provider), tempfile.TemporaryDirectory() as root:
+                client_instance = RetailMcpClient(root, provider=provider)
+                Path(root, client_instance.server_name + ".json").write_text(json.dumps({"access_token": "synthetic-access"}))
+                Path(root, client_instance.server_name + ".client.json").write_text(json.dumps({"client_id": "synthetic-client"}))
                 calls = []
 
                 def respond(request):
                     self.assertEqual(request.method, "POST")
+                    self.assertEqual(request.headers["authorization"], "Bearer synthetic-access")
                     message = json.loads(request.content)
                     method = message["method"]
                     calls.append(method)
@@ -91,7 +71,7 @@ class ProviderProtocolTests(unittest.TestCase):
                 def client(**kwargs):
                     return real_client(transport=httpx2.MockTransport(respond), **kwargs)
 
-                with patch.dict(sys.modules, oauth), patch.object(httpx2, "AsyncClient", client):
+                with patch.object(httpx2, "AsyncClient", client):
                     client_instance = RetailMcpClient(root, provider=provider)
                     result = client_instance.call("get_cart", {})
                     with self.assertRaisesRegex(HouseholdError, "Product search result changed"):

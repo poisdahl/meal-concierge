@@ -74,9 +74,12 @@ vary by store.
 | | Oda | Mathem | MENY |
 |---|---|---|---|
 | Connection | Oda MCP, plus browser for protected order actions | Mathem MCP | Logged-in MENY website |
-| Sign-in | Hermes OAuth **and** browser login to the same Oda account | Separate Mathem OAuth through Hermes | Persistent browser login |
+| Sign-in | Standalone OAuth **and** browser login to the same Oda account | Separate standalone Mathem OAuth | Persistent browser login |
 | Checkout | Configured Oda payment method | Review the cart in chat, then pay on Mathem's website | Home delivery and payment via Vipps (a Norwegian mobile payment service), approved on your phone |
 | Existing orders | Read, supported changes and cancellation | Read and track; change or cancel on Mathem's website | Read, supported changes and cancellation |
+
+Complete Oda/Mathem sign-in with the explicit [provider OAuth helper](docs/runtime.md#provider-oauth).
+Installation does not log in, and MCP OAuth does not authenticate a browser profile.
 
 Mathem uses Swedish kronor (SEK). Its `checkout prepare` returns a cart summary
 and a link to finish on Mathem. Automatic payment, order changes and cancellation
@@ -94,8 +97,8 @@ The standalone core requires Linux with a running user systemd manager or Apple
 Silicon macOS, Python 3.10+ to bootstrap, and `uv`. It installs its own pinned
 Python 3.12.12 runtime with `mcp==2.1.1` and `mcp-types==2.1.1`.
 Oda/MENY also require `agent-browser@0.33.1` and non-snap Chrome/Chromium.
-Existing Oda/Mathem OAuth still uses Hermes helpers; standalone OAuth and the new
-agent packages remain separate integration work.
+Oda/Mathem OAuth uses the standalone runtime. New agent packages and their full
+client workflows remain separate integration work.
 
 ## Installation
 

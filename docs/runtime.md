@@ -49,18 +49,93 @@ are checked against the native Unix limit before staging. Use shorter explicit
 | `state/recipes.sqlite3` | Own bank, revisions, snapshots and library-operation journals |
 | `state/assets/`, `state/snapshots/` | Reserved durable locations for recipe work; copied with the entire state tree |
 | `browser/` | Dedicated browser home/profile and daemon socket directory |
-| `tokens/` | Future standalone provider-auth location; installation does not populate it |
+| `tokens/` | Private provider OAuth state; populated only by explicit login |
 | `run/` | Socket-only directory for agent connection; no household data |
 | `backups/` | Private, complete offline state/config copies made before migration |
 | `runtime.json` | Exact installation paths, owner and selected/previous code release |
 
-The runtime's existing Oda/Mathem OAuth implementation still imports Hermes
-helpers. Independent provider OAuth/cutover is MC-04; a healthy standalone core
-does not certify their login/refresh or provider readiness. Do not copy refresh
-credentials to create a second owner. Existing Compose and explicit legacy
-runner paths remain supported by `service.py`; native adoption does not convert
-Compose or claim live parity. MENY login and its private `vipps_phone_number`
-configuration still require a separately authorized provider setup.
+Oda/Mathem OAuth uses the installed MCP SDK without Hermes. Provider readiness
+is separate from service health. Existing Compose and explicit legacy runner
+paths remain supported by `service.py`; native adoption does not convert Compose
+or claim live parity. MENY login and its private `vipps_phone_number`
+configuration require the authorized provider setup.
+
+## Provider OAuth
+
+Run the helper with the installation's `current/venv/bin/python` and
+`current/provider_oauth.py`. Use the exact token path from `runtime.json`; the
+following example uses explicit installation paths:
+
+```sh
+/private/program/current/venv/bin/python -I /private/program/current/provider_oauth.py \
+  --provider oda --tokens /private/household/tokens --status
+/private/program/current/venv/bin/python -I /private/program/current/provider_oauth.py \
+  --provider oda --tokens /private/household/tokens
+```
+
+Use `--provider mathem` for the separate Mathem login. `--status` reads only
+presence, remaining expiry and pending-exchange status; it does not create files,
+normalize a registration, refresh tokens, contact the provider or certify a
+working connection. The login command opens the system browser and waits up to
+300 seconds (`--timeout` accepts 1–600). It performs OAuth and MCP discovery,
+without cart/order actions. A saved login may still report connection
+`unavailable` when the provider's MCP endpoint fails. Run normal service status
+for a fresh provider connection check.
+
+For a headless host, add `--no-browser`. The helper writes an authorization URL
+to a private `*.authorize.json` file and prints only its path and callback port.
+Privately open that URL in your browser; do not paste the file or callback URL
+into chat or logs. Forward the printed port from your local loopback to that
+host's loopback with `ssh -L PORT:127.0.0.1:PORT HOST` before authorizing. Keep the
+login helper and forward running until the callback completes. The callback
+listener binds only `127.0.0.1`; it verifies the exact path/state, and the SDK
+verifies PKCE and any authorization-response issuer. The temporary URL file and
+listener are removed when the command exits. Existing registrations reuse their
+exact supported `http://localhost:PORT/...` or `http://127.0.0.1:PORT/...` redirect;
+a busy port fails instead of changing that registration.
+
+Ordinary service calls never open an authorization browser or register a new
+client. They refresh an expired token under the same provider lock used by the
+login helper and then dispatch each MCP request once. A competing operation
+returns busy. Authorization rejection requires explicit login and does not
+silently replay the provider request. Missing or invalid optional provider auth
+does not stop the core own-bank path.
+
+The existing `oda-weekly` and `mathem-weekly` token, `.client.json`, `.meta.json`
+and per-provider lock names remain unchanged. Legacy `expires_at` is honored;
+older records use original file modification time plus `expires_in`. Keep the
+original token directory in place when adopting an installation. Failed or
+cancelled login leaves the previous token/registration intact until a complete
+new grant is available. A private `.pending.json` records token-exchange
+uncertainty or a complete replacement awaiting local publication. Ready
+publication resumes under the lock after restart. An uncertain exchange blocks
+another refresh and requires explicit login. Preserve this file with the other
+auth files; do not delete it or restore old refresh tokens after a possible
+rotation. The helper never restores household/order/email journals.
+
+Before an authorized cutover, inspect active services/jobs and identify every
+process that can use the same provider credentials. Stop/retire the old direct
+OAuth owner and its automatic restart path before the standalone service takes
+over. Hermes must connect through Meal Concierge; a separate direct provider
+registration must not keep refreshing the same token files. The file lock cannot
+coordinate an older client that ignores it. Keep each provider's token directory
+available to its original-provider follow-ups when changing the active store.
+Rollback preserves the newest auth transaction and outcome journals: complete a
+ready publication with this runtime before any older code reads the legacy files;
+resolve an uncertain exchange by explicit login rather than replaying a refresh.
+Do not clone refresh credentials across installations.
+
+Oda additionally needs the dedicated browser profile logged into the same
+account, with the intended delivery address and payment method. MCP OAuth does
+not authenticate that browser or prove account binding. Existing protected-order
+browser review remains the account/address check. Mathem retains its manual
+website checkout; MENY retains its dedicated browser login.
+
+The provider auth tests use actual MCP/mcp-types 2.1.1 with test-only OAuth/MCP
+responses against the [MCP authorization contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+Their acceptance is
+**synthetically verified; live not verified**. No production synthetic fallback,
+live credential move or live provider certification is implied.
 
 ## Existing installations
 

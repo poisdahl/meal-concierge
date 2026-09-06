@@ -214,13 +214,8 @@ class MathemTransportTests(unittest.TestCase):
     def test_oauth_endpoint_storage_and_result_use_mathem_identity(self):
         captured = {}
         supported_tools = set(REQUIRED_TOOLS)
-        class Storage:
-            def __init__(self, server_name, hermes_home):
-                captured['storage_name'] = server_name
-            def has_cached_tokens(self):
-                return True
-        def oauth_provider(**kwargs):
-            captured['oauth'] = kwargs
+        def oauth_provider(directory, server_name, label, endpoint):
+            captured['oauth'] = (directory, server_name, label, endpoint)
             return SimpleNamespace()
         class Context:
             def __init__(self, *args, **kwargs):
@@ -247,29 +242,24 @@ class MathemTransportTests(unittest.TestCase):
             'mcp': SimpleNamespace(ClientSession=Session),
             'mcp.client.streamable_http': SimpleNamespace(streamable_http_client=stream),
             'mcp.types': SimpleNamespace(LATEST_PROTOCOL_VERSION='2025-11-25'),
-            'tools.mcp_oauth': SimpleNamespace(HermesTokenStorage=Storage, _build_client_metadata=lambda _: {}, _configure_callback_port=lambda *a: None, _make_callback_waiter=lambda *a, **k: None, _make_redirect_handler=lambda *a: None),
-            'tools.mcp_oauth_manager': SimpleNamespace(_HERMES_PROVIDER_CLS=oauth_provider),
+            'provider_oauth': SimpleNamespace(build_auth=oauth_provider),
         }
         with tempfile.TemporaryDirectory() as temp, mock.patch.dict(sys.modules, modules):
             client = RetailMcpClient(temp, provider='mathem')
             result = client.call('product_search', {'queries': ['ägg'], 'size': 5})
             self.assertEqual(result['provider'], 'mathem')
             self.assertEqual(captured['url'], 'https://www.mathem.se/mcp')
-            self.assertEqual(captured['oauth']['server_url'], captured['url'])
-            self.assertEqual(captured['storage_name'], 'mathem-weekly')
-            self.assertEqual(captured['oauth']['storage']._tokens_path(), Path(temp) / 'mathem-weekly.json')
-            self.assertEqual(captured['oauth']['storage']._client_info_path(), Path(temp) / 'mathem-weekly.client.json')
-            self.assertEqual(captured['oauth']['storage']._meta_path(), Path(temp) / 'mathem-weekly.meta.json')
+            self.assertEqual(captured['oauth'], (Path(temp), 'mathem-weekly', 'Mathem', captured['url']))
             self.assertTrue((Path(temp) / '.mathem-household.lock').exists())
             self.assertFalse((Path(temp) / '.oda-household.lock').exists())
             self.assertEqual(RetailMcpClient(temp).endpoint, 'https://oda.com/mcp')
             response = SimpleNamespace(is_redirect=True, next_request=SimpleNamespace(url=httpx.URL('https://oda.com/mcp')))
-            with self.assertRaisesRegex(HouseholdError, 'outside its store'):
+            with self.assertRaisesRegex(HouseholdError, 'redirect is unsupported'):
                 asyncio.run(captured['redirect_check'](response))
             supported_tools.remove('get_cart')
             with self.assertRaisesRegex(HouseholdError, 'lacks required operations: get_cart'):
                 client.probe()
-            with mock.patch.object(Storage, 'has_cached_tokens', return_value=False):
+            with mock.patch.object(modules['provider_oauth'], 'build_auth', side_effect=HouseholdError('Mathem login is required')):
                 with self.assertRaisesRegex(HouseholdError, 'Mathem login is required'):
                     client.probe()
 

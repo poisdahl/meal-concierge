@@ -70,7 +70,7 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 | Protected checkout | Fresh or standing authorization, reconcile | Manual on Mathem | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
 
 Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
-Hermes OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`
+provider OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`
 transport supports Oda and Mathem; endpoint, OAuth token/client/metadata files,
 operation lock, product identities, recipe sources and delivery references remain bound to the selected provider.
 No Oda token is reused and redirects outside the configured origin are rejected.
@@ -341,7 +341,13 @@ The [runtime guide](runtime.md) defines install/start/stop/restart/attachment an
 existing-installation migration. Provider login remains separate. Use the exact
 configured private profile for authorized browser login; a remote headless host
 needs a private graphical session. Do not clone refresh credentials or cookies
-between installations. Standalone Oda/Mathem OAuth remains pending MC-04.
+between installations. Oda and Mathem use the standalone
+[provider OAuth helper](runtime.md#provider-oauth). The helper reuses the
+configured token directory and keeps login separate from service startup. Its
+read-only `--status` reports stored auth state without refreshing; ordinary
+calls never open a login browser or register a new client. A healthy core or
+saved OAuth grant does not certify provider connectivity or the dedicated
+browser account.
 
 Close visible Chromium after login so the supervised browser can own that
 profile. For Oda protected checkout, verify that this profile shows the
