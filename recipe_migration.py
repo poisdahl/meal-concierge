@@ -8,7 +8,7 @@ import secrets
 from recipe_libraries import (RecipeLibraryError, RecipeLibraryDefiniteError,
                               validate_library_id, validate_library_recipe_ref,
                               validate_library_label_ref)
-from recipes import normalize_recipe, source_key, RecipeError, MAX_LIBRARY_OPERATIONS
+from recipes import bind_recipe_source, normalize_recipe, source_key, RecipeError, MAX_LIBRARY_OPERATIONS
 
 MAX_ITEMS = 20
 MAX_PLANS = 100
@@ -100,6 +100,59 @@ class Migration:
             raise RecipeError("exact recipe reference changed")
         return result
 
+    def native_source(self, library):
+        from recipe_library_mealie import MealieAdapter
+        from recipe_library_recipesage import RecipeSageAdapter
+        adapter = self.app.recipe_library_adapters.get(library)
+        return isinstance(adapter, (MealieAdapter, RecipeSageAdapter))
+
+    def source_get(self, reference, options, *, expected_context=None):
+        """New native copies never read editable Hermes export sidecars."""
+        from recipe_import_sources import read_native_recipe, fetch_native_cover
+        from recipe_assets import sanitize_image
+
+        adapter = self.app.recipe_library_adapters[reference["library_id"]]
+        _principal, binding = self.app._recipe_library_context(reference["library_id"], adapter)
+        record = read_native_recipe(adapter, reference)
+        actual = record["source_context"]["library_recipe_ref"]
+        if actual != reference or "version" not in actual:
+            raise RecipeError("native migration requires an unchanged exact source version")
+        endpoint = record["source_context"]["kind"] + ":recipe"
+        context = {"mode": "native_v1", "binding": binding, "endpoint": endpoint,
+                   "identity": "import:v1:" + digest([binding, endpoint, actual["recipe_id"]])}
+        if expected_context is not None and context != expected_context:
+            raise RecipeError("native migration source binding changed")
+        candidate = normalize_recipe(bind_recipe_source(record["candidate"]))
+        details = {"labels": {"status": "wording_preserved", "names": candidate["tags"],
+                              "reference_status": "unsupported"},
+                   "cover": {"status": "omitted" if record["image_status"] != "none" else "none"}}
+        favorite = None
+        if options["favorites"] == "preserve":
+            observed = self.app._read_external_favorite(adapter, reference)
+            if observed["library_recipe_ref"] != reference:
+                raise RecipeError("native migration favorite recipe version changed")
+            favorite = observed["is_favorite"]
+        if options.get("cover", "omit") == "preserve" and record["image_status"] != "none":
+            cover = fetch_native_cover(adapter, reference)
+            if cover["library_recipe_ref"] != reference or len(cover["bytes"]) > 1024 * 1024:
+                raise RecipeError("native migration cover is changed or exceeds 1 MiB")
+            managed = sanitize_image(cover["bytes"])
+            if len(managed) > 1024 * 1024:
+                raise RecipeError("native migration cover exceeds the managed 1 MiB limit")
+            asset_id = "sha256:" + hashlib.sha256(managed).hexdigest()
+            self.store.assets.install_managed(asset_id, managed)
+            candidate["image"] = {"asset_id": asset_id, "source_url": cover["source_url"]}
+            candidate = normalize_recipe(candidate)
+            details["cover"] = {"status": "preserve", "asset_id": asset_id,
+                                "source_url": cover["source_url"], "attribution_status": "unknown"}
+        if self.app._recipe_library_context(reference["library_id"], adapter)[1] != binding:
+            raise RecipeError("native migration source binding changed during retrieval")
+        result = {**candidate, "library_recipe_ref": actual, "native_context": context,
+                  "native_metadata": details}
+        if favorite is not None:
+            result["is_favorite"] = favorite
+        return result
+
     def scan(self, library, query="", filters=None, maximum=SCAN_LIMIT):
         """Enumerate a complete bounded selection; never silently truncate identity checks."""
         refs, seen, cursor = [], set(), None
@@ -131,16 +184,23 @@ class Migration:
             cursor = next_cursor
         raise RecipeError("migration search exceeds the page budget")
 
-    def destination_state(self, source_ref, doc, destination):
+    def destination_state(self, source_ref, doc, destination, context=None, *, reservation=None):
+        identity = context["identity"] if context else self.identity(source_ref)
+        mapping_id = identity if context else source_ref["recipe_id"]
         with self.store._connection() as connection:
+            if context and connection.execute(
+                    "SELECT 1 FROM migration_mappings WHERE source_library=? AND source_id=? AND destination_library=?",
+                    (source_ref["library_id"], source_ref["recipe_id"], destination)).fetchone():
+                return {"status": "conflict", "reason": "legacy_mapping_binding_unproven"}
             mapped = connection.execute(
                 "SELECT * FROM migration_mappings WHERE source_library=? AND source_id=? AND destination_library=?",
-                (source_ref["library_id"], source_ref["recipe_id"], destination)).fetchone()
+                (source_ref["library_id"], mapping_id, destination)).fetchone()
             pending = connection.execute(
                 "SELECT operation_id FROM library_operations WHERE kind IN ('create','migration') AND library_id=? "
                 "AND (source_identity IN (?,?) OR (kind='migration' AND json_extract(request_metadata, '$.origin_identity')=?)) "
-                "AND status IN ('pending','uncertain') LIMIT 1",
-                (destination, self.identity(source_ref), source_key(doc), digest(origin(doc)) if origin(doc) else None)).fetchone()
+                "AND status IN ('pending','uncertain') AND operation_id != ? LIMIT 1",
+                (destination, identity, self.identity(source_ref) if context else source_key(doc),
+                 None if context else digest(origin(doc)) if origin(doc) else None, reservation or "")).fetchone()
         if mapped:
             ref = json.loads(mapped["destination_ref"])
             current = self.get(ref, latest=True)
@@ -149,6 +209,14 @@ class Migration:
             return {"status": "already_mapped", "destination_ref": current["library_recipe_ref"]}
         if pending:
             return {"status": "unavailable", "reason": "unresolved_copy", "operation_id": pending[0]}
+        if context:
+            if destination != "builtin":
+                return {"status": "conflict", "reason": "native_copy_requires_builtin"}
+            current = self.store.source_entry(identity)
+            if current is None:
+                return {"status": "create"}
+            return {"status": "exact_existing" if digest(document(current)) == digest(doc) else "conflict",
+                    "destination_ref": current["library_recipe_ref"]}
         matches = []
         for ref in self.scan(destination):
             current = self.get(ref)
@@ -193,6 +261,8 @@ class Migration:
             else:
                 result["favorites"] = {"status": "preserve", "is_favorite": source["is_favorite"]}
                 result["stages"].append({"action": "set_favorite", "is_favorite": source["is_favorite"]})
+        if source.get("native_metadata"):
+            result["native_fields"] = deepcopy(source["native_metadata"])
         if options["labels"] != "omit":
             if not (source_caps["label_read"] and dest_caps["label_read"] and dest_caps["label_apply_existing"]):
                 result["labels"] = {"status": "unsupported", "choice_required": "omit_or_stop"}
@@ -214,6 +284,10 @@ class Migration:
                 else:
                     result["labels"] = {"status": "preserve", "mappings": stages}
                     result["stages"].extend(stages)
+        if options.get("cover", "omit") == "stop":
+            result["cover"] = {"status": "unsupported", "choice_required": "omit_or_preserve"}
+        elif options.get("cover", "omit") == "preserve" and not source.get("native_metadata"):
+            result["cover"] = {"status": "unsupported", "choice_required": "native_source_required"}
         return result
 
     def prepare(self, request):
@@ -222,9 +296,14 @@ class Migration:
         if source == destination or any(x not in self.app.recipe_libraries for x in (source, destination)):
             raise RecipeError("migration needs distinct exact configured source and destination libraries")
         options = request.get("metadata_options")
-        if not isinstance(options, dict) or set(options) - {"favorites", "labels", "label_mappings"} or any(options.get(k) not in {"preserve", "omit", "stop"} for k in ("favorites", "labels")):
+        if not isinstance(options, dict) or set(options) - {"favorites", "labels", "label_mappings", "cover"} or any(options.get(k) not in {"preserve", "omit", "stop"} for k in ("favorites", "labels")):
             raise RecipeError("explicit favorites and labels preserve/omit/stop choices are required")
         options = deepcopy(options)
+        if not isinstance(options.get("cover", "omit"), str) or options.get("cover", "omit") not in {"omit", "preserve", "stop"}:
+            raise RecipeError("cover choice must be omit, preserve or stop")
+        native = source != "builtin" and self.native_source(source)
+        if native and destination != "builtin":
+            raise RecipeError("new native copies require the builtin destination")
         mappings = options.get("label_mappings", [])
         if not isinstance(mappings, list) or len(mappings) > 20:
             raise RecipeError("label mappings must contain at most 20 exact pairs")
@@ -258,7 +337,9 @@ class Migration:
             frozen = {"source_ref": ref}
             preview = {"item_id": index, "source_ref": ref, "status": "unavailable"}
             try:
-                current = self.get(ref)
+                current = self.source_get(ref, options) if native else self.get(ref)
+                if native:
+                    frozen["source_context"] = current["native_context"]
                 doc = document(current)
                 self.app._require_recipe_provider(doc)
                 frozen["document"] = doc
@@ -271,8 +352,8 @@ class Migration:
                 if not dest_caps["create_from_discovery"] or dest_caps["read_only"] or not self.storage_supported(doc, destination):
                     preview.update(status="unsupported_rights", reason="destination_storage_unavailable")
                 else:
-                    preview.update(self.destination_state(ref, doc, destination))
-                if any(meta[k]["status"] in {"unsupported", "conflict"} for k in ("favorites", "labels")) or "stop" in (options["favorites"], options["labels"]):
+                    preview.update(self.destination_state(ref, doc, destination, frozen.get("source_context")))
+                if any(meta[k]["status"] in {"unsupported", "conflict"} for k in ("favorites", "labels")) or "stop" in (options["favorites"], options["labels"]) or meta.get("cover", {}).get("status") == "unsupported":
                     preview["metadata_blocked"] = True
             except Exception:
                 preview.update(status="unavailable", reason="exact_source_or_destination_unavailable")
@@ -337,6 +418,8 @@ class Migration:
         frozen = item["frozen"]
         ref, doc = frozen["source_ref"], frozen["document"]
         destination = plan["preview"]["destination_library_id"]
+        context = frozen.get("source_context")
+        identity = context["identity"] if context else self.identity(ref)
         key = f"mig:{plan['plan_id']}:{item['item_id']}:create"
         with self.store._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -347,16 +430,18 @@ class Migration:
                 raise RecipeError("destination connection is disabled")
             if connection.execute("SELECT 1 FROM library_operations WHERE kind IN ('create','migration') AND library_id=? "
                                   "AND (source_identity IN (?,?) OR (kind='migration' AND json_extract(request_metadata, '$.origin_identity')=?)) "
-                                  "AND status IN ('pending','uncertain')", (destination, self.identity(ref), source_key(doc), digest(origin(doc)) if origin(doc) else None)).fetchone():
+                                  "AND status IN ('pending','uncertain')", (destination, identity, self.identity(ref) if context else source_key(doc), None if context else digest(origin(doc)) if origin(doc) else None)).fetchone():
                 raise RecipeError("an unresolved copy already reserves this source and destination")
             if connection.execute("SELECT COUNT(*) FROM library_operations").fetchone()[0] >= MAX_LIBRARY_OPERATIONS:
                 raise RecipeError("recipe operation journal is full")
             if connection.execute("SELECT COUNT(*) FROM migration_mappings").fetchone()[0] + connection.execute("SELECT COUNT(*) FROM library_operations WHERE kind='migration' AND status IN ('pending','uncertain')").fetchone()[0] >= MAX_MAPPINGS:
                 raise RecipeError("migration mapping capacity reached")
             operation_id, timestamp = f"libop:v1:{secrets.token_urlsafe(18)}", now().isoformat()
-            metadata = {"status": "active", "plan_id": plan["plan_id"], "source_ref": ref, "destination_library_id": destination, "document_digest": digest(doc), "origin_identity": digest(origin(doc)) if origin(doc) else None}
+            metadata = {"status": "active", "plan_id": plan["plan_id"], "source_ref": ref, "destination_library_id": destination, "document_digest": digest(doc), "origin_identity": None if context else digest(origin(doc)) if origin(doc) else None}
+            if context:
+                metadata["source_context"] = context
             connection.execute("""INSERT INTO library_operations(operation_id,kind,library_id,request_digest,request_metadata,idempotency_key,status,source_identity,snapshot_digest,created_at,updated_at)
-                                  VALUES(?,'migration',?,?,?,?,'pending',?,?,?,?)""", (operation_id, destination, digest(metadata), canonical(metadata), key, self.identity(ref), digest(doc), timestamp, timestamp))
+                                  VALUES(?,'migration',?,?,?,?,'pending',?,?,?,?)""", (operation_id, destination, digest(metadata), canonical(metadata), key, identity, digest(doc), timestamp, timestamp))
             return self.store._operation(connection.execute("SELECT * FROM library_operations WHERE operation_id=?", (operation_id,)).fetchone())
 
     def finish(self, operation, status, ref=None):
@@ -366,14 +451,16 @@ class Migration:
 
     def save_mapping(self, plan, item, reference):
         ref, doc = item["frozen"]["source_ref"], item["frozen"]["document"]
+        context = item["frozen"].get("source_context")
+        mapping_id = context["identity"] if context else ref["recipe_id"]
         with self.store._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            prior = connection.execute("SELECT document_digest FROM migration_mappings WHERE source_library=? AND source_id=? AND destination_library=?", (ref["library_id"], ref["recipe_id"], reference["library_id"])).fetchone()
+            prior = connection.execute("SELECT document_digest FROM migration_mappings WHERE source_library=? AND source_id=? AND destination_library=?", (ref["library_id"], mapping_id, reference["library_id"])).fetchone()
             if prior is not None and prior[0] != digest(doc):
                 raise RecipeError("source mapping has conflicting content")
             if prior is None and connection.execute("SELECT COUNT(*) FROM migration_mappings").fetchone()[0] >= MAX_MAPPINGS:
                 raise RecipeError("migration mapping capacity reached")
-            connection.execute("INSERT INTO migration_mappings VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_library,source_id,destination_library) DO UPDATE SET destination_ref=excluded.destination_ref", (ref["library_id"], ref["recipe_id"], reference["library_id"], ref["version"], digest(doc), canonical(reference), now().isoformat()))
+            connection.execute("INSERT INTO migration_mappings VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_library,source_id,destination_library) DO UPDATE SET destination_ref=excluded.destination_ref", (ref["library_id"], mapping_id, reference["library_id"], ref["version"], digest(doc), canonical(reference), now().isoformat()))
         item["progress"].update(copy_status="confirmed", destination_ref=reference, metadata_status="pending")
         self.update(plan, item)
 
@@ -409,7 +496,8 @@ class Migration:
                 self.update(plan, item)
                 return
             try:
-                current = self.get(frozen["source_ref"], latest=True)
+                current = (self.source_get(frozen["source_ref"], plan["preview"]["metadata_options"], expected_context=frozen["source_context"])
+                           if frozen.get("source_context") else self.get(frozen["source_ref"], latest=True))
                 if current["library_recipe_ref"] != frozen["source_ref"] or digest(document(current)) != preview["document_digest"]:
                     raise RecipeError("source drift")
                 destination_caps = self.app._library_capabilities(destination)
@@ -418,7 +506,7 @@ class Migration:
                 meta = self.metadata(current, destination, plan["preview"]["metadata_options"], self.app._library_capabilities(frozen["source_ref"]["library_id"]), destination_caps)
                 if meta != frozen["metadata"]:
                     raise RecipeError("source metadata drift")
-                state = self.destination_state(frozen["source_ref"], frozen["document"], destination) if operation is None else self.destination_state_without_reservation(frozen, destination, operation)
+                state = self.destination_state(frozen["source_ref"], frozen["document"], destination, frozen.get("source_context")) if operation is None else self.destination_state_without_reservation(frozen, destination, operation)
                 expected = {k: preview[k] for k in ("status", "destination_ref", "reason", "operation_id") if k in preview}
                 if state != expected:
                     raise RecipeError("destination drift")
@@ -445,7 +533,7 @@ class Migration:
                     connection.execute("BEGIN IMMEDIATE")
                     if now() >= datetime.fromisoformat(plan["expires_at"]):
                         raise RecipeLibraryDefiniteError("migration confirmation expired")
-                    saved = self.store._save(connection, frozen["document"], "active", None, "migration", migration_identity=self.identity(frozen["source_ref"]))
+                    saved = self.store._save(connection, frozen["document"], "active", None, "migration", migration_identity=frozen["source_context"]["identity"] if frozen.get("source_context") else self.identity(frozen["source_ref"]))
                     ref = saved["library_recipe_ref"]
                     connection.execute("UPDATE library_operations SET status='confirmed',result_metadata=?,provider_recipe_id=?,provider_version=?,updated_at=? WHERE operation_id=?", (canonical(ref), ref["recipe_id"], ref["version"], now().isoformat(), operation["operation_id"]))
             else:
@@ -483,7 +571,10 @@ class Migration:
         self.apply_metadata(plan, item, expired)
 
     def destination_state_without_reservation(self, frozen, destination, operation):
-        # A pre-dispatch crash keeps its reservation, but still needs a fresh complete destination scan.
+        # A pre-dispatch crash keeps its reservation, but still checks current destination identity.
+        if frozen.get("source_context"):
+            return self.destination_state(frozen["source_ref"], frozen["document"], destination,
+                                          frozen["source_context"], reservation=operation["operation_id"])
         matches = []
         for ref in self.scan(destination):
             current = self.get(ref)

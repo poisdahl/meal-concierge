@@ -168,7 +168,7 @@ class PortableTests(unittest.TestCase):
             self.assertFalse(hasattr(archive, "trusted"))
         value = {**self.manifest, "kind": "private"}
         path = self.raw_package({"records.jsonl": canonical_bytes(self.record) + b"\n"}, manifest=value)
-        with self.assertRaisesRegex(RecipeError, "not yet supported"):
+        with self.assertRaisesRegex(RecipeError, "explicit private archive API"):
             with open_archive(path):
                 pass
 
@@ -1887,6 +1887,379 @@ class TranscriptTests(unittest.TestCase):
             with self.subTest(keys=list(mutation)), self.assertRaises(RecipeImportReaderError) as caught:
                 read_transcript({**self.source(), **mutation})
             self.assertNotIn('SYNTHETIC_ONLY_SECRET', str(caught.exception))
+
+
+class ImportApplicationTests(unittest.TestCase):
+    def setUp(self):
+        from core import StateStore
+        from service import Application
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        class Provider:
+            def probe(self, **kwargs):
+                return {'protocol_version': '2025-11-25', 'tool_count': 0, 'server': {'name': 'synthetic', 'version': '1'}}
+            def call(self, *args, **kwargs):
+                raise AssertionError('import attempted a provider effect')
+        self.app = Application(StateStore(self.root / 'state', {'household': 'synthetic-import', 'provider': 'oda'}), Provider(), None)
+        self.source = TranscriptTests().source()
+
+    def call(self, action, **request):
+        return self.app.handle({'operation': 'recipes', 'action': action, **request})
+
+    def preview(self):
+        return self.call('import', source_kind='transcript', transcript=self.source)
+
+    def test_actual_transcript_preview_save_edit_reimport_conflict(self):
+        preview = self.preview()
+        self.assertFalse(preview['personal_entry_created'])
+        self.assertEqual(preview['suggested_status'], 'draft')
+        self.assertEqual(self.app.recipes.search(), [])
+        self.assertEqual(preview['recipe']['ingredients'][0]['quantity'], {'numerator': 200, 'denominator': 1})
+        self.assertNotIn('Order nine', str(preview['recipe']))
+        saved = self.call('save', discovery_ref=preview['discovery_ref'], status='draft', idempotency_key='save-source')['recipe']
+        self.assertEqual(len(self.app.recipes.search()), 1)
+        self.assertEqual(self.preview()['discovery_ref'], preview['discovery_ref'])
+        edited = deepcopy(saved)
+        edited['notes'] = 'Local change'
+        self.app.recipes.update(saved['id'], saved['revision'], edited)
+        # A fresh source snapshot after an interpretation change conflicts with
+        # the retained imported identity, preserving the local revision.
+        self.source['interpretation']['name'] = 'Reinterpreted lentil soup'
+        fresh = self.preview()
+        response = self.call('save', discovery_ref=fresh['discovery_ref'], status='draft', idempotency_key='save-changed')
+        self.assertEqual(response['conflict']['kind'], 'source_changed')
+        self.assertEqual(self.app.recipes.get(saved['id'])['notes'], 'Local change')
+
+    def test_estimate_acceptance_preserves_source_and_no_personal_entry(self):
+        self.source['interpretation']['ingredients'][2]['estimated_amount'] = {'quantity': 1, 'unit': 'stk', 'assumptions': 'One medium tomato.'}
+        preview = self.preview()
+        self.assertEqual(preview['suggested_status'], 'draft')
+        accepted = self.call('accept_estimates', discovery_ref=preview['discovery_ref'], recipe_digest=preview['recipe_digest'],
+            estimate_fields=['ingredients.2.quantity', 'ingredients.2.unit'], confirmation_statement='I accept these exact recipe estimates and their stated assumptions.')
+        self.assertEqual(accepted['source_identity'], preview['source_identity'])
+        self.assertNotEqual(accepted['discovery_ref'], preview['discovery_ref'])
+        self.assertEqual(self.app.recipes.search(), [])
+
+    def test_exact_cover_unsaved_discovery_then_saved_historical_read(self):
+        import base64
+        preview = self.preview()
+        raw = BytesIO(); Image.new('RGB', (20, 20), 'red').save(raw, format='PNG')
+        attached = self.call('cover_import', discovery_ref=preview['discovery_ref'], recipe_digest=preview['recipe_digest'],
+            image={'credit': 'Synthetic own cover'}, image_base64=base64.b64encode(raw.getvalue()).decode())
+        self.assertEqual(self.app.recipes.search(), [])
+        self.assertEqual(attached['source_identity'], preview['source_identity'])
+        image = self.call('cover_get', discovery_ref=attached['discovery_ref'])
+        self.assertEqual(image['image_status'], 'available')
+        self.assertEqual(base64.b64decode(image['image_base64']), self.app.recipes.assets.read(attached['recipe']['image']['asset_id']))
+        saved = self.call('save', discovery_ref=attached['discovery_ref'], status='draft', idempotency_key='save-cover')['recipe']
+        changed = deepcopy(saved); changed['image'] = None
+        self.app.recipes.update(saved['id'], saved['revision'], changed)
+        self.assertEqual(self.call('cover_get', recipe_ref={'id': saved['id'], 'revision': 1})['image_status'], 'available')
+        self.assertEqual(self.call('cover_get', recipe_ref={'id': saved['id'], 'revision': 2})['image_status'], 'unavailable')
+        (self.app.recipes.assets.root / (attached['recipe']['image']['asset_id'][7:] + '.jpg')).unlink()
+        self.assertEqual(self.call('cover_get', recipe_ref={'id': saved['id'], 'revision': 1})['reason'], 'missing_or_corrupt_cover')
+        self.assertEqual(self.app.recipes.get(saved['id'], 1)['name'], 'Lentil soup')
+
+    def test_cover_bounds_and_digest_reject_before_asset_write(self):
+        preview = self.preview()
+        for data, digest in [('AA==', 'wrong'), ('!!!!', preview['recipe_digest']), ('A' * 1_398_105, preview['recipe_digest'])]:
+            with self.assertRaises(RecipeError):
+                self.call('cover_import', discovery_ref=preview['discovery_ref'], recipe_digest=digest, image={}, image_base64=data)
+        self.assertFalse(self.app.recipes.assets.root.exists())
+
+    def test_qualified_accounts_and_case_distinguish_same_culinary_source(self):
+        recipe = read_transcript(self.source)['candidate']
+        identities = [self.app._import_identity(binding, 'mealie:recipe', identifier) for binding, identifier in [('a'*64, 'ID'), ('b'*64, 'ID'), ('a'*64, 'id')]]
+        saved = []
+        for identity in identities:
+            snapshot = self.app.recipes.persist_discovery(recipe, source_identity=identity)
+            saved.append(self.app.recipes.save_discovery(snapshot['discovery_ref'], status='draft')['id'])
+        self.assertEqual(len(set(saved)), 3)
+        for identity, identifier in zip(identities, saved):
+            self.assertEqual(self.app.recipes.source_entry(identity)['id'], identifier)
+        with self.assertRaises(RecipeError):
+            self.app.recipes.persist_discovery(recipe, source_identity='caller-key')
+
+    def test_small_input_with_oversized_managed_cover_has_no_asset_or_discovery_change(self):
+        import base64
+        import random
+        tile = Image.frombytes('RGB', (64, 64), random.Random(41).randbytes(64 * 64 * 3))
+        image = Image.new('RGB', (1600, 1600))
+        for x in range(0, 1600, 64):
+            for y in range(0, 1600, 64):
+                image.paste(tile, (x, y))
+        raw = BytesIO(); image.save(raw, format='PNG')
+        self.assertLess(len(raw.getvalue()), 1024 * 1024)
+        self.assertGreater(len(sanitize_image(raw.getvalue())), 1024 * 1024)
+        preview = self.preview()
+        with self.assertRaisesRegex(RecipeError, 'prepared cover exceeds'):
+            self.call('cover_import', discovery_ref=preview['discovery_ref'], recipe_digest=preview['recipe_digest'],
+                image={}, image_base64=base64.b64encode(raw.getvalue()).decode())
+        self.assertFalse(self.app.recipes.assets.root.exists())
+        self.assertIsNone(self.app.recipes.resolve_discovery(preview['discovery_ref'])['recipe']['image'])
+
+    def test_url_text_second_read_validates_quotes_and_structured_choice(self):
+        text = 'Lentil soup\n200 g cooked lentils\nSimmer, then serve.'
+        page = {'mode': 'text', 'requires_interpretation': True, 'text': text, 'recipes': [], 'source_url': 'https://example.org/soup'}
+        interpretation = {'name': 'Lentil soup', 'ingredients': [{'page': 1, 'quote': '200 g cooked lentils'}], 'steps': [{'page': 1, 'quote': 'Simmer, then serve.'}]}
+        with patch('recipe_operations.fetch_public_webpage', return_value=page) as fetch:
+            first = self.call('import', source_kind='url', url=page['source_url'])
+            self.assertTrue(first['requires_interpretation'])
+            self.assertEqual(self.app.recipes.search(), [])
+            second = self.call('import', source_kind='url', url=page['source_url'], interpretation=interpretation)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(second['recipe']['ingredients'][0]['quantity']['numerator'], 200)
+        with patch('recipe_operations.fetch_public_webpage', return_value={**page, 'text': 'Changed source'}), self.assertRaises(RecipeError):
+            self.call('import', source_kind='url', url=page['source_url'], interpretation=interpretation)
+        with self.assertRaises(RecipeError):
+            self.call('import', source_kind='transcript', transcript={**self.source, 'source_provider': 'oda'})
+
+
+from contextlib import contextmanager
+
+class PrivateRestoreTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source, self.source_meta = self.bank('source')
+        self.target, self.target_meta = self.bank('target')
+        self.target.search()
+        self.assets = []
+        for color in ('blue', 'green'):
+            raw = BytesIO()
+            Image.new('RGB', (8, 8), color).save(raw, format='PNG')
+            self.assets.append(self.source.assets.import_bytes(raw.getvalue()))
+        recipe = {'schema_version': 2, 'name': 'Synthetic lentils', 'portions': 2,
+                  'ingredients': ['200 g lentils'], 'steps': ['Simmer.'],
+                  'source': {'kind': 'user', 'relationship': 'user_supplied'},
+                  'rights': {'storage': 'full'},
+                  'image': {'asset_id': self.assets[0], 'credit': 'Synthetic blue'}}
+        saved = self.source.save(recipe)
+        recipe['image'] = {'asset_id': self.assets[1], 'credit': 'Synthetic green'}
+        self.source.update(saved['id'], 1, recipe)
+        saved = self.source.archive(saved['id'], 2)
+        self.user_id = saved['id']
+        self.source.set_favorite(saved['library_recipe_ref'], True, idempotency_key='favorite-on')
+        self.source.set_favorite(saved['library_recipe_ref'], False, idempotency_key='favorite-off', expected_favorite_revision=1)
+        bundled = deepcopy(recipe)
+        bundled['name'] = 'Synthetic bundled lentils'
+        bundled['source'] = {'kind': 'synthetic', 'external_id': 'bundled-one', 'relationship': 'adapted'}
+        bundled.pop('image')
+        self.source.import_pack_record(bundled, pack_id='synthetic-pack', recipe_id='one', version='1')
+        self.archive = self.root / 'private.zip'
+        with self.owned(self.source_meta):
+            portable.export_private_archive(self.archive, self.source)
+
+    def bank(self, name):
+        home = self.root / name
+        state = home / 'state'
+        state.mkdir(parents=True)
+        household = 'SYNTHETIC_' + name
+        (state / 'state.json').write_text(json.dumps({'household': household, 'provider': 'oda'}))
+        meta = {'format': 1, 'home': str(home), 'manager': 'launchd',
+                'name': 'synthetic-private-restore-' + home.name,
+                'paths': {'state': str(state), 'browser_home': str(home / 'browser'),
+                          'browser_profile': str(home / 'profile'),
+                          'browser_socket_directory': str(home / 'browser-run'),
+                          'socket': str(home / 'run/service.sock')}}
+        (home / 'runtime.json').write_text(json.dumps(meta))
+        return RecipeStore(state / 'recipes.sqlite3', household), meta
+
+    @contextmanager
+    def owned(self, meta):
+        with patch.object(install, 'active', return_value=False), file_lock(Path(meta['home']) / '.installer.lock'), install.offline(meta):
+            yield
+
+    def restore(self, path=None):
+        with self.owned(self.target_meta):
+            return portable.restore_private_archive(path or self.archive, self.target)
+
+
+    def test_exact_roundtrip_history_favorite_pack_and_historical_assets(self):
+        result = self.restore()
+        self.assertEqual((result['status'], result['created'], result['processed']), ('complete', 2, 2))
+        for asset in self.assets:
+            self.assertEqual(self.target.assets.read(asset), self.source.assets.read(asset))
+        restored = self.target.get(self.user_id)
+        self.assertEqual((restored['revision'], restored['status']), (3, 'archived'))
+        self.assertEqual((restored['is_favorite'], restored['favorite_revision']), (False, 2))
+        output = self.root / 'restored.zip'
+        with self.owned(self.target_meta):
+            portable.export_private_archive(output, self.target)
+        self.assertEqual(output.read_bytes(), self.archive.read_bytes())
+
+    def test_replay_and_differing_local_history_are_not_overwritten(self):
+        self.restore()
+        before = self.target.path.read_bytes()
+        result = self.restore()
+        self.assertEqual((result['created'], result['unchanged']), (0, 2))
+        self.assertEqual(self.target.path.read_bytes(), before)
+        recipe = self.target.get(self.user_id)
+        recipe['notes'] = 'Local change must survive.'
+        self.target.update(self.user_id, 3, recipe)
+        before = self.target.path.read_bytes()
+        result = self.restore()
+        self.assertEqual((result['status'], result['conflicts'], result['unchanged']), ('partial', 1, 1))
+        self.assertEqual(self.target.path.read_bytes(), before)
+
+    def test_invalid_late_record_verifies_before_any_bank_or_asset_write(self):
+        with zipfile.ZipFile(self.archive) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        records = [json.loads(line) for line in files['records.jsonl'].splitlines()]
+        records[-1]['status'] = 'invalid'
+        files['records.jsonl'] = b''.join(portable.canonical_bytes(row) + b'\n' for row in records)
+        manifest = json.loads(files['manifest.json'])
+        for item in manifest['files']:
+            if item['path'] == 'records.jsonl':
+                item.update(bytes=len(files['records.jsonl']), sha256=hashlib.sha256(files['records.jsonl']).hexdigest())
+        files['manifest.json'] = portable.canonical_bytes(manifest)
+        malformed = self.root / 'malformed.zip'
+        with zipfile.ZipFile(malformed, 'w') as archive:
+            for name, data in files.items():
+                archive.writestr(name, data)
+        before = self.target.path.read_bytes()
+        with self.assertRaisesRegex(RecipeError, 'private revision envelope is invalid'):
+            self.restore(malformed)
+        self.assertEqual(self.target.path.read_bytes(), before)
+        self.assertFalse(self.target.assets.root.exists())
+
+    def test_staged_source_survives_original_replacement(self):
+        original = self.target.restore_private_entry
+        def change_original(group):
+            self.archive.write_bytes(b'Original source was replaced after verification.')
+            return original(group)
+        with patch.object(self.target, 'restore_private_entry', side_effect=change_original):
+            result = self.restore()
+        self.assertEqual((result['status'], result['created']), ('complete', 2))
+
+    def test_later_failure_reports_committed_progress_and_replays(self):
+        original = self.target.restore_private_entry
+        calls = 0
+        def fail_second(group):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RecipeError('Synthetic entry failure')
+            return original(group)
+        with patch.object(self.target, 'restore_private_entry', side_effect=fail_second):
+            result = self.restore()
+        self.assertEqual((result['status'], result['created'], result['processed'], result['failed'], result['remaining']),
+                         ('partial', 1, 1, 1, 1))
+        self.assertEqual(result['results'][-1]['recipe_id'], result['unconfirmed_record'])
+        self.assertEqual(len(self.target.search(include_archived=True)), 1)
+        result = self.restore()
+        self.assertEqual((result['status'], result['created'], result['unchanged']), ('complete', 1, 1))
+
+
+    def test_progress_results_are_bounded_without_losing_counts(self):
+        for index in range(99):
+            self.source.save({'name': f'Synthetic extra {index}', 'portions': 2,
+                'ingredients': ['200 g lentils'], 'steps': ['Simmer.'],
+                'source': {'kind': 'user', 'relationship': 'user_supplied'},
+                'rights': {'storage': 'full'}})
+        self.archive.unlink()
+        with self.owned(self.source_meta):
+            portable.export_private_archive(self.archive, self.source)
+        result = self.restore()
+        self.assertEqual((result['total'], result['processed'], result['created']), (101, 101, 101))
+        self.assertEqual(len(result['results']), 100)
+        self.assertTrue(result['results_truncated'])
+
+
+class ImportMCPRuntimeTests(unittest.TestCase):
+    def test_real_mcp_image_blocks_and_cli_exclusive_host_file(self):
+        import asyncio
+        import importlib.util
+        import subprocess
+        if importlib.util.find_spec('mcp') is None:
+            self.skipTest('requires pinned MCP 2.1.1 runtime')
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        source = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            socket_path = root / 'service.sock'
+            environment = {**os.environ, 'MEAL_CONCIERGE_SOCKET': str(socket_path), 'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': str(root)}
+            script = '''import os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from core import StateStore
+from service import Application,Server
+class Provider:
+ def probe(self,**kwargs): return {'protocol_version':'2025-11-25','tool_count':0,'server':{'name':'synthetic','version':'1'}}
+ def call(self,*args,**kwargs): raise AssertionError('unexpected provider call')
+root=Path(sys.argv[2])
+app=Application(StateStore(root/'state',{'household':'synthetic-import-runtime','provider':'oda'}),Provider(),None)
+Server(root/'service.sock',os.getgid(),os.getuid(),app).run()
+'''
+            log = (root / 'service.log').open('w+')
+            process = subprocess.Popen([sys.executable, '-I', '-B', '-c', script, str(source), str(root)], env=environment, stdout=log, stderr=log)
+            try:
+                until = time.monotonic() + 10
+                while not socket_path.exists() and process.poll() is None and time.monotonic() < until:
+                    time.sleep(.02)
+                log.flush(); log.seek(0)
+                self.assertTrue(socket_path.exists(), log.read())
+
+                async def exercise():
+                    parameters = StdioServerParameters(command=sys.executable, args=['-I', '-B', str(source / 'mcp_server.py')], env=environment)
+                    with (root / 'mcp.log').open('w') as error:
+                        async with stdio_client(parameters, errlog=error) as streams:
+                            async with ClientSession(*streams) as session:
+                                await session.initialize()
+                                tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+                                self.assertEqual(tools['meal_concierge_recipe_import'].input_schema['properties']['source_kind']['enum'], ['transcript', 'url', 'library'])
+                                self.assertIn('image_base64', tools['meal_concierge_recipe_cover'].input_schema['properties'])
+                                self.assertIsNone(tools['meal_concierge_recipe_image'].output_schema)
+                                preview_result = await session.call_tool('meal_concierge_recipe_import', {'source_kind': 'transcript', 'transcript': TranscriptTests().source()})
+                                self.assertFalse(preview_result.is_error)
+                                preview = json.loads(preview_result.content[0].text)
+                                # Prepare/serialize bytes in host code through the actual
+                                # JSON CLI; no base64 is emitted as model-visible text.
+                                import base64
+                                raw = BytesIO(); Image.new('RGB', (20, 20), 'green').save(raw, format='PNG')
+                                request = {'operation': 'recipes', 'action': 'cover_import', 'discovery_ref': preview['discovery_ref'],
+                                    'recipe_digest': preview['recipe_digest'], 'image': {'credit': 'Synthetic runtime cover'},
+                                    'image_base64': base64.b64encode(raw.getvalue()).decode()}
+                                uploaded = await asyncio.to_thread(subprocess.run, [sys.executable, '-I', '-B', str(source / 'cli.py')], input=json.dumps(request), text=True, capture_output=True, env=environment)
+                                self.assertEqual(uploaded.returncode, 0, uploaded.stderr + uploaded.stdout)
+                                self.assertNotIn('image_base64', uploaded.stdout)
+                                attached = json.loads(uploaded.stdout)['result']
+                                shown = await session.call_tool('meal_concierge_recipe_image', {'discovery_ref': attached['discovery_ref']})
+                                self.assertFalse(shown.is_error)
+                                self.assertEqual([block.type for block in shown.content], ['text', 'image'])
+                                self.assertNotIn('image_base64', shown.content[0].text)
+                                image_bytes = base64.b64decode(shown.content[1].data)
+                                self.assertEqual(shown.content[1].mime_type, 'image/jpeg')
+                                output = root / 'host-cover.jpg'
+                                read_request = json.dumps({'operation': 'recipes', 'action': 'cover_get', 'discovery_ref': attached['discovery_ref']})
+                                args = [sys.executable, '-I', '-B', str(source / 'cli.py'), '--image-output', str(output)]
+                                read = await asyncio.to_thread(subprocess.run, args, input=read_request, text=True, capture_output=True, env=environment)
+                                self.assertEqual(read.returncode, 0, read.stderr + read.stdout)
+                                self.assertEqual(output.read_bytes(), image_bytes)
+                                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+                                self.assertNotIn('image_base64', read.stdout)
+                                repeated = await asyncio.to_thread(subprocess.run, args, input=read_request, text=True, capture_output=True, env=environment)
+                                self.assertEqual(repeated.returncode, 2)
+                                self.assertEqual(output.read_bytes(), image_bytes)
+                                plain = await asyncio.to_thread(subprocess.run, args[:-2], input=read_request, text=True, capture_output=True, env=environment)
+                                self.assertEqual(plain.returncode, 2)
+                                self.assertIn('dispatched', plain.stdout)
+                                saved = await session.call_tool('meal_concierge_recipe_write', {'action': 'save', 'discovery_ref': attached['discovery_ref'], 'status': 'draft', 'idempotency_key': 'runtime-save'})
+                                self.assertFalse(saved.is_error)
+                                record = json.loads(saved.content[0].text)['recipe']
+                                readback = await session.call_tool('meal_concierge_recipe_image', {'recipe_ref': {'id': record['id'], 'revision': record['revision']}})
+                                self.assertEqual(readback.content[1].data, shown.content[1].data)
+                asyncio.run(exercise())
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill(); process.wait()
+                log.close()
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ def _manifest(value: Any) -> dict:
     if not isinstance(value, dict) or value.get("format") != FORMAT or type(value.get("format_version")) is not int or value["format_version"] != FORMAT_VERSION:
         raise RecipeError("unsupported portable recipe format")
     if value.get("kind") != "bundled":
-        raise RecipeError("portable private restore format is not yet supported")
+        raise RecipeError("private recipes require the explicit private archive API")
     for field in ("pack_id", "pack_version", "normalizer_version"):
         _text(value.get(field), field)
         if field != "normalizer_version" and len(value[field]) > 128:
@@ -607,6 +607,89 @@ def open_private_archive(path: Path | str):
 def write_private_archive(destination: Path | str, manifest: Mapping, files: Mapping[str, Path]) -> dict:
     """Create a mode-0600 private archive exclusively; validate every history/asset."""
     return _write_archive(destination, manifest, files, _private_manifest, open_private_archive)
+
+
+@contextmanager
+def _staged_private_archive(path: Path | str):
+    """Freeze owner-selected bytes outside the destination before verification."""
+    with tempfile.TemporaryDirectory(prefix=".private-restore-") as temporary:
+        staged = Path(temporary) / "recipes.zip"
+        digest, size = hashlib.sha256(), 0
+        with _regular_file(Path(path)) as source:
+            if os.fstat(source.fileno()).st_size > MAX_ARCHIVE_BYTES:
+                raise RecipeError("private restore archive is oversized")
+            descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as destination:
+                while chunk := source.read(CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > MAX_ARCHIVE_BYTES:
+                        raise RecipeError("private restore archive is oversized")
+                    destination.write(chunk)
+                    digest.update(chunk)
+        # No writable handle remains when any archive content is interpreted.
+        os.chmod(staged, 0o400)
+        with open_private_archive(staged) as archive:
+            archive.verify()
+            yield archive, digest.hexdigest()
+
+
+def _restore_private_entries(archive: PrivatePortableArchive, store, archive_digest: str) -> dict:
+    """Consume only the complete verified staging snapshot under offline locks."""
+    from recipe_assets import RecipeAssetError
+    report = {"kind": "private", "archive_sha256": archive_digest,
+              "total": archive.manifest["recipes_count"], "processed": 0,
+              "created": 0, "unchanged": 0, "conflicts": 0, "failed": 0}
+    results, result_count, current = [], 0, None
+
+    def remember(result):
+        nonlocal result_count
+        result_count += 1
+        if len(results) < 100:
+            results.append(result)
+
+    try:
+        for group in archive.recipe_entries():
+            current = group["entry"]["id"]
+            assets = {row["document"]["image"]["asset_id"] for row in group["revisions"]
+                      if row["document"].get("image")}
+            for asset_id in sorted(assets):
+                store.assets.install_managed(asset_id, archive.read_asset(asset_id))
+            outcome = store.restore_private_entry(group)
+            category = {"created": "created", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
+            report[category] += 1
+            report["processed"] += 1
+            result = {"recipe_id": current, "outcome": outcome["outcome"]}
+            if outcome.get("reason"):
+                result["reason"] = outcome["reason"]
+            remember(result)
+            current = None
+    except (RecipeError, RecipeAssetError, OSError) as exc:
+        report["failed"] = 1
+        report["error"] = str(exc)[:500]
+        report["unconfirmed_record"] = current
+        remember({"recipe_id": current, "outcome": "failed", "reason": report["error"]})
+    except KeyboardInterrupt:
+        report["interrupted"] = True
+        report["unconfirmed_record"] = current
+    report["status"] = "complete" if report["processed"] == report["total"] and not report["conflicts"] and not report["failed"] and not report.get("interrupted") else "partial"
+    report["remaining"] = report["total"] - report["processed"]
+    report["resumable"] = report["status"] != "complete"
+    return {**report, "results": results, "results_truncated": result_count > len(results)}
+
+
+def restore_private_archive(path: Path | str, store) -> dict:
+    """Restore owner-selected private history under caller in-process offline locks.
+
+    Full staging verification precedes any destination asset or bank writes.
+    Only RecipeStore owns SQL; each exact entry commits independently. A later
+    failure reports prior completed outcomes, and replay compares complete
+    entries instead of overwriting differences. This is never an ordinary RPC.
+    """
+    from recipes import RecipeStore
+    if not isinstance(store, RecipeStore):
+        raise RecipeError("private restore requires an explicit recipe store")
+    with _staged_private_archive(path) as (archive, digest):
+        return _restore_private_entries(archive, store, digest)
 
 
 def export_private_archive(destination: Path | str, store) -> dict:

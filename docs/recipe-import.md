@@ -2,11 +2,40 @@
 
 This is the shared reader and portable-file contract. The verified collection
 consumer applies records through the bank API under installer ownership. Private
-restore and client attachment integration remain pending their shared runtime
-changes. Private export preserves recipe history and assets. Successful file
+export and explicit offline restore preserve recipe history and assets. The
+service exposes source preview, explicit save and managed covers through MCP/CLI. Successful file
 inspection does not mean recipes have been saved.
 
 ## Native source extraction
+
+### Service preview and explicit save
+
+`meal_concierge_recipe_import` calls `recipes/import` with
+`source_kind=transcript|url|library`. A transcript uses the quoted shape below.
+A URL uses `url` and optional zero-based `record_index` for multiple JSON-LD
+recipes. Text fallback returns the bounded page; the host submits `interpretation`
+with page-1 quotes on a second URL read, and the service verifies those quotes
+against the newly fetched text. Caller replacement source text is rejected.
+Native reads use the exact configured `library_recipe_ref`.
+
+The result contains `recipe`, `recipe_digest`, `discovery_ref`, `import_report`,
+readiness and shopping requirements. Unknown amounts and estimates remain
+visible; `suggested_status=draft` does not silently turn them into usable
+quantities. The preview creates no personal entry. Explicit save uses the
+existing `meal_concierge_recipe_write` with that exact discovery reference,
+status and stable idempotency key. New source imports go to builtin.
+
+Native identities include the configured provider/origin/account binding,
+endpoint namespace and case-sensitive native ID. Supplied transcripts use their
+content digest. The service stores this identity in existing bank metadata;
+recipe content cannot choose it. Interpretation/cover/estimate changes produce
+new technical snapshots of the same source. Reimport preserves local revisions
+and reports a conflict rather than overwriting them. A legacy unqualified source
+identity requires explicit reconciliation. Original attribution and private
+provider restrictions remain independent from this duplicate identity.
+
+Native snapshots retain their exact source revision in existing
+`external_snapshot` metadata. Ordinary get/search never fetches image URLs.
 
 `recipe_import_readers.read_recipesage_export` accepts the UTF-8
 `{"recipes": [...]}` JSON-LD export produced by RecipeSage v4.0.6. Its shape is
@@ -24,8 +53,8 @@ schema.org Recipe from JSON-LD objects, arrays and `@graph`. Multiple recipes
 remain separate choices. It does not execute scripts, fetch JSON-LD contexts or
 follow source/image URLs. It accepts text ingredients and text, HowToStep or
 HowToSection instructions; unsupported structured yield/ingredient shapes fail
-explicitly. These offline readers do not yet establish the URL fetching or
-actual host-attachment workflow.
+explicitly. These offline readers parse supplied bytes; the service read and host-attachment
+workflow use the separate boundaries described below.
 
 Both readers return an extraction report with original fields, inert image
 candidates and unsupported fields. `source_candidate` then uses the shared
@@ -224,8 +253,10 @@ renderer: CSS layout, external resources and scripts are not interpreted.
 The host agent must still identify the recipe and report ambiguity or missing
 fields before the shared import/save workflow.
 
-These readers do not yet complete service ingestion, external-primary retirement,
-private portable restore or actual multi-platform attachment acceptance.
+The service import/image path, controlled write retirement and private restore
+are described here and in the reference. Actual model-driven attachment
+acceptance remains specific to each client; parser or protocol tests alone do
+not establish that a client read the original attachment.
 
 ## Supplied text and host transcriptions
 
@@ -396,13 +427,25 @@ pack baseline remain recipe metadata; `locally_modified` can be recomputed.
 A consistent full-installation backup is needed for history outside recipes,
 operation journals and installation reports.
 
-This slice exports and verifies private files. Applying them still needs the
-dedicated bank restore path: preserve IDs and complete revisions transactionally,
-report differing destination identities as conflicts, and retain provider binding
-without making records eligible under a different selected provider. No restore
-CLI or ordinary RPC upload is enabled by opening an archive.
+Restore an explicitly selected private archive with:
 
-## Trust and unfinished integration
+```sh
+python import_recipes.py --restore-private /chosen/path/recipes.zip \
+  --installation-home /chosen/installation
+```
+
+The command holds the same installer and stopped-runtime ownership as export.
+It closes a private staging copy and verifies the whole archive before writing
+bank entries or assets. The bank commits each complete entry and retained history
+atomically, preserving exact IDs, timestamps, source identity, origin/pack
+metadata and favorite CAS state. Identical entries are unchanged; different local
+entries or occupied identities are conflicts. It does not merge histories,
+rewrite journals or make restored store-bound recipes eligible elsewhere.
+Historical managed JPEGs retain their exact bytes. A later failure reports
+committed counts and supports replay; at most 100 outcome details are returned.
+This is a recipe archive restore, not a whole-household backup or ordinary RPC.
+
+## Trust and integration boundaries
 
 `kind: bundled` is an untrusted manifest assertion. Only the dedicated verified
 pack installation context may assign bundled entry origin. Ordinary imports
@@ -451,7 +494,7 @@ and relocation preserve notices, reports and assets together. Storage failure
 may prevent a final report; it does not undo committed recipes.
 
 The public consumer deliberately rejects `kind: private`; private application
-will use its separate bank restore integration.
+uses the separate explicit offline restore command above.
 
 A portable recipe export is separate from a consistent installation backup.
 It must not overwrite order/email/library outcome journals. The existing

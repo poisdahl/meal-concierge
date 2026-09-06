@@ -8,7 +8,7 @@ managed assets to embed them; text-only destinations retain the attribution.
 One optional `image` belongs to an exact recipe document version. It contains
 `asset_id: "sha256:<64 lowercase hexadecimal characters>"`, plus nullable
 `alt`, `source_url`, `creator`, `credit`, `license`, `license_url` and `changes`.
-Text metadata is limited to 500 characters; URLs are credential-free HTTPS,
+Text metadata is limited to 500 characters; URLs are credential-free HTTP or HTTPS,
 at most 2,048 characters. This is the shared recipe-v2 image shape. Image
 credit and rights are independent of recipe-text credit and rights. Neither
 an image URL nor license-looking text establishes public redistribution rights.
@@ -69,6 +69,29 @@ Managed checks reject embedded metadata markers and data after the final
 image marker; they do not promise removal of arbitrary steganographic content.
 Restoration must not recompress a managed rendition, which would change frozen
 asset identities. Private retailer assets cannot enter public packs.
+
+## Explicit client cover import and display
+
+`meal_concierge_recipe_cover` (`recipes/cover_import`) attaches one cover to an
+exact technical discovery and its `recipe_digest`, creating no personal entry.
+Provide image attribution without `asset_id` and either base64 for at most
+1 MiB of explicitly supplied bytes or the same imported native library ref and
+version. Native image selection is verified against the source's own image
+list; it never authorizes an arbitrary image URL. Host code prepares and
+serializes attachment bytes directly through `cli.py` stdin, without printing
+base64 into model text or assuming a shared filesystem. Use the returned new
+discovery ref for a subsequently requested save.
+
+`meal_concierge_recipe_image` (`recipes/cover_get`) accepts exactly one
+`discovery_ref` or saved `recipe_ref={id,revision}`. It returns native MCP JPEG
+image content plus recorded credits. Missing, corrupt or over-1-MiB managed
+covers return an explicit unavailable result; text and original versions remain
+usable. Ordinary recipe reads still contain only image metadata and references.
+Shell clients must use `cli.py --image-output /explicit/new/host-cover.jpg` for
+this read. The CLI creates a private exclusive file and prints metadata/path
+only; it refuses an existing output or a blob-producing read without that option.
+Image attribution URLs may be credential-free HTTP or HTTPS; display does not
+fetch them or infer a license. Cover credits remain separate from recipe text.
 
 ## Bank origin and pack imports
 

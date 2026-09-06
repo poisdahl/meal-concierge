@@ -126,6 +126,60 @@ def create_v1_bank(path: Path, recipe: dict) -> None:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_restart_waits_for_retiring_supervisor_and_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            meta = {'manager': 'launchd', 'name': 'mc03-test', 'home': directory,
+                    'unit': str(Path(directory) / 'service.plist')}
+            for lock_busy in (False, True):
+                with self.subTest(lock_busy=lock_busy):
+                    statuses = iter([True, True, False, *([False] if lock_busy else []), False])
+                    events = []
+                    ownership_attempts = 0
+
+                    def active(_):
+                        value = next(statuses)
+                        events.append(('active', value))
+                        return value
+
+                    @contextmanager
+                    def owner(_):
+                        nonlocal ownership_attempts
+                        self.assertEqual(events[-1], ('active', False))
+                        ownership_attempts += 1
+                        if lock_busy and ownership_attempts == 1:
+                            raise RuntimeError('target already owned')
+                        events.append(('ownership', 'acquired'))
+                        yield
+
+                    def native(*args):
+                        if args[1] == 'bootstrap':
+                            self.assertIn(('ownership', 'acquired'), events)
+                        events.append(('native', args[1]))
+
+                    with patch.object(install, 'active', side_effect=active), \
+                         patch.object(install, 'data_ownership', side_effect=owner), \
+                         patch.object(install, 'run', side_effect=native), \
+                         patch.object(install, 'health', return_value={'ok': True}), \
+                         patch.object(install.time, 'monotonic', return_value=0), \
+                         patch.object(install.time, 'sleep') as sleep:
+                        install.lifecycle(meta, 'restart')
+                    self.assertEqual(sleep.call_count, 2 if lock_busy else 1)
+                    self.assertEqual([e for e in events if e[0] == 'native'],
+                                     [('native', 'bootout'), ('native', 'bootstrap')])
+
+    def test_restart_refuses_owner_still_active_at_stop_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            meta = {'manager': 'launchd', 'name': 'mc03-test', 'home': directory,
+                    'unit': str(Path(directory) / 'service.plist')}
+            with patch.object(install, 'active', return_value=True), \
+                 patch.object(install, 'data_ownership') as owner, \
+                 patch.object(install, 'run') as native, \
+                 patch.object(install.time, 'monotonic', side_effect=[0, 30]):
+                with self.assertRaisesRegex(RuntimeError, 'service owner is active'):
+                    install.lifecycle(meta, 'restart')
+            owner.assert_not_called()
+            native.assert_called_once_with('launchctl', 'bootout', f'gui/{os.getuid()}/mc03-test')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mc03-', dir=os.environ.get('TMPDIR', '/tmp'))
         self.root = Path(self.temp.name)

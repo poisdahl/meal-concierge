@@ -23,6 +23,7 @@ from recipe_libraries import (
     load_library_secret,
     load_optional_adapter,
     normalize_library_configuration,
+    retired_library_configuration,
     secret_path,
     validate_library_id,
     verified_capabilities,
@@ -64,6 +65,11 @@ def atomic_private_json(path: Path, value: object) -> None:
             os.fsync(output.fileno())
         os.replace(temporary, path)
         os.chmod(path, 0o600)
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -295,6 +301,107 @@ def _set_primary(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, 
     return {"changed": True, "library_id": library_id, "primary": True, "capabilities": capabilities}
 
 
+def _retirement_inventory(state_directory: Path, library_ids: list[str], household: str) -> dict[str, Any]:
+    """Read retained local obligations without migration, cleanup or resolution."""
+    counts = {library: {"pending_operations": 0, "uncertain_operations": 0,
+                        "unfinished_migration_plans": 0, "migration_mappings": 0}
+              for library in library_ids}
+    result = {"scope": "local_journals_and_mappings", "bank_status": "absent", "libraries": counts}
+    database = state_directory / "recipes.sqlite3"
+    try:
+        database.lstat()
+    except FileNotFoundError:
+        return result
+    try:
+        database = database.resolve(strict=True)
+        # A read-only WAL connection can still create source-side SHM files.
+        # Never checkpoint or recover the source to obtain this inventory.
+        descriptor = os.open(database, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise RecipeLibraryError("retirement inventory requires a regular recipe bank")
+            header = os.read(descriptor, 100)
+        finally:
+            os.close(descriptor)
+        if len(header) != 100 or header[:16] != b"SQLite format 3\x00" or header[18:20] != b"\x01\x01":
+            raise RecipeLibraryError("retirement inventory requires a checkpointed rollback-journal bank")
+        if any(path.exists() and path.stat().st_size for path in (Path(str(database) + "-wal"), Path(str(database) + "-journal"))):
+            raise RecipeLibraryError("retirement inventory requires an idle recipe bank")
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+            metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
+            if metadata.get("household") != household or metadata.get("schema_version") not in {"1", "2", "3", "4", "5", "6"}:
+                raise RecipeLibraryError("retirement inventory household or schema differs")
+            version = int(metadata["schema_version"])
+            for library, values in counts.items():
+                if version >= 3:
+                    for status, count in connection.execute(
+                            "SELECT status,count(*) FROM library_operations WHERE library_id=? AND status IN ('pending','uncertain') GROUP BY status", (library,)):
+                        values[status + "_operations"] = count
+                if version >= 5:
+                    values["unfinished_migration_plans"] = connection.execute(
+                        "SELECT count(*) FROM migration_plans p WHERE (json_extract(p.preview,'$.source_library_id')=? OR json_extract(p.preview,'$.destination_library_id')=?) "
+                        "AND (NOT EXISTS (SELECT 1 FROM migration_items i WHERE i.plan_id=p.plan_id) OR EXISTS "
+                        "(SELECT 1 FROM migration_items i WHERE i.plan_id=p.plan_id AND (COALESCE(json_extract(i.progress,'$.copy_status'),'')!='confirmed' "
+                        "OR COALESCE(json_extract(i.progress,'$.metadata_status'),'')!='complete')))", (library, library)).fetchone()[0]
+                if version >= 5:
+                    values["migration_mappings"] = connection.execute(
+                        "SELECT count(*) FROM migration_mappings WHERE source_library=? OR destination_library=?", (library, library)).fetchone()[0]
+            result["bank_status"] = "ready"
+            return result
+        finally:
+            connection.close()
+    except (sqlite3.Error, OSError) as exc:
+        raise RecipeLibraryError("retirement local obligation inventory is unavailable") from exc
+
+
+def retire_external(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
+    """Retain source bindings and journals; change only stopped routing policy."""
+    import install
+    from runtime_ownership import file_lock
+
+    home = args.home.expanduser().resolve()
+    try:
+        if not home.is_dir():
+            raise RecipeLibraryError("retirement requires an existing installation home")
+        with file_lock(home / ".installer.lock"):
+            try:
+                meta = json.loads((home / "runtime.json").read_text(encoding="utf-8"))
+                paths = meta["paths"]
+                if (meta.get("format") != 1 or Path(meta["home"]).resolve() != home
+                        or meta.get("manager") not in {"systemd", "launchd"}
+                        or not isinstance(meta.get("name"), str)
+                        or any(not isinstance(paths[key], str) or not Path(paths[key]).is_absolute()
+                               for key in ("config", "state", "browser_profile", "browser_home", "browser_socket_directory", "socket"))
+                        or Path(paths["config"]).resolve() != args.config.resolve()
+                        or args.state_directory is not None and Path(paths["state"]).resolve() != args.state_directory.resolve()):
+                    raise ValueError()
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+                raise RecipeLibraryError("retirement requires a matching runtime.json configuration and state") from exc
+            config_path = Path(paths["config"]).resolve()
+            with install.offline(meta), _configuration_lock(config_path):
+                current = _read_config(config_path)
+                proposed = {**current, **retired_library_configuration(current)}
+                retained = [c["library_id"] for c in proposed["recipe_libraries"] if c["library_id"] != "builtin"]
+                inventory = _retirement_inventory(Path(paths["state"]), retained, current.get("household"))
+                changed = proposed != current
+                if changed:
+                    atomic_private_json(config_path, proposed)
+                return {"changed": changed, "primary_recipe_library_id": "builtin",
+                        "retained_read_only_libraries": retained, "retained_obligations": inventory,
+                        "migration_complete": False,
+                        "next_action": "Inspect retained sources and copy or reconcile outstanding work before considering connection removal.",
+                        "service_started": False}
+    except RecipeLibraryError:
+        raise
+    except RuntimeError as exc:
+        raise RecipeLibraryError("retirement requires a stopped installation with available ownership locks") from exc
+    except OSError as exc:
+        raise RecipeLibraryError("retirement configuration or installation is unavailable") from exc
+
+
 def remove_connection(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
     with _configuration_lock(args.config):
         return _remove_connection(args, _read_config(args.config))
@@ -358,6 +465,7 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--base-url", required=True)
     add.add_argument("--display-name")
     add.add_argument("--read-only", action="store_true")
+    commands.add_parser("retire-external", help="Use builtin for new writes and retain external readers; requires a stopped installation")
     for action in ("test", "update-credential", "set-primary", "remove"):
         command = commands.add_parser(action)
         command.add_argument("--library-id", required=True)
@@ -374,6 +482,7 @@ def main() -> None:
             "update-credential": update_credential,
             "set-primary": set_primary,
             "remove": remove_connection,
+            "retire-external": retire_external,
         }[args.action]
         result = handler(args, config)
     except RecipeLibraryError as exc:

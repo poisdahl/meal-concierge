@@ -288,6 +288,16 @@ def normalize_library_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
     return {"primary_recipe_library_id": primary, "recipe_libraries": libraries}
 
 
+def retired_library_configuration(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Select the own bank for new writes while retaining exact legacy readers."""
+    result = normalize_library_configuration(value)
+    result["primary_recipe_library_id"] = "builtin"
+    for connection in result["recipe_libraries"]:
+        if connection["library_id"] != "builtin":
+            connection["read_only"] = True
+    return result
+
+
 def secret_path(home: Path | str, library_id: Any) -> Path:
     checked = validate_library_id(library_id, allow_builtin=False)
     return Path(home) / "secrets" / "recipe-libraries" / f"{checked}.json"

@@ -14,6 +14,8 @@ interpretation remain in recipe_import_readers and the shared source parsers.
 from __future__ import annotations
 
 import http.client
+from datetime import datetime, timezone
+import hashlib
 import ipaddress
 import json
 import re
@@ -64,7 +66,15 @@ def _wire_json(value: Any) -> bytes:
 
 
 def _source_result(record: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    return {**record, "candidate": source_candidate(record), "source_context": context}
+    candidate = source_candidate(record)
+    if context.get("kind") in {"mealie", "recipesage"}:
+        reference = context["library_recipe_ref"]
+        candidate["external_snapshot"] = {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "content_hash": hashlib.sha256(json.dumps(candidate, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+            "source_revision_id": reference.get("version"), "permanent_url": None, "changes": None,
+        }
+    return {**record, "candidate": candidate, "source_context": context}
 
 
 def _public_address(address: str) -> bool:

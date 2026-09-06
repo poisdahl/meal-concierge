@@ -17,6 +17,9 @@ import threading
 import time
 from typing import Any, Mapping
 import unicodedata
+from recipe_import_readers import read_transcript, RecipeImportReaderError
+from recipe_import_sources import fetch_public_webpage, read_native_recipe, fetch_native_cover, RecipeImportSourceError
+from recipe_assets import RecipeAssetError, sanitize_image
 from urllib.error import HTTPError
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
@@ -33,6 +36,147 @@ from service_common import (
 
 
 class RecipeOperations:
+    @staticmethod
+    def _import_identity(binding, namespace, identity):
+        return "import:v1:" + hashlib.sha256(canonical([binding, namespace, identity]).encode()).hexdigest()
+
+    def _import_preview(self, request):
+        """Build source evidence from one explicit read, never caller recipe JSON."""
+        kind = request.get("source_kind")
+        try:
+            if kind == "transcript":
+                if any(request.get(key) is not None for key in ("url", "library_recipe_ref", "interpretation")):
+                    raise RecipeError("transcript import cannot include another source")
+                result = read_transcript(request.get("transcript"))
+                context = result["source_context"]
+                identity = self._import_identity("supplied", context["kind"], context["content_sha256"])
+            elif kind == "url":
+                if request.get("transcript") is not None or request.get("library_recipe_ref") is not None:
+                    raise RecipeError("URL import cannot include replacement source text")
+                page = fetch_public_webpage(request.get("url"))
+                if page["requires_interpretation"]:
+                    if request.get("interpretation") is None:
+                        return {**page, "personal_entry_created": False, "source_kind": "url"}
+                    result = read_transcript({"kind": "pasted_text", "pages": [{"page": 1, "text": page["text"]}],
+                        "interpretation": request["interpretation"], "attribution": {"url": request["url"]}})
+                    context = {"kind": "web", "url": request["url"], "source_mode": "verified_page_text"}
+                    result["source_context"] = context
+                    identity = self._import_identity("public", "web:text", normalize_source_url(request["url"]))
+                else:
+                    if request.get("interpretation") is not None:
+                        raise RecipeError("structured URL import does not accept replacement interpretation")
+                    index = request.get("record_index", 0)
+                    if type(index) is not int or not 0 <= index < len(page["recipes"]):
+                        raise RecipeError("record_index must select one returned source recipe")
+                    result = page["recipes"][index]
+                    result["source_recipe_count"] = len(page["recipes"])
+                    # Native JSON-LD identity is exact; page position distinguishes
+                    # recipes where the publisher supplies no identifier.
+                    source = result["candidate"]["source"]
+                    identity = self._import_identity("public", normalize_source_url(request["url"]), source.get("external_id") or index)
+            elif kind == "library":
+                if any(request.get(key) is not None for key in ("url", "transcript", "interpretation")):
+                    raise RecipeError("native import cannot include replacement source content")
+                reference = validate_library_recipe_ref(request.get("library_recipe_ref"))
+                library_id = reference["library_id"]
+                adapter = self.recipe_library_adapters.get(library_id)
+                if adapter is None or library_id not in self.recipe_libraries:
+                    raise RecipeError("configured native recipe source is unavailable")
+                _, binding = self._recipe_library_context(library_id, adapter)
+                result = read_native_recipe(adapter, reference)
+                if self._recipe_library_context(library_id, adapter)[1] != binding:
+                    raise RecipeError("native source account changed during import")
+                context = result["source_context"]
+                identity = self._import_identity(binding, context["kind"] + ":recipe", context["external_id"])
+            else:
+                raise RecipeError("source_kind must be transcript, url or library")
+            recipe = normalize_recipe(bind_recipe_source(result["candidate"]))
+            self._require_recipe_provider(recipe)
+            snapshot = self.recipes.persist_discovery(recipe, source_identity=identity)
+            scaled = scale_recipe(recipe)
+            ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
+            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count") if key in result}
+            return {**snapshot, "import_report": report, "readiness": scaled["readiness"],
+                    "shopping_requirements": scaled["shopping_requirements"], "suggested_status": "active" if ready else "draft",
+                    "personal_entry_created": False}
+        except (RecipeImportReaderError, RecipeImportSourceError) as exc:
+            raise RecipeError(str(exc)) from exc
+
+    def _import_cover(self, request):
+        snapshot = self.recipes.resolve_discovery(request.get("discovery_ref"))
+        if request.get("recipe_digest") != snapshot["recipe_digest"]:
+            raise RecipeError("cover attachment requires the exact discovery recipe_digest")
+        data, native = request.get("image_base64"), request.get("library_recipe_ref")
+        if (data is None) == (native is None):
+            raise RecipeError("cover attachment requires one explicit image or native cover reference")
+        image = request.get("image")
+        if not isinstance(image, Mapping) or "asset_id" in image:
+            raise RecipeError("cover metadata must omit service-owned asset_id")
+        # Validate all metadata before persisting even an unreferenced asset.
+        recipe = deepcopy(snapshot["recipe"])
+        recipe["image"] = {**image, "asset_id": "sha256:" + "0" * 64}
+        normalize_recipe(recipe)
+        self._require_recipe_provider(recipe)
+        try:
+            if data is not None:
+                if not isinstance(data, str) or len(data) > 4 * ((1024 * 1024 + 2) // 3):
+                    raise RecipeError("cover input exceeds 1 MiB; prepare a smaller image on the client")
+                try:
+                    body = base64.b64decode(data, validate=True)
+                except (ValueError, UnicodeError) as exc:
+                    raise RecipeError("cover input is not valid base64") from exc
+                if not body or len(body) > 1024 * 1024:
+                    raise RecipeError("cover input must contain at most 1 MiB")
+            else:
+                reference = validate_library_recipe_ref(native)
+                if not reference.get("version") or reference["version"] != (snapshot["recipe"].get("external_snapshot") or {}).get("source_revision_id"):
+                    raise RecipeError("native cover requires the exact imported source version")
+                adapter = self.recipe_library_adapters.get(reference["library_id"])
+                if adapter is None:
+                    raise RecipeError("configured native image source is unavailable")
+                _, binding = self._recipe_library_context(reference["library_id"], adapter)
+                provider = self.recipe_libraries[reference["library_id"]]["provider"]
+                identity = self._import_identity(binding, provider + ":recipe", reference["recipe_id"])
+                if snapshot["source_identity"] != identity:
+                    raise RecipeError("native cover does not belong to this imported source")
+                cover = fetch_native_cover(adapter, reference, image_url=request.get("image_url"))
+                if self._recipe_library_context(reference["library_id"], adapter)[1] != binding:
+                    raise RecipeError("native source account changed during cover import")
+                body = cover["bytes"]
+                if len(body) > 1024 * 1024:
+                    raise RecipeError("native cover exceeds the explicit 1 MiB input limit")
+                recipe["image"]["source_url"] = cover["source_url"]
+            managed = sanitize_image(body)
+            if len(managed) > 1024 * 1024:
+                raise RecipeError("prepared cover exceeds 1 MiB; reduce its dimensions on the client")
+            recipe["image"]["asset_id"] = "sha256:" + hashlib.sha256(managed).hexdigest()
+            self.recipes.assets.install_managed(recipe["image"]["asset_id"], managed)
+            result = self.recipes.persist_discovery(normalize_recipe(recipe), source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+            return {**result, "personal_entry_created": False}
+        except (RecipeAssetError, RecipeImportSourceError) as exc:
+            raise RecipeError(str(exc)) from exc
+
+    def _read_recipe_cover(self, request):
+        discovery, reference = request.get("discovery_ref"), request.get("recipe_ref")
+        if (discovery is None) == (reference is None):
+            raise RecipeError("image read requires one exact recipe_ref or discovery_ref")
+        if discovery is not None:
+            recipe = self.recipes.resolve_discovery(discovery)["recipe"]
+        else:
+            if not isinstance(reference, Mapping) or set(reference) != {"id", "revision"} or type(reference["revision"]) is not int:
+                raise RecipeError("image read recipe_ref requires exact id and revision")
+            recipe = self.recipes.get(reference["id"], reference["revision"])
+        image = recipe.get("image")
+        if not image:
+            return {"image_status": "unavailable", "reason": "no_managed_cover"}
+        try:
+            body = self.recipes.assets.read(image["asset_id"])
+        except RecipeAssetError:
+            return {"image_status": "unavailable", "reason": "missing_or_corrupt_cover", "image": image}
+        if len(body) > 1024 * 1024:
+            return {"image_status": "unavailable", "reason": "cover_exceeds_1_mib", "image": image}
+        return {"image_status": "available", "image": image, "content_type": "image/jpeg", "bytes": len(body), "image_base64": base64.b64encode(body).decode("ascii")}
+
     def _recipe_provider_eligibility(self, recipe: Mapping[str, Any]) -> dict[str, Any]:
         problem = recipe_provider_problem(recipe, self.provider)
         try:
@@ -1840,8 +1984,11 @@ class RecipeOperations:
             self.recipes.recover_library_operations()
             self._recipe_operations_recovered = True
         discovery_ref = request.get("discovery_ref")
+        imported_source = False
         try:
-            source_recipe = self.recipes.resolve_discovery(discovery_ref)["recipe"]
+            source_snapshot = self.recipes.resolve_discovery(discovery_ref)
+            source_recipe = source_snapshot["recipe"]
+            imported_source = str(source_snapshot["source_identity"]).startswith("import:v1:")
         except RecipeError:
             source_recipe = None  # Existing exact save recovery may outlive the discovery.
         explicit_target = request.get("library_id")
@@ -1850,13 +1997,15 @@ class RecipeOperations:
                 discovery_ref, idempotency_key=request.get("idempotency_key")
             )
             target = bound or self.primary_recipe_library_id
-            if not bound and source_recipe is not None and recipe_source_provider(source_recipe):
+            if not bound and source_recipe is not None and (imported_source or recipe_source_provider(source_recipe)):
                 target = "builtin"
         else:
             target = validate_library_id(explicit_target)
         if target not in self.recipe_libraries:
             raise RecipeLibraryError("library_id must name one exact configured recipe library")
         recovering = self.recipes.discovery_save_replay(discovery_ref, target)
+        if imported_source and target != "builtin" and not recovering:
+            raise RecipeError("new source imports are saved in the built-in recipe bank")
         if source_recipe is not None and not recovering:
             self._require_recipe_provider(source_recipe)
         if target != "builtin" and not recovering and source_recipe is not None and recipe_source_provider(source_recipe):
@@ -2774,20 +2923,27 @@ class RecipeOperations:
 
     def _recipes(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "search")
+        if action == "import":
+            return self._import_preview(request)
+        if action == "cover_import":
+            return self._import_cover(request)
+        if action == "cover_get":
+            return self._read_recipe_cover(request)
         if action == "accept_estimates":
             has_discovery = request.get("discovery_ref") is not None
             has_recipe = request.get("recipe_id") is not None
             if has_discovery == has_recipe or request.get("recipe") is not None:
                 raise RecipeError("accept_estimates requires exactly one saved recipe revision or discovery_ref, and no replacement document")
             if has_discovery:
-                original = self.recipes.resolve_discovery(request["discovery_ref"])["recipe"]
+                snapshot = self.recipes.resolve_discovery(request["discovery_ref"])
+                original = snapshot["recipe"]
             else:
                 if type(request.get("expected_revision")) is not int:
                     raise RecipeError("accept_estimates requires an exact expected_revision")
                 original = self.recipes.get(request["recipe_id"], request["expected_revision"])
             accepted = accept_recipe_estimates(original, request.get("recipe_digest"), request.get("estimate_fields"), request.get("confirmation_statement"))
             if has_discovery:
-                result = self.recipes.persist_discovery(accepted)
+                result = self.recipes.persist_discovery(accepted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
                 self.recipes.remember_discovery_transform(request["discovery_ref"], result["discovery_ref"], "conversion")
                 return {**result, "personal_entry_created": False}
             if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():
@@ -2811,7 +2967,7 @@ class RecipeOperations:
             if canonical(converted["source"]) != canonical(original["source"]):
                 raise RecipeError("conversion must preserve the exact source attribution")
             self._require_recipe_provider(converted)
-            result = self.recipes.persist_discovery(converted)
+            result = self.recipes.persist_discovery(converted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
             return {**result, "personal_entry_created": False}
         if action == "detail":

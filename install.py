@@ -204,7 +204,6 @@ def lifecycle(meta, action):
                     raise RuntimeError(f"service did not become ready; inspect {meta['home']}/service.err.log")
                 time.sleep(.1)
     else:
-        assert_stopped(meta)
         # launchd bootout can return before process exit; never take over early.
         deadline = time.monotonic() + 30
         while True:

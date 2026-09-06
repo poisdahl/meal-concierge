@@ -501,7 +501,7 @@ def _image(value: Any) -> dict[str, Any] | None:
         raise RecipeError("image contains unsupported fields; use one managed asset reference")
     if re.fullmatch(r"sha256:[a-f0-9]{64}", str(value.get("asset_id") or "")) is None:
         raise RecipeError("image.asset_id must be a managed sha256 identifier")
-    return {key: normalize_source_url(value.get(key)) if key.endswith("_url") else
+    return {key: _normalize_recipe_url(value.get(key), attribution=True) if key.endswith("_url") else
             _bounded_text(value.get(key), f"image.{key}", required=key == "asset_id", maximum=500)
             for key in sorted(fields)}
 
@@ -1522,7 +1522,7 @@ class RecipeStore:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def _connect(self, target: str | None = None) -> sqlite3.Connection:
+    def _connect(self, target: str | None = None, *, restore: bool = False) -> sqlite3.Connection:
         if target is None:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             existed = self.path.exists()
@@ -1536,6 +1536,13 @@ class RecipeStore:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("BEGIN IMMEDIATE")
             metadata = self._metadata(connection)
+            if restore and existed:
+                if metadata is None or metadata.get("household") != self.household or metadata.get("schema_version") != "6":
+                    raise RecipeError("private restore requires the current household bank schema")
+                # Restoring private recipes must not migrate or expire unrelated
+                # operations, discoveries, mappings or household metadata.
+                connection.commit()
+                return connection
             if metadata is not None:
                 if metadata.get("household") not in {None, self.household}:
                     raise RecipeError("recipe bank belongs to a different household")
@@ -1593,6 +1600,9 @@ class RecipeStore:
                                       "library_connection_controls", "recipe_favorites"))):
                 self._backup_v4(connection)
             self._schema(connection)
+            if restore:
+                connection.commit()
+                return connection
             from recipe_migration import cleanup
             cleanup(connection)
             self._cleanup_library_data(connection)
@@ -1605,8 +1615,8 @@ class RecipeStore:
             raise
 
     @contextmanager
-    def _connection(self):
-        connection = self._connect()
+    def _connection(self, *, restore: bool = False):
+        connection = self._connect(restore=restore)
         try:
             with connection:
                 yield connection
@@ -1726,11 +1736,12 @@ class RecipeStore:
             )
 
     @staticmethod
-    def _snapshot_parts(recipe: Mapping[str, Any]) -> tuple[dict[str, Any], str, str, str]:
+    def _snapshot_parts(recipe: Mapping[str, Any], source_identity: str | None = None) -> tuple[dict[str, Any], str, str, str]:
         document = normalize_recipe(recipe)
-        source_identity = source_key(document)
+        qualified_identity = source_identity
+        source_identity = qualified_identity or source_key(document)
         source = document.get("source") or {}
-        if source.get("publisher") and source.get("external_id"):
+        if qualified_identity is None and source.get("publisher") and source.get("external_id"):
             # Preserve the established frozen-snapshot digest format. Its full
             # attribution digest already distinguishes case-sensitive IDs.
             source_identity = f"{_normalized_text(source['publisher'])}:{_normalized_text(source['external_id'])}"
@@ -1792,7 +1803,9 @@ class RecipeStore:
         if row is None or (row["expires_at"] <= _now() and active_pin is None):
             raise RecipeError("discovery reference was not found")
         recipe = _stored_recipe_document(row["document"])
-        _, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(recipe)
+        identity = row["source_identity"]
+        qualified = identity if isinstance(identity, str) and identity.startswith("import:v1:") else None
+        _, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(recipe, qualified)
         if (
             snapshot_key != row["snapshot_key"]
             or content_hash != row["content_hash"]
@@ -1806,6 +1819,7 @@ class RecipeStore:
             "content_hash": row["content_hash"],
             "attribution_digest": row["attribution_digest"],
             "expires_at": row["expires_at"],
+            "source_identity": identity,
         }
 
     @staticmethod
@@ -3832,7 +3846,7 @@ class RecipeStore:
             source = self._resolved_snapshot(connection, self._discovery_ref(connection, discovery_ref))
             result = self._resolved_snapshot(connection, self._discovery_ref(connection, result_ref))
             fields = ("kind", "publisher", "url", "external_id")
-            if any(source["recipe"]["source"].get(field) != result["recipe"]["source"].get(field) for field in fields) or recipe_source_provider(source["recipe"]) != recipe_source_provider(result["recipe"]):
+            if source["source_identity"] != result["source_identity"] or any(source["recipe"]["source"].get(field) != result["recipe"]["source"].get(field) for field in fields) or recipe_source_provider(source["recipe"]) != recipe_source_provider(result["recipe"]):
                 raise RecipeError("recipe transform changed source identity")
             key = self._transform_cache_key(source, kind)
             # This is disposable memo metadata, never a personal entry or binding.
@@ -3843,8 +3857,11 @@ class RecipeStore:
                                "WHERE key LIKE 'recipe_transform:v1:%' ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
                                (MAX_UNBOUND_DISCOVERY_SNAPSHOTS,))
 
-    def persist_discovery(self, value: Any) -> dict[str, Any]:
-        document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(value)
+    def persist_discovery(self, value: Any, *, source_identity: str | None = None) -> dict[str, Any]:
+        """Store a trusted source projection; import identity is service-derived."""
+        if source_identity is not None and re.fullmatch(r"import:v1:[a-f0-9]{64}", source_identity) is None:
+            raise RecipeError("qualified import identity is invalid")
+        document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(value, source_identity)
         serialized = _canonical(document)
         try:
             with self._connection() as connection:
@@ -3874,7 +3891,7 @@ class RecipeStore:
                         if revision is None:
                             raise RecipeError("recipe bank is unavailable")
                         document, bound_key, content_hash, attribution_digest = (
-                            self._snapshot_parts(_stored_recipe_document(revision["document"]))
+                            self._snapshot_parts(_stored_recipe_document(revision["document"]), source_identity)
                         )
                         if bound_key != snapshot_key:
                             raise RecipeError("recipe bank is unavailable")
@@ -3885,7 +3902,7 @@ class RecipeStore:
                             discovery_ref, snapshot_key, document, source_identity, content_hash, attribution_digest,
                             created_at, renewed_at, expires_at, document_bytes
                         ) VALUES(?,?,?,?,?,?,?,?,?,?)
-                    """, (ref, snapshot_key, serialized, source_key(document), content_hash, attribution_digest,
+                    """, (ref, snapshot_key, serialized, source_identity or source_key(document), content_hash, attribution_digest,
                           created, created, self._expiry(current), len(serialized.encode("utf-8"))))
                 else:
                     ref = row["discovery_ref"]
@@ -4016,11 +4033,19 @@ class RecipeStore:
                     return result
                 resolved = self._resolved_snapshot(connection, ref)
                 recipe = resolved["recipe"]
-                source_identity = source_key(recipe)
-                existing = self._source_duplicate(connection, recipe)
+                source_identity = resolved["source_identity"]
+                qualified = source_identity if str(source_identity).startswith("import:v1:") else None
+                existing = (connection.execute("SELECT * FROM recipes WHERE source_key=?", (qualified,)).fetchone()
+                            if qualified else self._source_duplicate(connection, recipe))
+                if qualified and existing is None:
+                    legacy = self._source_duplicate(connection, recipe)
+                    if legacy is not None:
+                        return {**self._record(connection, legacy, created=False), "conflict": {
+                            "kind": "legacy_source_identity", "discovery_ref": ref,
+                            "requires": "reconcile the original source account before copying"}}
                 if existing is not None:
                     _, _, existing_content_hash, existing_attribution_digest = self._snapshot_parts(
-                        _stored_recipe_document(existing["document"])
+                        _stored_recipe_document(existing["document"]), qualified
                     )
                     if (
                         existing_content_hash != resolved["content_hash"]
@@ -4038,7 +4063,7 @@ class RecipeStore:
                         }
                         self._store_idem(connection, key, "save_discovery", request_hash, result)
                         return result
-                result = self._record(connection, existing, created=False) if existing is not None else self._save(connection, recipe, status, None, "discovery")
+                result = self._record(connection, existing, created=False) if existing is not None else self._save(connection, recipe, status, None, "discovery", migration_identity=qualified)
                 timestamp = _now()
                 connection.execute("""
                     INSERT INTO discovery_bindings(
@@ -4075,6 +4100,8 @@ class RecipeStore:
         rows = connection.execute("SELECT * FROM recipes WHERE source_key IN (?,?)", (identity, legacy)).fetchall()
         match = None
         for row in rows:
+            if str(row["source_key"]).startswith(("import:v1:", "migration:")):
+                continue  # Qualified internal identities are not attribution keys.
             stored_identity = source_key(_stored_recipe_document(row["document"]))
             if stored_identity != row["source_key"]:
                 # An uppercase legacy ID may occupy the lowercase ID's key.
@@ -4082,6 +4109,83 @@ class RecipeStore:
             if stored_identity == identity:
                 match = row
         return match
+
+    def source_entry(self, source_identity: str) -> dict[str, Any] | None:
+        """Internal exact source lookup for a confirmed import/migration context."""
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM recipes WHERE source_key=?", (source_identity,)).fetchone()
+            return self._record(connection, row, created=False) if row is not None else None
+
+    def restore_private_entry(self, group: Mapping[str, Any]) -> dict[str, Any]:
+        """Apply one fully verified private archive group under offline ownership.
+
+        The codec verifies the complete closed archive and installs its assets
+        first. This is deliberately separate from ordinary recipe save/input.
+        """
+        entry, revisions = group["entry"], group["revisions"]
+        recipe_id = entry["id"]
+        recipe = revisions[-1]["document"]
+        pack, favorite = entry["pack"], entry["favorite"]
+        metadata = (entry["entry_origin"], *(pack[key] for key in ("pack_id", "recipe_id", "version", "baseline_hash"))) if pack else (entry["entry_origin"], None, None, None, None)
+        desired_history = [(row["revision"], row["status"], _canonical(row["document"]), row["created_at"]) for row in revisions]
+        desired_favorite = [("builtin", int(favorite["is_favorite"]), favorite["favorite_revision"], favorite["created_at"], favorite["updated_at"])] if favorite else []
+        def result(outcome, reason=None):
+            return {"outcome": outcome, "recipe_id": recipe_id, **({"reason": reason} if reason else {})}
+        try:
+            with self._connection(restore=True) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
+                history = connection.execute("SELECT revision,status,document,created_at FROM revisions WHERE recipe_id=? ORDER BY revision", (recipe_id,)).fetchall()
+                origin = connection.execute("SELECT entry_origin,pack_id,pack_recipe_id,pack_version,baseline_hash FROM recipe_entry_metadata WHERE recipe_id=?", (recipe_id,)).fetchone()
+                favorites = connection.execute("SELECT library_id,is_favorite,favorite_revision,created_at,updated_at FROM recipe_favorites WHERE recipe_id=?", (recipe_id,)).fetchall()
+                if current is not None:
+                    fields = ("revision", "status", "source_key", "created_at", "updated_at", "created_via")
+                    equal = (all(current[key] == entry[key] for key in fields)
+                             and _stored_recipe_document(current["document"]) == recipe
+                             and [tuple(row) for row in history] == desired_history
+                             and origin is not None and tuple(origin) == metadata
+                             and [tuple(row) for row in favorites] == desired_favorite)
+                    return result("unchanged") if equal else result("conflict", "local_entry_differs")
+                if history or origin is not None or favorites:
+                    return result("conflict", "local_identity_rows_exist")
+                if entry["source_key"] is not None and connection.execute("SELECT 1 FROM recipes WHERE source_key=?", (entry["source_key"],)).fetchone():
+                    return result("conflict", "source_identity_exists")
+                if entry["source_key"] is not None and (
+                    connection.execute("SELECT 1 FROM library_operations WHERE library_id='builtin' AND source_identity=?", (entry["source_key"],)).fetchone()
+                    or connection.execute("SELECT 1 FROM migration_mappings WHERE destination_library='builtin' AND source_id=?", (entry["source_key"],)).fetchone()
+                ):
+                    return result("conflict", "local_history_references_source_identity")
+                if pack and connection.execute("SELECT 1 FROM recipe_entry_metadata WHERE pack_id=? AND pack_recipe_id=?", (pack["pack_id"], pack["recipe_id"])).fetchone():
+                    return result("conflict", "pack_identity_exists")
+                for query in (
+                    "SELECT 1 FROM discovery_bindings WHERE destination='builtin' AND recipe_id=?",
+                    "SELECT 1 FROM library_mappings WHERE library_id='builtin' AND recipe_id=?",
+                    "SELECT 1 FROM library_operations WHERE library_id='builtin' AND (target_recipe_id=?1 OR provider_recipe_id=?1)",
+                    "SELECT 1 FROM migration_mappings WHERE source_library='builtin' AND source_id=?",
+                ):
+                    if connection.execute(query, (recipe_id,)).fetchone():
+                        return result("conflict", "local_history_references_identity")
+                def references(value):
+                    if isinstance(value, dict):
+                        return (value.get("id") == recipe_id or value.get("recipe_id") == recipe_id
+                                or any(references(item) for item in value.values()))
+                    return isinstance(value, list) and any(references(item) for item in value)
+                for table, column in (("idempotency", "response_json"), ("migration_mappings", "destination_ref"),
+                                      ("migration_items", "frozen"), ("migration_items", "progress")):
+                    for row in connection.execute(f"SELECT {column} FROM {table}"):
+                        if row[0] and references(json.loads(row[0])):
+                            return result("conflict", "local_history_references_identity")
+                connection.execute("INSERT INTO recipes VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    recipe_id, entry["revision"], entry["status"], recipe["name"], self._search_text(recipe),
+                    entry["source_key"], content_fingerprint(recipe), _hash(recipe), _canonical(recipe),
+                    entry["created_at"], entry["updated_at"], entry["created_via"]))
+                connection.executemany("INSERT INTO revisions VALUES(?,?,?,?,?)", [(recipe_id, *row) for row in desired_history])
+                connection.execute("INSERT INTO recipe_entry_metadata VALUES(?,?,?,?,?,?)", (recipe_id, *metadata))
+                if favorite:
+                    connection.execute("INSERT INTO recipe_favorites VALUES(?,?,?,?,?,?)", ("builtin", recipe_id, *desired_favorite[0][1:]))
+                return result("created")
+        except sqlite3.Error as exc:
+            raise RecipeError("private recipe entry could not be restored") from exc
 
     def _save(self, connection: sqlite3.Connection, recipe: Mapping[str, Any], status: str, key: str | None, created_via: str, *, migration_identity: str | None = None) -> dict[str, Any]:
         request_hash = _hash({"recipe": recipe, "status": status})
@@ -4457,8 +4561,11 @@ class RecipeStore:
                 if recipe_source_provider(previous) is not None:
                     bind_recipe_source(recipe, prior=previous)
                 validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(current["document"]))
-                identity = source_key(recipe)
-                collision = self._source_duplicate(connection, recipe)
+                retained_identity = current["source_key"]
+                qualified = isinstance(retained_identity, str) and retained_identity.startswith(("import:v1:", "migration:"))
+                identity = retained_identity if qualified else source_key(recipe)
+                collision = (connection.execute("SELECT * FROM recipes WHERE source_key=?", (identity,)).fetchone()
+                             if qualified else self._source_duplicate(connection, recipe))
                 if collision is not None and collision["id"] != recipe_id:
                     raise RecipeError("source identity already belongs to another recipe")
                 revision = expected_revision + 1

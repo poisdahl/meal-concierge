@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Native recipe imports and explicitly offline private recipe export."""
+"""Native recipe imports and explicitly offline private export and restore."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -62,14 +63,14 @@ def _household_state(state_directory: Path) -> dict:
     return state
 
 
-def _export_private(args) -> dict:
+@contextmanager
+def _offline_store(args):
     import install
-    from recipe_portable import export_private_archive
     from runtime_ownership import file_lock
 
     home = args.installation_home.expanduser().resolve()
     if not home.is_dir():
-        raise RecipeError("private export requires an existing installation home")
+        raise RecipeError("private recipe operations require an existing installation home")
     with file_lock(home / ".installer.lock"):
         try:
             meta = json.loads((home / "runtime.json").read_text(encoding="utf-8"))
@@ -82,47 +83,63 @@ def _export_private(args) -> dict:
                 raise ValueError()
             state_directory = Path(paths["state"])
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-            raise RecipeError("private export requires a readable matching runtime.json installation manifest") from exc
+            raise RecipeError("private recipe operations require a readable matching runtime.json installation manifest") from exc
         if args.state_directory is not None and args.state_directory.resolve() != state_directory.resolve():
             raise RecipeError("--state-directory differs from the installation manifest")
-        # The exporting process retains both installer and runtime lifetime
+        # The calling process retains both installer and runtime lifetime
         # ownership. It never stops, restarts or adopts an existing service.
         with install.offline(meta):
             state = _household_state(state_directory)
-            manifest = export_private_archive(args.export_private,
-                RecipeStore(state_directory / "recipes.sqlite3", state["household"]))
+            yield RecipeStore(state_directory / "recipes.sqlite3", state["household"])
+
+
+def _export_private(args) -> dict:
+    from recipe_portable import export_private_archive
+    with _offline_store(args) as store:
+        manifest = export_private_archive(args.export_private, store)
     return {"exported": True, "kind": "private", "destination": str(args.export_private),
             "recipes_count": manifest["recipes_count"], "records_count": manifest["records_count"]}
 
 
+def _restore_private(args) -> dict:
+    from recipe_portable import restore_private_archive
+    with _offline_store(args) as store:
+        return restore_private_archive(args.restore_private, store)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Import native recipe JSON/JSONL or export private recipes offline")
+    parser = argparse.ArgumentParser(description="Import native recipe JSON/JSONL or export/restore private recipes offline")
     parser.add_argument("path", type=Path, nargs="?")
     parser.add_argument("--image", help="import one explicitly supplied relative image attachment")
     parser.add_argument("--import-root", type=Path, help="trusted local root containing that image attachment")
     parser.add_argument("--state-directory", type=Path)
-    parser.add_argument("--export-private", type=Path, help="write a new private recipe/history archive from a stopped installation")
-    parser.add_argument("--installation-home", type=Path, help="explicit installation home containing runtime.json; required for private export")
+    private_mode = parser.add_mutually_exclusive_group()
+    private_mode.add_argument("--export-private", type=Path, help="write a new private recipe/history archive from a stopped installation")
+    private_mode.add_argument("--restore-private", type=Path, help="restore exact private recipe history into a stopped installation without overwriting conflicts")
+    parser.add_argument("--installation-home", type=Path, help="explicit installation home containing runtime.json; required for private export/restore")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", choices=("active", "draft"))
     parser.add_argument("--backup", type=Path, help="write a verified SQLite backup before a committed import")
     args = parser.parse_args()
-    if args.export_private is not None:
+    if args.export_private is not None or args.restore_private is not None:
+        operation = "export" if args.export_private is not None else "restore"
         if (args.installation_home is None or args.path is not None or args.image is not None
                 or args.import_root is not None or args.backup is not None or args.dry_run or args.status is not None):
-            parser.error("--export-private requires --installation-home and cannot be combined with import/image/backup/dry-run/status options")
+            parser.error("private export/restore requires --installation-home and cannot be combined with import/image/backup/dry-run/status options")
         try:
-            result = _export_private(args)
+            result = _export_private(args) if operation == "export" else _restore_private(args)
         except (RecipeError, RecipeAssetError) as exc:
             raise SystemExit(str(exc)) from exc
         except RuntimeError as exc:
-            raise SystemExit("private export requires a stopped installation with available ownership locks") from exc
+            raise SystemExit(f"private {operation} requires a stopped installation with available ownership locks") from exc
         except OSError as exc:
-            raise SystemExit("private export input or destination is unavailable") from exc
+            raise SystemExit(f"private {operation} input or destination is unavailable") from exc
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        if operation == "restore" and result["status"] != "complete":
+            raise SystemExit(1)
         return
     if args.installation_home is not None or args.state_directory is None:
-        parser.error("normal imports require --state-directory; --installation-home is only used with --export-private")
+        parser.error("normal imports require --state-directory; --installation-home is only used with private export/restore")
     if args.image is not None:
         if args.path is not None or args.import_root is None or args.backup is not None:
             parser.error("--image requires --import-root and cannot be combined with a recipe path or --backup")

@@ -174,7 +174,7 @@ Private database-plus-assets backups preserve recipes and their metadata.
 Optional `image` is null or one exact versioned record with required
 `asset_id: "sha256:<64 lowercase hex>"` and nullable `alt`, `source_url`,
 `creator`, `credit`, `license`, `license_url`, `changes`. Text is bounded to
-500 characters, credential-free HTTPS URLs to 2048. There are no embedded bytes
+500 characters, credential-free HTTP or HTTPS URLs to 2048. There are no embedded bytes
 or filesystem paths. Image attribution is separate from recipe-text rights.
 New/replaced covers must reference an available managed local asset imported
 explicitly through the attachment importer. Completed retries, existing

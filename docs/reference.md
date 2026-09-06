@@ -398,10 +398,11 @@ an existing private state directory in place: pending checkout, cancellation,
 order-change, schedule, product-favorite and recurring records are provider-specific.
 Use a separate private installation and MCP registration for another provider.
 
-## Personal recipe-library connections
+## Recipe import sources and retained legacy connections
 
 The built-in bank always exists as exact `library_id="builtin"` and is the
-zero-configuration primary. The Mealie and RecipeSage adapters are included.
+zero-configuration primary and destination for new source imports. The Mealie
+and RecipeSage adapters support native import and retained legacy recovery.
 Merely adding either connection never selects it or blocks the built-in path.
 Connections live only in the private config and use stable IDs:
 
@@ -442,11 +443,9 @@ the provider-specific adapter is installed, use the interactive local helper:
 ```sh
 meal_concierge_home="${MEAL_CONCIERGE_HOME:-${HERMES_HOME:-$HOME/.hermes}/meal-concierge}"
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
-  add --library-id family-mealie --provider mealie --base-url https://recipes.example
+  add --library-id family-mealie --provider mealie --base-url https://recipes.example --read-only
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
   test --library-id family-mealie
-python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
-  set-primary --library-id family-mealie
 ```
 
 For Mealie, enter exactly `{"token":"<long-lived Mealie API token>"}` at the
@@ -826,10 +825,10 @@ handoff; ranking and save do not compare it with a later wall clock.
 After automatic collection, the planner and its save handoff resolve exact
 candidate snapshots locally. Save revalidation does not repeat source discovery
 or retailer calls. Source-family history and explicit feedback apply before
-shortlisting and again at save revalidation. A candidate must be active and have a full recipe document with known person
-servings. Known ingredient quantities are scaled to the requested portions.
-Unknown or non-scalable measures stay visible with `scaling_ready=false` and
-unresolved product needs; they never establish a purchasable amount.
+shortlisting and again at save revalidation. A candidate must be active and have a full recipe document with known person servings.
+Known ingredient quantities are scaled to the requested portions. Unknown or
+non-scalable measures stay visible with scaling_ready=false and unresolved
+product needs; they never establish a purchasable amount.
 Automatic MENY collection enriches exact link snapshots through the verified
 reader; unsupported detail readers remain explicit failed details. A title or
 summary cannot establish readiness. Compact discovery uses `projection=summary`,
@@ -1331,6 +1330,37 @@ leaves v10 usable and unknown newer versions fail closed. Source/leftover outcom
 maps each retain at most 2,000 entries and fail without deleting history at the
 bound.
 
+## Recipe source preview, save and cover display
+
+`meal_concierge_recipe_import` (`recipes/import`) accepts
+`source_kind=transcript|url|library`, with the corresponding quoted `transcript`,
+public `url`, or exact configured `library_recipe_ref`. The host reads original
+attachments with native tools; the service parses exact source quantities and
+validates selected quotations. URL fallback uses a second source read with
+`interpretation`, never caller replacement page text. Structured pages support
+zero-based `record_index`. See [recipe-import.md](recipe-import.md) for the
+bounded transcript shape and source-reader limits.
+
+The result is a technical `discovery_ref` with its recipe/digest, source report,
+readiness and unresolved shopping requirements. It creates no personal entry.
+An explicit save uses the existing recipe-write tool and that ref; source imports
+go to builtin. Account-qualified source identity survives local edits, covers,
+conversion and estimate acceptance. Reimport reports local/source conflicts.
+
+`meal_concierge_recipe_cover` (`recipes/cover_import`) takes the exact discovery
+ref/digest and declared `image` credits, plus either `image_base64` or the same
+native `library_recipe_ref`/version with optional native `image_url` selection.
+The image input is at most 1 MiB decoded. Host code prepares and serializes bytes
+directly through the JSON CLI; no service/host path sharing or blob in model text
+is needed. It returns a new technical ref; saving remains separate.
+
+`meal_concierge_recipe_image` (`recipes/cover_get`) reads one exact discovery or
+`recipe_ref={id,revision}` and emits native MCP JPEG content plus credits.
+Unavailable/corrupt/oversized images produce a bounded unavailable result.
+Shell reads require `cli.py --image-output /explicit/new/host-cover.jpg` and
+create a private exclusive file with metadata-only stdout. No display operation
+fetches an image URL. See [recipe-assets.md](recipe-assets.md).
+
 ## Explicit recipe-library copy
 
 `meal_concierge_migration` (local operation `migration`) provides `prepare`,
@@ -1353,6 +1383,18 @@ require authoritative reads and desired-state writes. Preserved labels need
 `library_label_ref` objects. Equal names never select an ID; no labels are
 created implicitly. The preview lists mappings and supported/omitted/blocked
 metadata separately from recipe content.
+
+New Mealie/RecipeSage inbound plans read actual native fields and target builtin.
+They freeze the configured origin/account binding and exact native version;
+editable legacy sidecars cannot replace source quantities or attribution.
+Native label wording remains in recipe tags, while unsupported preservation of
+external label identities is explicit. Optional `metadata_options.cover` is
+`omit` (default), `preserve`, or `stop`. Preservation verifies the source-owned
+cover/version, accepts at most 1 MiB, and sanitizes it into a managed JPEG.
+Unknown image creator/license remain unknown. Source identity and mappings use
+the configured account, endpoint namespace and exact case-sensitive native ID;
+an old mapping without proven binding requires review. Existing frozen legacy
+plans retain their original read/recovery semantics.
 
 The preview classifies every item as `create`, `already_mapped`,
 `exact_existing`, `conflict`, `unsupported_rights` or `unavailable`. Dedup uses
@@ -1389,10 +1431,24 @@ roll back by deleting the recipe. Inspect returns each exact item outcome and
 metadata-stage status. A definitive failure requires reviewing a new preview;
 an uncertain operation always stays attached to its original plan.
 
-Migration never changes `primary_recipe_library_id`. Review the final report,
-resolve all uncertainty, then use the existing separate explicit local
-recipe-library setup action if a primary change is desired. MCP migration has
-no routing, connection or credential mutation capability.
+Migration never changes `primary_recipe_library_id`. Review the copy report and
+retained recovery obligations. For the controlled write transition, use the
+explicit local command on a stopped installation:
+
+```sh
+python recipe_library_setup.py --config /installation/config.json \
+  --home /installation retire-external
+```
+
+It holds installer/runtime/config ownership, selects builtin, and makes all
+retained external connections read-only atomically. It preserves credentials,
+references, mappings and operation journals, does not probe optional sources or
+start a service, and reports remaining local obligations. This does not certify
+complete source migration. Missing optional source credentials do not block
+builtin after normal service startup. New external writes are masked while
+uncertain operations retain their original read-only reconciliation route.
+Do not remove a connection still required by history or unresolved operations.
+MCP migration has no routing, connection or credential mutation capability.
 
 Recipe-bank v5 adds private `migration_plans`, frozen items and exact durable
 mappings. A non-empty v4 bank receives one transactionally consistent private

@@ -168,7 +168,10 @@ async def sdk_checks(root, process):
         assert {t.name for t in discovered.tools} == expected
         for tool in discovered.tools:
             assert tool.input_schema["type"] == "object"
-            assert tool.output_schema["type"] == "object"
+            if tool.name == "meal_concierge_recipe_image":
+                assert tool.output_schema is None
+            else:
+                assert tool.output_schema["type"] == "object"
         schemas = {t.name: t.input_schema for t in discovered.tools}
         assert schemas["meal_concierge_catalog"]["required"] == ["action"]
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
