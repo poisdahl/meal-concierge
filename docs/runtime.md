@@ -255,9 +255,19 @@ from two Linux disk-full failures. An unchanged archive is idempotent, and a
 pack acquisition failure reports that the pack needs attention while leaving
 the core runtime usable.
 
-Default public HTTPS acquisition and installed external-library retirement
-remain separate native acceptance gates. Offline archive checks do not establish
-those outcomes; the latter is tracked in
+Actual fresh default HTTPS installations from public `d8ee7a8d` passed on
+macOS and Linux without a descriptor override or offline fallback: 3,807 recipes,
+784 JPEG assets, seven distinct dinners and new-client attachment after restart.
+Installed external-primary retirement and idempotent replay also passed on both
+OSes using synthetic library transport and credentials. Existing data, images
+and unfinished obligations were preserved; builtin became primary and the old
+source remained read-only for recovery. Linux preserved one existing mapping
+and one unfinished migration plan; macOS preserved zero mappings and two
+unfinished plans, so it does not independently prove the populated-mapping case.
+Both preserved one pending and one uncertain library operation. The original
+Mac fixture failure was reconciled with a native-only resume, without repeating
+update or retirement. Both final independent reviews approved this native
+runtime/pack/legacy scope; it does not close all recipe/client acceptance under
 [#46](https://github.com/poisdahl/meal-concierge/issues/46).
 
 ## Verification boundary
