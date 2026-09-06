@@ -283,11 +283,12 @@ def source_ingredient(text: str, *, item: str | None = None, measure: str | None
 
 def source_yield(text: str) -> tuple[dict[str, Any], float | None]:
     quantity = unit = portions = None
-    matched = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s+(.+?)\s*", text)
+    serves = re.fullmatch(r"\s*serves\s+(\d+(?:[.,]\d+)?)\s*", text, re.IGNORECASE)
+    matched = serves or re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s+(.+?)\s*", text)
     if matched:
         try:
             quantity = quantity_json(read_quantity(matched[1].replace(",", ".")))
-            unit = matched[2]
+            unit = "servings" if serves else matched[2]
             if unit.casefold() in {"serving", "servings", "portion", "portions", "porsjon", "porsjoner", "people", "persons"}:
                 portions = float(read_quantity(quantity))
         except ValueError:

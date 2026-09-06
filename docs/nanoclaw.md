@@ -3,8 +3,9 @@
 Meal Concierge runs as an independently owned service on the NanoClaw host.
 Its database, configuration, recipe assets, provider authentication and browser
 stay outside disposable agent containers. Use the existing installer/runtime
-to manage that service. An agent template installs only the stdio bridge and
-the canonical Meal Concierge skill; it never starts another household service.
+to manage that service. An agent template installs the MCP bridge, the existing
+CLI bridge and the canonical Meal Concierge skill. It never starts another
+household service.
 
 The native template targets NanoClaw 2.3.0 at
 `b76fcb3db0236b36a4d50bed02e89eff472d0e67`. It uses Agent Plugins 1.0
@@ -46,6 +47,14 @@ other entries, then run `ncl groups config add-mount --id GROUP_ID --host HOST_P
 existing group mounts before adding a conflicting destination. No whole
 household, source checkout, Docker socket, provider token or browser endpoint
 belongs in these mounts. Restart only the affected group when it is idle.
+
+For a requested recipe cover, use the packaged `bridge/cli.py` beside the MCP
+bridge with the same mounted Python runtime, `PYTHONPATH` and
+`MEAL_CONCIERGE_SOCKET`. Host code sends the prepared image bytes through stdin
+using `recipes/cover_import`; keep the encoded image out of model text. For an
+exact managed image read, `recipes/cover_get` requires `--image-output` and a
+new explicit local filename. Both routes use the existing household socket.
+See the installed skill for the import, credit and confirmation rules.
 
 The service authenticates the configured owner UID and host root. Run the
 NanoClaw agent container with that owner UID. Every participant who can use an

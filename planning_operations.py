@@ -39,6 +39,8 @@ from service_common import (
     canonical,
     menu_digest,
     menu_email_html,
+    scheduled_occurrence,
+    scheduler_settings_digest,
     validate_schedule
 )
 
@@ -1088,17 +1090,292 @@ class PlanningOperations:
                 return {"menu": deepcopy(menu)}
         raise HouseholdError("unknown menu action")
 
+    def _scheduler_owner(self, state):
+        schedule = state["schedule"]
+        if "scheduler_owner" not in schedule:
+            return None
+        owner = schedule["scheduler_owner"]
+        if (not isinstance(owner, Mapping) or owner.get("state") not in {"active", "handover"}
+                or not isinstance(owner.get("generation"), str) or not owner["generation"]):
+            raise HouseholdError("invalid managed scheduler owner; inspect and reconcile it")
+        self._scheduler_scope(owner.get("owner"))
+        return owner
+
+    def _scheduler_scope(self, value):
+        if not isinstance(value, Mapping) or set(value) != {"platform", "scope"}:
+            raise HouseholdError("scheduler owner requires exact platform and scope")
+        self._scheduler_binding({**value, "job_id": "scope"})
+        return dict(value)
+
+    def _native_scheduler_record(self, record):
+        if "scheduler" not in record:
+            return None
+        scheduler = record["scheduler"]
+        if (not isinstance(scheduler, Mapping) or scheduler.get("state") not in {"active", "paused", "handover"}
+                or not isinstance(scheduler.get("generation"), str) or not scheduler["generation"]):
+            raise HouseholdError("invalid managed scheduler job; inspect and reconcile it")
+        self._scheduler_binding(scheduler.get("binding"))
+        if scheduler.get("previous_binding") is not None:
+            self._scheduler_binding(scheduler["previous_binding"])
+        return scheduler
+
+    def _native_bindings(self, record):
+        scheduler = self._native_scheduler_record(record)
+        if scheduler is None:
+            return []
+        result = [] if scheduler.get("job_removed") is True else [scheduler["binding"]]
+        if scheduler.get("previous_binding") and scheduler.get("previous_job_removed") is not True:
+            result.append(scheduler["previous_binding"])
+        return result
+
+    def _check_native_collision(self, state, record, *bindings):
+        for other in [state["schedule"], *state["email_jobs"]]:
+            if other is record:
+                continue
+            reserved = self._native_bindings(other)
+            if any(binding is not None and binding in reserved for binding in bindings):
+                raise HouseholdError("native scheduler job is already bound to another weekly or email job")
+
+    def _scheduler_target(self, state, binding):
+        owner = self._scheduler_owner(state)
+        if owner and {key: binding[key] for key in ("platform", "scope")} != owner["owner"]:
+            raise HouseholdError("native job does not belong to the selected scheduler owner")
+        return owner["generation"] if owner else None
+
+    def _scheduler_dispatch_owner(self, state, scheduler):
+        owner = self._scheduler_owner(state)
+        if owner:
+            if (owner["state"] != "active" or not scheduler
+                    or scheduler.get("owner_generation") != owner["generation"]):
+                raise HouseholdError("scheduler owner is awaiting verified adoption or handover")
+            self._scheduler_target(state, scheduler["binding"])
+
+    def _unresolved_scheduled_effects(self, state):
+        return any(isinstance(row, Mapping) and isinstance(row.get("delivery_effect"), Mapping)
+                   and row["delivery_effect"].get("state") in {"dispatching", "uncertain"}
+                   for row in state["occurrences"].values())
+
+    def _weekly_invocation(self, schedule):
+        scheduler = self._native_scheduler_record(schedule)
+        return {key: deepcopy(scheduler.get(key)) for key in
+                ("binding", "generation", "owner_generation", "settings_digest")}
+
+    def _require_weekly_scheduler(self, state, supplied):
+        schedule = state["schedule"]
+        scheduler = self._native_scheduler_record(schedule)
+        self._scheduler_dispatch_owner(state, scheduler)
+        if scheduler:
+            if (scheduler["state"] != "active" or scheduler.get("job_removed") is True
+                    or scheduler.get("settings_digest") != scheduler_settings_digest(schedule)
+                    or canonical(supplied) != canonical(self._weekly_invocation(schedule))):
+                raise HouseholdError("weekly scheduler identity, generation or settings is not active")
+            return self._weekly_invocation(schedule)
+        if supplied is not None:
+            raise HouseholdError("weekly scheduler has not been adopted")
+        return None
+
+    def _weekly_plan_result(self, schedule):
+        invocation = self._weekly_invocation(schedule)
+        prompt = ("Run the saved weekly plan through the shared meal-concierge skill. "
+                  "Call schedule due with this exact scheduler object: " + canonical(invocation)
+                  + ". Carry its returned occurrence and scheduler unchanged into checkout auto. "
+                  "Preserve the original occurrence on retries. Reconcile uncertain effects before retrying.")
+        return {"scheduler": deepcopy(schedule["scheduler"]), "invocation": invocation,
+                "cron_prompt": prompt, "automation_digest": hashlib.sha256(prompt.encode()).hexdigest(),
+                "cron": {key: schedule[key] for key in ("weekday", "time", "timezone")}}
+
+    def _owner_plan(self, state, supplied):
+        target = self._scheduler_scope(supplied.get("owner"))
+        old = self._scheduler_owner(state)
+        if old and old["state"] == "handover":
+            if target != old["owner"]:
+                raise HouseholdError("reconcile the current owner plan before replacing it")
+            return {"owner": deepcopy(old), "acknowledged": False, "idempotent": True}
+        if old and supplied.get("generation") != old["generation"]:
+            raise HouseholdError("scheduler owner generation is stale")
+        if not old:
+            inventory = supplied.get("inventory")
+            if not isinstance(inventory, Mapping) or inventory.get("verified") is not True:
+                raise HouseholdError("owner adoption requires authoritative native inventory")
+            self._scheduler_scope({key: inventory.get(key) for key in ("platform", "scope")})
+        for record in [state["schedule"], *state["email_jobs"]]:
+            scheduler = self._native_scheduler_record(record)
+            if scheduler and (scheduler["state"] == "handover" or
+                              (scheduler.get("previous_binding") and not scheduler.get("previous_job_removed"))):
+                raise HouseholdError("finish the existing native job handover before planning another owner")
+        owner = {"owner": target, "state": "handover", "generation": secrets.token_urlsafe(18),
+                 "original_owner": deepcopy(old["owner"]) if old else None,
+                 "adoption_scope": deepcopy(old.get("adoption_scope", old["owner"])) if old else
+                     {key: inventory[key] for key in ("platform", "scope")}}
+        state["schedule"]["scheduler_owner"] = owner
+        return {"owner": deepcopy(owner), "acknowledged": False}
+
+    def _ack_owner(self, state, supplied):
+        owner = self._scheduler_owner(state)
+        if (not owner or supplied.get("owner") != owner["owner"]
+                or supplied.get("generation") != owner["generation"]):
+            raise HouseholdError("owner acknowledgment does not match the current plan")
+        inventory = supplied.get("inventory")
+        if (not isinstance(inventory, Mapping) or inventory.get("verified") is not True
+                or {key: inventory.get(key) for key in ("platform", "scope")} != owner["owner"]
+                or not isinstance(inventory.get("bindings"), list)):
+            raise HouseholdError("owner activation requires verified target inventory")
+        observed = [self._scheduler_binding(item) for item in inventory["bindings"]]
+        if len({canonical(item) for item in observed}) != len(observed):
+            raise HouseholdError("native owner inventory has duplicate bindings")
+        if (self._unresolved_scheduled_effects(state)
+                or (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES
+                or any(job.get("status") == "sending" for job in state["email_jobs"])):
+            raise HouseholdError("reconcile original dispatched effects before owner activation")
+        expected = []
+        for record in [state["schedule"], *state["email_jobs"]]:
+            scheduler = self._native_scheduler_record(record)
+            weekly = record is state["schedule"]
+            terminal = not record.get("enabled") if weekly else record.get("status") in {"sent", "cancelled"}
+            if scheduler is None:
+                if terminal and record.get("native_cleanup"):
+                    continue
+                if weekly and not record.get("enabled") and not record.get("cron_job_id"):
+                    continue
+                raise HouseholdError("adopt or verify cleanup of every existing weekly and email job")
+            bindings = self._native_bindings(record)
+            if terminal:
+                if bindings:
+                    raise HouseholdError("terminal native jobs need verified cleanup before owner activation")
+                continue
+            if (scheduler.get("owner_generation") != owner["generation"]
+                    or scheduler["state"] not in {"active", "paused"} or not scheduler.get("ack")
+                    or scheduler.get("job_removed") is True
+                    or (scheduler.get("previous_binding") and not scheduler.get("previous_job_removed"))):
+                raise HouseholdError("every current job must acknowledge the target owner plan")
+            self._scheduler_target(state, scheduler["binding"])
+            if weekly and scheduler.get("settings_digest") != scheduler_settings_digest(record):
+                raise HouseholdError("weekly scheduler settings changed during owner handover")
+            if not weekly and scheduler.get("delivery_date") != record.get("delivery_date"):
+                raise HouseholdError("email delivery changed during owner handover")
+            expected.extend(bindings)
+        if sorted(map(canonical, observed)) != sorted(map(canonical, expected)):
+            raise HouseholdError("native inventory must exactly match the household's remaining jobs")
+        owner["state"] = "active"
+        return {"owner": deepcopy(owner), "acknowledged": True}
+
+    def _weekly_scheduler(self, state, action, request):
+        schedule = state["schedule"]
+        supplied = request.get("scheduler")
+        if not isinstance(supplied, Mapping):
+            raise HouseholdError("scheduler action requires an exact scheduler object")
+        if action == "owner_plan":
+            return self._owner_plan(state, supplied)
+        if action == "ack_owner":
+            return self._ack_owner(state, supplied)
+        scheduler = self._native_scheduler_record(schedule)
+        if action == "due":
+            self._require_weekly_scheduler(state, supplied)
+            if not schedule.get("enabled"):
+                raise HouseholdError("scheduled run is off")
+            return {"occurrence": scheduled_occurrence(schedule, self._now()),
+                    "scheduler": self._weekly_invocation(schedule)}
+        if action == "scheduler_plan":
+            owner = self._scheduler_owner(state)
+            if not owner:
+                raise HouseholdError("select the installation owner with owner_plan first")
+            binding = self._scheduler_binding(supplied.get("binding"))
+            if schedule.get("enabled"):
+                self._scheduler_target(state, binding)
+            if scheduler:
+                if scheduler["state"] == "handover":
+                    if (binding != scheduler["binding"] or scheduler.get("settings_digest") != scheduler_settings_digest(schedule)
+                            or scheduler.get("owner_generation") != owner["generation"]):
+                        raise HouseholdError("reconcile the existing weekly plan before replacing it")
+                    return {"acknowledged": False, **self._weekly_plan_result(schedule)}
+                if supplied.get("generation") != scheduler["generation"]:
+                    raise HouseholdError("weekly scheduler plan generation is stale")
+                if scheduler.get("previous_binding") and not scheduler.get("previous_job_removed"):
+                    raise HouseholdError("verify the previous native job removal first")
+                previous = None if scheduler.get("job_removed") else scheduler["binding"]
+            else:
+                inventory = supplied.get("inventory")
+                if not isinstance(inventory, Mapping) or inventory.get("verified") is not True:
+                    raise HouseholdError("weekly adoption requires authoritative old native inventory")
+                scope = self._scheduler_scope({key: inventory.get(key) for key in ("platform", "scope")})
+                if schedule.get("cron_job_id") and scope != owner.get("adoption_scope"):
+                    raise HouseholdError("weekly adoption inventory does not match the original scheduler scope")
+                previous = supplied.get("previous_binding")
+                if previous is not None:
+                    previous = self._scheduler_binding(previous)
+                    if {key: previous[key] for key in scope} != scope:
+                        raise HouseholdError("old weekly job differs from the inspected native scope")
+                count = inventory.get("matching_jobs")
+                if type(count) is not int or count != (1 if previous else 0):
+                    raise HouseholdError("reconcile the exact old weekly native job before adoption")
+                if schedule.get("cron_job_id") and (not previous or previous["job_id"] != schedule["cron_job_id"]):
+                    raise HouseholdError("account for the legacy weekly cron job before adoption")
+            self._check_native_collision(state, schedule, binding, previous)
+            schedule["scheduler"] = {"binding": binding, "previous_binding": previous if previous != binding else None,
+                                     "generation": secrets.token_urlsafe(18), "owner_generation": owner["generation"],
+                                     "state": "handover", "settings_digest": scheduler_settings_digest(schedule)}
+        elif action == "pause_scheduler":
+            if not scheduler or canonical(supplied) != canonical(self._weekly_invocation(schedule)):
+                raise HouseholdError("pause requires the exact current weekly invocation")
+            self._pause_weekly(schedule)
+        elif action == "ack_scheduler":
+            if not scheduler or supplied.get("generation") != scheduler["generation"]:
+                raise HouseholdError("weekly scheduler acknowledgement generation is stale")
+            wanted = supplied.get("state")
+            if wanted != "removed":
+                self._scheduler_target(state, scheduler["binding"])
+            if (supplied.get("binding") != scheduler["binding"] or supplied.get("verified") is not True
+                    or wanted not in {"active", "paused", "removed"}
+                    or supplied.get("previous_binding") != scheduler.get("previous_binding")
+                    or (scheduler.get("previous_binding") and supplied.get("previous_job_removed") is not True)
+                    or request.get("automation_digest") != self._weekly_plan_result(schedule)["automation_digest"]):
+                raise HouseholdError("weekly acknowledgment requires exact native state and verified old removal")
+            if wanted == "removed":
+                if schedule.get("enabled"):
+                    raise HouseholdError("disable weekly scheduling before acknowledging removal")
+                scheduler["job_removed"] = True
+            elif (scheduler.get("job_removed") or scheduler.get("settings_digest") != scheduler_settings_digest(schedule)
+                  or scheduler.get("owner_generation") != self._scheduler_owner(state)["generation"]):
+                raise HouseholdError("weekly settings or owner changed; replan before activation")
+            if scheduler.get("ack") and canonical(scheduler["ack"]) != canonical(supplied):
+                raise HouseholdError("weekly acknowledgment differs from the completed plan")
+            scheduler["state"] = "paused" if wanted == "removed" else wanted
+            scheduler["previous_job_removed"] = supplied.get("previous_job_removed") is True
+            scheduler["ack"] = deepcopy(dict(supplied))
+        else:
+            raise HouseholdError("unknown scheduler action")
+        return {"acknowledged": action == "ack_scheduler", **self._weekly_plan_result(schedule)}
+
+    def _pause_weekly(self, schedule):
+        scheduler = self._native_scheduler_record(schedule)
+        if scheduler:
+            scheduler["generation"] = secrets.token_urlsafe(18)
+            scheduler["state"] = "paused"
+            scheduler.pop("ack", None)
+
     def _schedule(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "show")
+        if action == "reconcile":
+            return self._reconcile_scheduled_delivery(request)
         with self.store.locked() as state:
             schedule = state["schedule"]
+            if action in {"owner_plan", "ack_owner", "scheduler_plan", "ack_scheduler", "pause_scheduler", "due"}:
+                return self._weekly_scheduler(state, action, request)
             if action == "show":
                 return {"schedule": deepcopy(schedule)}
             if action == "disable":
                 schedule["enabled"] = False
                 schedule["auto_checkout"] = False
+                if "scheduler" in schedule:
+                    self._pause_weekly(schedule)
+                    return {"schedule": deepcopy(schedule), "automation_cleanup": self._weekly_plan_result(schedule)}
+                if self._scheduler_owner(state):
+                    return {"schedule": deepcopy(schedule),
+                            "next": "Adopt the exact legacy native binding before acknowledging its cleanup."}
                 return {"schedule": deepcopy(schedule), "remove_cron_job_id": schedule.get("cron_job_id")}
             if action == "set_cron_job":
+                if self._scheduler_owner(state) or "scheduler" in schedule:
+                    raise HouseholdError("managed weekly scheduling requires scheduler_plan and ack_scheduler")
                 schedule["cron_job_id"] = request.get("cron_job_id")
                 return {"schedule": deepcopy(schedule)}
             if action == "update":
@@ -1115,12 +1392,18 @@ class PlanningOperations:
                     replacement = deepcopy(dict(replacement))
                     replacement.setdefault("strategy", "cheapest")
                     changes = {**changes, "delivery": replacement}
+                before = scheduler_settings_digest(schedule)
                 schedule.update(deepcopy(changes))
                 validate_schedule(schedule, self.provider)
                 if schedule.get("auto_checkout"):
                     schedule["mode"] = "auto_checkout"
                 elif schedule.get("mode") == "auto_checkout":
                     schedule["mode"] = "cart_ready"
+                if self._scheduler_owner(state) or "scheduler" in schedule:
+                    if before != scheduler_settings_digest(schedule):
+                        self._pause_weekly(schedule)
+                    return {"schedule": deepcopy(schedule), "scheduler_update_required": True,
+                            "next": "Plan and verify the native weekly job before acknowledging it."}
                 return {
                     "schedule": deepcopy(schedule),
                     "cron": {

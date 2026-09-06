@@ -40,11 +40,104 @@ from service_common import (
     require_provider_identity,
     safe_order_id,
     scheduled_occurrence,
+    scheduler_settings_digest,
     validate_schedule
 )
 
 
 class OrderOperations:
+    def _guard_scheduled_context(self, state, context):
+        if context is None:
+            return
+        row = state["occurrences"].get(context["occurrence"])
+        if not isinstance(row, Mapping) or row.get("attempt_id") != context["attempt_id"]:
+            raise HouseholdError("scheduled worker attempt is stale")
+        if context.get("manual") is True:
+            return
+        self._require_weekly_scheduler(state, context["scheduler"])
+        if (not state["schedule"].get("enabled")
+                or scheduler_settings_digest(state["schedule"]) != context["settings_digest"]):
+            raise HouseholdError("scheduled settings changed while the worker was running")
+
+    def _pending_scheduler_guard(self, state, pending):
+        if (pending.get("scheduler_context") or {}).get("manual") is True:
+            self._guard_scheduled_context(state, pending["scheduler_context"])
+            return
+        if pending.get("automatic_checkout", bool(pending.get("occurrence"))):
+            context = pending.get("scheduler_context")
+            if context is None and self._scheduler_owner(state):
+                raise HouseholdError("original automatic checkout has no managed scheduler identity")
+            self._guard_scheduled_context(state, context)
+
+    def _weekly_attempt_status(self, state, context, status):
+        try:
+            self._guard_scheduled_context(state, context)
+        except HouseholdError:
+            return False
+        row = state["occurrences"][context["occurrence"]]
+        if row.get("status") != "completed":
+            row["status"] = status
+        return True
+
+    def _scheduled_select(self, request, arguments, deadline):
+        context = request.get("_scheduler_context")
+        with self.store.locked() as state:
+            if self._unresolved_scheduled_effects(state):
+                raise HouseholdError("reconcile the original scheduled delivery selection before another selection")
+            if context is not None:
+                self._guard_scheduled_context(state, context)
+                state["occurrences"][context["occurrence"]]["delivery_effect"] = {
+                    "attempt_id": context["attempt_id"], "provider": self.provider,
+                    "slot_ref": request["slot_ref"], "state": "dispatching",
+                }
+        try:
+            return self.provider_client.call("select_delivery_slot", arguments, deadline=deadline)
+        except Exception:
+            if context is not None:
+                self._record_scheduled_effect(context, "uncertain")
+            raise
+
+    def _record_scheduled_effect(self, context, outcome, selected=None):
+        if context is None:
+            return
+        with self.store.locked() as state:
+            row = state["occurrences"].get(context["occurrence"])
+            effect = row.get("delivery_effect") if isinstance(row, Mapping) else None
+            if not isinstance(effect, dict) or effect.get("attempt_id") != context["attempt_id"]:
+                raise HouseholdError("original scheduled delivery effect is unavailable")
+            if selected is not None and selected["slot_ref"] != effect["slot_ref"]:
+                raise HouseholdError("selected delivery does not match the original scheduled effect")
+            if effect.get("state") != "resolved":
+                effect["state"] = outcome
+                if selected is not None:
+                    effect["selected"] = deepcopy(selected)
+
+    def _reconcile_scheduled_delivery(self, request):
+        occurrence = request.get("occurrence")
+        if not isinstance(occurrence, str) or not occurrence:
+            raise HouseholdError("reconciliation requires the original scheduled occurrence")
+        deadline = request.get("_deadline") or time.monotonic() + 240
+        with self._browser_operation(deadline):
+            with self.store.locked() as state:
+                row = state["occurrences"].get(occurrence)
+                effect = deepcopy(row.get("delivery_effect")) if isinstance(row, Mapping) else None
+                if ((state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES
+                        and isinstance(effect, Mapping) and effect.get("state") != "resolved"):
+                    raise HouseholdError("reconcile the protected checkout before reading delivery selection")
+            if not isinstance(effect, Mapping) or effect.get("provider") != self.provider:
+                raise HouseholdError("no original delivery effect for this provider occurrence")
+            if effect.get("state") == "resolved":
+                return {"resolved": True, "occurrence": occurrence, "retry_allowed": False}
+            dates = None
+            reference = effect["slot_ref"]
+            if self.provider in {"oda", "mathem"} and reference.startswith(f"{self.provider}:"):
+                dates = [retail_delivery_slot_date(reference, provider=self.provider)]
+            selected = [slot for slot in self._normalized_provider_slots(dates, deadline=deadline) if slot["selected"]]
+            if len(selected) != 1 or selected[0]["slot_ref"] != reference:
+                return {"resolved": False, "occurrence": occurrence, "retry_allowed": False}
+            self._record_scheduled_effect({"occurrence": occurrence, "attempt_id": effect["attempt_id"]}, "resolved", selected[0])
+            return {"resolved": True, "occurrence": occurrence, "retry_allowed": False, "selected": selected[0]}
+
     @staticmethod
     def _find_delivery_slot(value: Any, slot_id: Any) -> dict[str, Any] | None:
         if isinstance(value, Mapping):
@@ -84,6 +177,7 @@ class OrderOperations:
         baseline: Mapping[str, Any],
         cart: Mapping[str, Any] | None = None,
         occurrence: str | None = None,
+        scheduler_context: Mapping[str, Any] | None = None,
     ) -> None:
         normalized = validate_delivery_slot(slot)
         if origin not in {"explicit", "cheapest"}:
@@ -105,6 +199,7 @@ class OrderOperations:
             "observed_at": self._now().isoformat(),
         }
         with self.store.locked() as state:
+            self._guard_scheduled_context(state, scheduler_context)
             if canonical(state.get("order_change")) != canonical(baseline.get("order_change")):
                 raise HouseholdError("order change state changed while recording delivery")
             state["delivery_selection"] = observation
@@ -211,6 +306,7 @@ class OrderOperations:
         *,
         occurrence: str,
         deadline: float | None,
+        scheduler_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         preference = schedule["delivery"]
         state = self.store.read()
@@ -269,6 +365,7 @@ class OrderOperations:
                     baseline=state,
                     cart=scope_cart,
                     occurrence=occurrence,
+                    scheduler_context=scheduler_context,
                 )
                 return {
                     "ready": True,
@@ -312,6 +409,7 @@ class OrderOperations:
                 baseline=state,
                 cart=scope_cart,
                 occurrence=occurrence,
+                scheduler_context=scheduler_context,
             )
             return {
                 "ready": True,
@@ -330,10 +428,15 @@ class OrderOperations:
                 "_candidate_digest": digest,
                 "_occurrence": occurrence,
                 "_defer_record": True,
+                "_scheduler_context": scheduler_context,
             })
         except HouseholdError as exc:
             selection_error = exc
             result = None
+            if scheduler_context is not None and scheduler_context.get("scheduler") is not None:
+                # An attempted mutation with a lost outcome is reconciled
+                # separately; a fresh read here must not silently retry it.
+                raise
         verified = result.get("selected") if isinstance(result, Mapping) else None
         fresh_slots = self._normalized_provider_slots(dates, deadline=deadline)
         fresh_selected = [slot for slot in fresh_slots if slot["selected"]]
@@ -394,7 +497,10 @@ class OrderOperations:
             baseline=self.store.read(),
             cart=fresh_scope_cart,
             occurrence=occurrence,
+            scheduler_context=scheduler_context,
         )
+        if scheduler_context is not None:
+            self._record_scheduled_effect(scheduler_context, "resolved", verified)
         return {
             "ready": True,
             "origin": "cheapest",
@@ -614,6 +720,8 @@ class OrderOperations:
         *,
         deadline: float | None,
     ) -> dict[str, Any] | None:
+        with self.store.locked() as state:
+            self._pending_scheduler_guard(state, pending)
         delivery = (pending.get("summary") or {}).get("delivery")
         expected = delivery.get("slot") if isinstance(delivery, Mapping) else None
         if not isinstance(expected, Mapping):
@@ -660,7 +768,7 @@ class OrderOperations:
                 raise HouseholdError("delivery changed a second time; checkout stopped before payment")
             choice = (
                 self._scheduled_delivery_choice(
-                    schedule, occurrence=occurrence, deadline=deadline,
+                    schedule, occurrence=occurrence, deadline=deadline, scheduler_context=pending.get("scheduler_context"),
                 )
                 if changed
                 else {
@@ -691,6 +799,7 @@ class OrderOperations:
             delivery_binding=choice,
             delivery_reselections=reselections + 1,
             automatic_checkout=pending.get("automatic_checkout", bool(occurrence)),
+            scheduler_context=pending.get("scheduler_context"),
         )
         problem = self._scheduled_checkout_problem(prepared["summary"], occurrence or None, automatic=pending.get("automatic_checkout", bool(occurrence)))
         if problem is not None:
@@ -781,7 +890,7 @@ class OrderOperations:
                     if provider_slot_id is None:
                         raise HouseholdError("the requested provider delivery slot has no provider id")
                     arguments["delivery_slot_id"] = provider_slot_id
-                    self.provider_client.call("select_delivery_slot", arguments, deadline=deadline)
+                    self._scheduled_select(request, arguments, deadline)
                     selected_date = self._delivery_slot_date(candidate)
                     fresh = [
                         slot for slot in self._normalized_provider_slots([selected_date], deadline=deadline)
@@ -794,6 +903,7 @@ class OrderOperations:
                     ):
                         raise HouseholdError(f"{self.provider.upper()} delivery selection is uncertain; inspect the provider selection")
                     normalized = fresh[0]
+                    self._record_scheduled_effect(request.get("_scheduler_context"), "resolved", normalized)
                     raw_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                     cart = cart_summary(raw_cart)
                     delivery = cart.get("delivery")
@@ -816,6 +926,8 @@ class OrderOperations:
                                 raise HouseholdError("order change state changed while selecting delivery")
                             locked["order_change"]["kind"] = "delivery"
                             locked["order_change"]["requested_delivery"] = requested
+                    with self.store.locked() as current_state:
+                        self._guard_scheduled_context(current_state, request.get("_scheduler_context"))
                     if request.get("_defer_record") is not True:
                         self._record_delivery_selection(
                             normalized,
@@ -842,7 +954,7 @@ class OrderOperations:
                         change.get("code") if change else None,
                         deadline=deadline,
                     )
-                    result = self.provider_client.call("select_delivery_slot", arguments, deadline=deadline)
+                    result = self._scheduled_select(request, arguments, deadline)
                     self.browser.verify_order_change(
                         change.get("order_id") if change else None,
                         change.get("code") if change else None,
@@ -857,6 +969,9 @@ class OrderOperations:
                     normalized = validate_delivery_slot(selected)
                     if normalized["slot_ref"] != slot_ref or normalized["selected"] is not True:
                         raise HouseholdError("MENY selected delivery does not match the requested slot")
+                    self._record_scheduled_effect(request.get("_scheduler_context"), "resolved", normalized)
+                    with self.store.locked() as current_state:
+                        self._guard_scheduled_context(current_state, request.get("_scheduler_context"))
                     if request.get("_defer_record") is not True:
                         scope_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                         self._record_delivery_selection(
@@ -1424,13 +1539,16 @@ class OrderOperations:
         if action == "auto":
             occurrence = str(request.get("occurrence") or "")
             with self.store.locked() as state:
+                scheduler_identity = self._require_weekly_scheduler(state, request.get("scheduler"))
+                if self._unresolved_scheduled_effects(state):
+                    raise HouseholdError("reconcile the original scheduled delivery effect before retry")
                 schedule = deepcopy(state["schedule"])
                 validate_schedule(schedule, self.provider)
                 if not schedule.get("enabled"):
                     raise HouseholdError("scheduled run is off")
                 if not schedule.get("auto_checkout") and schedule.get("mode") != "cart_ready":
                     raise HouseholdError("scheduled delivery choice requires cart_ready or auto_checkout mode")
-                if not isinstance(schedule.get("cron_job_id"), str) or not schedule["cron_job_id"].strip():
+                if scheduler_identity is None and (not isinstance(schedule.get("cron_job_id"), str) or not schedule["cron_job_id"].strip()):
                     raise HouseholdError("auto-checkout is not linked to its configured cron job")
                 expected_occurrence = scheduled_occurrence(schedule, self._now())
                 if state.get("order_change"):
@@ -1460,14 +1578,18 @@ class OrderOperations:
                 elif pending:
                     raise HouseholdError("finish the pending interactive or dispatched checkout before the scheduled run")
                 attempts = int(existing.get("attempts", 0)) + 1 if isinstance(existing, Mapping) else 1
-                state["occurrences"][occurrence] = {"status": "started", "at": self._now().isoformat(), "attempts": attempts}
+                context = {"occurrence": occurrence, "attempt_id": secrets.token_urlsafe(18),
+                           "scheduler": scheduler_identity, "settings_digest": scheduler_settings_digest(schedule)}
+                state["occurrences"][occurrence] = {"status": "started", "at": self._now().isoformat(),
+                                                    "attempts": attempts, "attempt_id": context["attempt_id"],
+                                                    "scheduler_context": deepcopy(context)}
             try:
                 delivery_choice = self._scheduled_delivery_choice(
-                    schedule, occurrence=occurrence, deadline=deadline,
+                    schedule, occurrence=occurrence, deadline=deadline, scheduler_context=context,
                 )
                 if delivery_choice.get("ready") is not True:
                     with self.store.locked() as state:
-                        state["occurrences"][occurrence]["status"] = "needs_input"
+                        self._weekly_attempt_status(state, context, "needs_input")
                     return {
                         "completed": False,
                         "confirmed": False,
@@ -1481,7 +1603,7 @@ class OrderOperations:
                         timezone_name=str(schedule["timezone"]),
                     ):
                         with self.store.locked() as state:
-                            state["occurrences"][occurrence]["status"] = "needs_input"
+                            self._weekly_attempt_status(state, context, "needs_input")
                         return {
                             "completed": False,
                             "confirmed": False,
@@ -1496,7 +1618,8 @@ class OrderOperations:
                     )
                     summary = self._bind_delivery_summary(cart_summary(cart), delivery_choice)
                     with self.store.locked() as state:
-                        state["occurrences"][occurrence]["status"] = "cart_ready"
+                        self._guard_scheduled_context(state, context)
+                        self._weekly_attempt_status(state, context, "cart_ready")
                     return {
                         "completed": False,
                         "confirmed": False,
@@ -1506,15 +1629,15 @@ class OrderOperations:
                         **delivery_choice,
                     }
                 prepared = self._checkout_prepare(
-                    deadline, occurrence=occurrence, delivery_binding=delivery_choice, automatic_checkout=True,
+                    deadline, occurrence=occurrence, delivery_binding=delivery_choice, automatic_checkout=True, scheduler_context=context,
                 )
             except HouseholdError:
                 with self.store.locked() as state:
-                    state["occurrences"][occurrence]["status"] = "needs_input"
+                    self._weekly_attempt_status(state, context, "needs_input")
                 raise
             if prepared.get("cart_reconciliation_required") is True:
                 with self.store.locked() as state:
-                    state["occurrences"][occurrence]["status"] = "needs_input"
+                    self._weekly_attempt_status(state, context, "needs_input")
                 return {"completed": False, "confirmed": False, "mode": "cart_ready", **prepared}
             problem = self._scheduled_checkout_problem(prepared["summary"], occurrence)
             if problem is not None:
@@ -1522,20 +1645,20 @@ class OrderOperations:
                     pending = state.get("pending_checkout")
                     if pending and pending.get("confirmation_id") == prepared["confirmation_id"] and pending.get("status") == "awaiting_confirmation":
                         state["pending_checkout"] = None
-                    state["occurrences"][occurrence]["status"] = "needs_input"
+                    self._weekly_attempt_status(state, context, "needs_input")
                 return {"completed": False, "reason": problem, "summary": prepared["summary"]}
             if self.confirmation_policy == "standing":
                 try:
                     result = self._checkout_confirm(deadline, prepared["confirmation_id"])
                 except HouseholdError:
                     with self.store.locked() as state:
-                        state["occurrences"][occurrence]["status"] = "needs_input"
+                        self._weekly_attempt_status(state, context, "needs_input")
                     raise
                 with self.store.locked() as state:
-                    state["occurrences"][occurrence]["status"] = "completed" if result.get("confirmed") is True else "needs_input"
+                    self._weekly_attempt_status(state, context, "completed" if result.get("confirmed") is True else "needs_input")
                 return {**result, "completed": result.get("confirmed") is True, "authorized_summary": prepared["summary"]}
             with self.store.locked() as state:
-                state["occurrences"][occurrence]["status"] = "awaiting_confirmation"
+                self._weekly_attempt_status(state, context, "awaiting_confirmation")
             return {
                 "completed": False,
                 "confirmed": False,
@@ -1555,6 +1678,7 @@ class OrderOperations:
         delivery_reselections: int = 0,
         cart_ready_continuation: bool = False,
         automatic_checkout: bool = False,
+        scheduler_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if self.provider == "mathem":
             if automatic_checkout:
@@ -1582,6 +1706,8 @@ class OrderOperations:
                 record = state.get("occurrences", {}).get(occurrence)
                 if not isinstance(record, Mapping) or record.get("status") != "cart_ready":
                     raise HouseholdError("checkout occurrence is no longer cart_ready")
+                if record.get("scheduler_context"):
+                    scheduler_context = {**deepcopy(record["scheduler_context"]), "manual": True}
             current_pending = state.get("pending_checkout")
             inherited_occurrence = (
                 current_pending.get("occurrence")
@@ -1592,6 +1718,8 @@ class OrderOperations:
             )
             if inherited_occurrence:
                 automatic_checkout = current_pending.get("automatic_checkout", True)
+                scheduler_context = current_pending.get("scheduler_context")
+                self._pending_scheduler_guard(state, current_pending)
                 occurrence = inherited_occurrence
                 occurrence_record = state.get("occurrences", {}).get(occurrence)
                 if isinstance(occurrence_record, dict):
@@ -1599,6 +1727,9 @@ class OrderOperations:
                     occurrence_record["at"] = self._now().isoformat()
             if expired_awaiting_confirmation(current_pending, self._now()):
                 state["pending_checkout"] = None
+            if self._unresolved_scheduled_effects(state):
+                raise HouseholdError("reconcile the original scheduled delivery effect before preparing checkout")
+            self._guard_scheduled_context(state, scheduler_context)
             baseline = deepcopy(state.get("pending_checkout"))
             if baseline and baseline.get("status") in UNRESOLVED_CHECKOUT_STATUSES:
                 raise HouseholdError("reconcile the pending checkout before preparing another")
@@ -1785,7 +1916,9 @@ class OrderOperations:
                     raise HouseholdError("menu changed while preparing checkout; prepare a new summary")
                 if cart_plan_baseline is not None and canonical(state.get("cart_plan")) != canonical(cart_plan_baseline):
                     raise HouseholdError("cart plan changed while preparing checkout; prepare a new summary")
+                self._guard_scheduled_context(state, scheduler_context)
                 state["pending_checkout"] = {
+                    "scheduler_context": deepcopy(scheduler_context),
                     "status": "awaiting_confirmation",
                     "confirmation_id": confirmation_id,
                     "cart": cart,
@@ -1878,6 +2011,7 @@ class OrderOperations:
                         raise HouseholdError("order change changed; show a new summary")
                     if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                         raise HouseholdError("cart plan changed; show a new summary")
+                    self._pending_scheduler_guard(state, pending)
                     state["pending_checkout"]["status"] = "clicking"
 
                 def before_click() -> None:
@@ -1915,6 +2049,10 @@ class OrderOperations:
                             if canonical(fresh_target) != canonical(pending_change["before"]):
                                 raise CheckoutPreconditionError("the target order changed before the final click")
                     with self.store.locked() as state:
+                        try:
+                            self._pending_scheduler_guard(state, pending)
+                        except HouseholdError as exc:
+                            raise CheckoutPreconditionError(str(exc)) from exc
                         if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                             raise CheckoutPreconditionError("cart plan changed before the final click")
                         current_pending = state.get("pending_checkout")
@@ -2006,7 +2144,8 @@ class OrderOperations:
         occurrence = pending.get("occurrence")
         if occurrence:
             record = state.setdefault("occurrences", {}).get(occurrence)
-            if isinstance(record, dict):
+            context = pending.get("scheduler_context")
+            if isinstance(record, dict) and (not context or record.get("attempt_id") == context["attempt_id"]):
                 record["status"] = "completed"
                 record["order_id"] = order_id
                 record["completed_at"] = self._now().isoformat()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a native NanoClaw template for an independently running household.
 
-Only the stdio bridge and canonical skill enter the template. The operator
+Only the MCP/CLI bridges and canonical skill enter the template. The operator
 attaches a dedicated socket directory and compatible Python runtime separately.
 This command never starts a service or changes an existing NanoClaw group.
 """
@@ -54,7 +54,7 @@ def build(output: Path, python_base: Path, site_packages: Path, socket_directory
     template = output / "template"
     (template / "bridge").mkdir(parents=True)
     (template / "skills/meal-concierge").mkdir(parents=True)
-    for name in ("mcp_server.py", "rpc_client.py"):
+    for name in ("mcp_server.py", "rpc_client.py", "cli.py"):
         shutil.copyfile(SOURCE / name, template / "bridge" / name)
     shutil.copyfile(SOURCE / "skill/SKILL.md", template / "skills/meal-concierge/SKILL.md")
     (template / "plugin.json").write_text(json.dumps({

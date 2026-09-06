@@ -414,7 +414,14 @@ class CoreTestsBase:
         self.assertEqual(module.rpc_timeout("cart", {"action": "get"}), 120)
         self.assertEqual(module.rpc_timeout("delivery", {"action": "list"}), 300)
         self.assertEqual(module.rpc_timeout("checkout", {"action": "submit"}), 660)
+        scheduler = {"binding": {"platform": "test", "scope": "private", "job_id": "one"}, "generation": "one"}
         module.rpc = mock.Mock(return_value={})
+        module.meal_concierge_schedule("ack_scheduler", scheduler=scheduler, automation_digest="digest")
+        module.rpc.assert_called_with("schedule", action="ack_scheduler", changes={}, cron_job_id=None,
+                                      scheduler=scheduler, automation_digest="digest", occurrence=None)
+        module.meal_concierge_checkout("auto", occurrence="2026-W36", scheduler=scheduler)
+        module.rpc.assert_called_with("checkout", action="auto", occurrence="2026-W36", confirmation_id=None,
+                                      idempotency_key=None, scheduler=scheduler)
         self.assertIn("meal_concierge_product_favorites", module.server.tools)
         self.assertNotIn("meal_concierge_favorites", module.server.tools)
         module.meal_concierge_product_favorites("add", product_id=MENY_PRODUCT, product_name="Brokkoli", quantity=2)

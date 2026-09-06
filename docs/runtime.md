@@ -234,22 +234,30 @@ the shared bounded archive codec. It verifies the descriptor's hash, size and
 format; `--recipe-pack PATH` accepts only a local artifact matching that descriptor
 and only during `install` or `update`. Archive data does not pass through RPC.
 
-**This source build has no default recipe pack pinned.** An explicit
-`--recipe-pack` therefore currently fails before opening the archive or changing
-data. Ordinary installation remains usable without a pack. Publishing a verified
-archive and pinning its exact release descriptor remain separate acceptance gates
-under [#47](https://github.com/poisdahl/meal-concierge/issues/47).
+This runtime pins [recipe pack 2026-09-06.3](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.3).
+Its 92,860,588-byte archive contains 3,807 Wikibooks recipes: 25 marked ready
+under the pack's quantity/readiness rules and 3,782 drafts. It includes 784
+managed JPEGs and source/image notices. Twenty parse failures and 793 withheld
+TheMealDB records remain explicit coverage limits; this is not a complete
+normalized collection. The installer verifies the exact published SHA256 and
+format for both the default HTTPS URL and an explicit local archive.
 
-The implemented path has been exercised with a synthetic pinned descriptor and
-the actual candidate archive on macOS and Linux ARM64: 3,779 bundled recipes,
-managed images, exact historical references, favorites, archived entries and
-frozen menus survived import, update and relocated restore. Interrupted imports
-resume against current data; two observed Linux disk-full failures were resumed.
-Changed upstream or locally edited entries report conflicts and preserve existing
-content. An unchanged archive is idempotent. An optional pack acquisition failure
-reports that the pack needs attention while leaving the core runtime usable.
-These results do not certify acquisition of a published default release or
-external-library retirement, tracked in
+Actual offline native macOS and Linux ARM64 fresh installs imported the .3
+archive, selected and saved seven dinners and preserved them across restart and
+new-client attachment. Retained-bank upgrades created 28 drafts, preserved 3,703
+entries unchanged and retained 76 upstream/local conflicts under KEEP. The
+partial result preserves previous content, favorites, archived entries, image
+history and operation journals. The Mac restart needed a reviewed fix and
+resume; a Linux cleanup error and a host-specific preflight lookup were
+reconciled without repeating installation. Earlier .2 tests demonstrated
+interrupted import and relocated database-plus-assets restore, including recovery
+from two Linux disk-full failures. An unchanged archive is idempotent, and a
+pack acquisition failure reports that the pack needs attention while leaving
+the core runtime usable.
+
+Default public HTTPS acquisition and installed external-library retirement
+remain separate native acceptance gates. Offline archive checks do not establish
+those outcomes; the latter is tracked in
 [#46](https://github.com/poisdahl/meal-concierge/issues/46).
 
 ## Verification boundary

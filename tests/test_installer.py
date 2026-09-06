@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 from contextlib import contextmanager
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -202,6 +203,22 @@ class InstallerTests(unittest.TestCase):
                 source.write_bytes(invalid)
                 with self.assertRaisesRegex(RuntimeError, 'release descriptor|pinned'):
                     install.stage_recipe_pack(release, source)
+                self.assertEqual(list(release.iterdir()), [staged])
+
+    def test_default_recipe_download_verifies_content_and_removes_failed_stage(self):
+        payload = b'synthetic published artifact'
+        expected = {**install.RECIPE_PACK, 'bytes': len(payload),
+                    'sha256': hashlib.sha256(payload).hexdigest()}
+        release = self.root / 'release'; release.mkdir()
+        with patch.object(install, 'RECIPE_PACK', expected):
+            with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(payload)) as fetch:
+                staged = install.stage_recipe_pack(release)
+            fetch.assert_called_once_with(expected['url'], timeout=60)
+            self.assertEqual(staged.read_bytes(), payload)
+            for invalid in (payload[:-1], payload + b'x', b'x' + payload[1:]):
+                with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(invalid)):
+                    with self.assertRaisesRegex(RuntimeError, 'release descriptor|pinned'):
+                        install.stage_recipe_pack(release)
                 self.assertEqual(list(release.iterdir()), [staged])
 
     def test_recipe_artifact_rejects_links_special_files_and_unreleased_input(self):

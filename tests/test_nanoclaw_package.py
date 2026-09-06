@@ -31,7 +31,8 @@ class PackageTests(unittest.TestCase):
                 result = package.build(output, python, site, sockets)
                 self.assertEqual(len(result["additionalMounts"]), 3)
                 self.assertTrue(all(m["readonly"] for m in result["additionalMounts"]))
-                self.assertEqual({p.name for p in (output / "template/bridge").iterdir()}, {"mcp_server.py", "rpc_client.py"})
+                self.assertEqual({p.name for p in (output / "template/bridge").iterdir()}, {"mcp_server.py", "rpc_client.py", "cli.py"})
+                self.assertEqual((output / "template/bridge/cli.py").read_bytes(), (package.SOURCE / "cli.py").read_bytes())
                 self.assertEqual((output / "template/skills/meal-concierge/SKILL.md").read_bytes(), (package.SOURCE / "skill/SKILL.md").read_bytes())
                 server = json.loads((output / "template/mcp.json").read_text())["mcpServers"]["meal_concierge"]
                 self.assertEqual(server["command"], "env")

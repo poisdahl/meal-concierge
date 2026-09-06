@@ -370,19 +370,40 @@ safe fresh-prepare instructions permits one new standing-authorized submit.
 A confirmed expired delivery reservation can be renewed once with the same exact
 slot before that pre-dispatch retry. Never infer non-dispatch from a timeout.
 
-For a due schedule call checkout auto with its exact occurrence. Cart_ready never
-pays. Carry its returned occurrence into later manual prepare or submit; manual
-continuation does not become unattended checkout. Auto checkout additionally
-requires complete menu/product preparation and configured amount/delivery guards.
+Select one installation scheduler owner explicitly with `schedule owner_plan`
+and `ack_owner`; interactive access never transfers ownership. The owner may
+serve email-only installations without a weekly timer. Inspect authoritative
+native inventory, create replacements paused, retain exact platform/scope/job
+IDs, apply the returned prompt and verify exact old-job removal. Unknown or
+unavailable inventory is not absence. Preserve unrelated native system jobs.
+Use weekly/email `scheduler_plan` and `ack_scheduler`; carry the returned
+invocation unchanged. Finish the global owner acknowledgment only after every
+current weekly/email job is verified in the target scope and terminal jobs are
+removed. New emails during handover remain fenced until included. Never use
+legacy set_cron_job or ack_automation to bypass managed adoption.
 
-After confirmed order, schedule its recipe email for the verified delivery date
-when a recipient is configured. Apply returned cron changes before acknowledging
-`ack_automation`; use `automation_plan` to recover unfinished scheduling. Use the
-native scheduler, not a second scheduler/state store. Due claims a job;
-`begin_send` immediately before sender invocation must return `dispatch=true`.
-Send exactly that payload, then mark_sent only after confirmed delivery. Release
-only after definite no-send failure. Uncertain sends remain protected. Requested
-test email never consumes the scheduled job.
+For a due managed schedule, call schedule due with its scheduler invocation,
+then checkout auto with its returned occurrence and scheduler. Cart_ready never
+pays. Carry its occurrence into later manual prepare or submit; this remains
+manual continuation. Auto checkout additionally requires complete menu/product
+preparation and configured amount/delivery guards. Updating settings or pausing
+invalidates old workers; replan and verify before resuming. Disable affects only
+the weekly run, preserving order emails. An uncertain delivery selection stays
+in its original occurrence; use schedule reconcile, which only reads selected
+provider state. Do not retry selection while unresolved. Preserve checkout
+confirmation/idempotency references and reconcile dispatched payment separately.
+
+After a confirmed order, schedule its recipe email for the verified delivery
+date when a recipient is configured. Use the selected native scheduler and
+recover unfinished jobs with automation_plan. Due claims a job; begin_send with
+the exact invocation and token must return dispatch=true before the sender is
+called. Send that frozen payload once, then mark_sent only after confirmed
+success. Reconcile uncertain sends with the original token and actual sender
+evidence; not_sent requires affirmative evidence, never timeout inference.
+Requested test email never consumes the scheduled job. After sent/cancelled
+jobs are removed and their exact native absence verified, call email ack_cleanup.
+Bindings stay reserved until this exact acknowledgment; preserve unrelated jobs.
+See docs/email-scheduler.md for request fields and legacy cleanup.
 
 External cancellation uses email reconcile for the exact provider/order.
 Missing orders, auth errors and timeouts are not cancellation evidence.

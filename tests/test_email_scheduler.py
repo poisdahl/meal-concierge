@@ -337,17 +337,17 @@ class EmailSchedulerTests(unittest.TestCase):
             state["menu"] = {**state["menu"], "order_id": "another-order"}
         self.app.handle({"operation": "email", "action": "schedule", "provider": "oda",
                          "order_id": "another-order", "delivery_date": self.provider.delivery})
-        with self.assertRaisesRegex(HouseholdError, "another email follow-up"):
+        with self.assertRaisesRegex(HouseholdError, "another weekly or email job"):
             self.app.handle({"operation": "email", "action": "scheduler_plan", "provider": "oda",
                              "order_id": "another-order", "scheduler": {"binding": invocation["binding"],
                              "inventory": {"platform": "synthetic-timer", "scope": "private-fixture", "verified": True, "matching_jobs": 0}}})
-        with self.assertRaisesRegex(HouseholdError, "another email follow-up"):
+        with self.assertRaisesRegex(HouseholdError, "another weekly or email job"):
             self.app.handle({"operation": "email", "action": "scheduler_plan", "provider": "oda",
                              "order_id": "another-order", "scheduler": {
                              "binding": {**self.binding, "job_id": "job-2"}, "previous_binding": invocation["binding"],
                              "inventory": {"platform": "synthetic-timer", "scope": "private-fixture", "verified": True, "matching_jobs": 1}}})
         self.call("cancel_followup", owner_confirmed_cancelled=True)
-        with self.assertRaisesRegex(HouseholdError, "another email follow-up"):
+        with self.assertRaisesRegex(HouseholdError, "another weekly or email job"):
             self.app.handle({"operation": "email", "action": "scheduler_plan", "provider": "oda",
                              "order_id": "another-order", "scheduler": {"binding": invocation["binding"],
                              "inventory": {"platform": "synthetic-timer", "scope": "private-fixture", "verified": True, "matching_jobs": 0}}})

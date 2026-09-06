@@ -129,6 +129,13 @@ def scheduled_occurrence(schedule: Mapping[str, Any], current: datetime) -> str:
     iso = due.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
 
+def scheduler_settings_digest(schedule: Mapping[str, Any]) -> str:
+    """Effective weekly settings, independent of native registration metadata."""
+    return hashlib.sha256(canonical({key: schedule.get(key) for key in (
+        "enabled", "weekday", "time", "timezone", "mode", "delivery",
+        "maximum_total", "auto_checkout",
+    )}).encode()).hexdigest()
+
 def meny_login_lost(error: BaseException) -> bool:
     current: BaseException | None = error
     seen: set[int] = set()

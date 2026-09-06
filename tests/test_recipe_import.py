@@ -1812,6 +1812,22 @@ class TranscriptTests(unittest.TestCase):
         self.assertNotIn('is_favorite', recipe)
         self.assertIsNone(recipe['source_provider'])
 
+    def test_serves_syntax_does_not_infer_ambiguous_or_physical_portions(self):
+        for quote in ('Serves 0', 'Serves -2', 'Serves 2–4', 'Serves 2-4',
+                      'Serves about 2', 'Serves 2 loaves', 'Serves 2. Enjoy!',
+                      '2', '2 loaves'):
+            with self.subTest(quote=quote):
+                value = self.source()
+                value['pages'][0]['text'] = value['pages'][0]['text'].replace('2 servings', quote)
+                value['interpretation']['yield']['quote'] = quote
+                recipe = read_transcript(value)['candidate']
+                self.assertIsNone(recipe['portions'])
+                self.assertEqual(recipe['portions_evidence']['basis'], 'unknown')
+                self.assertEqual(recipe['yield']['original_text'], quote)
+                if quote == '2 loaves':
+                    self.assertEqual(recipe['yield']['quantity'], {'numerator': 2, 'denominator': 1})
+                    self.assertEqual(recipe['yield']['unit'], 'loaves')
+
     def test_host_estimates_remain_unaccepted_and_physical_yield_is_independent(self):
         value = self.source()
         value['pages'][0]['text'] = value['pages'][0]['text'].replace('2 servings', '2 loaves')
@@ -1909,6 +1925,37 @@ class ImportApplicationTests(unittest.TestCase):
 
     def preview(self):
         return self.call('import', source_kind='transcript', transcript=self.source)
+
+    def test_quoted_serves_import_preserves_source_and_unresolved_count(self):
+        for kind in ('pasted_text', 'photo_transcript', 'pdf_transcript'):
+            for quote, portions in (('Serves 2', 2), ('sErVeS 2', 2),
+                                    ('Serves 1.5', 1.5), ('Serves 1,5', 1.5)):
+                with self.subTest(kind=kind, quote=quote):
+                    self.source = TranscriptTests().source()
+                    self.source['kind'] = kind
+                    self.source['pages'][0]['text'] = self.source['pages'][0]['text'].replace('2 servings', quote)
+                    self.source['interpretation']['yield']['quote'] = quote
+                    before = deepcopy(self.source)
+                    preview = self.preview()
+                    recipe = preview['recipe']
+                    self.assertEqual(self.source, before)
+                    self.assertEqual(recipe['portions'], portions)
+                    self.assertEqual(recipe['portions_evidence']['basis'], 'source')
+                    self.assertEqual(recipe['portions_evidence']['input'], f'Page 1: {quote}')
+                    self.assertEqual(recipe['yield']['original_text'], quote)
+                    self.assertEqual(recipe['yield']['unit'], 'servings')
+                    self.assertEqual(recipe['yield']['evidence']['quantity']['input'], f'Page 1: {quote}')
+                    self.assertEqual(recipe['ingredients'][2]['original_text'], '1 tomato')
+                    self.assertIsNone(recipe['ingredients'][2]['quantity'])
+                    self.assertIsNone(recipe['ingredients'][2]['unit'])
+                    self.assertFalse(preview['readiness']['scaling_ready'])
+                    self.assertNotIn('portions', preview['readiness']['missing_decisions'])
+                    self.assertIn('ingredients.2.quantity', preview['readiness']['missing_decisions'])
+                    self.assertTrue(preview['shopping_requirements'][0]['scalable'])
+                    self.assertFalse(preview['shopping_requirements'][2]['scalable'])
+                    self.assertEqual(preview['suggested_status'], 'draft')
+                    self.assertFalse(preview['personal_entry_created'])
+        self.assertEqual(self.app.recipes.search(), [])
 
     def test_actual_transcript_preview_save_edit_reimport_conflict(self):
         preview = self.preview()

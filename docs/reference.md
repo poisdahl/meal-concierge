@@ -1076,14 +1076,21 @@ requests, in a safe order, are:
   Release is safe only after a definite no-send failure. A moved
   delivery returns the replacement one-shot action.
 
-New, moved and upgraded delivery-day jobs expose
-`automation_update_required`. Apply the exact `cron_prompt` to that one Hermes
-automation, then call the returned `automation_ack`; acknowledgement records
-protocol 4 only after the external update succeeds. After an upgrade, call
-email `automation_plan`, replace every listed legacy prompt, and acknowledge
-each result. Until then the old prompt safely declines to send rather than
-using an unbound payload.
-
+Managed weekly and delivery-day jobs use explicit installation ownership and
+exact native job bindings. `schedule owner_plan` starts adoption/handover;
+`ack_owner` activates only after verified native inventory matches all current
+household jobs and old/terminal bindings are removed. Use per-job
+`scheduler_plan` / `ack_scheduler`, not legacy `set_cron_job` or
+`ack_automation`. The owner is independent of weekly enabled status, so an
+email-only installation needs no dummy timer. `schedule due` returns the local
+week occurrence and exact invocation for checkout `auto`. Settings changes and
+pause revoke stale workers; dispatched effects retain their original journals.
+`schedule reconcile` reads the original delivery selection without repeating it.
+Email `ack_cleanup` records exact terminal native removal before ID reuse.
+[The scheduler contract](email-scheduler.md) gives the request shapes, native
+adapter obligations, cleanup and recovery sequence. Legacy unowned jobs remain
+readable and compatible until explicit adoption; unavailable native inventory
+never establishes absence.
 Each job snapshots its provider as well as its menu and recipient. A MENY
 instance can therefore finish an older Oda delivery email when its normal Oda
 token directory is still available, without changing the household's active
@@ -1095,8 +1102,8 @@ masked-recipient subject and HTML payload but cannot send it. Set
 `email_automation_profile` only when that named private automation profile is
 already configured for the intended sender.
 
-Weekly and delivery-day wakeups are ordinary Hermes cron jobs created from the
-exact action returned by the integration. Provider selection remains in the
+Weekly and delivery-day wakeups belong to the explicitly selected native
+scheduler, using the exact action returned by the integration. Provider selection remains in the
 private config below the skill; natural language never selects a household or
 account.
 
@@ -1115,8 +1122,9 @@ so the target cannot become ambiguous. A scheduled checkout dispatches only
 after its configured total and delivery guards, and only under standing
 authorization; MENY always requires the user's payment approval through Vipps.
 
-Hermes cron owns weekly wakeups and delivery-day email wakeups; this package
-only stores settings and returns the next cron or email action. The email flow
+The selected native scheduler owns weekly and delivery-day wakeups; this
+package stores settings, exact ownership and recovery journals and returns
+the next native scheduler or email action. The email flow
 is bound to one confirmed provider order and marks delivery only after a successful
 send. The package does not store payment data or implement payment itself.
 
@@ -1480,12 +1488,13 @@ recipe text, test labels or missing data. An uncertain email send remains
 protected and must be reconciled separately. Cancelled follow-up drops its
 pending email payload and preserves a terminal record.
 
-Apply the returned `automation_cleanup` through native Hermes cron removal for
-the exact automation key/provider/order. If an older job has a different name,
+Apply returned `automation_cleanup` through native removal for the exact
+platform/scope/job ID and provider/order. Record managed terminal removal with
+`email ack_cleanup`. If an older job has a different name,
 inspect its prompt and bind the exact job ID; never delete by fuzzy name.
 Verify that the job is absent. `email automation_plan` also returns `removals`
-for cancelled jobs, making interrupted scheduler cleanup recoverable. Already
-absent is complete; preserve unrelated jobs. Provider cancellation and local
+for sent/cancelled managed jobs, making interrupted cleanup recoverable. Verify
+absence and acknowledge exact cleanup before releasing the binding; preserve unrelated jobs. Provider cancellation and local
 follow-up cleanup are distinct operations; never re-cancel an already cancelled
 order. When an ordinary order cancellation succeeds, reconcile its email
 follow-up and apply any returned cron removal before reporting completion.

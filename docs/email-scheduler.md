@@ -5,12 +5,74 @@ A native scheduler owns its timer and invokes the existing service; it does
 not start another household daemon. Every email remains bound to its original
 provider, order, recipient and menu snapshot after a provider or menu change.
 
-This is the Application/JSON CLI contract. Native MCP schema and shared skill
-integration, installation-wide weekly scheduler ownership, and actual native
-platform handover remain pending. Existing protocol-4 jobs without a
-`scheduler` record are reported as `unowned_legacy`; their compatibility path
-does not establish verified scheduler ownership. Ordinary interactive access
-does not adopt or move a scheduler.
+This is the Application, JSON CLI and native MCP contract. Native platform
+persistence, actual timer invocation and sender availability must be verified
+on the selected platform separately. Existing jobs without managed ownership
+remain `unowned_legacy`; their compatibility path does not establish verified
+scheduler ownership. Interactive access never adopts or moves a scheduler.
+
+## Installation owner and weekly job
+
+The installation owner is independent of weekly `enabled`; an email-only
+installation has no weekly/control timer. These actions use `operation=schedule`
+or the equivalent native MCP tool:
+
+1. Call `owner_plan` with `scheduler.owner={platform,scope}`. Initial adoption
+   additionally requires `scheduler.inventory={platform,scope,verified:true}`
+   from an authoritative inventory of the known old scope. Existing owner
+   transfer requires its current `scheduler.generation`. Pending same-target
+   plan replay returns the same generation; a different unresolved target is
+   rejected. Finish any already pending per-job handover first.
+2. The returned `owner` contains target `owner`, `generation`, `state=handover`
+   and `original_owner`, plus the retained first-adoption `adoption_scope`. All managed and legacy scheduler dispatch is fenced
+   during this hold. Adopt every current weekly/email job individually; use
+   exact old identities and verified native removal, never unscoped labels.
+3. For a weekly job call `scheduler_plan` with target `scheduler.binding`, plus
+   the saved weekly generation for a managed job. Initial weekly adoption needs
+   inventory `{platform,scope,verified:true,matching_jobs:0|1}`; if one old job
+   exists, include its exact `previous_binding`. A legacy `cron_job_id` must be
+   accounted for by that previous binding. Disabled old weekly jobs can plan
+   their existing native identity solely to acknowledge removal, without
+   creating a replacement timer.
+4. Apply the returned `cron` weekday/time/timezone and exact `cron_prompt` to
+   the paused native job, verify any previous job removed, then acknowledge
+   with `automation_digest` and `scheduler={binding,generation,
+   previous_binding,previous_job_removed,verified:true,state:active|paused}`.
+   The acknowledgment records native adapter evidence; the core does not query
+   the external platform itself. A lost response reuses the same plan/ID.
+5. Call `ack_owner` with `scheduler.owner`, the returned owner `generation`,
+   and `inventory={platform,scope,verified:true,bindings:[...]}`. `bindings`
+   contains exactly the remaining household job bindings in the target scope,
+   excluding unrelated native system jobs. Under one lock the service checks
+   all current rows, including emails added during handover, terminal jobs,
+   previous bindings and unresolved effects. Each continuing job needs a
+   verified target registration; sent/cancelled emails and disabled weekly jobs
+   need verified removal. No active job is inferred from an unavailable lookup.
+6. A native weekly invocation calls `schedule due` with the exact returned
+   `invocation` as `scheduler`, then carries the returned `occurrence` and
+   `scheduler` unchanged into checkout `auto`. The existing local-week
+   `YYYY-Www` identity and 30-minute admission window remain authoritative.
+
+`pause_scheduler` requires the exact weekly invocation and returns a new
+revoked generation. Changes to effective weekly settings also pause it.
+Replan and verify native state before resuming; disable/enable cannot revive
+old invocations or acknowledgments. `disable` preserves installation ownership
+and legitimate order emails. For native removal of a disabled weekly job,
+acknowledge its returned plan with `state=removed` and verified previous removal.
+
+Automatic delivery selection persists an original-attempt dispatch marker
+before provider I/O. Pause before that point prevents selection; pause after it
+cannot recall the action. A timeout remains unresolved, blocking selection,
+preparation and owner activation until `schedule reconcile` with the original
+`occurrence` obtains positive selected-slot evidence. Reconciliation waits for
+the existing provider-operation lock and does not read through an unresolved
+protected checkout/payment. This action only reads;
+a mismatch or unavailable read never permits a resend. Late results may resolve
+their original effect, but cannot publish stale provenance or overwrite another
+attempt. Pre-dispatch checkout is also fenced at prepare and final click.
+Dispatched checkout/payment remains recoverable with its original confirmation
+and idempotency references, independently of current ownership. Manual
+cart_ready continuation remains manual and carries the original occurrence.
 
 ## Register or hand over one email job
 
@@ -79,14 +141,26 @@ dispatched job also requires these explicit no-send fields for `release`.
 Only definite no-send releases it for another attempt of the same occurrence.
 Recovery uses the original sending token even if the scheduler was paused.
 
-Cancellation cleanup includes the managed scheduler record. Apply native
-removals to its exact scoped identities, including a still-pending previous
-binding; never delete by an unscoped automation label. These operations do not
-cancel or change the provider order. Another follow-up cannot adopt an owned
-target or claim it as an old job to remove. Cancelled jobs retain their binding
-reservation while native cleanup lacks a reconciled completion; this slice
-does not offer automatic reuse of those identifiers. Previously verified
-removed bindings are omitted from later cancellation cleanup.
+Terminal native bindings remain reserved until explicit removal acknowledgment,
+including sent jobs. `automation_plan` returns outstanding terminal removals.
+Remove and verify exact current and unremoved previous identities; never delete
+by an unscoped automation label. Call email `ack_cleanup` with exact provider,
+order_id and `scheduler={binding,generation,previous_binding,
+previous_job_removed:true,verified:true,state:removed}` from the original job.
+The same acknowledgment replays idempotently; stale generations cannot free a
+new job's reused ID. Cleanup of old-scope terminal jobs remains available during
+global handover. Previously removed identities are omitted from removal plans;
+retain the original scheduler record from status for the acknowledgment.
+
+A terminal legacy email with no scheduler record uses `ack_cleanup` without
+inventing a native timer: supply the current owner-plan generation,
+`verified:true,state:removed` and
+`inventory={platform,scope,verified:true,matching_jobs:0}` after authoritative
+absence verification in its retained original scope. A new email created during
+handover records the selected target scope instead. Empty inventory from another
+scope cannot establish removal. This receipt accounts for the
+terminal legacy row during first global adoption. None of these operations
+cancels or changes the provider order.
 
 ## Frozen payload and test boundary
 
@@ -113,6 +187,4 @@ persistence. A sender on another host/container needs supported narrow asset
 transfer before it can claim inline-image support; client-local paths alone do
 not provide that access.
 
-Run `python -I -B tests/test_email_scheduler.py` in the pinned Python environment
-from [the runtime instructions](runtime.md). These tests use synthetic provider
-reads and a local SMTP receiver.
+Run the focused contract tests with `python tests/test_email_scheduler.py` from the product root, using the pinned test environment described in the [README](../README.md).

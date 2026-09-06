@@ -26,7 +26,17 @@ SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
 # Published with the matching runtime after the public artifact is verified.
 # The archive itself, command-line input and household config cannot supply trust.
-RECIPE_PACK = None
+RECIPE_PACK = {
+    'format': 'meal-concierge-recipes',
+    'format_version': 1,
+    'recipe_schema_version': 2,
+    'normalizer_version': '1',
+    'pack_id': 'wikibooks-themealdb-en',
+    'pack_version': '2026-09-06.3',
+    'bytes': 92860588,
+    'sha256': '1fafd73c2538b6551fc637256e9dd1aba7e2d7c4f780f129354bd27a5bcdb0c1',
+    'url': 'https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-06.3/meal-concierge-recipes-2026-09-06.3.zip',
+}
 MAX_PACK_BYTES = 1024 * 1024 * 1024
 
 
