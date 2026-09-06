@@ -260,6 +260,7 @@ class Migration:
             try:
                 current = self.get(ref)
                 doc = document(current)
+                self.app._require_recipe_provider(doc)
                 frozen["document"] = doc
                 preview.update(name=doc["name"], document_digest=digest(doc))
                 if source_caps is None or dest_caps is None:
@@ -400,6 +401,7 @@ class Migration:
             return
         dispatched = operation and (operation["dispatched_at"] or operation["status"] == "uncertain")
         if not dispatched:
+            self.app._require_recipe_provider(frozen["document"])
             if expired:
                 progress.update(copy_status="needs_review", reason="confirmation_expired")
                 if operation:

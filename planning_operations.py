@@ -17,7 +17,8 @@ import time
 from typing import Any, Mapping
 from core import HouseholdError, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyCartStoppedError
-from recipes import RecipeError, normalize_recipe, prepare_recipe_input, recipe_key, scale_recipe, validate_week
+from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
+from recipes import recipe_provider_problem
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
 from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
@@ -386,6 +387,9 @@ class PlanningOperations:
         except HouseholdError as exc:
             return {"status":"needs_input", "reason":str(exc)}
         source = mp.slot_by_id(current, spec["source_slot_id"])
+        for recipe in current["dishes"] + current["salads"]:
+            if recipe["recipe_key"] == source["recipe_key"]:
+                self._require_recipe_provider(recipe)
         replaced = {d["replaces_slot_id"] for d in spec["leftovers"]}
         carried = [deepcopy(s) for s in current["slots"] if s["slot_id"] not in replaced]
         leftover_slots = [{"slot_id":d["slot_id"], "date":d["date"], "meal_type":d["meal_type"], "kind":"leftover",
@@ -447,6 +451,7 @@ class PlanningOperations:
             raise HouseholdError("planning history limit reached")
         current = state["menu"]
         successor = deepcopy(supplied["successor"])
+        self._require_menu_provider(successor)
         successor.update({"menu_id": "menu_" + secrets.token_hex(12), "revision": 1, "phase": "draft"})
         successor["digest"] = menu_digest(successor)
         planning["history"][mp.lock_key(current)] = deepcopy(current)
@@ -484,9 +489,14 @@ class PlanningOperations:
                     raise HouseholdError("menu recipes must be objects")
                 reference = raw.get("recipe_ref")
                 library_reference = raw.get("library_recipe_ref")
-                if reference is not None and library_reference is not None:
+                discovery_reference = raw.get("discovery_ref") if "source" not in raw else None
+                if sum(item is not None for item in (reference, library_reference, discovery_reference)) > 1:
                     raise RecipeLibraryError("menu recipe must use exactly one recipe reference type")
-                if library_reference is not None:
+                if discovery_reference is not None:
+                    stored = self.recipes.resolve_discovery(discovery_reference)["recipe"]
+                    recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
+                    recipe["discovery_ref"] = discovery_reference
+                elif library_reference is not None:
                     checked = validate_library_recipe_ref(library_reference)
                     if checked["library_id"] not in self.recipe_libraries:
                         raise RecipeLibraryError("library_recipe_ref names an unconfigured recipe library")
@@ -496,7 +506,7 @@ class PlanningOperations:
                             raise HouseholdError("only active recipes can be added to a new menu")
                     else:
                         stored = self._external_library_get(checked)
-                    for field in ("library_id", "is_favorite", "favorite_revision"):
+                    for field in ("library_id", "is_favorite", "favorite_revision", "entry_origin", "pack", "locally_modified"):
                         stored.pop(field, None)
                     recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
                     recipe["library_recipe_ref"] = deepcopy(stored["library_recipe_ref"])
@@ -505,15 +515,16 @@ class PlanningOperations:
                     stored = self.recipes.get(reference.get("id"), reference.get("revision"))
                     if stored.get("status") != "active" or stored.get("revision_status", stored.get("status")) != "active":
                         raise HouseholdError("only active recipes can be added to a new menu")
-                    for field in ("library_id", "is_favorite", "favorite_revision"):
+                    for field in ("library_id", "is_favorite", "favorite_revision", "entry_origin", "pack", "locally_modified"):
                         stored.pop(field, None)
                     recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
                 else:
                     candidate = deepcopy(dict(raw))
                     if not isinstance(candidate.get("source"), Mapping) or not isinstance(candidate.get("rights"), Mapping):
                         raise HouseholdError("new menu recipes require explicit source, relationship and rights metadata")
-                    document = normalize_recipe(candidate) if trusted_snapshots else prepare_recipe_input(candidate)
+                    document = normalize_recipe(candidate) if trusted_snapshots else self.recipes.prepare_input(candidate)
                     recipe = scale_recipe(document, candidate.get("portions"))
+                self._require_recipe_provider(recipe)
                 materialized.append(recipe)
                 count += 1
             result[collection] = materialized
@@ -685,6 +696,8 @@ class PlanningOperations:
                 scale_recipe(recipe, request.get("portions"))
             except RecipeError as exc:
                 materialization_error = str(exc)
+            if problem := recipe_provider_problem(recipe, self.provider):
+                materialization_error = problem
             supplied_facts = deepcopy(raw.get("facts", {})) if isinstance(raw, Mapping) else {}
             resolved.append({
                 "reference": reference,
@@ -952,6 +965,11 @@ class PlanningOperations:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and current.get("digest") == digest:
                     return {"menu": deepcopy(current), "idempotent": True}
+                if planner_context is None:
+                    for collection in ("dishes", "salads"):
+                        for recipe in menu[collection]:
+                            if "recipe_ref" not in recipe and "library_recipe_ref" not in recipe:
+                                validate_recipe_image(recipe, self.recipes.assets)
                 if planner_context is not None:
                     original_handoff, resolved, planner_request = planner_context
                     current_result = self._run_planner(
@@ -1112,6 +1130,7 @@ class PlanningOperations:
             menu = state.get("menu")
             if not isinstance(menu, Mapping) or canonical(self._cart_menu_ref(menu)) != canonical(menu_ref):
                 raise HouseholdError("menu_ref is stale or not the active menu")
+            self._require_menu_provider(menu)
             return (
                 {"kind": "saved_menu", "menu_ref": deepcopy(dict(menu_ref))},
                 deepcopy(dict(menu)), deepcopy(dict(menu_ref)),
@@ -2130,6 +2149,7 @@ class PlanningOperations:
         }
 
     def _cart_checkout_gate(self, summary: Mapping[str, Any], menu: Mapping[str, Any]) -> dict[str, Any] | None:
+        self._require_menu_provider(menu)
         live, names = self._cart_lines(summary)
         digest = self._cart_digest(live)
         menu_ref = self._cart_menu_ref(menu)
@@ -2175,6 +2195,7 @@ class PlanningOperations:
         return self._cart_question(result, summary, reason=reason)
 
     def _require_cart_menu(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        self._require_menu_provider(self.store.read().get("menu"))
         supplied = request.get("menu_ref", request.get("_expected_menu_ref"))
         if not isinstance(supplied, Mapping) or set(supplied) != {"menu_id", "revision", "digest"}:
             raise HouseholdError("cart sync and reconcile require the exact menu_ref from the menu or question")

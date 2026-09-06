@@ -14,7 +14,8 @@ sys.path.insert(0, str(ROOT))
 
 from core import StateStore
 from recipes import (ESTIMATE_CONFIRMATION, RecipeError, RecipeStore, normalize_recipe,
-                     prepare_recipe_input, recipe_digest, scale_recipe, source_ingredient, source_yield)
+                     prepare_recipe_input, recipe_digest, scale_recipe, source_ingredient, source_yield,
+                     normalize_source_url, normalize_attribution_url)
 from recipe_quantities import read_quantity, parse_measure
 from product_planner import menu_requirements
 from recipe_library_mealie import MealieAdapter
@@ -167,13 +168,13 @@ class RecipeContractTests(unittest.TestCase):
         needs, _ = menu_requirements({"dishes": [scale_recipe(normalize_recipe(recipe), 2)], "salads": []})
         self.assertEqual({n["unit"] for n in needs}, {"ml", "g"})
 
-    def test_staged_image_binding_and_source_claims_fail_without_mutation(self):
+    def test_missing_image_binding_and_source_claims_fail_without_mutation(self):
         recipe = authored_recipe()
         recipe["image"] = {"asset_id": "sha256:" + "a" * 64, "credit": "Independent cover credit"}
         normalized = normalize_recipe(recipe)
         self.assertEqual(normalize_recipe(normalized), normalized)
         self.assertEqual(menu_requirements({"dishes": [scale_recipe(normalized, 2)], "salads": []}), menu_requirements({"dishes": [scale_recipe(normalize_recipe(authored_recipe()), 2)], "salads": []}))
-        with self.assertRaisesRegex(RecipeError, "managed image writes"):
+        with self.assertRaisesRegex(RecipeError, "available managed asset"):
             self.save(recipe)
         self.assertEqual(self.app.recipes.search(), [])
         recipe = authored_recipe()
@@ -187,6 +188,120 @@ class RecipeContractTests(unittest.TestCase):
         changed["source_provider"] = None
         with self.assertRaisesRegex(RecipeError, "preserve"):
             self.app.handle({"operation": "recipes", "action": "update", "recipe_id": saved["id"], "expected_revision": 1, "recipe": changed})
+
+    def test_managed_cover_bank_menu_product_path_and_missing_cover_retries(self):
+        from test_meal_concierge_recipe_assets import picture
+        from recipe_assets import asset_filename
+        recipe = authored_recipe()
+        image_id = self.app.recipes.assets.import_bytes(picture())
+        recipe["rights"]["credit"] = "Independent recipe text credit"
+        recipe["image"] = {"asset_id": image_id, "credit": "Independent photo credit"}
+        recipe["entry_origin"] = "bundled"
+        saved = self.save(recipe)
+        self.assertEqual(saved["entry_origin"], "user")
+        reference = {"recipe_ref": {"id": saved["id"], "revision": 1}, "portions": 2}
+        menu = self.save_menu(reference)
+        self.assertEqual(menu["dishes"][0]["image"]["asset_id"], image_id)
+        requirements, unresolved = menu_requirements(menu)
+        self.assertEqual((len(requirements), unresolved), (5, []))
+        prepared = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(menu), "candidate_approvals": [{"requirement_id": r["requirement_id"], "candidate_refs": [r["item"]]} for r in requirements]})["product_plan"]
+        self.assertEqual(prepared["status"], "prepared")
+        changed = deepcopy(saved)
+        replacement = self.app.recipes.assets.import_bytes(picture(color="blue"))
+        changed["image"]["asset_id"] = replacement
+        update = {"operation": "recipes", "action": "update", "recipe_id": saved["id"], "expected_revision": 1, "recipe": changed, "idempotency_key": "replace-cover"}
+        self.assertEqual(self.app.handle(update)["recipe"]["revision"], 2)
+        for asset_id in (image_id, replacement):
+            (self.app.recipes.assets.root / asset_filename(asset_id)).unlink()
+        self.assertEqual(self.save(recipe)["id"], saved["id"])
+        self.assertEqual(self.app.handle(update)["recipe"]["revision"], 2)
+        historical_menu = self.save_menu(reference)
+        self.assertEqual(historical_menu["dishes"][0]["image"]["asset_id"], image_id)
+        html = menu_email_html(historical_menu)
+        self.assertIn("Independent recipe text credit", html)
+        self.assertIn("Independent photo credit", html)
+        self.assertNotIn("<img", html)
+
+    def test_inline_menu_attachment_validation_preserves_completed_missing_cover_replay(self):
+        from test_meal_concierge_recipe_assets import picture
+        from recipe_assets import asset_filename
+        recipe = authored_recipe()
+        image_id = self.app.recipes.assets.import_bytes(picture())
+        recipe["image"] = {"asset_id": image_id, "credit": "Inline credit"}
+        request = {"operation": "menu", "action": "save", "menu": {"week": "2026-W40", "dishes": [recipe], "salads": []}}
+        first = self.app.handle(request)
+        self.assertTrue(self.app.handle(request)["idempotent"])
+        (self.app.recipes.assets.root / asset_filename(image_id)).unlink()
+        repeated = self.app.handle(request)
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(repeated["menu"], first["menu"])
+        before = deepcopy(self.store.read())
+        for fake_reference in (None, "not-a-bank-reference"):
+            new = deepcopy(request)
+            new["menu"]["week"] = "2026-W41"
+            if fake_reference is not None:
+                new["menu"]["dishes"][0]["recipe_ref"] = fake_reference
+            with self.assertRaisesRegex(RecipeError, "available managed asset"):
+                self.app.handle(new)
+            self.assertEqual(self.store.read(), before)
+
+    def test_application_origin_search_filters_before_limit_and_keeps_favorite_separate(self):
+        bundled = self.app.recipes.import_pack_record(authored_recipe(), pack_id="synthetic", recipe_id="base", version="1")["recipe"]
+        for index in range(3):
+            recipe = authored_recipe()
+            recipe["name"] = f"Personal {index}"
+            self.save(recipe, f"user-{index}")
+        query = {"operation": "recipes", "action": "search", "library_id": "builtin", "entry_origin": "bundled", "include_ineligible": True, "limit": 1}
+        result = self.app.handle(query)["recipes"]
+        self.assertEqual([row["id"] for row in result], [bundled["id"]])
+        self.assertEqual(result[0]["entry_origin"], "bundled")
+        self.assertEqual(result[0]["pack"], bundled["pack"])
+        self.assertFalse(result[0]["locally_modified"])
+        self.assertEqual(self.app.handle({**query, "favorites_only": True})["recipes"], [])
+        self.app.recipes.set_favorite(bundled["library_recipe_ref"], True, idempotency_key="pack-favorite")
+        self.assertEqual(len(self.app.handle({**query, "favorites_only": True})["recipes"]), 1)
+        cross = {key: value for key, value in query.items() if key != "library_id"}
+        cross["library_ids"] = ["builtin"]
+        self.assertEqual(self.app.handle(cross)["recipes"][0]["entry_origin"], "bundled")
+
+    def test_historical_menu_replay_does_not_change_when_current_pack_metadata_changes(self):
+        for kind in ("recipe_ref", "library_recipe_ref"):
+            with self.subTest(kind=kind):
+                recipe = authored_recipe()
+                bundled = self.app.recipes.import_pack_record(recipe, pack_id="synthetic", recipe_id=kind, version="1")["recipe"]
+                reference = ({"recipe_ref": {"id": bundled["id"], "revision": 1}} if kind == "recipe_ref"
+                             else {"library_recipe_ref": bundled["library_recipe_ref"]})
+                request = {"operation": "menu", "action": "save", "menu": {"week": "2026-W40", "dishes": [{**reference, "portions": 2}], "salads": []}}
+                first = self.app.handle(request)["menu"]
+                self.assertTrue({"entry_origin", "pack", "locally_modified"}.isdisjoint(first["dishes"][0]))
+                changed = deepcopy(bundled)
+                changed["name"] = "Edited current revision"
+                self.app.recipes.update(bundled["id"], 1, changed)
+                self.assertTrue(self.app.recipes.get(bundled["id"], 1)["locally_modified"])
+                repeated = self.app.handle(request)
+                self.assertTrue(repeated["idempotent"])
+                self.assertEqual(repeated["menu"], first)
+
+    def test_inert_self_hosted_attribution_ports_keep_identity_and_legacy_rules(self):
+        recipe = authored_recipe()
+        recipe["source"]["url"] = "https://Recipes.Example:9000/soup?id=7&utm_source=test"
+        recipe["source"]["original"] = {"url": "http://original.example:443/soup?id=7"}
+        saved = self.save(recipe)
+        self.assertEqual(saved["source"]["url"], "https://recipes.example:9000/soup?id=7")
+        self.assertEqual(saved["source"]["original"]["url"], "http://original.example:443/soup?id=7")
+        menu = self.save_menu({"recipe_ref": {"id": saved["id"], "revision": 1}, "portions": 2})
+        self.assertIn('href="https://recipes.example:9000/soup?id=7"', menu_email_html(menu))
+        self.assertIn('href="http://original.example:443/soup?id=7"', menu_email_html(menu))
+        self.assertEqual(normalize_attribution_url("http://[::1]:9000/r"), "http://[::1]:9000/r")
+        self.assertEqual(normalize_attribution_url("http://host.example:80/r"), "http://host.example/r")
+        self.assertEqual(normalize_source_url("https://host.example:443/r"), "https://host.example/r")
+        for bad in ("https://host.example:0/r", "https://host.example:65536/r", "https://host.example:abc/r", "https://user:password@host.example:9000/r", "javascript:bad()"):
+            with self.assertRaises(RecipeError):
+                normalize_attribution_url(bad)
+        with self.assertRaisesRegex(RecipeError, "standard HTTPS port"):
+            normalize_source_url("https://host.example:9000/r", version=1)
+        with self.assertRaisesRegex(RecipeError, "HTTPS"):
+            normalize_source_url("http://host.example:9000/r")
 
     def test_themealdb_preserves_upstream_original_measure_and_unknown_servings(self):
         meal = {"idMeal": "123", "strMeal": "Synthetic", "strInstructions": "Cook at 180 C for 30 minutes.", "strIngredient1": "salt", "strMeasure1": "3 ts", "strSource": "http://example.org/recipe?id=7&oldid=9&utm_medium=test"}

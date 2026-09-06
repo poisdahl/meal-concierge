@@ -1,12 +1,15 @@
 """Synthetic local cover tests; no downloaded photos, services or recipients."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import random
 import shutil
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -21,6 +24,7 @@ sys.path.insert(0, str(CORE))
 from PIL import Image, PngImagePlugin
 import recipe_assets as assets
 from recipe_assets import RecipeAssets, RecipeAssetError
+from recipes import RecipeStore, RecipeError, normalize_recipe, recipe_digest
 
 
 def picture(format="PNG", size=(80, 40), color="tomato", **options):
@@ -247,6 +251,156 @@ class RecipeAssetTests(unittest.TestCase):
         noisy = assets.sanitize_image(output.getvalue())
         self.assertIn(b"\xff\x00", noisy)
         self.assets.install_managed(reference(noisy), noisy)
+
+
+class RecipeAssetBankTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.bank = RecipeStore(self.root / "recipes.sqlite3", "Synthetic")
+        self.cover = self.bank.assets.import_bytes(picture())
+        self.recipe = {"schema_version": 2, "name": "Synthetic soup", "portions": 2,
+            "source": {"kind": "user", "relationship": "user_supplied", "url": "https://example.invalid/soup"},
+            "rights": {"storage": "full", "credit": "Text creator"},
+            "ingredients": [{"item": "carrots", "quantity": 200, "unit": "g"}], "steps": ["Cook carrots."],
+            "image": {"asset_id": self.cover, "credit": "Independent image creator"}}
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def pack(self, recipe=None, **kwargs):
+        return self.bank.import_pack_record(recipe or self.recipe, pack_id="synthetic-pack", recipe_id="soup", version=kwargs.pop("version", "1"), **kwargs)
+
+    def test_user_metadata_cannot_be_forged_and_exact_duplicate_keeps_origin(self):
+        forged = {**self.recipe, "entry_origin": "bundled", "pack": {"pack_id": "fake"}, "locally_modified": True}
+        saved = self.bank.save(forged)
+        self.assertEqual(saved["entry_origin"], "user")
+        self.assertIsNone(saved["pack"])
+        self.assertFalse(saved["locally_modified"])
+        conflict = self.pack()
+        self.assertEqual((conflict["outcome"], conflict["reason"]), ("conflict", "source_identity_exists"))
+        self.assertEqual(conflict["recipe"]["id"], saved["id"])
+        self.assertEqual(self.bank.import_records([forged])["skipped"], 1)
+        self.assertEqual(len(self.bank.search(entry_origin="user")), 1)
+        self.assertEqual(self.bank.search(entry_origin="bundled"), [])
+
+    def test_pack_reimport_preserves_favorite_archive_history_and_detects_local_edits(self):
+        first = self.pack()["recipe"]
+        self.assertEqual(first["entry_origin"], "bundled")
+        self.assertEqual(first["pack"]["baseline_hash"], recipe_digest(normalize_recipe(self.recipe)))
+        self.bank.set_favorite(first["library_recipe_ref"], True, idempotency_key="favorite")
+        archived = self.bank.archive(first["id"], 1)
+        repeat = self.pack(version="2")
+        self.assertEqual(repeat["outcome"], "unchanged")
+        self.assertEqual((repeat["recipe"]["revision"], repeat["recipe"]["status"]), (2, "archived"))
+        self.assertTrue(repeat["recipe"]["is_favorite"])
+        self.assertEqual(repeat["recipe"]["pack"]["version"], "1")
+        self.assertFalse(repeat["recipe"]["locally_modified"])
+        changed = deepcopy(first)
+        changed["name"] = "Local edit"
+        changed["source"]["url"] = "https://example.invalid/locally-changed-source"
+        self.bank.update(first["id"], archived["revision"], changed)
+        conflict = self.pack()
+        self.assertEqual((conflict["outcome"], conflict["reason"]), ("conflict", "locally_modified"))
+        self.assertEqual(conflict["recipe"]["id"], first["id"])
+        self.assertEqual(len(self.bank.search(include_archived=True)), 1)
+        historical = self.bank.get(first["id"], 1)
+        self.assertEqual(historical["name"], "Synthetic soup")
+        self.assertTrue(historical["locally_modified"])
+        self.assertTrue(historical["is_favorite"])
+
+    def test_changed_pack_conflicts_and_interrupted_per_record_import_resumes(self):
+        first = self.pack(status="draft")["recipe"]
+        changed = deepcopy(self.recipe)
+        changed["name"] = "New upstream edition"
+        conflict = self.pack(changed, version="2")
+        self.assertEqual(conflict["reason"], "pack_content_changed")
+        self.assertEqual(conflict["recipe"]["status"], "draft")
+        bad = deepcopy(changed)
+        bad["source"]["url"] = "https://example.invalid/other"
+        bad["image"]["asset_id"] = "sha256:" + "a" * 64
+        with self.assertRaisesRegex(RecipeError, "available managed asset"):
+            self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="other", version="1")
+        self.assertEqual(self.pack()["outcome"], "unchanged")
+        bad["image"] = None
+        second = self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="other", version="1")
+        self.assertEqual(second["outcome"], "created")
+        self.assertEqual(second["recipe"]["status"], "active")
+        self.assertEqual(self.bank.get(first["id"])["revision"], 1)
+        bad["source_provider"] = "oda"
+        with self.assertRaisesRegex(RecipeError, "store-bound"):
+            self.bank.import_pack_record(bad, pack_id="synthetic-pack", recipe_id="bound", version="1")
+
+    def test_retries_metadata_edits_and_history_do_not_require_missing_old_assets(self):
+        first = self.bank.save(self.recipe, idempotency_key="save")
+        changed = deepcopy(self.recipe)
+        changed["image"]["asset_id"] = self.bank.assets.import_bytes(picture(color="blue"))
+        second = self.bank.update(first["id"], 1, changed, idempotency_key="replace")
+        self.assertEqual(self.bank.assets.read(self.cover), self.bank.assets.read(first["image"]["asset_id"]))
+        shutil.rmtree(self.bank.assets.root)
+        self.assertEqual(self.bank.save(self.recipe, idempotency_key="save")["id"], first["id"])
+        self.assertEqual(self.bank.update(first["id"], 1, changed, idempotency_key="replace")["revision"], 2)
+        self.assertEqual(self.bank.get(first["id"], 1)["image"]["asset_id"], self.cover)
+        changed["image"]["credit"] = "Corrected independent credit"
+        third = self.bank.update(first["id"], 2, changed)
+        self.assertEqual(third["revision"], 3)
+        changed["image"]["asset_id"] = self.cover
+        with self.assertRaisesRegex(RecipeError, "available managed asset"):
+            self.bank.update(first["id"], 3, changed)
+        changed["image"] = None
+        self.assertIsNone(self.bank.update(first["id"], 3, changed)["image"])
+        self.assertEqual(second["rights"]["credit"], "Text creator")
+
+    def test_legacy_migration_and_old_idempotency_overlay_do_not_rewrite_documents(self):
+        saved = self.bank.save(self.recipe, idempotency_key="legacy-save")
+        with sqlite3.connect(self.bank.path) as connection:
+            original = connection.execute("SELECT document FROM recipes").fetchone()[0]
+            replay = json.loads(connection.execute("SELECT response_json FROM idempotency").fetchone()[0])
+            for key in ("entry_origin", "pack", "locally_modified"):
+                replay.pop(key, None)
+            connection.execute("UPDATE idempotency SET response_json=?", (json.dumps(replay),))
+            connection.execute("DROP TABLE recipe_entry_metadata")
+            connection.execute("UPDATE metadata SET value='5' WHERE key='schema_version'")
+        reopened = RecipeStore(self.bank.path, "Synthetic")
+        self.assertEqual(reopened.get(saved["id"])["entry_origin"], "unknown")
+        self.assertEqual(reopened.get(saved["id"], 1)["recipe_digest"], saved["recipe_digest"])
+        self.assertEqual(reopened.save(self.recipe, idempotency_key="legacy-save")["entry_origin"], "unknown")
+        self.assertEqual(len(reopened.search(entry_origin="unknown", limit=1)), 1)
+        with sqlite3.connect(self.bank.path) as connection:
+            self.assertEqual(connection.execute("SELECT document FROM recipes").fetchone()[0], original)
+            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], "6")
+
+    def test_relocated_native_backup_keeps_origins_history_and_assets_after_deletion(self):
+        first = self.pack()["recipe"]
+        changed = deepcopy(self.recipe)
+        changed["image"]["asset_id"] = self.bank.assets.import_bytes(picture(color="blue"))
+        self.bank.update(first["id"], 1, changed)
+        destination = self.root / "relocated"
+        destination.mkdir()
+        self.bank.backup(destination / "recipes.sqlite3")
+        shutil.copytree(self.bank.assets.root, destination / "recipe-assets")
+        self.bank.delete(first["id"], 2)
+        self.assertTrue(self.bank.assets.read(self.cover))
+        restored = RecipeStore(destination / "recipes.sqlite3", "Synthetic")
+        for revision in (1, 2):
+            record = restored.get(first["id"], revision)
+            self.assertEqual(record["entry_origin"], "bundled")
+            self.assertTrue(restored.assets.read(record["image"]["asset_id"]))
+
+    def test_explicit_local_image_cli_dry_run_then_import_is_repeat_safe(self):
+        (self.root / "state.json").write_text(json.dumps({"household": "Synthetic"}))
+        (self.root / "attachment.png").write_bytes(picture(color="green"))
+        command = [sys.executable, str(CORE / "import_recipes.py"), "--state-directory", str(self.root), "--import-root", str(self.root), "--image", "attachment.png"]
+        preview = subprocess.run(command + ["--dry-run"], capture_output=True, text=True, check=True)
+        asset_id = json.loads(preview.stdout)["asset_id"]
+        with self.assertRaises(RecipeAssetError):
+            self.bank.assets.read(asset_id)
+        actual = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(actual.stdout)["asset_id"], asset_id)
+        self.assertTrue(self.bank.assets.read(asset_id))
+        repeat = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(repeat.stdout, actual.stdout)
+        self.assertFalse(self.bank.path.exists())
 
 
 if __name__ == "__main__":

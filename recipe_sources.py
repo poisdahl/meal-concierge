@@ -385,6 +385,7 @@ def provider_recipe_candidates(provider: str, value: Any, limit: int) -> list[di
         if not name or not external_id or urlsplit(url or "").hostname not in allowed_hosts:
             continue
         results.append(normalize_recipe({
+            "schema_version": 2, "source_provider": provider,
             "schema_version": 2,
             "name": name, "language": "sv-SE" if provider == "mathem" else "nb-NO", "tags": [provider.upper()],
             "source": {

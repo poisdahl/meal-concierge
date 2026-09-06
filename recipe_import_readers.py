@@ -288,7 +288,7 @@ class _JSONLDScripts(HTMLParser):
                 raise RecipeImportReaderError("webpage has too many JSON-LD scripts")
 
 
-def read_webpage_jsonld(data: bytes | str, *, source_url: str) -> list[dict[str, Any]]:
+def read_webpage_jsonld(data: bytes | str, *, source_url: str, allow_empty: bool = False) -> list[dict[str, Any]]:
     """Extract every Recipe, preserving ambiguity for the caller to resolve."""
     url = _url(source_url, "source_url")
     if url is None or not url.startswith("https://"):
@@ -312,9 +312,100 @@ def read_webpage_jsonld(data: bytes | str, *, source_url: str) -> list[dict[str,
                         raise RecipeImportReaderError("webpage has too many recipes")
                 if "@graph" in value:
                     pending.append(value["@graph"])
-    if not result:
+    if not result and not allow_empty:
         raise RecipeImportReaderError("webpage contains no supported JSON-LD Recipe")
     return result
+
+
+
+MAX_WEBPAGE_TEXT_BYTES = 64 * 1024
+
+
+class _WebpageText(HTMLParser):
+    """Plain text fallback; no rendering, external resources or script execution."""
+    _ignored = {"head", "script", "style", "template", "noscript", "svg", "canvas", "iframe", "object"}
+    _blocks = {"article", "section", "main", "div", "p", "li", "ul", "ol", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "td", "th", "dl", "dt", "dd", "caption"}
+    _void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, bool]] = []
+        self.parts: list[str] = []
+        self.size = 0
+
+    def _append(self, data: str) -> None:
+        self.size += len(data.encode("utf-8"))
+        if self.size > MAX_WEBPAGE_TEXT_BYTES:
+            raise RecipeImportReaderError("webpage text exceeds the supported interpretation limit")
+        self.parts.append(data)
+
+    @property
+    def ignored(self) -> bool:
+        return bool(self.stack and self.stack[-1][1])
+
+    def _close(self, names: set[str], boundaries: set[str] | frozenset[str] = frozenset()) -> None:
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] in names:
+                del self.stack[index:]
+                return
+            if self.stack[index][0] in boundaries:
+                return
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # HTML permits omission of these common end tags. Keep a hidden child
+        # from suppressing the visible paragraph/list/table item that follows.
+        if tag not in {"html", "head", "base", "link", "meta", "title", "style", "script", "noscript", "template"}:
+            self._close({"head"}, {"template", "svg", "math"})
+        if tag in self._blocks:
+            self._close({"p"}, {"button", "html", "table", "td", "th", "object", "template", "svg", "math"})
+        if tag in {"li", "dt", "dd", "tr", "td", "th"}:
+            if tag == "li":
+                names, containers = {"li"}, {"ul", "ol", "menu", "table"}
+            elif tag in {"dt", "dd"}:
+                names, containers = {"dt", "dd"}, {"dl", "table"}
+            elif tag == "tr":
+                names, containers = {"tr"}, {"table", "tbody", "thead", "tfoot"}
+            else:
+                names, containers = {"td", "th"}, {"tr", "table"}
+            self._close(names, containers | {"template", "svg", "math"})
+        hidden = any(key == "hidden" or key == "aria-hidden" and (value or "").casefold() == "true" for key, value in attrs)
+        ignored = self.ignored or tag in self._ignored or hidden
+        if not ignored and tag in self._blocks:
+            self._append("\n")
+        if tag not in self._void:
+            if len(self.stack) >= 128:
+                raise RecipeImportReaderError("webpage nesting exceeds the supported text limit")
+            self.stack.append((tag, ignored))
+
+    def handle_endtag(self, tag: str) -> None:
+        self._close({tag})
+        if not self.ignored and tag in self._blocks:
+            self._append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.ignored:
+            self._append(data)
+
+
+def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
+    """Prefer structured recipes, otherwise expose bounded text for host interpretation.
+
+    Malformed structured data fails explicitly; it is not silently downgraded to
+    text. Text has no inferred recipe fields or authority and must be presented
+    as untrusted source content to the calling agent.
+    """
+    recipes = read_webpage_jsonld(data, source_url=source_url, allow_empty=True)
+    if recipes:
+        return {"mode": "structured", "recipes": recipes, "text": None, "requires_interpretation": False}
+    parser = _WebpageText()
+    parser.feed(_input_text(data, MAX_WEBPAGE_BYTES))
+    parser.close()
+    if any(tag in parser._ignored for tag, _ in parser.stack):
+        raise RecipeImportReaderError("webpage text has an unclosed non-text element")
+    text = "\n".join(line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split())))
+    text = _text(text, "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
+    return {"mode": "text", "recipes": [], "text": text, "source_url": _url(source_url, "source_url"),
+            "requires_interpretation": True}
 
 
 def source_candidate(record: dict[str, Any]) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 """Versioned, bounded recipe-pack framing shared by the builder and importer.
 
-This module grants no source trust and does not mutate the recipe bank. A caller
-must select the trusted installation/private restore path outside the archive.
+The codec grants no source trust. The installer selects a trusted release
+descriptor and holds offline ownership before calling the bank application API.
 """
 
 from __future__ import annotations
@@ -12,9 +12,11 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import struct
 from typing import Any, BinaryIO, Iterator, Mapping
+import unicodedata
 import zipfile
 import zlib
 
@@ -88,6 +90,8 @@ def _manifest(value: Any) -> dict:
         raise RecipeError("portable private restore format is not yet supported")
     for field in ("pack_id", "pack_version", "normalizer_version"):
         _text(value.get(field), field)
+        if field != "normalizer_version" and len(value[field]) > 128:
+            raise RecipeError(f"portable {field} exceeds the bank metadata limit")
     if type(value.get("recipe_schema_version")) is not int or value["recipe_schema_version"] not in {1, 2}:
         raise RecipeError("unsupported portable recipe schema")
     count = value.get("records_count")
@@ -259,8 +263,8 @@ class PortableArchive:
             for _ in self.chunks(name):
                 pass
         count = sum(1 for _ in self.records())
-        return {"records_count": count, "files_count": len(self.inventory),
-                "expanded_bytes": sum(item["bytes"] for item in self.inventory.values())}
+        return {"records_count": count, "files_count": len(self.entries),
+                "expanded_bytes": sum(info.file_size for info in self.entries.values())}
 
     def records(self) -> Iterator[dict]:
         pending = b""
@@ -369,3 +373,215 @@ def write_archive(destination: Path | str, manifest: Mapping, files: Mapping[str
         if created:
             output.unlink(missing_ok=True)
         raise
+
+
+@contextmanager
+def _verified_archive(path: Path | str, expected: Mapping):
+    """Bind one opened file to the installer's code-selected release descriptor."""
+    fields = ("format", "format_version", "recipe_schema_version", "pack_id", "pack_version", "normalizer_version")
+    if not isinstance(expected, Mapping) or not all(field in expected for field in (*fields, "bytes", "sha256")):
+        raise RecipeError("a complete trusted release descriptor is required")
+    if type(expected["bytes"]) is not int or not 0 < expected["bytes"] <= MAX_ARCHIVE_BYTES or not isinstance(expected["sha256"], str) or not _DIGEST.fullmatch(expected["sha256"]):
+        raise RecipeError("trusted release size/digest is invalid")
+    if type(expected["format_version"]) is not int or type(expected["recipe_schema_version"]) is not int:
+        raise RecipeError("trusted release versions are invalid")
+    for field in ("pack_id", "pack_version", "normalizer_version"):
+        _text(expected[field], field)
+    try:
+        with _regular_file(Path(path)) as handle:
+            actual_size = 0
+            digest = hashlib.sha256()
+            while chunk := handle.read(CHUNK_BYTES):
+                actual_size += len(chunk)
+                if actual_size > expected["bytes"]:
+                    raise RecipeError("archive differs from trusted release size")
+                digest.update(chunk)
+            if actual_size != expected["bytes"] or digest.hexdigest() != expected["sha256"]:
+                raise RecipeError("archive differs from trusted release digest/size")
+            _directory_bound(handle)
+            with zipfile.ZipFile(handle) as zipped:
+                archive = PortableArchive(zipped)
+                if any(archive.manifest[field] != expected[field] for field in fields):
+                    raise RecipeError("archive manifest differs from trusted release descriptor")
+                yield archive
+    except (zipfile.BadZipFile, EOFError, UnicodeError, struct.error, NotImplementedError) as exc:
+        raise RecipeError("trusted recipe archive is invalid") from exc
+
+
+def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
+    """Read-only installer preflight. A manifest cannot supply its own descriptor.
+
+    The installer chooses expected_descriptor from the reviewed release, before
+    acquiring the archive. This function is not an ordinary recipe-upload tool.
+    """
+    with _verified_archive(path, expected_descriptor) as archive:
+        return {**_preflight(archive), "archive_sha256": expected_descriptor["sha256"],
+                "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                "recipe_schema_version": archive.manifest["recipe_schema_version"]}
+
+
+def _preflight(archive: PortableArchive) -> dict:
+    from recipe_assets import validate_managed
+    from recipes import evidence_inputs, normalize_recipe, recipe_evidence_fields, scale_recipe
+    result = archive.verify()
+    for field in ("pack_id", "pack_version"):
+        value = archive.manifest[field]
+        if unicodedata.normalize("NFC", value).strip() != value:
+            raise RecipeError("pack identity must use canonical bank text")
+    for name in archive.inventory:
+        if match := _ASSET.fullmatch(name):
+            validate_managed(archive._read(name), "sha256:" + match[1])
+    for record in archive.records():
+        if unicodedata.normalize("NFC", record["recipe_id"]).strip() != record["recipe_id"]:
+            raise RecipeError("pack record identity must use canonical bank text")
+        recipe = normalize_recipe(record["recipe"])
+        if canonical_bytes(recipe) != canonical_bytes(record["recipe"]):
+            raise RecipeError("pack recipe differs from its declared normalized schema")
+        if recipe.get("source_provider") is not None:
+            raise RecipeError("a bundled pack cannot contain store-bound recipes")
+        if any(item.get("acceptance") for value in recipe_evidence_fields(recipe).values() for item in evidence_inputs(value)):
+            raise RecipeError("a bundled pack cannot supply local estimate acceptance")
+        if record["status"] == "ready":
+            scaled = scale_recipe(recipe)
+            if not scaled["readiness"]["scaling_ready"] or not all(item["scalable"] for item in scaled["shopping_requirements"]):
+                raise RecipeError("a ready pack recipe has unresolved quantities or servings")
+    return result
+
+
+@contextmanager
+def _pack_directory(state: Path, manifest: Mapping):
+    """Open a state-relative metadata directory without following archive paths."""
+    identity = hashlib.sha256(canonical_bytes([manifest["pack_id"], manifest["pack_version"]])).hexdigest()
+    descriptors = []
+    try:
+        root = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(root)
+        for name in ("pack-metadata", identity):
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=root)
+                os.fsync(root)
+            except FileExistsError:
+                pass
+            root = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+            descriptors.append(root)
+        yield root, f"pack-metadata/{identity}"
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _report_bytes(directory: int, name: str, value: bytes, *, immutable: bool = False) -> None:
+    """Retain exact notices; progress replacement never touches household journals."""
+    if immutable:
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(descriptor, "rb") as handle:
+                info = os.fstat(handle.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size != len(value) or handle.read(len(value) + 1) != value:
+                    raise RecipeError("this pack version already has different retained metadata")
+            return
+    temporary = ".pack-" + secrets.token_hex(16)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if immutable:
+            os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        else:
+            os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def apply_archive(path: Path | str, state_directory: Path | str, household: str,
+                  expected_descriptor: Mapping) -> dict:
+    """Apply a verified release under the caller's *in-process* offline ownership.
+
+    The installer owns the service/state lifetime locks throughout this call.
+    This internal API is not an ordinary upload tool. It never restores state
+    or operation journals and never changes favorites or existing recipe rows.
+    """
+    from recipe_assets import RecipeAssetError, RecipeAssets
+    from recipes import RecipeStore
+    if not hasattr(RecipeStore, "import_pack_record"):
+        raise RecipeError("this runtime does not support per-record pack installation")
+    state = Path(state_directory)
+    # The caller has initialized this exact installation while holding ownership.
+    with _verified_archive(path, expected_descriptor) as archive:
+        checked = _preflight(archive)
+        with _pack_directory(state, archive.manifest) as (directory, relative):
+            for name in ("manifest.json", "attribution.json", "coverage.json"):
+                if name in archive.entries:
+                    _report_bytes(directory, name, archive._read(name), immutable=True)
+            store = RecipeStore(state / "recipes.sqlite3", household)
+            assets = RecipeAssets(state / "recipe-assets")
+            report = {"status": "in_progress", "archive_sha256": expected_descriptor["sha256"],
+                      "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                      "total": checked["records_count"], "processed": 0, "created": 0,
+                      "unchanged": 0, "conflicts": 0, "failed": 0,
+                      "report_directory": relative}
+            results = []
+            _report_bytes(directory, "status.json", canonical_bytes(report))
+            current = None
+            try:
+                for record in archive.records():
+                    current = record["recipe_id"]
+                    image = record["recipe"].get("image")
+                    if image:
+                        assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
+                    outcome = store.import_pack_record(record["recipe"], pack_id=archive.manifest["pack_id"],
+                        recipe_id=current, version=archive.manifest["pack_version"], status=record["status"])
+                    category = {"created": "created", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
+                    report[category] += 1
+                    report["processed"] += 1
+                    result = {"recipe_id": current, "outcome": outcome["outcome"],
+                              "bank_recipe_ref": outcome["recipe"]["library_recipe_ref"]}
+                    if outcome.get("reason"):
+                        result["reason"] = outcome["reason"]
+                    results.append(result)
+                    current = None
+                    _report_bytes(directory, "status.json", canonical_bytes(report))
+            except (RecipeError, RecipeAssetError) as exc:
+                report["failed"] += 1
+                report["error"] = str(exc)[:500]
+                results.append({"recipe_id": current, "outcome": "failed", "reason": report["error"]})
+            except KeyboardInterrupt:
+                report["interrupted"] = True
+                report["unconfirmed_record"] = current
+            report["status"] = "complete" if report["processed"] == report["total"] and not report["conflicts"] and not report["failed"] and not report.get("interrupted") else "partial"
+            report["remaining"] = report["total"] - report["processed"]
+            report["resumable"] = report["status"] != "complete"
+            # Full per-record results stay in the private state, not an RPC frame.
+            _report_bytes(directory, "results.json", canonical_bytes(results))
+            _report_bytes(directory, "status.json", canonical_bytes(report))
+            return {**report, "results": results[:100], "results_truncated": len(results) > 100}
+
+
+def main() -> None:
+    """Read-only CLI; the installer invokes apply_archive while owning its locks."""
+    import argparse
+    from recipe_assets import RecipeAssetError
+    parser = argparse.ArgumentParser(description="Preflight the code-selected recipe collection")
+    parser.add_argument("action", choices=("preflight",))
+    parser.add_argument("--archive", type=Path, required=True)
+    parser.add_argument("--expected-json", required=True)
+    args = parser.parse_args()
+    try:
+        result = preflight_archive(args.archive, _json(args.expected_json.encode()))
+    except (RecipeError, RecipeAssetError, OSError):
+        print(json.dumps({"status": "invalid", "error": "recipe pack preflight failed"}))
+        raise SystemExit(1)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

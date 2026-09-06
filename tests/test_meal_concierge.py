@@ -441,6 +441,7 @@ class CoreTestsBase:
             "email", action="ack_automation", order_id="order-1", delivery_date="2026-09-05",
             provider=None, claim_token=None, automation_key="meal-concierge-email-0123456789abcdef",
             automation_digest="a" * 64, protocol=4, owner_confirmed_cancelled=False,
+            scheduler=None, send_outcome=None, sender_receipt=None, images_supported=False,
         )
 
     def test_cart_summary_rejects_huge_provider_quantity_as_a_bounded_error(self):

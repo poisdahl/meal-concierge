@@ -19,6 +19,7 @@ from typing import Any, Mapping
 import unicodedata
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
+from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem
 from recipe_libraries import CAPABILITY_NAMES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
 from service_common import (
@@ -30,6 +31,55 @@ from service_common import (
 
 
 class RecipeOperations:
+    def _recipe_provider_eligibility(self, recipe: Mapping[str, Any]) -> dict[str, Any]:
+        problem = recipe_provider_problem(recipe, self.provider)
+        try:
+            required = recipe_source_provider(recipe)
+        except RecipeError:
+            required = None
+        return {"eligible": problem is None, "required_provider": required, "reason": problem}
+
+    def _require_recipe_provider(self, recipe: Mapping[str, Any]) -> None:
+        if problem := recipe_provider_problem(recipe, self.provider):
+            raise RecipeError(problem)
+
+    def _require_menu_provider(self, menu: Any) -> None:
+        if not isinstance(menu, Mapping):
+            return
+        slots = menu.get("slots")
+        new_keys = None
+        if isinstance(slots, list):
+            historical = set(menu.get("historical_slot_ids", []))
+            new_keys = {slot["recipe_key"] for slot in slots if slot["slot_id"] not in historical}
+        for collection in ("dishes", "salads"):
+            for recipe in menu.get(collection, []):
+                if new_keys is None or recipe.get("recipe_key") in new_keys:
+                    self._require_recipe_provider(recipe)
+
+    def _recipe_detail(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Enrich one service-owned search snapshot; no personal save."""
+        snapshot = self.recipes.resolve_discovery(request.get("discovery_ref"))
+        source_recipe = snapshot["recipe"]
+        self._require_recipe_provider(source_recipe)
+        provider = recipe_source_provider(source_recipe)
+        if provider != "meny":
+            raise RecipeError("verified recipe details are currently supported only for MENY; this source remains readable")
+        if not self.store.read()["profile"]["recipes"]["sources"].get(provider):
+            raise RecipeError("the recipe source is disabled")
+        deadline = time.monotonic() + 15
+        with self._browser_operation(deadline):
+            state = self.store.read()
+            if any(state.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change")):
+                raise RecipeError("finish the pending provider operation before recipe details")
+            response = self.provider_client.call("recipe_detail", {"recipe_id": source_recipe["source"]["external_id"]}, deadline=deadline)
+        if not isinstance(response, Mapping) or response.get("provider") != provider or not isinstance(response.get("recipe"), Mapping):
+            raise RecipeError("recipe detail provider response is invalid")
+        recipe = normalize_recipe(bind_recipe_source(response["recipe"], provider=provider))
+        if any(recipe["source"].get(field) != source_recipe["source"].get(field) for field in ("url", "external_id")):
+            raise RecipeError("recipe detail source identity changed")
+        self._require_recipe_provider(recipe)
+        return {**self.recipes.persist_discovery(recipe), "capabilities": deepcopy(response.get("capabilities", {}))}
+
     @staticmethod
     def _week_index(week: str) -> int:
         match = re.fullmatch(r"(\d{4})-W(\d{2})", validate_week(week))
@@ -152,11 +202,13 @@ class RecipeOperations:
             for field in ("library_id", "is_favorite", "favorite_revision"):
                 recipe.pop(field, None)
             recipe["usage"] = self._usage_summary(state, recipe["recipe_key"], week)
-            if recipe["usage"]["eligible"]:
+            if recipe["usage"]["eligible"] and recipe_provider_problem(recipe, self.provider) is None:
                 results.append(recipe)
         return results
 
     def _provider_recipe_candidates(self, provider: str, query: str, limit: int) -> list[dict[str, Any]]:
+        if provider != self.provider:
+            return []
         if not query:
             return []
         client = self.provider_client if provider == self.provider else self.email_provider_clients.get(provider)
@@ -210,7 +262,7 @@ class RecipeOperations:
         state = self.store.read()
         week = validate_week(request.get("week") or self._household_today(state).strftime("%G-W%V"))
         sources = validate_source_settings(state["profile"]["recipes"]["sources"])
-        enabled = [source for source in SOURCE_IDS if sources[source]]
+        enabled = [source for source in SOURCE_IDS if sources[source] and (source not in {"oda", "meny", "mathem"} or source == self.provider)]
         if not enabled:
             raise HouseholdError("no recipe sources are enabled")
         per_source = min(5, max(1, math.ceil(total_limit / len(enabled))))
@@ -236,6 +288,9 @@ class RecipeOperations:
         for source in SOURCE_IDS:
             if not sources[source]:
                 statuses.append({"source": source, "enabled": False, "status": "disabled", "count": 0})
+                continue
+            if source in {"oda", "meny", "mathem"} and source != self.provider:
+                statuses.append({"source": source, "enabled": True, "status": "ineligible", "count": 0, "reason": f"select {source.upper()} to use its recipes"})
                 continue
             future = next((candidate for candidate, name in futures.items() if name == source), None)
             if future is None:
@@ -295,7 +350,7 @@ class RecipeOperations:
         if library_id == "builtin":
             return {
                 "provider": "builtin",
-                "server_version": "5",
+                "server_version": "6",
                 "read_only": False,
                 **{
                     name: name in {
@@ -1693,16 +1748,27 @@ class RecipeOperations:
             self.recipes.recover_library_operations()
             self._recipe_operations_recovered = True
         discovery_ref = request.get("discovery_ref")
+        try:
+            source_recipe = self.recipes.resolve_discovery(discovery_ref)["recipe"]
+        except RecipeError:
+            source_recipe = None  # Existing exact save recovery may outlive the discovery.
         explicit_target = request.get("library_id")
         if explicit_target is None:
             bound = self.recipes.bound_library_for_discovery(
                 discovery_ref, idempotency_key=request.get("idempotency_key")
             )
             target = bound or self.primary_recipe_library_id
+            if not bound and source_recipe is not None and recipe_source_provider(source_recipe):
+                target = "builtin"
         else:
             target = validate_library_id(explicit_target)
         if target not in self.recipe_libraries:
             raise RecipeLibraryError("library_id must name one exact configured recipe library")
+        recovering = self.recipes.discovery_save_replay(discovery_ref, target)
+        if source_recipe is not None and not recovering:
+            self._require_recipe_provider(source_recipe)
+        if target != "builtin" and not recovering and source_recipe is not None and recipe_source_provider(source_recipe):
+            raise RecipeError("private store recipes are saved in the built-in bank")
         if target != "builtin":
             try:
                 candidate = self.recipes.resolve_discovery(discovery_ref)["recipe"]
@@ -2635,6 +2701,8 @@ class RecipeOperations:
             return {"recipe": self.recipes.update(request["recipe_id"], request["expected_revision"], accepted, idempotency_key=request["idempotency_key"])}
         if action == "discover":
             return self._discover_recipes(request)
+        if action == "detail":
+            return self._recipe_detail(request)
         if action == "libraries":
             libraries = []
             for library_id, connection in self.recipe_libraries.items():
@@ -2672,6 +2740,12 @@ class RecipeOperations:
             favorites_only = request.get("favorites_only", False)
             if not isinstance(favorites_only, bool):
                 raise RecipeLibraryError("favorites_only must be true or false")
+            entry_origin = request.get("entry_origin")
+            if entry_origin is not None:
+                if entry_origin not in ("user", "bundled", "unknown"):
+                    raise RecipeLibraryError("entry_origin must be user, bundled or unknown")
+                if library_ids != ["builtin"]:
+                    raise RecipeLibraryError("entry_origin filtering requires the builtin recipe library")
             if requested_ids is None and library_ids == ["builtin"] and request.get("cursor") is not None:
                 raise RecipeLibraryError("built-in recipe search has no continuation cursor")
             if requested_ids is not None or library_ids != ["builtin"]:
@@ -2729,13 +2803,15 @@ class RecipeOperations:
                                     query, limit=page_limit, offset=offset,
                                     include_archived=request.get("include_archived") is True,
                                     favorites_only=favorites_only,
+                                    entry_origin=entry_origin,
                                 )
                                 offset += len(rows)
                                 for row in rows:
                                     summary = self._usage_summary(
                                         state, row["recipe_key"], week
                                     )
-                                    if not include_ineligible and not summary["eligible"]:
+                                    problem = recipe_provider_problem(row, self.provider)
+                                    if not include_ineligible and (not summary["eligible"] or problem):
                                         continue
                                     item = {
                                         key: deepcopy(row.get(key))
@@ -2743,11 +2819,13 @@ class RecipeOperations:
                                             "id", "revision", "status", "name", "language", "tags",
                                             "source", "rights", "portions", "library_id", "is_favorite",
                                             "favorite_revision",
+                                            "entry_origin", "pack", "locally_modified", "image",
                                         )
                                     }
                                     item["library_recipe_ref"] = deepcopy(row["library_recipe_ref"])
                                     item["recipe_key"] = library_recipe_key(row["library_recipe_ref"])
                                     item["usage"] = summary
+                                    item["provider_eligibility"] = self._recipe_provider_eligibility(row)
                                     accepted.append(item)
                                     if len(accepted) == limit:
                                         break
@@ -2889,6 +2967,7 @@ class RecipeOperations:
                     request.get("query", ""), limit=page_limit,
                     include_archived=request.get("include_archived") is True,
                     favorites_only=favorites_only, offset=offset,
+                    entry_origin=entry_origin,
                 )
                 offset += len(rows)
                 for row in rows:
@@ -2899,12 +2978,15 @@ class RecipeOperations:
                             "id", "revision", "status", "name", "language", "tags", "source", "rights",
                             "portions", "created_at", "updated_at", "created_via", "content_fingerprint", "recipe_key",
                             "library_id", "is_favorite", "favorite_revision",
+                            "entry_origin", "pack", "locally_modified", "image",
                         )
                     }
                     value["library_recipe_ref"] = deepcopy(row["library_recipe_ref"])
                     value["recipe_key"] = library_recipe_key(row["library_recipe_ref"])
                     value["usage"] = summary
-                    if include_ineligible or summary["eligible"]:
+                    problem = recipe_provider_problem(row, self.provider)
+                    value["provider_eligibility"] = self._recipe_provider_eligibility(row)
+                    if include_ineligible or summary["eligible"] and problem is None:
                         results.append(value)
                         if len(results) == requested_limit:
                             break
@@ -2937,7 +3019,7 @@ class RecipeOperations:
                 result["recipe_key"] = library_recipe_key(result["library_recipe_ref"])
             if request.get("week"):
                 result["usage"] = self._usage_summary(self.store.read(), result["recipe_key"], validate_week(request["week"]))
-            return {"recipe": result}
+            return {"recipe": result, "provider_eligibility": self._recipe_provider_eligibility(recipe)}
         if action == "list_labels":
             if request.get("library_id") is None:
                 raise RecipeLibraryError(
@@ -3007,12 +3089,18 @@ class RecipeOperations:
                 idempotency_key=request.get("idempotency_key"),
             )
         if action == "set_favorite":
+            if request.get("discovery_ref") is not None:
+                if request.get("library_recipe_ref") is not None or request.get("recipe_id") is not None or request.get("is_favorite") is not True:
+                    raise RecipeError("favorite an unsaved discovery with only discovery_ref and is_favorite=true")
+                return self.recipes.favorite_discovery(request["discovery_ref"], idempotency_key=request.get("idempotency_key"), provider=self.provider)
             reference = validate_library_recipe_ref(request.get("library_recipe_ref"))
             if request.get("recipe_id") is not None:
                 raise RecipeLibraryError("set_favorite requires only one exact library_recipe_ref identity")
             if request.get("library_id") is not None and request["library_id"] != reference["library_id"]:
                 raise RecipeLibraryError("library_recipe_ref does not match library_id")
             if reference["library_id"] == "builtin":
+                if request.get("is_favorite") is True:
+                    self._require_recipe_provider(self.recipes.get(reference["recipe_id"], reference.get("version")))
                 return self.recipes.set_favorite(
                     reference,
                     request.get("is_favorite"),
@@ -3020,6 +3108,14 @@ class RecipeOperations:
                     dispatch_before=request.get("_migration_expires_at"),
                     idempotency_key=request.get("idempotency_key"),
                 )
+            if request.get("is_favorite") is True:
+                previous = self.recipes.library_operation_for_idempotency(request.get("idempotency_key"))
+                recovering = previous is not None and (previous["status"] in {"confirmed", "failed", "uncertain"} or previous.get("dispatched_at"))
+                if not recovering:
+                    external = self._external_library_get(reference)
+                    self._require_recipe_provider(external)
+                    if recipe_source_provider(external):
+                        raise RecipeError("save this store recipe in the built-in bank before favoriting")
             return self._set_external_favorite(
                 reference,
                 request.get("is_favorite"),
@@ -3043,7 +3139,8 @@ class RecipeOperations:
             target = self.primary_recipe_library_id if request.get("library_id") is None else request.get("library_id")
             if target != "builtin":
                 raise RecipeLibraryError("external recipe create requires an exact discovery_ref")
-            value = prepare_recipe_input(request.get("recipe"))
+            value = self.recipes.prepare_input(request.get("recipe"))
+            self._require_recipe_provider(value)
             return {
                 "saved": True,
                 "library_id": "builtin",
@@ -3069,7 +3166,7 @@ class RecipeOperations:
             recipe_id = str(request.get("recipe_id") or "")
             expected = request.get("expected_revision")
             prior = self.recipes.get(recipe_id, expected)
-            value = prepare_recipe_input(request.get("recipe"), prior=prior)
+            value = self.recipes.prepare_input(request.get("recipe"), prior=prior)
             key = request.get("idempotency_key")
             return {"recipe": self.recipes.update(recipe_id, expected, value, status=request.get("status"), idempotency_key=key)}
         if action == "archive":

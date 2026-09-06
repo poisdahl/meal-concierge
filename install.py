@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -11,16 +12,85 @@ import plistlib
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
 import uuid
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime_ownership import file_lock, ownership, listener_ownership
 
 SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
+# Published with the matching runtime after the public artifact is verified.
+# The archive itself, command-line input and household config cannot supply trust.
+RECIPE_PACK = None
+MAX_PACK_BYTES = 1024 * 1024 * 1024
+
+
+def stage_recipe_pack(release, source=None):
+    """Copy a release-pinned artifact; offline input has the same trust boundary."""
+    expected = RECIPE_PACK
+    if expected is None:
+        if source is not None:
+            raise RuntimeError('no released recipe pack is pinned by this runtime')
+        return None
+    if not 0 < expected['bytes'] <= MAX_PACK_BYTES:
+        raise RuntimeError('release recipe pack exceeds the supported archive size')
+    destination = Path(release) / ('recipe-pack-' + uuid.uuid4().hex + '.zip')
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        if source is None:
+            handle = urllib.request.urlopen(expected['url'], timeout=60)
+        else:
+            descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            handle = os.fdopen(descriptor, 'rb')
+        with handle:
+            if source is not None and not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise RuntimeError('recipe pack input must be a regular file')
+            with destination.open('xb') as output:
+                while chunk := handle.read(min(1024 * 1024, expected['bytes'] - size + 1)):
+                    size += len(chunk)
+                    if size > expected['bytes']:
+                        raise RuntimeError('recipe pack is larger than its release descriptor')
+                    digest.update(chunk)
+                    output.write(chunk)
+        if size != expected['bytes'] or digest.hexdigest() != expected['sha256']:
+            raise RuntimeError('recipe pack differs from the artifact pinned by this runtime')
+        destination.chmod(0o400)
+        return destination
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def recipe_pack_command(release, action, archive, meta=None):
+    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import preflight_archive; print(json.dumps(preflight_archive(sys.argv[2],json.loads(sys.argv[3]))))"
+    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(RECIPE_PACK)]
+    if action == 'apply':
+        # The applying process owns its locks itself. Killing this installer
+        # cannot release ownership while its surviving child still writes.
+        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]))"
+        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(meta)]
+    result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
+    if result.returncode not in ({0, 2} if action == 'apply' else {0}):
+        detail = (result.stdout or result.stderr).strip()[:2000]
+        raise RuntimeError(f'recipe pack {action} failed ({result.returncode}): {detail}')
+    return json.loads(result.stdout)
+
+
+def apply_recipe_pack(archive, meta):
+    """Installed-runtime child entry point; no parent-owned lifetime locks."""
+    from recipe_portable import apply_archive
+    with offline(meta):
+        settings = json.loads(Path(meta['paths']['config']).read_text())
+        report = apply_archive(archive, Path(meta['paths']['state']), settings['household'], RECIPE_PACK)
+        print(json.dumps(report))
+    if report['status'] != 'complete':
+        raise SystemExit(2)
 
 
 def run(*args, **kwargs):
@@ -150,6 +220,12 @@ def lifecycle(meta, action):
 @contextmanager
 def offline(meta):
     assert_stopped(meta)
+    with data_ownership(meta):
+        yield
+
+
+@contextmanager
+def data_ownership(meta):
     p = meta['paths']
     with ownership(p['state'], p['browser_profile'], p['browser_home'], p['browser_socket_directory']), listener_ownership(p['socket']):
         yield
@@ -173,6 +249,10 @@ def backup(meta, destination):
     state = Path(meta['paths']['state']).resolve()
     if destination == state or destination.is_relative_to(state):
         raise RuntimeError('backup must be outside the state directory')
+    if meta.get('code_root'):
+        code = Path(meta['code_root']).resolve()
+        if destination == code or destination.is_relative_to(code):
+            raise RuntimeError('backup must be outside replaceable program files')
     destination.mkdir(mode=0o700, parents=True, exist_ok=False)
     copy_data(state, destination / 'state')
     shutil.copyfile(meta['paths']['config'], destination / 'config.json')
@@ -188,15 +268,25 @@ def stage_release(code_root):
         shutil.copyfile(path, release / path.name)
     shutil.copyfile(SOURCE / 'runtime-requirements.txt', release / 'runtime-requirements.txt')
     shutil.copytree(SOURCE / 'skill', release / 'skill')
-    run(uv, 'venv', '--python', PYTHON, release / 'venv')
-    run(uv, 'pip', 'sync', '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
+    run(uv, '--no-config', 'venv', '--python', PYTHON, release / 'venv')
+    run(uv, '--no-config', 'pip', 'sync', '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
     # Check both versions AND the actual loaded modules inside this private venv.
     run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.1.1'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
     return release
 
 
 def migrate(release, meta):
-    run(release / 'venv/bin/python', '-I', '-c', "import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from core import StateStore; from service import config; from recipes import RecipeStore; s=StateStore(Path(sys.argv[2]),config(Path(sys.argv[3]))); RecipeStore(s.directory/'recipes.sqlite3',str(s.config['household'])).search(limit=1)", release, meta['paths']['state'], meta['paths']['config'])
+    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import migrate_owned; migrate_owned(json.loads(sys.argv[2]))"
+    run(release / 'venv/bin/python', '-I', '-c', code, release, json.dumps(meta))
+
+
+def migrate_owned(meta):
+    from core import StateStore
+    from service import config
+    from recipes import RecipeStore
+    with data_ownership(meta):
+        state = StateStore(Path(meta['paths']['state']), config(Path(meta['paths']['config'])))
+        RecipeStore(state.directory / 'recipes.sqlite3', str(state.config['household'])).search(limit=1)
 
 
 def write_unit(meta):
@@ -250,15 +340,18 @@ def main():
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
     for field in ['config', 'state', 'socket', 'tokens', 'browser-profile', 'browser-home', 'browser-socket-directory', 'agent-browser', 'browser-executable']:
         parser.add_argument('--' + field)
-    parser.add_argument('--recipe-pack', type=Path, help='reserved local versioned pack boundary; requires pending R06/R07 importer')
+    parser.add_argument('--recipe-pack', type=Path, help='downloaded artifact matching the recipe pack pinned by this runtime')
     parser.add_argument('--backup', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
+    if args.recipe_pack is not None:
+        if args.action not in {'install', 'update'}:
+            raise RuntimeError('--recipe-pack applies only to install/update')
+        if RECIPE_PACK is None:
+            raise RuntimeError('no released recipe pack is pinned by this runtime')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
-    if args.recipe_pack is not None:
-        raise RuntimeError('recipe-pack installation is pending #39/#40/#42/#46/#47; no archive was opened or installed')
     if args.action == 'restore':
         if not args.backup:
             raise RuntimeError('--backup is required')
@@ -363,11 +456,22 @@ def main():
                 if (code_root / 'current').exists():
                     raise RuntimeError('unowned existing code root; use an empty code directory')
                 write_json(owner, {'home': str(home)})
-            publish(meta, path, home, settings)
+            publish(meta, path, home, settings, args.recipe_pack)
 
 
-def publish(meta, path, home, settings):
+def publish(meta, path, home, settings, recipe_pack=None):
     release = stage_release(Path(meta['code_root']))
+    archive = None
+    pack_error = None
+    try:
+        archive = stage_recipe_pack(release, recipe_pack)
+        if archive is not None:
+            recipe_pack_command(release, 'preflight', archive)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        if recipe_pack is not None:
+            raise  # Explicit invalid input never reaches database migration.
+        archive = None
+        pack_error = str(exc)
     with offline(meta):
         meta['paths']['maintenance'] = str(home / 'maintenance.json')
         # Persist the exact owner before any unit publication or data migration.
@@ -380,7 +484,10 @@ def publish(meta, path, home, settings):
             backup(meta, destination)
             print('Offline backup:', destination)
         write_json(home / 'maintenance.json', {'candidate': str(release), 'reason': 'offline update incomplete; repair before starting'})
-        migrate(release, meta)
+    # The writing child owns its locks; parent death cannot free them early.
+    # Maintenance remains set across this handoff and the subsequent publication.
+    migrate(release, meta)
+    with offline(meta):
         write_unit(meta)
         current = Path(meta['code_root']) / 'current'
         replacement = current.with_name('.current-' + uuid.uuid4().hex)
@@ -391,7 +498,22 @@ def publish(meta, path, home, settings):
         write_json(path, meta)
         (home / 'maintenance.json').unlink()
         (home / 'pending-install.json').unlink()
+    # The complete core is usable if pack application cannot acquire ownership.
+    # The child reacquires lifetime ownership before it writes; a competing core
+    # startup makes application fail safely rather than sharing mutable state.
+    if archive is not None:
+        try:
+            report = recipe_pack_command(release, 'apply', archive, meta)
+            print('Recipe pack:', json.dumps({key: value for key, value in report.items() if key != 'results'}))
+            if report['status'] != 'complete':
+                pack_error = 'recipe pack import is incomplete; committed recipes remain available and reported conflicts were preserved'
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            pack_error = str(exc)
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
+    if pack_error:
+        raise RuntimeError('Runtime is usable; recipe pack needs attention: ' + pack_error + '. Retry update after addressing the reported problem.')
+    if RECIPE_PACK is None:
+        print('No recipe pack is pinned in this source build.')
 
 
 if __name__ == '__main__':

@@ -13,9 +13,12 @@ from typing import Any, Mapping
 import unicodedata
 
 from core import HouseholdError
+from recipe_selection import candidate_groups, merge_family_usage
+from recipes import RecipeError, scale_recipe
+from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v2"
+PLANNER_VERSION = "weekly-menu-v3"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
@@ -36,18 +39,29 @@ PERISHABILITY = {"fresh", "shelf_stable", "unknown"}
 FISH_TERMS = {
     "ansjos", "fisk", "hyse", "kveite", "laks", "makrell", "ørret", "sardiner",
     "sei", "sild", "torsk", "tunfisk",
+    "fish", "salmon", "cod", "haddock", "herring", "trout", "tuna", "sardines",
 }
 LEGUME_TERMS = {
     "bønne", "bønner", "erte", "erter", "kikerter", "linse", "linser", "soyabønner",
+    "beans", "bean", "peas", "chickpeas", "lentils", "lentil",
 }
 WHOLEGRAIN_OR_POTATO_TERMS = {
     "bygg", "fullkorn", "fullkornsris", "grov pasta", "havre", "potet", "poteter",
     "quinoa", "rug",
+    "potato", "potatoes", "oats", "barley", "brown rice", "wholegrain", "wholewheat",
 }
 VEGETABLE_TERMS = {
     "agurk", "aubergine", "blomkål", "brokkoli", "gulrot", "grønnkål", "kål",
     "løk", "paprika", "pastinakk", "purre", "selleri", "spinat", "squash", "tomat",
+    "carrot", "carrots", "onion", "onions", "tomato", "tomatoes", "broccoli", "spinach", "kale", "cabbage",
 }
+
+PRIORITY_FACETS = {
+    "fish": "fish", "fisk": "fish", "legumes": "legume", "belgfrukter": "legume",
+    "vegetables": "vegetable", "grønnsaker": "vegetable", "whole grains": "wholegrain", "fullkorn": "wholegrain",
+}
+LEAFY_TERMS = {"spinach", "spinat", "kale", "grønnkål", "mangold", "chard"}
+WHOLEGRAIN_TERMS = {"wholegrain", "wholewheat", "fullkorn", "brown rice", "havre", "oats", "quinoa"}
 
 
 class PlannerError(HouseholdError):
@@ -179,9 +193,10 @@ def _contains_term(identity: str, terms: set[str]) -> bool:
 def _derived_dietary(recipe: Mapping[str, Any]) -> dict[str, Any]:
     facets: set[str] = set()
     vegetables: set[str] = set()
-    for identity, _unit, excluded in _ingredient_identities(recipe):
-        if excluded:
+    for ingredient in recipe.get("ingredients", []):
+        if ingredient.get("optional"):
             continue
+        identity = _text(ingredient.get("item"))
         if _contains_term(identity, FISH_TERMS):
             facets.add("fish")
         if _contains_term(identity, LEGUME_TERMS):
@@ -252,6 +267,10 @@ def _hard_evaluation(
     if error:
         status = "fail"
         reasons.append({"code": "not_materializable", "status": "fail", "detail": str(error)[:500]})
+    if candidate.get("readiness_unknown"):
+        if status == "pass":
+            status = "unknown"
+        reasons.append({"code": "readiness_needs_input", "status": "unknown", "detail": candidate["readiness_unknown"]})
     safety = candidate["facts"]["safety"]
     for field in ("allergies_or_sensitivities", "avoid"):
         supplied = safety.get(field) if isinstance(safety, Mapping) else {}
@@ -268,6 +287,10 @@ def _hard_evaluation(
             elif reason_status == "unknown" and status == "pass":
                 status = "unknown"
     usage = candidate.get("usage")
+    if isinstance(usage, Mapping) and usage.get("history_coverage") == "history_work_limit":
+        if status == "pass":
+            status = "unknown"
+        reasons.append({"code": "history_work_limit", "status": "unknown", "detail": "source-family history search was bounded before completion"})
     eligible = bool(usage.get("eligible")) if isinstance(usage, Mapping) else False
     key = str(candidate["recipe_key"])
     if eligible:
@@ -284,6 +307,87 @@ def _hard_evaluation(
             "detail": deepcopy(usage.get("blocked_by", [])) if isinstance(usage, Mapping) else "unknown",
         })
     return {"status": status, "reasons": reasons}
+
+
+def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], portions: int | None = None) -> dict[str, Any]:
+    """Evaluate only a loaded, exact Application candidate; summaries cannot pass."""
+    item = deepcopy(dict(candidate))
+    recipe = item["recipe"]
+    if recipe.get("representation") == "summary" or not isinstance(recipe.get("ingredients"), list) or not recipe.get("ingredients") or not recipe.get("steps"):
+        item["materialization_error"] = "full recipe ingredients and steps are not loaded"
+        item["readiness_unknown"] = "full recipe ingredients and steps are not loaded"
+    else:
+        try:
+            scaled = scale_recipe(recipe, portions if portions is not None else recipe.get("portions"))
+            unresolved = [need["item"] for need in scaled["shopping_requirements"]
+                          if not need.get("optional") and (not need.get("scalable") or need.get("quantity") is None or not need.get("unit"))]
+            if unresolved or not scaled["readiness"]["scaling_ready"]:
+                item["readiness_unknown"] = {"ingredients": unresolved, "fields": scaled["readiness"]["missing_decisions"]}
+        except RecipeError as exc:
+            item["readiness_unknown"] = str(exc)[:500]
+    item["facts"] = _effective_facts(recipe, item.get("supplied_facts", item.get("facts")))
+    if not item.get("materialization_error"):
+        item["facts"]["listed_fish_mass"] = _listed_fish_mass(recipe)
+    item["hard_constraints"] = _hard_evaluation(item, profile, overrides)
+    return item
+
+
+def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping[str, Any]) -> list[dict[str, Any]]:
+    recipe = candidate["recipe"]
+    tags = {_text(tag) for tag in recipe.get("tags", [])}
+    cuisine = profile.get("cuisine") or {}
+    reasons = []
+    for field in ("wanted", "flavours"):
+        requested = {_text(value) for value in cuisine.get(field, [])}
+        matched = sorted(requested.intersection(tags))
+        if requested:
+            reasons.append(_reason("cuisine:" + field, min(12, len(matched) * 4),
+                                   {"matched_tags": matched, "unmatched_or_unknown": sorted(requested - tags)}))
+    if candidate.get("is_favorite"):
+        reasons.append(_reason("recipe:favorite", 4, "current personal favorite"))
+    identities = [_text(item.get("item")) for item in recipe.get("ingredients", []) if not item.get("optional")]
+    facets = set(candidate["facts"]["dietary_facets"]["values"])
+    if any(_contains_term(identity, WHOLEGRAIN_TERMS) for identity in identities):
+        facets.add("wholegrain")
+    diet = profile.get("diet") or {}
+    for preference in sorted({_text(value) for value in diet.get("prioritise", [])}):
+        facet = PRIORITY_FACETS.get(preference)
+        reasons.append(_reason("diet:prioritise", 4 if facet in facets else 0,
+                               {"preference": preference, "evidence": "positive_ingredient_match" if facet in facets else "unknown" if facet else "unsupported"}))
+    weekdays = {name: index for index, name in enumerate(("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"), 1)}
+    wanted_days = {value if type(value) is int else weekdays.get(_text(value)) for value in diet.get("leafy_green_days", [])}
+    if date.fromisoformat(day).isoweekday() in wanted_days:
+        present = any(_contains_term(identity, LEAFY_TERMS) for identity in identities)
+        reasons.append(_reason("diet:leafy_green_day", 5 if present else 0,
+                               {"day": day, "evidence": "positive_ingredient_match" if present else "unknown"}))
+    return reasons
+
+
+def _listed_fish_mass(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    """Positive listed fish mass per serving, never inferred nutritional safety."""
+    grams = 0
+    unknown = []
+    modifiers = {"fresh", "frozen", "fillet", "fillets", "filet", "fileter", "fersk", "frossen", "skinless", "boneless"}
+    try:
+        scaled = scale_recipe(recipe, 1)
+    except RecipeError:
+        return {"grams_per_serving": None, "unknown": ["serving_or_quantity_evidence"]}
+    for item in scaled["ingredients"]:
+        if item.get("optional"):
+            continue
+        identity = _text(item.get("item"))
+        if not _contains_term(identity, FISH_TERMS):
+            continue
+        words = set(re.findall(r"[^\W\d_]+", identity, flags=re.UNICODE))
+        unit = UNITS.get(normalized_unit(item.get("unit")))
+        if words - modifiers - FISH_TERMS or unit is None or unit[0] != "g":
+            unknown.append(identity)
+            continue
+        try:
+            grams += read_quantity(item.get("quantity"), legacy_float=recipe.get("schema_version") == 1) * unit[1]
+        except ValueError:
+            unknown.append(identity)
+    return {"grams_per_serving": float(grams), "unknown": unknown}
 
 
 def _positive_int(profile: Mapping[str, Any], field: str, default: int) -> int:
@@ -374,7 +478,7 @@ def _reason(code: str, weight: int, detail: Any) -> dict[str, Any]:
 def _slot_reasons(
     candidate: Mapping[str, Any], day: str, index: int, count: int, profile: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
-    reasons: list[dict[str, Any]] = []
+    reasons: list[dict[str, Any]] = _preference_reasons(candidate, day, profile)
     explicit_feedback = candidate.get("planning_feedback")
     if explicit_feedback is not None:
         reasons.append(_reason("feedback:explicit-v1", explicit_feedback["weight"], deepcopy(explicit_feedback)))
@@ -409,7 +513,9 @@ def _slot_reasons(
     else:
         reasons.append(_reason("perishability:unknown", 0, "not scored"))
     usage = candidate.get("usage") if isinstance(candidate.get("usage"), Mapping) else {}
-    if not any(usage.get(field) for field in ("last_planned_week", "last_ordered_week", "last_cooked_week")):
+    if usage.get("history_coverage", "complete") != "complete":
+        reasons.append(_reason("recency:history_incomplete", 0, usage["history_coverage"]))
+    elif not any(usage.get(field) for field in ("last_planned_week", "last_ordered_week", "last_cooked_week")):
         reasons.append(_reason("recency:no_recorded_use", 5, "no matching recorded use"))
     else:
         weeks_since = None
@@ -443,6 +549,16 @@ def _plan_reasons(
     selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = []
+    fish_range = (profile.get("diet") or {}).get("fish_grams_per_person")
+    if isinstance(fish_range, list) and len(fish_range) == 2:
+        mass = [candidate["facts"].get("listed_fish_mass", {"grams_per_serving": None, "unknown": ["not_loaded"]}) for candidate in selected]
+        known = sum(item["grams_per_serving"] or 0 for item in mass)
+        incomplete = any(item["grams_per_serving"] is None or item["unknown"] for item in mass)
+        met = fish_range[0] <= known <= fish_range[1]
+        reasons.append(_reason("weekly_target:listed_fish_mass", 8 if met and not incomplete else 0,
+                               {"listed_grams_per_serving": known, "target_range": fish_range,
+                                "coverage": "partial_positive_evidence" if incomplete else "listed_recognized_ingredients",
+                                "nutritional_compliance": "not_established"}))
     variety = [
         value for candidate in selected for value in candidate["facts"]["variety_facets"]["values"]
     ]
@@ -527,12 +643,15 @@ def _selection(
     }
     diet = profile.get("diet") if isinstance(profile.get("diet"), Mapping) else {}
     cuisine = profile.get("cuisine") if isinstance(profile.get("cuisine"), Mapping) else {}
-    if any(diet.get(field) for field in ("patterns", "fish_grams_per_person", "plate", "nutrition")):
-        relaxations.add("nutrition_detail")
+    for field in ("patterns", "plate", "nutrition", "exceptions", "legumes"):
+        if diet.get(field):
+            relaxations.add("unsupported:diet." + field)
     if diet.get("leafy_green_days"):
-        relaxations.add("leafy_green_days")
-    if any(cuisine.get(field) for field in ("base_style", "wanted", "flavours", "quality")):
-        relaxations.add("cuisine_and_format_preferences")
+        relaxations.add("leafy_green_absence_unknown")
+    if any(cuisine.get(field) for field in ("base_style", "quality")):
+        relaxations.add("cuisine_free_text")
+    if any(cuisine.get(field) for field in ("wanted", "flavours")):
+        relaxations.add("cuisine_exact_tags_only")
     payload = {
         "candidate_scope": scope,
         "slots": slots,
@@ -658,32 +777,29 @@ def plan_week(
             blocked_by = item["usage"].get("blocked_by")
             if isinstance(blocked_by, list):
                 item["usage"]["blocked_by"] = sorted(blocked_by, key=canonical)
-        item["facts"] = _effective_facts(item["recipe"], item.get("facts"))
-        item["hard_constraints"] = _hard_evaluation(
-            item, profile, checked["cooldown_overrides"]
-        )
+        item = prepare_candidate(item, profile, checked["cooldown_overrides"], checked["portions"])
         prepared.append(item)
-    identity_owners: dict[tuple[str, str], str] = {}
     status_priority = {"pass": 0, "unknown": 1, "fail": 2}
-    for item in sorted(prepared, key=lambda candidate: (
-        status_priority[candidate["hard_constraints"]["status"]],
-        candidate["reference_key"],
-    )):
-        identities = (
-            ("recipe", str(item["dedupe_key"])),
-            ("content", str(item["content_digest"])),
-        )
-        owner = next((identity_owners[key] for key in identities if key in identity_owners), None)
-        if owner is not None:
+    for group in candidate_groups(prepared):
+        usage = merge_family_usage(group)
+        for item in group:
+            item["usage"] = deepcopy(usage)
+            item["hard_constraints"] = _hard_evaluation(item, profile, checked["cooldown_overrides"])
+        ordered = sorted(group, key=lambda candidate: (
+            status_priority[candidate["hard_constraints"]["status"]],
+            "recipe_ref" not in candidate["reference"],
+            not candidate.get("locally_modified", False),
+            candidate["reference_key"],
+        ))
+        for item in group:
+            item["dedupe_key"] = "family:" + ordered[0]["reference_key"]
+        for item in ordered[1:]:
             item["hard_constraints"]["status"] = "fail"
             item["hard_constraints"]["reasons"].append({
                 "code": "duplicate_recipe_identity",
                 "status": "fail",
-                "detail": {"same_as_reference_key": owner},
+                "detail": {"same_as_reference_key": ordered[0]["reference_key"]},
             })
-            continue
-        for key in identities:
-            identity_owners[key] = item["reference_key"]
     prepared.sort(key=lambda item: item["reference_key"])
     unknown_override_keys = set(checked["cooldown_overrides"]).difference(
         item["recipe_key"] for item in prepared

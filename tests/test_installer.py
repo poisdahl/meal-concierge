@@ -5,12 +5,14 @@ log in, send, order, register an agent, or touch an existing installation.
 """
 from __future__ import annotations
 import asyncio
+import hashlib
 from contextlib import contextmanager
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -19,11 +21,12 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 CORE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CORE))
 import install
-from runtime_ownership import ownership, listener_ownership, assert_no_legacy_service
+from runtime_ownership import ownership, listener_ownership, assert_no_legacy_service, file_lock
 from core import StateStore
 from recipes import RecipeStore
 
@@ -41,8 +44,8 @@ def command(*args, success=True, **kwargs):
     return result
 
 
-def installer(*args, success=True):
-    return command(sys.executable, CORE / 'install.py', *args, success=success)
+def installer(*args, success=True, cwd=None):
+    return command(sys.executable, CORE / 'install.py', *args, success=success, cwd=cwd)
 
 
 @contextmanager
@@ -124,11 +127,140 @@ def create_v1_bank(path: Path, recipe: dict) -> None:
 
 class InstallerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='mc03-', dir='/tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='mc03-', dir=os.environ.get('TMPDIR', '/tmp'))
         self.root = Path(self.temp.name)
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_recipe_artifact_requires_release_digest_and_exact_bounded_size(self):
+        source = self.root / 'offline.zip'
+        payload = b'synthetic artifact' * 70000
+        source.write_bytes(payload)
+        release = self.root / 'release'; release.mkdir()
+        expected = {'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
+        with patch.object(install, 'RECIPE_PACK', expected):
+            staged = install.stage_recipe_pack(release, source)
+            self.assertEqual(staged.read_bytes(), payload)
+            source.write_bytes(b'changed after staging')
+            self.assertEqual(staged.read_bytes(), payload)
+            for invalid in (payload[:-1], payload + b'x', b'x' + payload[1:]):
+                source.write_bytes(invalid)
+                with self.assertRaisesRegex(RuntimeError, 'release descriptor|pinned'):
+                    install.stage_recipe_pack(release, source)
+                self.assertEqual(list(release.iterdir()), [staged])
+
+    def test_recipe_artifact_rejects_links_special_files_and_unreleased_input(self):
+        source = self.root / 'source'; source.write_bytes(b'keep')
+        link = self.root / 'link'; link.symlink_to(source)
+        fifo = self.root / 'fifo'; os.mkfifo(fifo)
+        release = self.root / 'release'; release.mkdir()
+        expected = {'bytes': 4, 'sha256': hashlib.sha256(b'keep').hexdigest()}
+        with patch.object(install, 'RECIPE_PACK', expected):
+            for invalid in (link, fifo):
+                with self.assertRaises((OSError, RuntimeError)):
+                    install.stage_recipe_pack(release, invalid)
+            self.assertEqual(list(release.iterdir()), [])
+        with patch.object(install, 'RECIPE_PACK', None):
+            self.assertIsNone(install.stage_recipe_pack(release))
+            with self.assertRaisesRegex(RuntimeError, 'no released recipe pack'):
+                install.stage_recipe_pack(release, source)
+        self.assertEqual(source.read_bytes(), b'keep')
+
+    def test_backup_refuses_replaceable_code_and_symlink_aliases(self):
+        code = self.root / 'code'; code.mkdir()
+        alias = self.root / 'code-alias'; alias.symlink_to(code)
+        state = self.root / 'state'; state.mkdir()
+        meta = {'code_root': str(code), 'paths': {'state': str(state)}}
+        for destination in (code, code / 'release/snapshot', alias / 'snapshot'):
+            with self.assertRaisesRegex(RuntimeError, 'outside replaceable program files'):
+                install.backup(meta, destination)
+        self.assertEqual(list(code.iterdir()), [])
+
+    def test_real_isolated_pack_preflight_uses_installed_source(self):
+        from recipe_portable import FORMAT, canonical_bytes, write_archive
+        from recipes import normalize_recipe
+        recipe = normalize_recipe(RECIPE)
+        manifest = {'format': FORMAT, 'format_version': 1, 'kind': 'bundled',
+                    'pack_id': 'mc03-test', 'pack_version': '1', 'normalizer_version': 'test1',
+                    'recipe_schema_version': 1, 'records_count': 1}
+        records = self.root / 'records.jsonl'
+        records.write_bytes(canonical_bytes({'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe}) + b'\n')
+        archive = self.root / 'pack.zip'
+        write_archive(archive, manifest, {'records.jsonl': records})
+        expected = {key: value for key, value in manifest.items() if key not in {'kind', 'records_count'}}
+        expected.update(url=archive.as_uri(), bytes=archive.stat().st_size, sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+        release = self.root / 'release'; (release / 'venv/bin').mkdir(parents=True)
+        (release / 'venv/bin/python').symlink_to(sys.executable)
+        for path in CORE.glob('*.py'):
+            (release / path.name).symlink_to(path)
+        with patch.object(install, 'RECIPE_PACK', expected):
+            report = install.recipe_pack_command(release, 'preflight', archive)
+        self.assertEqual(report['records_count'], 1)
+        self.assertEqual(report['archive_sha256'], expected['sha256'])
+
+    def test_migration_child_keeps_ownership_after_installer_parent_is_killed(self):
+        state = self.root / 'state'
+        config = self.root / 'config.json'; config.write_text(json.dumps(CONFIG))
+        RecipeStore(state / 'recipes.sqlite3', CONFIG['household']).search()
+        release = self.root / 'release'; (release / 'venv/bin').mkdir(parents=True)
+        (release / 'venv/bin/python').symlink_to(sys.executable)
+        for path in CORE.glob('*.py'):
+            (release / path.name).symlink_to(path)
+        meta = {'paths': {'state': str(state), 'config': str(config),
+                         'browser_profile': str(self.root / 'profile'),
+                         'browser_home': str(self.root / 'browser'),
+                         'browser_socket_directory': str(self.root / 'browser/run'),
+                         'socket': str(self.root / 'run/service.sock')}}
+        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import migrate; migrate(Path(sys.argv[1]),json.loads(sys.argv[2]))"
+        with sqlite3.connect(state / 'recipes.sqlite3') as blocker, (self.root / 'migration.log').open('w') as log:
+            blocker.execute('BEGIN IMMEDIATE')  # Hold the real migration in database I/O.
+            parent = subprocess.Popen([sys.executable, '-I', '-c', code, str(release), json.dumps(meta)],
+                                      stdout=log, stderr=log, start_new_session=True)
+            child = None
+            child_identity = None
+            def identity(pid):
+                return command('ps', '-p', pid, '-o', 'lstart=,pgid=,command=', success=False).stdout.strip()
+            try:
+                deadline = time.monotonic() + 10
+                while not (state / 'state.json').exists():
+                    self.assertIsNone(parent.poll(), (self.root / 'migration.log').read_text())
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.01)
+                rows = command('ps', '-axo', 'pid=,ppid=').stdout.splitlines()
+                children = [int(row.split()[0]) for row in rows if int(row.split()[1]) == parent.pid]
+                self.assertEqual(len(children), 1)
+                child = children[0]
+                self.assertEqual(os.getpgid(child), parent.pid)
+                child_identity = identity(child)
+                self.assertTrue(child_identity)
+                os.kill(child, signal.SIGSTOP)
+                parent.kill(); parent.wait(timeout=5)
+                blocker.rollback()
+                with self.assertRaisesRegex(RuntimeError, 'owned'):
+                    with file_lock(state / '.service-owner.lock'):
+                        pass
+                blocked = command(*install.service_args(meta, release), success=False, timeout=5)
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertIn('owned', blocked.stderr)
+                os.kill(child, signal.SIGCONT)
+                deadline = time.monotonic() + 10
+                while True:
+                    try:
+                        with file_lock(state / '.service-owner.lock'):
+                            break
+                    except RuntimeError:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(.02)
+                with service(self.root):
+                    self.assertTrue(raw_rpc(self.root / 'run/service.sock', {'operation': 'health'})['ok'])
+            finally:
+                blocker.rollback()
+                if parent.poll() is None:
+                    os.killpg(parent.pid, signal.SIGKILL)
+                    parent.wait(timeout=5)
+                elif child is not None and identity(child) == child_identity:
+                    os.kill(child, signal.SIGKILL)
 
     def test_live_service_and_alias_locks_leave_listener_and_state_intact(self):
         with service(self.root) as (first, args):
@@ -239,7 +371,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(RecipeStore(restored / 'state/recipes.sqlite3', CONFIG['household']).get(record['id'], 1), bank.get(record['id'], 1))
         self.assertNotEqual(installer('restore', '--backup', self.root / 'backup', '--home', restored, success=False).returncode, 0)
 
-    def test_missing_or_linked_backup_and_pack_do_not_succeed(self):
+    def test_missing_or_linked_backup_does_not_succeed(self):
         backup = self.root / 'backup'; backup.mkdir()
         install.write_json(backup / 'backup.json', {'format': 1, 'complete': True})
         install.write_json(backup / 'config.json', CONFIG)
@@ -248,10 +380,6 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(target.exists())
         (backup / 'state').mkdir(); (backup / 'state/outside').symlink_to('/etc/passwd')
         self.assertNotEqual(installer('restore', '--backup', backup, '--home', target, success=False).returncode, 0)
-        pack_home = self.root / 'pack-home'
-        result = installer('install', '--home', pack_home, '--recipe-pack', '../untrusted.tar', success=False)
-        self.assertNotEqual(result.returncode, 0); self.assertIn('pending', result.stderr)
-        self.assertFalse(pack_home.exists())
 
     def test_real_json_and_sqlite_migration_and_failed_database(self):
         state = self.root / 'state'; config = self.root / 'config.json'
@@ -266,7 +394,11 @@ class InstallerTests(unittest.TestCase):
         # Use the actual runtime source with the actual migration child.
         for path in CORE.glob('*.py'):
             (release / path.name).symlink_to(path)
-        meta = {'paths': {'state': str(state), 'config': str(config)}}
+        meta = {'paths': {'state': str(state), 'config': str(config),
+                         'browser_profile': str(self.root / 'profile'),
+                         'browser_home': str(self.root / 'browser'),
+                         'browser_socket_directory': str(self.root / 'browser/run'),
+                         'socket': str(self.root / 'run/service.sock')}}
         create_v1_bank(state / 'recipes.sqlite3', RECIPE)
         install.migrate(release, meta)
         old = RecipeStore(state / 'recipes.sqlite3', CONFIG['household']).get('rec_v1', 1)
@@ -274,7 +406,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(old['library_recipe_ref']['version'], '1')
         self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 12)
         with sqlite3.connect(state / 'recipes.sqlite3') as db:
-            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '5')
+            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '6')
             self.assertEqual(db.execute('select response_json from idempotency where key=?', ('v1-key',)).fetchone()[0], '{"id":"rec_v1"}')
         (state / 'recipes.sqlite3').write_bytes(b'broken database')
         with self.assertRaises(subprocess.CalledProcessError):
@@ -398,8 +530,13 @@ def native(root, name, adapter, chrome):
 
 def native_mathem(root, name):
     home = Path(root) / 'mathem-home'
+    foreign = Path(root) / 'foreign-project'
+    foreign.mkdir(parents=True, exist_ok=True)
+    (foreign / 'pyproject.toml').write_text('[tool.uv]\nrequired-version = "==0.0.0"\nexclude-newer = "2000-01-01T00:00:00Z"\n')
+    inherited = command('uv', 'venv', '--python', install.PYTHON, foreign / 'unwanted-venv', cwd=foreign, success=False)
+    assert inherited.returncode and 'required' in inherited.stderr.lower(), inherited.stderr
     installer('install', '--home', home, '--code-root', Path(root) / 'mathem-code', '--name', name,
-              '--provider', 'mathem', '--household', 'MC03 Mathem synthetic')
+              '--provider', 'mathem', '--household', 'MC03 Mathem synthetic', cwd=foreign)
     meta = json.loads((home / 'runtime.json').read_text())
     try:
         assert 'browser_binary' not in meta['paths']
@@ -407,7 +544,27 @@ def native_mathem(root, name):
         attachment = json.loads(installer('attach', '--home', home).stdout)
         print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
         assert install.health(meta)['integration']['status'] == 'awaiting_login'
-        print('PASS native Mathem core and own bank without browser or Hermes; OAuth explicitly unavailable')
+        print(command(attachment['command'], '-I', __file__, '--bridge-restart', home).stdout.strip())
+        installer('stop', '--home', home)
+        state = Path(meta['paths']['state'])
+        bank = RecipeStore(state / 'recipes.sqlite3', 'MC03 Mathem synthetic')
+        saved = bank.save(RECIPE, idempotency_key='mathem-native-exact')
+        frozen = bank.get(saved['id'], 1)
+        data = json.loads((state / 'state.json').read_text())
+        data['pending_checkout'] = {'status': 'uncertain', 'idempotency_key': 'mathem-native-original'}
+        install.write_json(state / 'state.json', data)
+        before = (state / 'state.json').read_bytes()
+        installer('update', '--home', home, cwd=foreign)
+        updated = json.loads((home / 'runtime.json').read_text())
+        assert updated['release'] != meta['release']
+        assert (state / 'state.json').read_bytes() == before
+        assert RecipeStore(state / 'recipes.sqlite3', 'MC03 Mathem synthetic').get(saved['id'], 1) == frozen
+        meta = updated
+        installer('start', '--home', home)
+        print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
+        print('PASS native Mathem core and own bank without browser or Hermes; provider authentication not configured in this isolated test')
+        print('PASS standalone runtime ignores an incompatible invoking-project uv configuration')
+        print('PASS restart/reconnect and offline upgrade preserve the exact saved recipe and uncertain operation')
     finally:
         installer('stop', '--home', home)
         if meta['manager'] == 'systemd':

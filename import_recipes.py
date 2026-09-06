@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Iterator
 
 from recipes import MAX_IMPORT_RECORDS, MAX_RECIPE_BYTES, RecipeError, RecipeStore
+from recipe_assets import RecipeAssetError, read_local_file, sanitize_image
 
 
 MAX_IMPORT_BYTES = 64 * 1024 * 1024
@@ -51,12 +53,19 @@ def _json_records(path: Path) -> Iterator[Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import native Hermes Recipe JSON or JSONL")
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", type=Path, nargs="?")
+    parser.add_argument("--image", help="import one explicitly supplied relative image attachment")
+    parser.add_argument("--import-root", type=Path, help="trusted local root containing that image attachment")
     parser.add_argument("--state-directory", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", choices=("active", "draft"), default="active")
     parser.add_argument("--backup", type=Path, help="write a verified SQLite backup before a committed import")
     args = parser.parse_args()
+    if args.image is not None:
+        if args.path is not None or args.import_root is None or args.backup is not None:
+            parser.error("--image requires --import-root and cannot be combined with a recipe path or --backup")
+    elif args.path is None or args.import_root is not None:
+        parser.error("supply a recipe path, or --image with --import-root")
     state_path = args.state_directory / "state.json"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -67,13 +76,21 @@ def main() -> None:
         raise SystemExit("state directory has no household identity")
     store = RecipeStore(args.state_directory / "recipes.sqlite3", household)
     try:
+        if args.image is not None:
+            if args.dry_run:
+                rendition = sanitize_image(read_local_file(args.import_root, args.image))
+                asset_id = "sha256:" + hashlib.sha256(rendition).hexdigest()
+            else:
+                asset_id = store.assets.import_file(args.import_root, args.image)
+            print(json.dumps({"asset_id": asset_id, "dry_run": args.dry_run}, sort_keys=True))
+            return
         backup = None
         if args.backup:
             if args.dry_run:
                 raise RecipeError("--backup is not used with --dry-run")
             backup = str(store.backup(args.backup))
-        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status)
-    except (OSError, RecipeError) as exc:
+        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status, provider=state.get("provider"))
+    except (OSError, RecipeError, RecipeAssetError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps({**result, "backup": backup}, ensure_ascii=False, sort_keys=True))
 

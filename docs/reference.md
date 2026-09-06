@@ -643,8 +643,20 @@ The [versioned recipe contract](recipe-contract.md) defines exact quantities,
 original source wording, separate yield/person servings, field evidence and
 explicit estimate acceptance. New typed writers use recipe schema 2. Existing
 schema-1 documents, revisions and discovery digests retain their exact content.
-Schema-2 external-library writes and new managed-image mutations are staged
-unsupported; the built-in bank supports the culinary/evidence representation.
+Schema-2 external-library writes remain unsupported. The built-in bank supports
+explicit local [managed cover imports](recipe-assets.md), versioned image
+references and independent image attribution in frozen emails.
+
+SQLite schema 6 adds `entry_origin=user|bundled|unknown` and optional
+`pack: {pack_id, recipe_id, version, baseline_hash}` metadata without changing
+historical culinary documents. Ordinary explicit saves/imports are user entries;
+legacy entries are unknown. Only the verified local pack consumer creates
+bundled entries. `locally_modified` compares current content to the initial pack
+baseline. Stable pack IDs make repeats safe; incoming changes or local edits
+report conflicts while preserving identity, history, favorites and archive state.
+Builtin-only `entry_origin` search filtering applies before limits and combines
+independently with favorites/archive filters. Caller-supplied origin metadata
+never grants a different origin or redistribution rights.
 
 The recipe bank is household-bound SQLite at
 `$HERMES_HOME/meal-concierge/state/recipes.sqlite3`. It is opened only by recipe
@@ -728,10 +740,35 @@ read proves the requested state. Labels never emulate favorite, archive,
 identity, ownership, rights, attribution, visibility or provider authorization,
 and label changes never alter frozen discovery or menu snapshots.
 
-Source URLs must be credential-free HTTPS. Query strings and fragments are
-discarded before persistence. Original Oda, Mathem or MENY recipe text is stored only
-as a `link_only` record; a full stored version must be explicitly identified as
-`adapted` or `inspired_by`.
+New source URLs retain identifying query parameters under the versioned recipe
+contract. Schema-1 URLs and historical digests remain unchanged. Original store
+text may be retained in a full private schema-2 operating snapshot or explicitly
+saved/favorited in the built-in bank. The source-provider binding is derived
+from trusted readers and known source identity (including upstream attribution),
+not a generated label. Full storage does not grant redistribution permission.
+Keep private store text/assets out of public packs; database-plus-assets private
+backups preserve them. Owners remain responsible for applicable source terms.
+
+New saves/favorites, menus, replans, products and cart/purchase use require the
+matching selected provider. Existing recipes remain readable/manageable with
+provider eligibility shown separately. Restoring private data preserves binding
+without authorizing cross-provider use. Existing configured-provider mismatch
+protection remains: this feature does not add provider-switch machinery or alter
+original-provider order/email journals.
+
+Discovery action `detail` resolves an exact MENY discovery_ref through the
+existing authenticated browser adapter, validates its exact source identity and
+returns a new immutable normalized snapshot. Ordinary scaling/product matching
+uses its stated base quantities; native portion/product/cart shortcuts remain
+unsupported. Oda/Mathem recipe detail contracts are not available yet. Private
+snapshots do not create bank entries or favorites. A direct menu may reference
+one with `{"discovery_ref": "...", "portions": 4}`.
+
+Recipe favorite accepts either an exact existing library_recipe_ref or an
+unsaved discovery_ref with is_favorite=true and one idempotency_key. The latter
+saves and favorites the exact version in one local transaction. A different
+intent cannot reuse that key to leave a partially saved entry. Same-source
+changed content retains the existing explicit conflict workflow.
 
 Recipe `discover` fetches enabled sources concurrently with bounded result,
 response-size and time limits. A slow, empty or failed source is reported per
@@ -1098,19 +1135,6 @@ reconciliation; a later request does not retry it automatically. Product facts
 that become unavailable after an already verified cart write are reported as
 unavailable, without claiming a verified price change.
 
-The finite bounds were exercised with a synthetic seven-dinner Application
-fixture: 52 source rows produced 37 resolved shopping needs and three pantry/
-optional questions. Explicit decisions yielded a complete 37-need plan and one
-cart mutation, with independent package arithmetic and exact fractional pantry
-subtraction. Three full-week alternatives reused 37 compatible searches; a
-separate boundary fixture exercised three disjoint 64-need alternatives with
-192 approvals and searches. A 65-need menu failed before dispatch. The measured 37-need preparation made 37 synthetic searches and returned 50
-packages costing 5,000 øre in 0.15 seconds. A stress fixture of 64 needs with five
-candidates and an analytic bound of 7,776 combinations per need took 9.17 seconds;
-a fixture exceeding the unchanged 10,000-combination limit returned all 64 needs
-unresolved in 11.28 seconds. These are synthetic local measurements under
-concurrent validation load, not live-store speed estimates.
-
 A complete comparison ranks total payable product amounts including mandatory
 deposits, then exact dimensionless excess, package count, original rank and
 selection digest. The result includes the original scores/reasons, every product
@@ -1125,6 +1149,19 @@ provenance only, never apply authority. It never changes saved recipes implicitl
 Delivery, cart-level bags and fees are excluded. The later provider-authoritative
 checkout summary remains the final price authority. Comparison performs only
 bounded product observations; it never authorizes cart, order or payment changes.
+
+The finite bounds were exercised with a synthetic seven-dinner Application
+fixture: 52 source rows produced 37 resolved shopping needs and three pantry/
+optional questions. Explicit decisions yielded a complete 37-need plan and one
+cart mutation, with independent package arithmetic and exact fractional pantry
+subtraction. Three full-week alternatives reused 37 compatible searches; a
+separate boundary fixture exercised three disjoint 64-need alternatives with
+192 approvals and searches. A 65-need menu failed before dispatch. The measured 37-need preparation made 37 synthetic searches and returned 50
+packages costing 5,000 øre in 0.15 seconds. A stress fixture of 64 needs with five
+candidates and an analytic bound of 7,776 combinations per need took 9.17 seconds;
+a fixture exceeding the unchanged 10,000-combination limit returned all 64 needs
+unresolved in 11.28 seconds. These are synthetic local measurements under
+concurrent validation load, not live-store speed estimates.
 
 
 ## Exact meal slots and remaining-week replanning

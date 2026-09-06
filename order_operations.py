@@ -1453,6 +1453,7 @@ class OrderOperations:
                         started_at = None
                     if started_at is not None and started_at.tzinfo is not None and self._now() < started_at + SCHEDULE_OCCURRENCE_LEASE:
                         raise HouseholdError("this scheduled occurrence is already running")
+                self._require_menu_provider(state.get("menu"))
                 pending = state.get("pending_checkout")
                 if pending and pending.get("status") == "awaiting_confirmation" and pending.get("occurrence"):
                     self._abandon_predispatch(state, reason="scheduled run retried")
@@ -1562,6 +1563,7 @@ class OrderOperations:
                 state = self.store.read()
                 if state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change"):
                     raise HouseholdError("finish the pending provider operation before manual checkout")
+                self._require_menu_provider(state.get("menu"))
                 summary = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                 return {
                     "provider": "mathem", "currency": "SEK", "confirmed": False,
@@ -1574,6 +1576,8 @@ class OrderOperations:
         with self.store.locked() as state:
             if state.get("pending_cart_change"):
                 raise HouseholdError("reconcile_change before checkout")
+            if not state.get("order_change"):
+                self._require_menu_provider(state.get("menu"))
             if cart_ready_continuation:
                 record = state.get("occurrences", {}).get(occurrence)
                 if not isinstance(record, Mapping) or record.get("status") != "cart_ready":
@@ -1829,6 +1833,8 @@ class OrderOperations:
             return recovered
         if not pending or pending["status"] != "awaiting_confirmation":
             raise HouseholdError("no fresh checkout confirmation is pending")
+        if not pending.get("order_change"):
+            self._require_menu_provider(pending.get("menu"))
         if confirmation_id != pending.get("confirmation_id"):
             raise HouseholdError("checkout confirmation does not match the prepared summary")
         if self._now() >= datetime.fromisoformat(pending["expires_at"]):
@@ -1915,6 +1921,8 @@ class OrderOperations:
                         expected = {**pending, "status": "clicking"}
                         if not current_pending or canonical(current_pending) != canonical(expected):
                             raise CheckoutPreconditionError("checkout confirmation changed before the final click")
+                    if not pending_change:
+                        self._require_menu_provider(pending.get("menu"))
                     if self._now() >= datetime.fromisoformat(pending["expires_at"]):
                         raise CheckoutPreconditionError("checkout confirmation expired before the final click")
 

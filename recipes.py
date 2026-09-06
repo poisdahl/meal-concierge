@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 import hashlib
@@ -161,6 +161,10 @@ def validate_week(value: Any) -> str:
 
 
 def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
+    return _normalize_recipe_url(value, version=version)
+
+
+def _normalize_recipe_url(value: Any, *, version: int = 2, attribution: bool = False) -> str | None:
     if value is None or value == "":
         return None
     text = _bounded_text(value, "source.url", maximum=2_048)
@@ -172,8 +176,10 @@ def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
         parsed = urlsplit(text or "")
     except ValueError as exc:
         raise RecipeError("source.url is invalid") from exc
-    if parsed.scheme.casefold() != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise RecipeError("source.url must be a credential-free HTTPS URL")
+    scheme = parsed.scheme.casefold()
+    if scheme not in ({"http", "https"} if attribution else {"https"}) or not parsed.hostname or parsed.username or parsed.password:
+        protocols = "HTTP or HTTPS" if attribution else "HTTPS"
+        raise RecipeError(f"source.url must be a credential-free {protocols} URL")
     raw_host = parsed.hostname.casefold().rstrip(".")
     if "%" in raw_host:
         raise RecipeError("source.url hostname must not contain percent escapes")
@@ -193,10 +199,14 @@ def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
         port = parsed.port
     except ValueError as exc:
         raise RecipeError("source.url is invalid") from exc
-    if port not in {None, 443}:
+    if version == 1 and port not in {None, 443}:
         raise RecipeError("source.url must use the standard HTTPS port")
+    if port == 0:
+        raise RecipeError("source.url port is invalid")
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     rendered_host = f"[{host}]" if ":" in host else host
+    if port is not None and port != (80 if scheme == "http" else 443):
+        rendered_host += f":{port}"
     query = ""
     if version >= 2:
         # Keep original query encoding/order and all unknown identity parameters.
@@ -205,16 +215,13 @@ def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
             unquote_plus(part.split("=", 1)[0]).casefold().startswith("utm_")
             or unquote_plus(part.split("=", 1)[0]).casefold() in {"fbclid", "gclid", "msclkid"}
         ))
-    return urlunsplit(("https", rendered_host, path, query, ""))
+    return urlunsplit((scheme, rendered_host, path, query, ""))
 
 
 def normalize_attribution_url(value: Any) -> str | None:
     # Attribution is a link, never a fetch instruction. Keep an upstream HTTP
     # source honest rather than changing its scheme or losing its credit.
-    if isinstance(value, str) and value.startswith("http://"):
-        checked = normalize_source_url("https://" + value[7:])
-        return "http://" + checked[8:] if checked else None
-    return normalize_source_url(value)
+    return _normalize_recipe_url(value, attribution=True)
 
 
 def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str, Any]:
@@ -499,6 +506,77 @@ def _image(value: Any) -> dict[str, Any] | None:
             for key in sorted(fields)}
 
 
+def recipe_source_provider(recipe: Mapping[str, Any]) -> str | None:
+    """Effective source restriction, including untouched legacy documents.
+
+    This is neither publication permission nor an external operation binding.
+    """
+    bindings = set()
+    explicit = recipe.get("source_provider")
+    if explicit is not None:
+        if not isinstance(explicit, str) or explicit not in {"oda", "meny", "mathem"}:
+            raise RecipeError("source_provider must be oda, meny, mathem or null")
+        bindings.add(explicit)
+    source = recipe.get("source")
+    if isinstance(source, Mapping):
+        for context in (source, source.get("original")):
+            if not isinstance(context, Mapping):
+                continue
+            try:
+                host = str(urlsplit(str(context.get("url") or "")).hostname or "").casefold().rstrip(".")
+            except ValueError as exc:
+                raise RecipeError("source URL hostname is invalid") from exc
+            try:
+                host = host.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise RecipeError("source URL hostname is invalid") from exc
+            for provider, domain in (("oda", "oda.com"), ("meny", "meny.no"), ("mathem", "mathem.se")):
+                if host == domain or host.endswith("." + domain):
+                    bindings.add(provider)
+                for field in ("kind", "publisher"):
+                    label = _normalized_text(context.get(field))
+                    if re.match(r"^" + provider + r"(?:\b|[._-])", label) or label.removeprefix("www.").rstrip(".") == domain:
+                        bindings.add(provider)
+    if len(bindings) > 1:
+        raise RecipeError("conflicting recipe source_provider identities")
+    return next(iter(bindings), None)
+
+
+def recipe_provider_problem(recipe: Mapping[str, Any], provider: str) -> str | None:
+    try:
+        required = recipe_source_provider(recipe)
+    except RecipeError as exc:
+        return str(exc)
+    if required is not None and required != provider:
+        return f"recipe requires {required.upper()} as the selected grocery provider; currently {provider.upper()}"
+    return None
+
+
+def bind_recipe_source(value: Any, *, prior: Mapping[str, Any] | None = None, provider: str | None = None) -> dict[str, Any]:
+    """Derive a new document's binding from source identity and trusted context."""
+    if not isinstance(value, Mapping):
+        raise RecipeError("recipe must be an object")
+    result = deepcopy(dict(value))
+    known = recipe_source_provider(result)
+    previous = recipe_source_provider(prior) if prior is not None else None
+    if previous is not None:
+        if "source_provider" in result and result["source_provider"] != previous:
+            raise RecipeError("an update must preserve the known source_provider binding")
+        if known is not None and known != previous:
+            raise RecipeError("an update must preserve the known source_provider binding")
+        # Keep attribution even when all caller-provided clues were relabeled.
+        if result.get("source") != prior.get("source"):
+            raise RecipeError("a copied or edited store recipe must preserve its source attribution")
+        known = previous
+    if provider is not None:
+        if provider not in {"oda", "meny", "mathem"} or known not in {None, provider}:
+            raise RecipeError("recipe source does not match the trusted provider")
+        known = provider
+    if known is not None:
+        result.update(schema_version=2, source_provider=known)
+    return result
+
+
 def normalize_recipe(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RecipeError("recipe must be an object")
@@ -557,7 +635,7 @@ def normalize_recipe(value: Any) -> dict[str, Any]:
             or re.match(r"^(meny|oda|mathem)(?:\b|[._-])", kind) is not None
             or kind_domain in {"meny.no", "oda.com", "mathem.se"}
         )
-        if restricted_source and source["relationship"] not in {"adapted", "inspired_by"}:
+        if version == 1 and restricted_source and source["relationship"] not in {"adapted", "inspired_by"}:
             raise RecipeError("original Oda, Mathem or MENY content is link_only; store only an adapted or inspired recipe as full")
         portions = None if cleaned.get("portions") is None else _finite_positive(cleaned.get("portions"), "portions")
         ingredients = cleaned.get("ingredients")
@@ -712,13 +790,12 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
     prior = normalize_recipe(prior) if prior is not None else None
     if prior is not None and prior["schema_version"] == 2 and isinstance(value, Mapping) and value.get("schema_version") == 1:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
+    value = bind_recipe_source(value, prior=prior)
     if isinstance(value, Mapping) and isinstance(value.get("source"), Mapping) and str(value["source"].get("relationship") or "").casefold() == "generated" and value.get("schema_version", 1) == 1:
         value = {**value, "schema_version": 2}
     recipe = normalize_recipe(value)
     if prior is not None and prior.get("schema_version") == 2 and recipe["schema_version"] != 2:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
-    if recipe.get("image") != (prior.get("image") if prior else None):
-        raise RecipeError("managed image writes are unsupported until the asset importer is installed")
     if prior is not None and prior.get("source_provider") is not None:
         if recipe.get("source_provider") != prior["source_provider"]:
             raise RecipeError("an update must preserve the known source_provider binding")
@@ -737,6 +814,19 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
         if evidence.get("basis") == "source" and not (inherited and recipe["source"] == prior["source"]):
             raise RecipeError(f"{path}: source evidence requires a trusted source import or unchanged exact version")
     return recipe
+
+
+def validate_recipe_image(recipe: Mapping[str, Any], assets: Any, *, prior: Mapping[str, Any] | None = None) -> None:
+    """Validate a newly attached cover; existing text remains usable without it."""
+    image = recipe.get("image") or {}
+    old_image = (prior or {}).get("image") or {}
+    asset_id = image.get("asset_id")
+    if asset_id is not None and asset_id != old_image.get("asset_id"):
+        from recipe_assets import RecipeAssetError
+        try:
+            assets.read(asset_id)
+        except RecipeAssetError as exc:
+            raise RecipeError("new recipe image must reference an available managed asset") from exc
 
 
 ESTIMATE_CONFIRMATION = "I accept these exact recipe estimates and their stated assumptions."
@@ -844,6 +934,11 @@ class RecipeStore:
     def __init__(self, path: Path | str, household: str):
         self.path = Path(path)
         self.household = str(household)
+
+    @property
+    def assets(self):
+        from recipe_assets import RecipeAssets
+        return RecipeAssets(self.path.parent / "recipe-assets")
 
     @staticmethod
     def _metadata(connection: sqlite3.Connection) -> dict[str, str] | None:
@@ -1035,7 +1130,7 @@ class RecipeStore:
                 "INSERT INTO metadata(key, value) VALUES('schema_version', '1')"
             )
             version = "1"
-        if version not in {"1", "2", "3", "4", "5"}:
+        if version not in {"1", "2", "3", "4", "5", "6"}:
             raise RecipeError("recipe bank schema is newer than this meal concierge")
         row = connection.execute("SELECT value FROM metadata WHERE key='household'").fetchone()
         if row is None:
@@ -1058,6 +1153,15 @@ class RecipeStore:
             version = "4"
         if version == "4":
             self._migrate_v4_to_v5(connection)
+            version = "5"
+        if version == "5":
+            connection.execute("""CREATE TABLE recipe_entry_metadata (
+                recipe_id TEXT PRIMARY KEY REFERENCES recipes(id) ON DELETE CASCADE,
+                entry_origin TEXT NOT NULL,
+                pack_id TEXT, pack_recipe_id TEXT, pack_version TEXT, baseline_hash TEXT,
+                UNIQUE(pack_id, pack_recipe_id))""")
+            connection.execute("INSERT INTO recipe_entry_metadata(recipe_id, entry_origin) SELECT id, 'unknown' FROM recipes")
+            connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'")
         namespace = connection.execute(
             "SELECT value FROM metadata WHERE key='discovery_namespace'"
         ).fetchone()
@@ -1430,7 +1534,7 @@ class RecipeStore:
             if metadata is not None:
                 if metadata.get("household") not in {None, self.household}:
                     raise RecipeError("recipe bank belongs to a different household")
-                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5"}:
+                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5", "6"}:
                     raise RecipeError("recipe bank schema is newer than this meal concierge")
             recipes_exist = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recipes'"
@@ -1539,6 +1643,21 @@ class RecipeStore:
         }
 
     @classmethod
+    def _entry_metadata(cls, connection: sqlite3.Connection, recipe_id: str) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT m.*, r.content_hash FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id WHERE m.recipe_id=?",
+            (recipe_id,),
+        ).fetchone()
+        if row is None:
+            return {"entry_origin": "unknown", "pack": None, "locally_modified": False}
+        pack = None
+        if row["entry_origin"] == "bundled":
+            pack = {"pack_id": row["pack_id"], "recipe_id": row["pack_recipe_id"],
+                    "version": row["pack_version"], "baseline_hash": row["baseline_hash"]}
+        return {"entry_origin": row["entry_origin"], "pack": pack,
+                "locally_modified": pack is not None and row["content_hash"] != row["baseline_hash"]}
+
+    @classmethod
     def _record(
         cls,
         connection: sqlite3.Connection,
@@ -1559,6 +1678,7 @@ class RecipeStore:
         })
         favorite = cls._favorite_state(connection, row["id"])
         result.update({key: favorite[key] for key in ("library_id", "is_favorite", "favorite_revision")})
+        result.update(cls._entry_metadata(connection, row["id"]))
         if created is not None:
             result["created"] = created
         return result
@@ -1588,6 +1708,8 @@ class RecipeStore:
             raise RecipeError("idempotency key belongs to a permanently deleted recipe")
         result["idempotent"] = True
         result["created"] = False
+        if isinstance(result_recipe_id, str):
+            result.update(self._entry_metadata(connection, result_recipe_id))
         return result
 
     @staticmethod
@@ -2093,6 +2215,15 @@ class RecipeStore:
             "AND kind!='migration' AND (idempotency_key IS NULL OR idempotency_key NOT LIKE 'mig:%') AND (error_code IS NULL OR error_code!='recipe_deleted') AND updated_at <= ?",
             (cutoff,),
         )
+
+    def discovery_save_replay(self, discovery_ref: Any, library_id: str) -> bool:
+        """Whether this exact destination already has a terminal/dispatched save."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT status, dispatched_at FROM library_operations WHERE library_id=? AND discovery_ref=? AND kind='create'",
+                (library_id, discovery_ref),
+            ).fetchone()
+            return row is not None and (row["status"] in {"confirmed", "failed", "uncertain"} or row["dispatched_at"] is not None)
 
     def begin_library_create(
         self,
@@ -3728,6 +3859,7 @@ class RecipeStore:
         *,
         destination: Any = None,
         binding_status: Any = None,
+        _transaction=None,
     ) -> dict[str, Any]:
         if (destination is None) != (binding_status is None):
             raise RecipeError("destination and binding_status must be supplied together")
@@ -3740,10 +3872,11 @@ class RecipeStore:
         ):
             raise RecipeError("discovery binding status must be pending or uncertain")
         try:
-            with self._connection() as connection:
-                connection.execute(
-                    "BEGIN IMMEDIATE" if resolved_destination is not None else "BEGIN"
-                )
+            with (nullcontext(_transaction) if _transaction is not None else self._connection()) as connection:
+                if _transaction is None:
+                    connection.execute(
+                        "BEGIN IMMEDIATE" if resolved_destination is not None else "BEGIN"
+                    )
                 ref = self._discovery_ref(connection, value)
                 resolved = self._resolved_snapshot(connection, ref)
                 if resolved_destination is not None:
@@ -3810,16 +3943,18 @@ class RecipeStore:
         })
         favorite = self._favorite_state(connection, current["id"])
         result.update({key: favorite[key] for key in ("library_id", "is_favorite", "favorite_revision")})
+        result.update(self._entry_metadata(connection, current["id"]))
         return result
 
-    def save_discovery(self, value: Any, *, status: str = "active", idempotency_key: Any = None) -> dict[str, Any]:
+    def save_discovery(self, value: Any, *, status: str = "active", idempotency_key: Any = None, _transaction=None) -> dict[str, Any]:
         if not isinstance(status, str) or status not in {"active", "draft"}:
             raise RecipeError("recipe status must be active or draft")
         ref = _bounded_text(value, "discovery_ref", required=True, maximum=200)
         key = self._idempotency_key(idempotency_key)
         try:
-            with self._connection() as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with (nullcontext(_transaction) if _transaction is not None else self._connection()) as connection:
+                if _transaction is None:
+                    connection.execute("BEGIN IMMEDIATE")
                 ref = self._discovery_ref(connection, ref)
                 request_hash = _hash({"discovery_ref": ref, "status": status})
                 if existing := self._idem(connection, key, "save_discovery", request_hash):
@@ -3894,6 +4029,7 @@ class RecipeStore:
                 result["duplicate"] = "source_key"
                 self._store_idem(connection, key, "save", request_hash, result)
                 return result
+        validate_recipe_image(recipe, self.assets)
         fingerprint = content_fingerprint(recipe)
         warning = connection.execute("SELECT id FROM recipes WHERE content_fingerprint=? LIMIT 1", (fingerprint,)).fetchone()
         created_at = _now()
@@ -3903,12 +4039,45 @@ class RecipeStore:
             (recipe_id, 1, status, recipe["name"], self._search_text(recipe), source_identity, fingerprint, content_hash, _canonical(recipe), created_at, created_at, created_via),
         )
         connection.execute("INSERT INTO revisions VALUES(?,?,?,?,?)", (recipe_id, 1, status, _canonical(recipe), created_at))
+        connection.execute("INSERT INTO recipe_entry_metadata(recipe_id, entry_origin) VALUES(?, 'user')", (recipe_id,))
         row = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
         result = self._record(connection, row, created=True)
         if warning:
             result["duplicate_warning"] = {"kind": "content_fingerprint", "recipe_id": warning["id"]}
         self._store_idem(connection, key, "save", request_hash, result)
         return result
+
+    def prepare_input(self, value: Any, *, prior: Mapping[str, Any] | None = None, _transaction=None) -> dict[str, Any]:
+        """Resolve caller-carried local references before dropping server fields."""
+        if not isinstance(value, Mapping):
+            raise RecipeError("recipe must be an object")
+        originals = []
+        if prior is not None:
+            originals.append(normalize_recipe(prior))
+        reference = value.get("recipe_ref")
+        if isinstance(reference, Mapping):
+            if set(reference) != {"id", "revision"}:
+                raise RecipeError("copied recipe_ref must contain an exact id and revision")
+            originals.append(normalize_recipe(self.get(reference["id"], reference["revision"], _transaction=_transaction)))
+        if value.get("id") is not None:
+            if value.get("revision") is None:
+                raise RecipeError("copied recipe id requires its exact revision")
+            originals.append(normalize_recipe(self.get(value["id"], value["revision"], _transaction=_transaction)))
+        if value.get("library_recipe_ref") is not None:
+            ref = validate_library_recipe_ref(value["library_recipe_ref"])
+            if ref["library_id"] != "builtin":
+                raise RecipeError("external recipe copies require an exact service-resolved discovery")
+            originals.append(normalize_recipe(self.get(ref["recipe_id"], ref["version"], _transaction=_transaction)))
+        if value.get("discovery_ref") is not None:
+            originals.append(self.resolve_discovery(value["discovery_ref"], _transaction=_transaction)["recipe"])
+        if originals and any(_canonical(item) != _canonical(originals[0]) for item in originals[1:]):
+            raise RecipeError("copied recipe references disagree")
+        prepared = prepare_recipe_input(value, prior=originals[0] if originals else None)
+        if prior is None:
+            for evidence in recipe_evidence_fields(prepared).values():
+                if evidence.get("acceptance") is not None or evidence.get("calculation") is not None:
+                    raise RecipeError("estimate acceptance and calculation are service-owned; save the exact discovery instead")
+        return prepared
 
     def save(self, value: Any, *, status: str = "active", idempotency_key: Any = None) -> dict[str, Any]:
         if not isinstance(status, str) or status not in {"active", "draft"}:
@@ -3922,13 +4091,58 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def get(self, recipe_id: Any, revision: Any = None) -> dict[str, Any]:
+    def import_pack_record(self, recipe: Any, *, pack_id: str, recipe_id: str, version: str, status: str = "ready") -> dict[str, Any]:
+        """Import one record from a caller-verified pack, never from ordinary RPC.
+
+        The caller establishes archive provenance and installs exact managed
+        assets. Each record commits independently so interrupted packs resume.
+        Existing entries, their history, favorites and archive state stay intact.
+        """
+        pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
+        pack_recipe_id = _bounded_text(recipe_id, "pack recipe_id", required=True, maximum=256)
+        version = _bounded_text(version, "pack version", required=True, maximum=128)
+        if status not in ("ready", "draft"):
+            raise RecipeError("pack record status must be ready or draft")
+        recipe = normalize_recipe(recipe)
+        if recipe_source_provider(recipe) is not None:
+            raise RecipeError("store-bound recipes cannot be imported from a bundled pack")
+        content_hash = _hash(recipe)
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                existing = connection.execute(
+                    "SELECT r.*, m.baseline_hash FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id WHERE m.pack_id=? AND m.pack_recipe_id=?",
+                    (pack_id, pack_recipe_id),
+                ).fetchone()
+                if existing is not None:
+                    result = self._record(connection, existing, created=False)
+                    if existing["content_hash"] != existing["baseline_hash"]:
+                        return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
+                    if content_hash != existing["baseline_hash"]:
+                        return {"outcome": "conflict", "reason": "pack_content_changed", "recipe": result}
+                    return {"outcome": "unchanged", "recipe": result}
+                identity = source_key(recipe)
+                duplicate = connection.execute("SELECT * FROM recipes WHERE source_key=?", (identity,)).fetchone() if identity else None
+                if duplicate is not None:
+                    return {"outcome": "conflict", "reason": "source_identity_exists", "recipe": self._record(connection, duplicate, created=False)}
+                result = self._save(connection, recipe, "active" if status == "ready" else "draft", None, "pack")
+                connection.execute(
+                    "UPDATE recipe_entry_metadata SET entry_origin='bundled', pack_id=?, pack_recipe_id=?, pack_version=?, baseline_hash=? WHERE recipe_id=?",
+                    (pack_id, pack_recipe_id, version, content_hash, result["id"]),
+                )
+                result.update(self._entry_metadata(connection, result["id"]))
+                return {"outcome": "created", "recipe": result}
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank is unavailable") from exc
+
+    def get(self, recipe_id: Any, revision: Any = None, *, _transaction=None) -> dict[str, Any]:
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
         if isinstance(revision, str) and re.fullmatch(r"[1-9][0-9]*", revision):
             revision = int(revision)
         try:
-            with self._connection() as connection:
-                connection.execute("BEGIN")
+            with (nullcontext(_transaction) if _transaction is not None else self._connection()) as connection:
+                if _transaction is None:
+                    connection.execute("BEGIN")
                 if revision is None:
                     row = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
                     if row is None:
@@ -3945,6 +4159,7 @@ class RecipeStore:
                 result.update({"id": recipe_id, "revision": revision, "status": current["status"], "revision_status": version["status"], "created_at": current["created_at"], "updated_at": version["created_at"], "created_via": current["created_via"], "content_fingerprint": content_fingerprint(result), "recipe_key": f"bank:{recipe_id}", "library_recipe_ref": {"library_id": "builtin", "recipe_id": recipe_id, "version": str(revision)}})
                 favorite = self._favorite_state(connection, recipe_id)
                 result.update({key: favorite[key] for key in ("library_id", "is_favorite", "favorite_revision")})
+                result.update(self._entry_metadata(connection, recipe_id))
                 return result
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
@@ -3956,6 +4171,7 @@ class RecipeStore:
         limit: Any = 10,
         include_archived: bool = False,
         favorites_only: bool = False,
+        entry_origin: str | None = None,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         text = _bounded_text(query, "query", maximum=200) or ""
@@ -3965,6 +4181,8 @@ class RecipeStore:
             raise RecipeError("recipe search filters must be true or false")
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise RecipeError("search offset must be a non-negative integer")
+        if entry_origin is not None and entry_origin not in ("user", "bundled", "unknown"):
+            raise RecipeError("entry_origin must be user, bundled or unknown")
         literal = _normalized_text(text).replace("!", "!!").replace("%", "!%").replace("_", "!_")
         needle = f"%{literal}%"
         status = "" if include_archived else "AND status != 'archived'"
@@ -3974,16 +4192,37 @@ class RecipeStore:
             "AND favorite.is_favorite=1)"
             if favorites_only else ""
         )
+        origin_filter = "AND EXISTS (SELECT 1 FROM recipe_entry_metadata m WHERE m.recipe_id=recipes.id AND m.entry_origin=?)" if entry_origin is not None else ""
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN")
                 rows = connection.execute(
-                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-                    (needle, needle, limit, offset),
+                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (needle, needle, *([entry_origin] if entry_origin is not None else []), limit, offset),
                 ).fetchall()
                 return [self._record(connection, row) for row in rows]
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
+
+    def favorite_discovery(self, discovery_ref: Any, *, idempotency_key: Any, provider: str) -> dict[str, Any]:
+        """One local transaction saves the exact snapshot and its favorite intent."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            saved = self.save_discovery(discovery_ref, _transaction=connection)
+            if saved.get("conflict"):
+                return {"saved": False, "recipe": saved, "conflict": saved["conflict"]}
+            key = self._idempotency_key(idempotency_key)
+            if key is None:
+                raise RecipeError("idempotency_key is required")
+            request_hash = _hash({
+                "library_id": "builtin", "recipe_id": saved["id"],
+                "is_favorite": True, "expected_favorite_revision": None,
+            })
+            if self._idem(connection, key, "set_favorite", request_hash) is None:
+                if problem := recipe_provider_problem(saved, provider):
+                    raise RecipeError(problem)
+            favorite = self.set_favorite(saved["library_recipe_ref"], True, idempotency_key=key, _transaction=connection)
+            return {**favorite, "recipe": {**saved, "is_favorite": True, "favorite_revision": favorite["favorite_revision"]}}
 
     def set_favorite(
         self,
@@ -3993,6 +4232,7 @@ class RecipeStore:
         expected_favorite_revision: Any = None,
         idempotency_key: Any,
         dispatch_before: str | None = None,
+        _transaction=None,
     ) -> dict[str, Any]:
         reference = validate_library_recipe_ref(library_recipe_ref)
         if reference["library_id"] != "builtin":
@@ -4016,8 +4256,9 @@ class RecipeStore:
             "expected_favorite_revision": expected_favorite_revision,
         })
         try:
-            with self._connection() as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with (nullcontext(_transaction) if _transaction is not None else self._connection()) as connection:
+                if _transaction is None:
+                    connection.execute("BEGIN IMMEDIATE")
                 recipe = connection.execute(
                     "SELECT id, revision FROM recipes WHERE id=?", (recipe_id,)
                 ).fetchone()
@@ -4137,6 +4378,10 @@ class RecipeStore:
                     raise RecipeError("recipe was not found")
                 if current["revision"] != expected_revision:
                     raise RecipeError(f"recipe revision conflict; current revision is {current['revision']}")
+                previous = _stored_recipe_document(current["document"])
+                if recipe_source_provider(previous) is not None:
+                    bind_recipe_source(recipe, prior=previous)
+                validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(current["document"]))
                 identity = source_key(recipe)
                 collision = connection.execute("SELECT id FROM recipes WHERE source_key=? AND id != ?", (identity, recipe_id)).fetchone() if identity else None
                 if collision:
@@ -4188,7 +4433,7 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def import_records(self, records: Iterable[Any], *, dry_run: bool = False, default_status: str = "active") -> dict[str, Any]:
+    def import_records(self, records: Iterable[Any], *, dry_run: bool = False, default_status: str = "active", provider: str | None = None) -> dict[str, Any]:
         if default_status not in {"active", "draft"}:
             raise RecipeError("default import status is invalid")
         created = skipped = warnings = 0
@@ -4222,7 +4467,10 @@ class RecipeStore:
                         key = None
                     if status not in {"active", "draft"}:
                         raise RecipeError(f"record {index} has an invalid status")
-                    recipe = prepare_recipe_input(recipe_value)
+                    recipe = self.prepare_input(recipe_value, _transaction=connection)
+                    required = recipe_source_provider(recipe)
+                    if required is not None and provider != required:
+                        raise RecipeError(f"recipe requires {required.upper()} as the selected grocery provider for import")
                     key = key or f"import:{_hash(recipe)}"
                     result = self._save(connection, recipe, status, key, "import")
                     if result.get("created"):

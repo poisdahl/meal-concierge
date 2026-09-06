@@ -277,6 +277,14 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         except RecipeError:
             permanent_url = None
         details = []
+        from recipes import recipe_source_provider
+        try:
+            provider = recipe_source_provider(value)
+        except RecipeError:
+            provider = None
+            details.append("Kildens butikktilknytning er uklar; historisk oppskrift beholdes.")
+        if provider:
+            details.append(f"Privat oppskrift fra {provider.upper()}; nye menyer og innkjøp krever denne butikken.")
         if metadata.get("author"):
             details.append(escape(metadata["author"]))
         original = metadata.get("original")

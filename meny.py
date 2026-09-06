@@ -806,7 +806,7 @@ class MenyClient:
 
     def call(self, tool: str, arguments: Mapping[str, Any], *, deadline: float | None = None, allow_recovery: bool = False) -> dict[str, Any]:
         supported = {
-            "product_search", "recipe_search", "likely_to_buy", "get_cart", "manipulate_cart",
+            "product_search", "recipe_search", "recipe_detail", "likely_to_buy", "get_cart", "manipulate_cart",
             "get_delivery_slots", "select_delivery_slot", "get_orders", "get_order", "order_tracking",
         }
         if tool not in supported:
@@ -828,6 +828,10 @@ class MenyClient:
             if tool == "recipe_search":
                 limit = self._limit(arguments.get("size", 5))
                 return self._search(str(arguments.get("query") or ""), limit, "recipes")
+            if tool == "recipe_detail":
+                if set(arguments) != {"recipe_id"}:
+                    raise HouseholdError("MENY recipe detail needs only the exact recipe_id")
+                return self._recipe_detail(arguments["recipe_id"])
             if tool == "likely_to_buy":
                 return {
                     "provider": "meny",
@@ -850,6 +854,29 @@ class MenyClient:
             if tool == "get_order":
                 return order
             return {"order_id": order_id, "status": order["status"]}
+
+    def _recipe_detail(self, recipe_id: Any) -> dict[str, Any]:
+        from recipes import normalize_recipe
+        from retailer_recipes import MENY_RECIPE_CAPABILITIES, meny_recipe_input, meny_recipe_path
+
+        path = meny_recipe_path(recipe_id)
+        self._open(BASE_URL + path)
+        self._assert_authenticated()
+        observation = self._eval(r"""
+(() => {
+  const expected = __EXPECTED__;
+  if (location.href !== expected) return JSON.stringify({ready:false});
+  const nodes = [...document.querySelectorAll('script[type="application/ld+json"]')];
+  if (nodes.length < 1 || nodes.length > 8) return JSON.stringify({ready:false});
+  const scripts = nodes.map(node => node.textContent || '');
+  if (scripts.reduce((size, value) => size + value.length, 0) > 262144) return JSON.stringify({ready:false});
+  return JSON.stringify({ready:true, url:location.href,
+    canonical_urls:[...document.querySelectorAll('link[rel="canonical"]')].map(node => node.href), scripts});
+})()
+""".replace("__EXPECTED__", json.dumps(BASE_URL + path)))
+        self._assert_authenticated()
+        recipe = normalize_recipe(meny_recipe_input(observation, path))
+        return {"provider": "meny", "recipe": recipe, "capabilities": dict(MENY_RECIPE_CAPABILITIES)}
 
     @staticmethod
     def _limit(value: Any) -> int:

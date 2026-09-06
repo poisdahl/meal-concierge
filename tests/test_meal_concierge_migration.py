@@ -390,6 +390,6 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(store.search('')), 1)
         self.assertEqual((backup.stat().st_ino, backup.read_bytes()), before)
         with closing(sqlite3.connect(path)) as connection:
-            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], '5')
-            connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'"); connection.commit()
+            self.assertEqual(connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0], '6')
+            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'"); connection.commit()
         with self.assertRaisesRegex(RecipeError, 'newer'): store.search('')

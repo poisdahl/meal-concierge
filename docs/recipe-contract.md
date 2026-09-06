@@ -1,19 +1,25 @@
 # Versioned culinary document contract
 
-Recipe document versions and SQLite versions are separate. This contract adds
-document schema 2 without changing SQLite schema 5. Stored schema-1 documents,
+Recipe document versions and SQLite versions are separate. The culinary
+document uses schema 2; bank origin metadata uses SQLite schema 6. Stored schema-1 documents,
 revisions, discovery references and digests are decoded by their original rules;
 reads do not migrate them. Unversioned legacy text-only requests retain schema 1.
 New producers specify `schema_version: 2`; supplying a new typed field also
 selects 2. A schema-1 request containing new fields is rejected. An update cannot
 downgrade an existing schema-2 document and silently discard its evidence.
 
+Schema-2 attribution preserves valid explicit nonstandard ports on self-hosted
+source links. HTTPS source links and HTTP/HTTPS original-attribution links keep
+their actual scheme and port; neither grants network-fetch authority. Schema-1
+URL normalization retains its original standard-HTTPS-port restriction.
+
 The culinary version retains existing name/language/tags/steps/times/storage,
 source and rights fields. Bank ID/revision, favorite/archive state, entry origin,
 pack metadata and technical creation fields remain bank metadata. Projected
 `entry_origin`, `pack` and `locally_modified` never become culinary facts or
-user-writable origin grants. Asset/origin storage and provider eligibility are
-separate integration packages; this representation does not activate them.
+user-writable origin grants. [Managed covers and bank origin](recipe-assets.md)
+describe their storage and import boundaries. Provider eligibility remains
+independent of entry origin.
 
 ## Quantities and matching
 
@@ -151,18 +157,30 @@ revision, permanent URL and change notes; a hash does not replace input wording.
 `rights.storage` (`full`/`link_only`) describes retained content. License/credit
 strings do not authorize public redistribution. `source_provider` is nullable
 `oda`/`meny`/`mathem` and remains distinct from existing operation-journal
-`provider_binding`. This stage preserves known bindings and retains the current
-full-original-store restriction; provider-private saves/eligibility await their
-trusted integration.
+`provider_binding`. New private schema-2 snapshots and explicit saves may retain
+full original store content. The source provider is derived from the trusted
+reader and known source identity, including upstream attribution and legacy
+sources. A caller cannot clear a known binding through edits, copied references,
+relabeling or imports. Schema-1 decoding and historical digests stay unchanged.
+
+New saves/favorites, menu materialization, product preparation and purchases
+require the matching selected provider. Reads, removal of favorites and historical
+operation/email recovery preserve their existing context. Eligibility is computed
+per action; it is never a persisted shopping-ready flag. A null binding does not
+establish neutral provenance or publication rights. Trusted pack installation
+rejects effective store binding even when an input explicitly supplies null.
+Private database-plus-assets backups preserve recipes and their metadata.
 
 Optional `image` is null or one exact versioned record with required
 `asset_id: "sha256:<64 lowercase hex>"` and nullable `alt`, `source_url`,
 `creator`, `credit`, `license`, `license_url`, `changes`. Text is bounded to
 500 characters, credential-free HTTPS URLs to 2048. There are no embedded bytes
 or filesystem paths. Image attribution is separate from recipe-text rights.
-Representation and historical decoding preserve it, but new/replaced/removed
-managed-image writes report unsupported until the asset importer is installed.
-An unchanged prior image stays readable even if the local asset is missing.
+New/replaced covers must reference an available managed local asset imported
+explicitly through the attachment importer. Completed retries, existing
+same-asset metadata edits, cover removal and historical reads remain usable
+even if the optional file is missing. Frozen rendering retains image credits
+independently of recipe-text credits, including its text-only fallback.
 
 Mealie/RecipeSage native source readers preserve original text and distinguish
 yield from servings without requiring a Meal Concierge sidecar. Supported
@@ -170,11 +188,11 @@ explicit source quantities are parsed; residual text stays unresolved. Schema-2
 external-library writes and edited schema-2 sidecars report unsupported before
 external dispatch rather than discarding fields. Existing supported schema-1
 text-only write/reconciliation paths remain. Ordinary native JSON imports reject
-privileged evidence/acceptance or new image writes before committing any rows;
+privileged evidence/acceptance or unavailable new image references before committing any rows;
 dedicated trusted source import/private restore handles those separately.
 
 The focused behavioral contract is exercised by
 [the recipe contract tests](../tests/test_meal_concierge_recipe_contract.py).
 The suite uses synthetic/local data and actual Application/menu/product code;
-it does not certify live provider availability, image importing or public-pack
+it does not certify live provider availability or public-pack
 redistribution.

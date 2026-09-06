@@ -121,8 +121,18 @@ only for that current-user decision. Use a stable idempotency key for a saved
 recipe. This creates a new version and retains estimate labels; discovery
 acceptance creates no personal bank entry. Keep estimates visibly labeled in
 chat/menu/email. A source/import/LLM field cannot stand in for this operation.
-Schema-2 writes to legacy external libraries and new managed-cover writes remain
-explicitly unsupported until their corresponding workflows are installed.
+Schema-2 writes to legacy external libraries remain explicitly unsupported.
+For a requested local cover, use the installed attachment importer and its
+returned managed `asset_id`; never put a local path, image bytes or remote image
+URL in the asset reference. Keep image creator/credit/license separate from
+recipe-text attribution. Missing optional covers leave frozen recipes usable as
+text; never fetch a source URL to repair them implicitly.
+
+Builtin entries report `entry_origin=user|bundled|unknown`, independent of
+favorites and archive state. Use that filter only with `library_id=builtin`.
+Preserve returned pack provenance and `locally_modified`; ordinary recipe
+content cannot assign them. Pack reimport conflicts require inspection and
+cannot authorize overwriting local edits, favorites or archive state.
 
 Use `meal_concierge_recipes` for libraries/search/get, and
 `meal_concierge_recipe_discovery` for discover/resolve. Search the target week.
@@ -155,19 +165,33 @@ in menu/order/email snapshots. Product IDs do not belong in recipe documents.
 Use `meal_concierge_recipe_write` only for requested save/update/built-in archive.
 For a selected discovery, save its exact ref instead of rebuilding its fields.
 If selection is ambiguous, clarify first. After save, confirm the returned recipe name, source,
-and exact library. Original Oda/Mathem/MENY recipes are link-only; adapted/inspired
-attribution is valid only when true. Do not guess licenses or merge duplicates.
+and exact library. Original Oda/Mathem/MENY content may be retained in private
+schema-2 snapshots and explicitly saved in the built-in bank, with original
+attribution and its source-provider binding. New save/favorite/menu/product/cart
+use requires that provider; explain a mismatch without switching configuration.
+Do not falsely relabel originals as adapted. Private storage does not authorize
+public redistribution. Keep store text/images out of public packs and exports;
+private backups preserve them. The owner remains responsible for source terms.
+An existing full snapshot may be used without a personal save. For a MENY search
+snapshot, discovery action `detail` takes its exact discovery_ref and returns a
+new frozen normalized ref with verified website quantities. Oda/Mathem detail
+support remains unavailable until a verified reader exists; never invent it.
 External updates require advertised provider-enforced conditional writes.
 
 `meal_concierge_recipe_favorite` sets an explicit desired state on an exact ref.
 `meal_concierge_recipe_labels` reads/creates native labels or changes exact
 recipe-label membership only when the capability is advertised. Duplicate
 names do not select IDs. Labels never stand for favorites, archive or rights.
-Saving and favoriting a discovery are separate operations with separate stable
-keys. Report `saved in builtin; favorite not set` when that is the exact outcome;
-name the actual external library otherwise. Report `favorite outcome uncertain`
-for uncertainty. On retry, reuse the bound discovery ref and both keys;
-never rediscover, recreate, retarget or delete to roll back a partial success.
+For an unsaved discovery, pass discovery_ref, is_favorite=true and one stable
+idempotency_key to recipe_favorite. This explicitly saves and favorites that
+exact version in one local transaction; retries cannot create another entry.
+Keep already-existing two-step/external operation recovery on its original keys
+and report its actual outcome; never rediscover or retarget an uncertain save.
+For that legacy two-step flow, report `saved in builtin; favorite not set` or
+`favorite outcome uncertain` when that is the recorded result; on retry,
+reuse the bound discovery ref and both keys.
+Removing a favorite and reading/managing an old store entry remain possible
+when the currently selected provider differs.
 
 `meal_concierge_recipe_lifecycle` handles external archive/delete. Show the exact
 prepare result and permanence warning, then confirm with its unchanged ID and a

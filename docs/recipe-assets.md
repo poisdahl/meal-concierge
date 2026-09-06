@@ -1,9 +1,9 @@
 # Managed recipe covers
 
-The local asset and MIME helpers and Application email preparation are implemented.
-Frozen covers and independent image credits are verified through a local SMTP
-receiver. Bank/tool attachment import and entry-origin metadata remain pending;
-remote sender asset transfer and real delivery are not verified.
+The built-in bank stores one optional managed cover per recipe version.
+Local attachment import, bank origin metadata and frozen HTML/MIME rendering
+use the same digest references. A remote sender needs access to the service's
+managed assets to embed them; text-only destinations retain the attribution.
 
 One optional `image` belongs to an exact recipe document version. It contains
 `asset_id: "sha256:<64 lowercase hexadecimal characters>"`, plus nullable
@@ -26,6 +26,22 @@ attachment beneath its trusted import root. Relative traversal, symlink
 components, nonregular files and oversized files are rejected. The root is
 selected by the local operator, not by downloaded recipe content.
 `import_bytes(data)` is the corresponding local in-memory ingestion primitive.
+
+For an explicit local attachment, run:
+
+```bash
+python3 import_recipes.py --state-directory /path/to/state \
+  --import-root /path/to/attachments --image cover.png
+```
+
+`--dry-run` decodes and reports the resulting `asset_id` without writing it.
+Importing the image creates no recipe. Supply the returned ID in a schema-2
+recipe's `image`, with independently supplied credit/license metadata, through
+the ordinary recipe save/update or JSON import path. New and replaced covers
+must resolve to valid managed files before the recipe transaction commits.
+Completed retries and exact source duplicates return their existing identity
+even if a cover later goes missing. Existing same-asset metadata edits, cover
+removal and historical reads do not require the optional file to remain present.
 
 Supported input is static JPEG, PNG or WebP, identified by actual decoding.
 The input must be at most 12 MiB, 24 million pixels and 12,000 pixels on either
@@ -53,6 +69,35 @@ Managed checks reject embedded metadata markers and data after the final
 image marker; they do not promise removal of arbitrary steganographic content.
 Restoration must not recompress a managed rendition, which would change frozen
 asset identities. Private retailer assets cannot enter public packs.
+
+## Bank origin and pack imports
+
+SQLite schema 6 adds entry metadata without rewriting culinary documents,
+historical revisions or their digests. New explicit saves and ordinary imports
+are `entry_origin: user`; existing schema-5 entries migrate to `unknown`.
+Downloaded `entry_origin`, `pack` or `locally_modified` fields cannot grant an
+origin. Discovery snapshots are not personal-bank entries.
+
+Only the internal verified-pack consumer calls
+`RecipeStore.import_pack_record(recipe, pack_id=..., recipe_id=..., version=...,
+status="ready")`. It must verify archive provenance and install exact managed
+assets first. The API accepts `ready` (active) or `draft` and commits one record
+at a time. Its result has `outcome: created|unchanged|conflict`, the bank `recipe`,
+and a conflict `reason` when applicable. This is not a normal RPC import mode.
+
+Bundled entries expose `pack: {pack_id, recipe_id, version, baseline_hash}`.
+The initial normalized document establishes the immutable baseline. Reimport
+looks up the stable pack/recipe pair before mutable source metadata. Unchanged
+content preserves the original ID, version, history, favorite and archive state.
+Changed incoming content or a locally edited current document reports a
+conflict. An existing user/unknown source duplicate retains its origin.
+An interrupted import resumes by repeating the same per-record calls.
+
+`locally_modified` compares the current document with that baseline, including
+when reading a historical revision; archiving or favoriting is not a content
+edit. Built-in search can filter `entry_origin=user|bundled|unknown` before its
+limit and independently combine `favorites_only` or `include_archived`.
+Pack origin does not authorize redistribution or override provider eligibility.
 
 ## Frozen email payloads
 
