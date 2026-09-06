@@ -1059,6 +1059,18 @@ snapshots even if the current menu or recipient later changes.
 
 ## Natural-language workflow
 
+Setup and status include `store_readiness` for the selected store. It is derived
+from existing configuration and the last connection result, without browsing,
+cart changes or a checkout probe. `verified` applies only to the stated
+connection check; delivery, browser account matching and payment can remain
+`unknown`. Missing local browser/Vipps configuration is `not_configured`, while
+a known login requirement is `needs_user_action`. None of these fields is saved
+as a permanent readiness flag or changes the household preference review.
+Use the existing workflow's reconciliation action before repairing/retrying an
+uncertain operation. A fresh requested checkout remains the authority for its
+actual review. See [store prerequisites](../README.md#requirements) for manual
+setup, first-card verification limits and provider-specific payment guidance.
+
 After restart, use the normal Hermes CLI or messaging path. Useful smoke
 requests, in a safe order, are:
 

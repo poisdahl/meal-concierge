@@ -29,6 +29,41 @@ Scheduled work may use defaults but must retain `needs_review` for the next
 interactive run. Reuse standing authorization; ask only for a choice actually
 missing or a confirmation required by the active policy.
 
+## Store setup and payment readiness
+
+On first store setup or the first shopping request, briefly explain the selected
+store's `store_readiness` guidance from setup/status, separately from household
+preferences and optional email setup. Only the selected store needs an account.
+Local recipes/imports/menu planning remain available while that account is
+unconnected. Installation creates neither a store account nor a saved card.
+
+For Oda, standalone OAuth and the dedicated browser must use the same intended
+account/address; saved-card checkout needs a usable saved card. Point to Payment
+in the Oda profile. If entering a card during a manual payment, use the offered
+remember/save-card option. A mandatory first order has not been established for
+every account: do not instruct the user to buy and cancel as a required setup
+step or perform such actions yourself. Explain cancellation only when available
+within the store's actual deadline, without promising immediate release of funds.
+For MENY, explain persistent browser login, home delivery, locally configured
+Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its
+separate OAuth and manual website checkout; its help documents adding cards under
+Your account > Payment. Do not transfer Oda-specific setup assumptions to Mathem.
+
+`connection_check.status=verified` means the last provider connection check only.
+Treat `not_configured`, `needs_user_action` and `unknown` distinctly. Never infer
+browser/account matching or payment readiness from OAuth, service health, an
+empty cart or an inaccessible page. Show one next action for the actual blocker;
+do not repeatedly ask a configured user to redo setup just because an unprobed
+payment field is unknown. During a legitimate requested checkout, use its fresh
+review and errors. Do not call checkout, change a cart, reserve delivery, create
+an order or repeat login merely to check readiness.
+
+Let the user enter passwords/card details and complete bank/device approval in
+the provider's UI. Never request passwords, card numbers, CVC or payment tokens
+in chat. Resume a new review after setup is repaired; an uncertain original cart,
+order or payment must be reconciled first. Pending MENY phone approval requires
+approval and reconciliation of that exact payment, never another submission.
+
 ## Messages and destination profiles
 
 Lead with the verified result or the decision needed. A small top-up may need

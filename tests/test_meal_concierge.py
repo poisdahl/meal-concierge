@@ -1455,6 +1455,20 @@ class CoreTestsBase:
         with self.assertRaisesRegex(HouseholdError, "page changed"):
             browser._review_checkout(cart)
 
+        for changes, message in [
+            ({"authenticated": False}, "browser login could not be verified"),
+            ({"address_matches": False}, "address does not match"),
+            ({"masked_payment": False, "payment_display": None}, "saved payment card could not be verified"),
+            ({"available": False, "masked_payment": False}, "unavailable items or details"),
+            ({"total_matches": False}, "does not match the reviewed cart"),
+        ]:
+            with self.subTest(changes=changes):
+                responses = iter([{"expanded": True}, {"ready": True}, {"expanded": True},
+                                  {**deepcopy(extracted), **changes}])
+                browser._eval = lambda _script: next(responses)
+                with self.assertRaisesRegex(HouseholdError, message):
+                    browser._review_checkout(cart)
+
     def test_oda_final_click_rechecks_every_protected_amount_component(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser._checkout_deadline = None
@@ -5704,6 +5718,59 @@ class FlowTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_store_guidance_does_not_probe_checkout_or_change_setup_idempotence(self):
+        with mock.patch.object(self.browser, "review_checkout", side_effect=AssertionError("readiness must not enter checkout")):
+            setup = self.app.handle({"operation": "setup", "action": "show"})
+            readiness = setup["store_readiness"]
+            self.assertEqual(readiness["connection_check"]["status"], "verified")
+            self.assertEqual(readiness["browser_check"]["status"], "unknown")
+            self.assertEqual(readiness["payment_check"]["status"], "unknown")
+            self.assertTrue(readiness["local_recipes_available"])
+            self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
+            self.app.integration = {"status": "unavailable"}
+            repeated = self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
+            self.assertTrue(repeated["idempotent"])
+            self.assertIsNone(self.app.handle({"operation": "setup", "action": "show"})["question"])
+            self.app.handle({"operation": "recipes", "action": "search", "query": "rice", "library_id": "builtin"})
+            self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
+        self.assertEqual(self.oda.calls, [])
+
+    def test_store_guidance_distinguishes_missing_browser_and_login(self):
+        self.app.browser = None
+        self.app.integration = {"status": "awaiting_login"}
+        readiness = self.app.handle({"operation": "status"})["store_readiness"]
+        self.assertEqual(readiness["connection_check"]["status"], "needs_user_action")
+        self.assertEqual(readiness["browser_check"]["status"], "not_configured")
+        self.assertIn("same intended Oda account", readiness["connection"])
+        self.assertEqual(self.oda.calls, [])
+
+    def test_meny_guidance_never_exposes_phone_or_replays_pending_payment(self):
+        store = StateStore(Path(self.temp.name) / "meny", {**CONFIG, "provider": "meny"})
+        client = FakeMeny()
+        app = Application(store, client, None)
+        readiness = app.handle({"operation": "setup", "action": "show"})["store_readiness"]
+        self.assertEqual(readiness["payment_check"]["status"], "not_configured")
+        client.vipps_phone_number = "synthetic-private-phone"
+        with store.locked() as state:
+            state["pending_checkout"] = {"status": "awaiting_user_payment", "confirmation_id": "original"}
+        status = app.handle({"operation": "status"})
+        self.assertEqual(status["store_readiness"]["payment_check"]["status"], "unknown")
+        self.assertNotIn(client.vipps_phone_number, json.dumps(status))
+        self.assertEqual(status["workflow"]["next_action"]["action"], "reconcile")
+        self.assertEqual(store.read()["pending_checkout"]["confirmation_id"], "original")
+        self.assertEqual(client.calls, [])
+        self.assertEqual(client.checkout_clicks, 0)
+
+    def test_mathem_guidance_preserves_manual_checkout(self):
+        store = StateStore(Path(self.temp.name) / "mathem", {**CONFIG, "provider": "mathem"})
+        app = Application(store, self.oda, None)
+        status = app.handle({"operation": "status"})
+        self.assertEqual(status["checkout"], "manual")
+        self.assertEqual(status["store_readiness"]["provider"], "mathem")
+        self.assertIn("manually", status["store_readiness"]["payment"])
+        self.assertEqual(status["store_readiness"]["payment_check"]["status"], "unknown")
+        self.assertEqual(self.oda.calls, [])
 
     def test_catalog_and_reversible_cart_use_mcp(self):
         self.app.handle({"operation": "catalog", "action": "products", "query": "fullkorn"})

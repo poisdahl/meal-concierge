@@ -401,6 +401,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 **masked_status(self.store.read(), self.integration),
                 "confirmation_policy": self.confirmation_policy,
                 "workflow": workflow_status(self.store.read()),
+                "store_readiness": self._store_readiness(),
                 **({"currency": "SEK", "checkout": "manual", "store_url": "https://www.mathem.se/se/"} if self.provider == "mathem" else {}),
             }
         if operation == "setup":
@@ -509,6 +510,60 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return {"email_recipient": mask_email(email)}
         raise HouseholdError("unknown profile action")
 
+    def _store_readiness(self) -> dict[str, Any]:
+        """Explain known configuration without navigating or testing checkout."""
+        connected = self.integration.get("status") == "ready"
+        connection_status = (
+            "verified" if connected else
+            "needs_user_action" if self.integration.get("status") == "awaiting_login" else
+            "unknown"
+        )
+        guidance = {
+            "oda": {
+                "store_url": "https://oda.com/no/",
+                "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
+                "connection": "Complete standalone Oda OAuth and log the dedicated browser into the same intended Oda account and address.",
+                "payment": "Oda saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
+            },
+            "meny": {
+                "store_url": "https://meny.no/",
+                "account": "Use your own MENY account with complete contact details and supported home-delivery address.",
+                "connection": "Log the dedicated browser into the intended MENY account; configure the Vipps phone number locally.",
+                "payment": "This integration supports home delivery with Vipps. Set up Vipps on your phone and approve the exact payment there when asked.",
+            },
+            "mathem": {
+                "store_url": "https://www.mathem.se/",
+                "account": "Use your own Mathem account with complete contact and delivery details in a supported delivery area.",
+                "connection": "Complete separate Mathem OAuth. Sign into that same intended account on Mathem's website for manual checkout.",
+                "payment": "Finish payment manually on Mathem's website. Mathem documents adding cards under Your account > Payment; verify the options available in your account. Oda first-card instructions do not apply.",
+            },
+        }[self.provider]
+        payment_status = "unknown"
+        payment_action = "Verify the payment method in the store's own app or website."
+        if self.provider == "meny" and not getattr(self.provider_client, "vipps_phone_number", None):
+            payment_status = "not_configured"
+            payment_action = "Configure the intended Vipps phone number locally before MENY checkout."
+        browser_status = (
+            "not_configured" if self.provider == "oda" and self.browser is None else "unknown"
+        )
+        return {
+            "provider": self.provider,
+            **guidance,
+            "connection_check": {
+                "status": connection_status,
+                "scope": "Last provider connection check only; not checkout, account/address matching or payment readiness.",
+                "next_action": None if connected else guidance["connection"] if connection_status == "needs_user_action" else "Check provider availability; readiness is unknown, so do not repeat login solely to make status ready.",
+            },
+            "browser_check": {
+                "status": browser_status,
+                "next_action": "Configure Oda's dedicated browser before checkout." if browser_status == "not_configured" else None,
+            },
+            "delivery_check": {"status": "unknown", "scope": "Address and delivery are checked during the requested shopping/checkout flow."},
+            "payment_check": {"status": payment_status, "next_action": payment_action},
+            "local_recipes_available": True,
+            "note": "Installation creates neither a store account nor a saved payment card. Complete sensitive entry and bank/device approval directly with the provider. A repaired prerequisite does not authorize replay of an uncertain operation; reconcile it first.",
+        }
+
     def _setup_summary(self, state: Mapping[str, Any]) -> dict[str, Any]:
         profile = state["profile"]
         meals = profile["meals"]
@@ -534,6 +589,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "configuration_required": required,
             "configuration_status": (state.get("setup") or {}).get("status"),
             "current": self._setup_summary(state),
+            "store_readiness": self._store_readiness(),
             "question": "Keep all current/default Meal Concierge settings? Answer once, or provide only the values you want to change." if required else None,
             "next": "Call meal_concierge_setup action=apply with keep_current=true, or keep_current=false and only the requested changes." if required else "Use action=rerun to review this configuration again.",
         }

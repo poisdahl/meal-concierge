@@ -104,6 +104,36 @@ Oda/MENY also require `agent-browser@0.33.1` and non-snap Chrome/Chromium.
 Oda/Mathem OAuth uses the standalone runtime. New agent packages and their full
 client workflows remain separate integration work.
 
+For shopping, you also need **your own account with the store you select**,
+complete contact/delivery details and an address in its delivery area.
+Installation does not create a store account or save a payment card. Local
+recipes, imports and menu planning remain usable without a connected store.
+
+- **Oda:** complete both standalone OAuth and dedicated browser login for the
+  same intended account/address. Saved-card checkout requires a usable saved
+  card. Check **Payment** in your Oda profile. When entering a card during a
+  manual payment, select the remember/save-card option if offered.
+  [Oda's card help](https://hjelp.oda.com/no/article/9edae5) explains saved-card
+  management and changing cards during payment; it does not establish that
+  every new account must place an order to save its first card. If no add-card
+  option is available, ask Oda for its current setup procedure. We have not
+  verified every account's first-card UI. Any order you independently choose
+  to place follows Oda's actual cancellation deadline and payment-release
+  process; cancellation and immediate release of funds are not guaranteed.
+- **MENY:** use a persistent login to your intended customer account and set
+  up home delivery. Configure the intended Vipps phone number locally and
+  prepare Vipps on your phone. This integration uses Vipps with phone approval;
+  Oda's saved-card procedure does not apply.
+- **Mathem:** complete separate Mathem OAuth and sign into the same intended
+  account on the website for manual checkout. Mathem's
+  [card help](https://support.mathem.se/sv/article/b8d1e5) describes adding cards
+  under **Your account > Payment**; check your account's actual options.
+  Automated Mathem payment remains unsupported.
+
+The linked card-help pages were checked on 2026-09-07; this is documentation
+verification, not an authenticated test of your account. Enter cards, passwords
+and bank/device approvals only in the provider's trusted UI, never in agent chat.
+
 ## Installation
 
 Clone this repository outside the private data directory. Install the browser
@@ -149,6 +179,13 @@ Start with a planning request:
 The first interactive planning or recipe-discovery request asks you to review
 the household settings. Keep the defaults or change the portions, preferences
 and recipe sources. Review the proposed menu and ask Hermes to save it.
+
+Before your first shopping request, Hermes explains the selected store's
+account and payment requirements above. A successful connection check proves
+only that connection; it does not verify the browser account, address or card.
+Missing or unknown prerequisites get a concrete next step when encountered.
+After fixing one manually, request a new review. If an earlier order or payment
+has an uncertain result, reconcile that original attempt first.
 
 Then try:
 
@@ -203,8 +240,11 @@ journals after possible orders or sends. See [recovery and restore](docs/runtime
 
 | Symptom | What to check |
 |---|---|
-| `awaiting_login` | Complete authorized provider setup using the configured dedicated browser profile. |
+| `awaiting_login` | For Oda/Mathem, complete that store's standalone OAuth; Oda also needs its dedicated browser login. For MENY, log into its dedicated browser profile. |
 | `unavailable` | Check the service logs and whether the configured store and browser dependencies are reachable. |
+| Connection ready, checkout still unavailable | Review the selected store's account, browser, delivery and payment requirements above. Connection readiness does not prove payment readiness. |
+| Oda browser address mismatch | Check that OAuth and the dedicated browser use the same intended account/address, then request a new checkout review. |
+| Oda saved card could not be verified | Inspect Payment in Oda and complete any required card setup there. An unreadable payment page is not proof that no card exists. |
 | Hermes cannot find the tools | Run `hermes mcp test meal_concierge` and restart Hermes. If you restrict `platform_toolsets`, include `meal_concierge` for that platform. |
 | Standalone runtime missing | Install with `uv` available on PATH; inspect the runtime guide. |
 | Browser missing or snap rejected | Install non-snap Chrome/Chromium; pass `--browser-executable` for a custom location. |

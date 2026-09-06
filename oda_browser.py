@@ -430,6 +430,14 @@ class OdaBrowser:
         expected_url = CHECKOUT_URL if order_id is None else f"{CHECKOUT_URL}?orderNumber={order_id}"
         if set(result) != required or result["url"] != expected_url or type(result["submit_controls"]) is not int:
             raise HouseholdError("Oda checkout page changed")
+        if result["authenticated"] is not True:
+            raise HouseholdError("Oda browser login could not be verified; log the dedicated browser into the same intended account as Oda OAuth, then request a new checkout review")
+        if result["available"] is not True:
+            raise OdaCheckoutMismatchError("Oda checkout has unavailable items or details; review the current cart before checkout")
+        if result["address_matches"] is not True:
+            raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
+        if result["masked_payment"] is not True:
+            raise HouseholdError("Oda saved payment card could not be verified; check Payment in your Oda account and complete any card entry there, then request a new checkout review")
         result["line_matches"] = checkout_lines_match(expected["lines"], result.pop("items"))
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:

@@ -1777,6 +1777,8 @@ class OrderOperations:
                 raise HouseholdError("select a delivery address before checkout")
             summary["delivery"]["address"] = unicodedata.normalize("NFC", " ".join(address.split()))
         before = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_orders", {"page": 1, "size": 20})
+        if self.browser is None:
+            raise HouseholdError("Oda checkout browser is not configured; configure the dedicated browser and sign into the same intended Oda account as OAuth before requesting checkout again")
         with self._browser_operation(deadline):
             state = self.store.read()
             if (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
