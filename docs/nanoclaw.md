@@ -134,3 +134,36 @@ the installation's actual supported model and delivery paths. Configure model
 authentication through the host's established provider integration, preserving
 one refresh owner; the Meal Concierge template does not install model credentials
 or claim to verify their continuity.
+
+## Native model acceptance
+
+The completed isolated MC-08 acceptance used the published compact-reference
+product at `8333ae16c1231dad2ff127a52ad0473acc8bc0ca`. Native tests demonstrated
+session adoption, original text/photo/PDF import, managed covers, explicit
+estimate acceptance and scaling, exact single-dinner save/readback, and seven
+distinct saved dinners for four portions using `plan.save_ref` as `planner_ref`.
+Two revoked old-owner schedule gates made no provider calls. The replacement
+native weekly occurrence reached synthetic `checkout auto` / `cart_ready`.
+
+The model completed one successful `begin_send`, one token-only local SMTP send
+and one `mark_sent`, retaining the original image in the MIME message. An earlier
+claim expired without dispatch; a subsequent cold turn made no Application calls.
+After explicit operator reconciliation, native `due` recovered the expired claim
+for the same occurrence. This verifies recovery with operator assistance, not
+uninterrupted first-attempt automation or sending through a production mail
+provider. No real purchase or recipient send was performed.
+
+The original managed cover also reached a human-visible Mattermost message and
+rendered in authenticated Chrome. The first model answer was text-only; one
+human follow-up triggered native `send_file`. Native delivery receipts, the
+human download and the managed-image hash matched. This test used the upstream
+Mattermost adapter at `6d5c1d0893bcd7d6f9eabeaac629d445ab23d154` and one isolated
+NanoClaw test-copy change binding its webhook listener to `127.0.0.1:19290`.
+It does not certify an unmodified upstream runtime or add a production core patch.
+
+Independent final correctness and adversarial reviews passed. Task-owned
+containers, networks, listeners and helpers were removed; original failed
+attempts, household state and private evidence were retained. Earlier model
+copying errors and recovery steps remain part of the acceptance record. Live
+provider behavior and private-network destination isolation are not established
+by these synthetic tests.
