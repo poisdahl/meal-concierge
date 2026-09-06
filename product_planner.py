@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 import hashlib
 import json
 import math
 import re
+import time
 from typing import Any, Mapping
 import unicodedata
 
@@ -16,23 +16,13 @@ from core import HouseholdError
 
 
 PRODUCT_PLAN_VERSION = "product-plan-v2"
-MAX_REQUIREMENTS = 20
+MAX_REQUIREMENTS = 64
+MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
 MAX_PACKAGES_PER_REQUIREMENT = 100
 MAX_COMBINATIONS = 10_000
 
-_UNITS = {
-    "g": ("g", Fraction(1)),
-    "gram": ("g", Fraction(1)),
-    "kg": ("g", Fraction(1_000)),
-    "ml": ("ml", Fraction(1)),
-    "cl": ("ml", Fraction(10)),
-    "dl": ("ml", Fraction(100)),
-    "l": ("ml", Fraction(1_000)),
-    "stk": ("count", Fraction(1)),
-    "stykk": ("count", Fraction(1)),
-    "count": ("count", Fraction(1)),
-}
+from recipe_quantities import UNITS as _UNITS, read_quantity
 
 
 def canonical(value: Any) -> str:
@@ -61,26 +51,10 @@ def _identity(value: Any) -> str | None:
 
 
 def _positive_fraction(value: Any) -> Fraction | None:
-    if isinstance(value, Mapping):
-        try:
-            result = _read_fraction(value, positive=True)
-            return result if result.numerator <= 10**15 and result.denominator <= 10**12 else None
-        except HouseholdError:
-            return None
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
     try:
-        decimal = Decimal(str(value))
-    except InvalidOperation:
+        return read_quantity(value, legacy_float=True)
+    except ValueError:
         return None
-    if not decimal.is_finite() or decimal <= 0 or not -12 <= decimal.adjusted() <= 15:
-        return None
-    result = Fraction(decimal)
-    if result.numerator > 10**15 or result.denominator > 10**12:
-        return None
-    return result
 
 
 def _normalized_unit(value: Any) -> str:
@@ -187,7 +161,9 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 if action == "omit" or (action == "have_all" and (quantity is None or conversion is None or identity is None or not scalable)):
                     continue
                 reason = None
-                if raw.get("pantry") is True and action is None:
+                if raw.get("unresolved_reason"):
+                    reason = str(raw["unresolved_reason"])
+                elif raw.get("pantry") is True and action is None:
                     reason = "pantry_state_needs_input"
                 elif raw.get("optional") is True and action is None:
                     reason = "optional_requirement_needs_input"
@@ -257,7 +233,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
 def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict[str, Any]]:
     if value is None:
         return {}
-    if not isinstance(value, list) or len(value) > MAX_REQUIREMENTS:
+    if not isinstance(value, list) or len(value) > MAX_ALTERNATIVE_REQUIREMENTS:
         raise HouseholdError("candidate_approvals must be a bounded list")
     approvals = {}
     for raw in value:
@@ -581,6 +557,7 @@ def build_product_plan(
     ingredient_decisions: Any = None,
     budget_ore: int | None = None,
     price_mode: str = "exact",
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     if price_mode not in {"exact", "estimate"}:
         raise HouseholdError("price_mode must be exact or estimate")
@@ -605,12 +582,18 @@ def build_product_plan(
         requirement_id = requirement["requirement_id"]
         observation = observations.get(requirement_id)
         item = deepcopy(requirement)
-        if not isinstance(observation, Mapping):
-            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "provider_search_unavailable"})
+        if not isinstance(observation, Mapping) or observation.get("unavailable_reason"):
+            reason = observation["unavailable_reason"] if isinstance(observation, Mapping) else "provider_search_unavailable"
+            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": reason})
             item["status"] = "needs_input"
             planned.append(item)
             continue
         item["observation"] = _canonical_observation(observation)
+        if deadline is not None and time.monotonic() >= deadline:
+            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "product_planning_deadline"})
+            item["status"] = "needs_input"
+            planned.append(item)
+            continue
         if hard_constraints:
             unresolved.append({
                 "requirement_id": requirement_id,

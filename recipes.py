@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 import hashlib
 import ipaddress
 import json
@@ -19,9 +19,10 @@ import stat
 import tempfile
 from typing import Any, Iterable, Mapping
 import unicodedata
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 from core import HouseholdError
+from recipe_quantities import UNITS, normalized_unit, parse_measure, quantity_json, quantity_text, read_quantity
 from recipe_libraries import (
     RecipeLibraryError,
     normalize_label_name,
@@ -55,6 +56,7 @@ SERVER_FIELDS = {
     "id", "revision", "status", "created_at", "updated_at", "created_via",
     "recipe_key", "content_fingerprint", "content_hash", "shopping_requirements",
     "library_id", "library_recipe_ref", "is_favorite", "favorite_revision",
+    "entry_origin", "pack", "locally_modified", "recipe_digest", "readiness",
 }
 
 
@@ -158,7 +160,7 @@ def validate_week(value: Any) -> str:
     return str(value)
 
 
-def normalize_source_url(value: Any) -> str | None:
+def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
     if value is None or value == "":
         return None
     text = _bounded_text(value, "source.url", maximum=2_048)
@@ -195,10 +197,27 @@ def normalize_source_url(value: Any) -> str | None:
         raise RecipeError("source.url must use the standard HTTPS port")
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     rendered_host = f"[{host}]" if ":" in host else host
-    return urlunsplit(("https", rendered_host, path, "", ""))
+    query = ""
+    if version >= 2:
+        # Keep original query encoding/order and all unknown identity parameters.
+        # Only these explicit advertising/tracking parameters are irrelevant.
+        query = "&".join(part for part in parsed.query.split("&") if part and not (
+            unquote_plus(part.split("=", 1)[0]).casefold().startswith("utm_")
+            or unquote_plus(part.split("=", 1)[0]).casefold() in {"fbclid", "gclid", "msclkid"}
+        ))
+    return urlunsplit(("https", rendered_host, path, query, ""))
 
 
-def _source(value: Any, *, required: bool = True) -> dict[str, Any]:
+def normalize_attribution_url(value: Any) -> str | None:
+    # Attribution is a link, never a fetch instruction. Keep an upstream HTTP
+    # source honest rather than changing its scheme or losing its credit.
+    if isinstance(value, str) and value.startswith("http://"):
+        checked = normalize_source_url("https://" + value[7:])
+        return "http://" + checked[8:] if checked else None
+    return normalize_source_url(value)
+
+
+def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         if required:
             raise RecipeError("source metadata is required")
@@ -215,14 +234,63 @@ def _source(value: Any, *, required: bool = True) -> dict[str, Any]:
         "publisher": _bounded_text(value.get("publisher"), "source.publisher", maximum=200),
         "title": _bounded_text(value.get("title"), "source.title", maximum=300),
         "author": _bounded_text(value.get("author"), "source.author", maximum=200),
-        "url": normalize_source_url(value.get("url")),
+        "url": normalize_source_url(value.get("url"), version=version),
         "external_id": _bounded_text(value.get("external_id"), "source.external_id", maximum=300),
         "relationship": relationship,
     }
+    if version >= 2 and value.get("original") is not None:
+        original = value["original"]
+        fields = {"url", "external_id", "publisher", "author", "title"}
+        if not isinstance(original, Mapping) or set(original) - fields:
+            raise RecipeError("source.original must contain only attribution fields")
+        result["original"] = {
+            key: normalize_attribution_url(original.get(key)) if key == "url" else
+            _bounded_text(original.get(key), f"source.original.{key}", maximum=300)
+            for key in sorted(fields)
+        }
     return result
 
 
-def _rights(value: Any) -> dict[str, Any]:
+def source_ingredient(text: str, *, item: str | None = None, measure: str | None = None) -> dict[str, Any]:
+    """Normalize observed source text only; residual interpretation stays unresolved."""
+    quantity = unit = None
+    if measure is not None:
+        quantity, unit = parse_measure(measure)
+    elif item is None:
+        for candidate in sorted(UNITS, key=len, reverse=True):
+            matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + r"\s+(.+)", text, re.IGNORECASE)
+            if matched:
+                quantity, unit = parse_measure(f"{matched[1]} {candidate}")
+                if quantity is not None:
+                    item = matched[2]
+                    break
+    evidence = {"basis": "source", "input": text}
+    unit_evidence = deepcopy(evidence)
+    if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
+        unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
+    return {"item": item or text, "raw": text, "original_text": text,
+            "amount": measure,
+            "quantity": quantity, "unit": unit, "scalable": quantity is not None and unit in UNITS,
+            "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
+
+
+def source_yield(text: str) -> tuple[dict[str, Any], float | None]:
+    quantity = unit = portions = None
+    matched = re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s+(.+?)\s*", text)
+    if matched:
+        try:
+            quantity = quantity_json(read_quantity(matched[1].replace(",", ".")))
+            unit = matched[2]
+            if unit.casefold() in {"serving", "servings", "portion", "portions", "porsjon", "porsjoner", "people", "persons"}:
+                portions = float(read_quantity(quantity))
+        except ValueError:
+            pass
+    evidence = {"basis": "source", "input": text}
+    return {"original_text": text, "quantity": quantity, "unit": unit,
+            "evidence": {"quantity": deepcopy(evidence), "unit": deepcopy(evidence)}}, portions
+
+
+def _rights(value: Any, *, version: int = 2) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RecipeError("rights metadata is required")
     storage = str(value.get("storage") or value.get("content_mode") or "").casefold()
@@ -233,12 +301,12 @@ def _rights(value: Any) -> dict[str, Any]:
     return {
         "storage": storage,
         "license": _bounded_text(value.get("license"), "rights.license", maximum=200),
-        "license_url": normalize_source_url(value.get("license_url")),
+        "license_url": normalize_source_url(value.get("license_url"), version=version),
         "credit": _bounded_text(value.get("credit"), "rights.credit", maximum=500),
     }
 
 
-def _external_snapshot(value: Any, source: Mapping[str, Any]) -> dict[str, Any] | None:
+def _external_snapshot(value: Any, source: Mapping[str, Any], *, version: int = 2) -> dict[str, Any] | None:
     required = str(source.get("kind") or "").casefold() in {"themealdb", "wikibooks"}
     if value is None and not required:
         return None
@@ -260,7 +328,7 @@ def _external_snapshot(value: Any, source: Mapping[str, Any]) -> dict[str, Any] 
         "source_revision_id": _bounded_text(
             value.get("source_revision_id"), "external_snapshot.source_revision_id", maximum=200,
         ),
-        "permanent_url": normalize_source_url(value.get("permanent_url")),
+        "permanent_url": normalize_source_url(value.get("permanent_url"), version=version),
         "changes": _bounded_text(value.get("changes"), "external_snapshot.changes", required=required, maximum=1_000),
     }
 
@@ -271,7 +339,7 @@ def _format_number(value: float) -> str:
     return format(value, ".15g")
 
 
-def _ingredient(value: Any, index: int) -> dict[str, Any]:
+def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
     if isinstance(value, str):
         text = _bounded_text(value, f"ingredients[{index}]", required=True, maximum=500)
         return {"raw": text, "item": text, "quantity": None, "unit": None, "scalable": False, "notes": None, "optional": False, "pantry": False}
@@ -316,20 +384,149 @@ def _ingredient(value: Any, index: int) -> dict[str, Any]:
     return result
 
 
+def _quantity(value: Any, field: str) -> dict[str, int] | None:
+    if value is None:
+        return None
+    try:
+        return quantity_json(read_quantity(value))
+    except ValueError as exc:
+        raise RecipeError(f"{field}: {exc}") from exc
+
+
+def _evidence(value: Any, field: str, *, original: str | None = None, basis: str = "unknown") -> dict[str, Any]:
+    if value is None:
+        value = {"basis": basis, "input": original}
+    if not isinstance(value, Mapping) or set(value) - {"basis", "input", "assumptions", "conversion", "calculation", "acceptance"}:
+        raise RecipeError(f"{field} contains unsupported evidence fields")
+    basis = value.get("basis", "unknown")
+    if not isinstance(basis, str) or basis not in {"source", "user", "estimate", "unknown"}:
+        raise RecipeError(f"{field}.basis must be source, user, estimate or unknown")
+    result = {"basis": basis, **{
+        key: _bounded_text(value.get(key), f"{field}.{key}", maximum=1000)
+        for key in ("input", "assumptions", "conversion")
+    }}
+    calculation = value.get("calculation")
+    if calculation is not None:
+        required = {"operation", "input_quantity", "factor"}
+        dependency = {"input_portions", "portions_evidence"}
+        if not isinstance(calculation, Mapping) or set(calculation) not in (required, required | dependency) or calculation["operation"] != "portion_scale":
+            raise RecipeError(f"{field}.calculation is unsupported")
+        result["calculation"] = {
+            "operation": "portion_scale",
+            "input_quantity": _quantity(calculation["input_quantity"], f"{field}.calculation.input_quantity"),
+            "factor": _quantity(calculation["factor"], f"{field}.calculation.factor"),
+        }
+        if any(result["calculation"][key] is None for key in ("input_quantity", "factor")):
+            raise RecipeError(f"{field}.calculation needs exact quantities")
+        if "input_portions" in calculation:
+            result["calculation"]["input_portions"] = _quantity(calculation["input_portions"], f"{field}.calculation.input_portions")
+            portion_evidence = calculation["portions_evidence"]
+            if result["calculation"]["input_portions"] is None or not isinstance(portion_evidence, Mapping) or "calculation" in portion_evidence:
+                raise RecipeError(f"{field}.calculation needs original serving evidence")
+            result["calculation"]["portions_evidence"] = _evidence(portion_evidence, f"{field}.calculation.portions_evidence")
+    acceptance = value.get("acceptance")
+    if acceptance is not None:
+        if basis != "estimate" or not isinstance(acceptance, Mapping) or set(acceptance) != {"recipe_digest", "statement"}:
+            raise RecipeError(f"{field}.acceptance is invalid")
+        digest = acceptance.get("recipe_digest")
+        if not isinstance(digest, str) or re.fullmatch(r"[a-f0-9]{64}", digest) is None:
+            raise RecipeError(f"{field}.acceptance needs an exact recipe digest")
+        result["acceptance"] = {"recipe_digest": digest, "statement": _bounded_text(acceptance.get("statement"), f"{field}.acceptance.statement", required=True, maximum=500)}
+    return result
+
+
+def _amount_evidence(value: Any, field: str, *, original: str | None, basis: str) -> dict[str, Any]:
+    value = {} if value is None else value
+    if not isinstance(value, Mapping) or set(value) - {"quantity", "unit"}:
+        raise RecipeError(f"{field} must contain quantity and unit evidence only")
+    return {key: _evidence(value.get(key), f"{field}.{key}", original=original, basis=basis) for key in ("quantity", "unit")}
+
+
+def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
+    field = f"ingredients[{index}]"
+    if isinstance(value, str):
+        value = {"raw": value, "item": value, "original_text": value, "scalable": False}
+    if not isinstance(value, Mapping):
+        raise RecipeError(f"{field} must be text or an object")
+    item = _bounded_text(value.get("item") or value.get("name"), f"{field}.item", required=True, maximum=300)
+    raw = _bounded_text(value.get("raw"), f"{field}.raw", maximum=500)
+    original = _bounded_text(value.get("original_text", raw), f"{field}.original_text", maximum=500)
+    quantity = _quantity(value.get("quantity"), f"{field}.quantity")
+    unit = _bounded_text(value.get("unit"), f"{field}.unit", maximum=40)
+    unit = normalized_unit(unit) or None
+    scalable = value.get("scalable", quantity is not None)
+    if not isinstance(scalable, bool) or (scalable and (quantity is None or unit is None)):
+        raise RecipeError(f"{field} scalable quantity requires a positive amount and unit")
+    flags = {key: value.get(key, False) for key in ("optional", "pantry")}
+    if any(not isinstance(flag, bool) for flag in flags.values()):
+        raise RecipeError(f"{field} optional and pantry must be true or false")
+    amount = f"{quantity_text(quantity)} {unit}" if quantity is not None and unit else _bounded_text(value.get("amount"), f"{field}.amount", maximum=100)
+    return {
+        "item": item, "quantity": quantity, "unit": unit, "scalable": scalable,
+        "raw": f"{amount} {item}" if scalable else raw or " ".join(part for part in (amount, item) if part),
+        "amount": amount, "original_text": original,
+        "notes": _bounded_text(value.get("notes"), f"{field}.notes", maximum=500),
+        **flags, "evidence": _amount_evidence(value.get("evidence"), f"{field}.evidence", original=original, basis=basis),
+    }
+
+
+def _yield(value: Any, *, basis: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = {"original_text": value}
+    if not isinstance(value, Mapping) or set(value) - {"original_text", "quantity", "unit", "evidence"}:
+        raise RecipeError("yield contains unsupported fields")
+    original = _bounded_text(value.get("original_text"), "yield.original_text", maximum=500)
+    return {
+        "original_text": original,
+        "quantity": _quantity(value.get("quantity"), "yield.quantity"),
+        "unit": _bounded_text(value.get("unit"), "yield.unit", maximum=80),
+        "evidence": _amount_evidence(value.get("evidence"), "yield.evidence", original=original, basis=basis),
+    }
+
+
+def _image(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    fields = {"asset_id", "alt", "source_url", "creator", "credit", "license", "license_url", "changes"}
+    if not isinstance(value, Mapping) or set(value) - fields:
+        raise RecipeError("image contains unsupported fields; use one managed asset reference")
+    if re.fullmatch(r"sha256:[a-f0-9]{64}", str(value.get("asset_id") or "")) is None:
+        raise RecipeError("image.asset_id must be a managed sha256 identifier")
+    return {key: normalize_source_url(value.get(key)) if key.endswith("_url") else
+            _bounded_text(value.get(key), f"image.{key}", required=key == "asset_id", maximum=500)
+            for key in sorted(fields)}
+
+
 def normalize_recipe(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RecipeError("recipe must be an object")
     _check_shape(value)
+    # Preserve the established unversioned text-only write contract. New typed
+    # producers declare v2; supplying any v2 field also selects it explicitly.
+    new_fields = bool(set(value) & {"yield", "portions_evidence", "source_provider", "image"}) or (
+        isinstance(value.get("source"), Mapping) and "original" in value["source"]
+    ) or any(isinstance(item, Mapping) and (set(item) & {"original_text", "evidence"} or isinstance(item.get("quantity"), Mapping)) for item in (value.get("ingredients") if isinstance(value.get("ingredients"), list) else []))
+    version = value.get("schema_version", 2 if new_fields else 1)
+    if type(version) is not int or version not in {1, 2}:
+        raise RecipeError("unsupported recipe schema_version; supported versions are 1 and 2")
+    if version == 1 and (
+        set(value) & {"yield", "portions_evidence", "source_provider", "image"}
+        or isinstance(value.get("source"), Mapping) and "original" in value["source"]
+        or any(isinstance(item, Mapping) and set(item) & {"original_text", "evidence"} for item in (value.get("ingredients") if isinstance(value.get("ingredients"), list) else []))
+    ):
+        raise RecipeError("new evidence, yield, binding and image fields require recipe schema_version 2")
     cleaned = {key: child for key, child in value.items() if key not in SERVER_FIELDS and key != "recipe_ref"}
-    source = _source(cleaned.get("source"))
-    rights = _rights(cleaned.get("rights"))
+    source = _source(cleaned.get("source"), version=version)
+    rights = _rights(cleaned.get("rights"), version=version)
     name = _bounded_text(cleaned.get("name"), "name", required=True, maximum=300)
     tags = cleaned.get("tags", [])
     if not isinstance(tags, list) or len(tags) > 50:
         raise RecipeError("tags must be a list with at most 50 values")
     normalized_tags = [_bounded_text(item, f"tags[{index}]", required=True, maximum=80) for index, item in enumerate(tags)]
     result: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": version,
         "name": name,
         "language": _bounded_text(cleaned.get("language") or "nb-NO", "language", required=True, maximum=20),
         "tags": normalized_tags,
@@ -337,7 +534,7 @@ def normalize_recipe(value: Any) -> dict[str, Any]:
         "rights": rights,
         "notes": _bounded_text(cleaned.get("notes"), "notes", maximum=MAX_TEXT),
     }
-    external_snapshot = _external_snapshot(cleaned.get("external_snapshot"), source)
+    external_snapshot = _external_snapshot(cleaned.get("external_snapshot"), source, version=version)
     if external_snapshot is not None:
         result["external_snapshot"] = external_snapshot
     if rights["storage"] == "link_only":
@@ -371,12 +568,38 @@ def normalize_recipe(value: Any) -> dict[str, Any]:
             raise RecipeError("steps must contain one to 100 entries")
         result.update({
             "portions": portions,
-            "ingredients": [_ingredient(item, index) for index, item in enumerate(ingredients)],
+            "ingredients": [
+                _ingredient_v1(item, index) if version == 1 else
+                _ingredient(item, index, basis="user" if source["relationship"] == "user_supplied" else "estimate" if source["relationship"] == "generated" else "unknown")
+                for index, item in enumerate(ingredients)
+            ],
             "steps": [_bounded_text(item, f"steps[{index}]", required=True) for index, item in enumerate(steps)],
             "times": deepcopy(cleaned.get("times")) if isinstance(cleaned.get("times"), Mapping) else None,
             "storage": _bounded_text(cleaned.get("storage"), "storage", maximum=1_000),
             "reheating": _bounded_text(cleaned.get("reheating"), "reheating", maximum=1_000),
         })
+    if version == 2:
+        basis = "user" if source["relationship"] == "user_supplied" else "estimate" if source["relationship"] == "generated" else "unknown"
+        provider = cleaned.get("source_provider")
+        if provider is not None and (not isinstance(provider, str) or provider not in {"oda", "meny", "mathem"}):
+            raise RecipeError("source_provider must be oda, meny, mathem or null")
+        result.update({
+            "yield": _yield(cleaned.get("yield"), basis=basis),
+            "portions_evidence": _evidence(cleaned.get("portions_evidence"), "portions_evidence", basis=basis),
+            "source_provider": provider,
+            "image": _image(cleaned.get("image")),
+        })
+        for path, evidence in recipe_evidence_fields(result).items():
+            calculation = evidence.get("calculation")
+            if calculation is None:
+                continue
+            if path.endswith(".unit"):
+                raise RecipeError(f"{path}: a unit cannot carry a quantity calculation")
+            actual = _evidence_value(result, path)["value"]
+            if actual is None or read_quantity(calculation["input_quantity"]) * read_quantity(calculation["factor"]) != read_quantity(actual):
+                raise RecipeError(f"{path}: calculation does not match the derived quantity")
+            if "input_portions" in calculation and (result.get("portions") is None or read_quantity(calculation["input_portions"]) * read_quantity(calculation["factor"]) != read_quantity(result["portions"])):
+                raise RecipeError(f"{path}: calculation does not match the serving factor")
     if len(_canonical(result).encode()) > MAX_RECIPE_BYTES:
         raise RecipeError("recipe is too large")
     return result
@@ -428,68 +651,190 @@ def recipe_key(recipe: Mapping[str, Any]) -> str:
     return f"content:{content_fingerprint(recipe)}"
 
 
+def recipe_evidence_fields(recipe: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Stable field paths for evidence and explicit estimate acceptance."""
+    result = {}
+    if isinstance(recipe.get("portions_evidence"), dict):
+        result["portions"] = recipe["portions_evidence"]
+    if isinstance(recipe.get("yield"), Mapping):
+        for key, evidence in recipe["yield"].get("evidence", {}).items():
+            result[f"yield.{key}"] = evidence
+    for index, ingredient in enumerate(recipe.get("ingredients", [])):
+        for key, evidence in ingredient.get("evidence", {}).items():
+            result[f"ingredients.{index}.{key}"] = evidence
+    return result
+
+
+def evidence_inputs(evidence: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(evidence, Mapping):
+        return []
+    dependency = (evidence.get("calculation") or {}).get("portions_evidence")
+    return [evidence] + ([dependency] if isinstance(dependency, Mapping) else [])
+
+
+def _unaccepted(evidence: Any) -> bool:
+    return any(item.get("basis") == "estimate" and not item.get("acceptance") for item in evidence_inputs(evidence))
+
+
+def recipe_digest(recipe: Mapping[str, Any]) -> str:
+    return _hash(normalize_recipe(recipe))
+
+
+def _evidence_value(recipe: Mapping[str, Any], path: str) -> Any:
+    if path == "portions":
+        return {"value": recipe.get("portions"), "evidence": recipe.get("portions_evidence")}
+    if path.startswith("yield."):
+        value = recipe.get("yield") or {}
+    else:
+        index = int(path.split(".")[1])
+        ingredients = recipe.get("ingredients", [])
+        value = ingredients[index] if index < len(ingredients) else {}
+    field = path.split(".")[-1]
+    return {"item": value.get("item"), "original_text": value.get("original_text"),
+            "value": value.get(field), "evidence": value.get("evidence", {}).get(field),
+            **({"unit": value.get("unit")} if field == "quantity" else {})}
+
+
+def _prior_evidence_paths(recipe: Mapping[str, Any], prior: Mapping[str, Any] | None, path: str) -> list[str]:
+    if prior is None:
+        return []
+    if not path.startswith("ingredients."):
+        return [path]
+    index = int(path.split(".")[1])
+    ingredient = recipe["ingredients"][index]
+    return [f"ingredients.{old_index}.{path.split('.')[-1]}"
+            for old_index, old in enumerate(prior.get("ingredients", []))
+            if _normalized_text(old.get("item")) == _normalized_text(ingredient.get("item"))]
+
+
+def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Validate caller/import authority once, separately from stored decoding."""
+    prior = normalize_recipe(prior) if prior is not None else None
+    if prior is not None and prior["schema_version"] == 2 and isinstance(value, Mapping) and value.get("schema_version") == 1:
+        raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
+    if isinstance(value, Mapping) and isinstance(value.get("source"), Mapping) and str(value["source"].get("relationship") or "").casefold() == "generated" and value.get("schema_version", 1) == 1:
+        value = {**value, "schema_version": 2}
+    recipe = normalize_recipe(value)
+    if prior is not None and prior.get("schema_version") == 2 and recipe["schema_version"] != 2:
+        raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
+    if recipe.get("image") != (prior.get("image") if prior else None):
+        raise RecipeError("managed image writes are unsupported until the asset importer is installed")
+    if prior is not None and prior.get("source_provider") is not None:
+        if recipe.get("source_provider") != prior["source_provider"]:
+            raise RecipeError("an update must preserve the known source_provider binding")
+    if prior is not None and prior["source"].get("original") is not None and recipe["source"].get("original") != prior["source"]["original"]:
+        raise RecipeError("an update must preserve original source attribution")
+    prior_evidence = recipe_evidence_fields(prior) if prior else {}
+    for path, evidence in recipe_evidence_fields(recipe).items():
+        old_paths = _prior_evidence_paths(recipe, prior, path)
+        inherited = any(_evidence_value(recipe, path) == _evidence_value(prior, old_path) for old_path in old_paths)
+        if (recipe["source"]["relationship"] == "generated" or prior is not None and prior["source"]["relationship"] == "generated" or not inherited and any(prior_evidence.get(old_path, {}).get("basis") == "estimate" for old_path in old_paths)) and evidence["basis"] != "estimate":
+            raise RecipeError(f"{path}: an estimate cannot be relabeled as user, source or unknown evidence")
+        if evidence.get("calculation") is not None and not inherited:
+            raise RecipeError(f"{path}: calculation provenance is service-owned; scale an exact recipe version")
+        if evidence.get("acceptance") is not None and not inherited:
+            raise RecipeError(f"{path}: estimate acceptance is service-owned; use accept_estimates on an exact version")
+        if evidence.get("basis") == "source" and not (inherited and recipe["source"] == prior["source"]):
+            raise RecipeError(f"{path}: source evidence requires a trusted source import or unchanged exact version")
+    return recipe
+
+
+ESTIMATE_CONFIRMATION = "I accept these exact recipe estimates and their stated assumptions."
+
+
+def accept_recipe_estimates(recipe: Mapping[str, Any], digest: Any, fields: Any, statement: Any) -> dict[str, Any]:
+    result = normalize_recipe(recipe)
+    if digest != recipe_digest(result):
+        raise RecipeError("estimate acceptance needs the exact current recipe_digest")
+    if statement != ESTIMATE_CONFIRMATION:
+        raise RecipeError("estimate acceptance requires the explicit current-user confirmation statement")
+    if not isinstance(fields, list) or not 1 <= len(fields) <= 402 or any(not isinstance(field, str) for field in fields) or len(set(fields)) != len(fields):
+        raise RecipeError("estimate_fields must name a nonempty unique bounded list of exact fields")
+    evidence = recipe_evidence_fields(result)
+    for path in fields:
+        if path not in evidence or evidence[path].get("basis") != "estimate":
+            raise RecipeError("only existing estimated fields can be accepted")
+        evidence[path]["acceptance"] = {"recipe_digest": digest, "statement": statement}
+    return result
+
+
 def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict[str, Any]:
     result = deepcopy(dict(recipe))
     if (result.get("rights") or {}).get("storage") != "full":
         raise RecipeError("link_only recipes cannot be materialized into a menu")
-    base = None if result.get("portions") is None else _finite_positive(result.get("portions"), "portions")
-    if base is None and portions is not None:
-        raise RecipeError("a recipe with unknown portions cannot be scaled")
+    base = None if result.get("portions") is None else _finite_positive(result["portions"], "portions")
     target = base if portions is None else _finite_positive(portions, "target portions")
+    if base is None and portions is not None:
+        raise RecipeError("unknown portions: resolve person servings explicitly before scaling")
+    missing = [path for path, evidence in recipe_evidence_fields(result).items() if _unaccepted(evidence) or any(item.get("basis") == "unknown" for item in evidence_inputs(evidence))]
+    if portions is not None and any(path == "portions" or path.startswith("ingredients.") for path in missing):
+        raise RecipeError("explicit estimate acceptance is required before scaling: " + ", ".join(missing))
     if base is None:
-        result["shopping_requirements"] = [
-            {
-                "query": value.get("item"), "item": value.get("item"),
-                "quantity": value.get("quantity"), "unit": value.get("unit"),
-                "optional": value.get("optional", False), "pantry": value.get("pantry", False),
-                "scalable": value.get("scalable") is True,
-            }
-            for value in result.get("ingredients", [])
-        ]
-        result["recipe_key"] = recipe_key(result)
-        if result.get("id"):
-            result["recipe_ref"] = {"id": result["id"], "revision": result["revision"]}
-        return result
-    factor = target / base
-    if not math.isfinite(factor) or factor <= 0:
-        raise RecipeError("portion scaling factor must be positive and finite")
+        missing.insert(0, "portions")
+    try:
+        factor = Fraction(1) if base is None else read_quantity(target) / read_quantity(base)
+        quantity_json(factor)
+    except ValueError as exc:
+        raise RecipeError(f"portion scaling factor must be positive and finite within exact quantity limits: {exc}") from exc
     scaled = []
     requirements = []
-    try:
-        base_decimal = Decimal(str(base))
-        target_decimal = Decimal(str(target))
-    except InvalidOperation as exc:
-        raise RecipeError("portion scaling factor must be positive and finite") from exc
-    for value in result.get("ingredients", []):
+    version = result.get("schema_version", 1)
+    for index, value in enumerate(result.get("ingredients", [])):
         item = deepcopy(dict(value))
+        amount = item.get("quantity")
         if item.get("scalable") is True:
-            source_quantity = _finite_positive(item.get("quantity"), "ingredient quantity")
             try:
-                quantity = float(Decimal(str(source_quantity)) * target_decimal / base_decimal)
-            except (InvalidOperation, OverflowError) as exc:
-                raise RecipeError("scaled ingredient quantity must be positive and finite") from exc
-            if not math.isfinite(quantity) or quantity <= 0:
-                raise RecipeError("scaled ingredient quantity must be positive and finite")
-            item["quantity"] = quantity
-            item["amount"] = f"{_format_number(quantity)} {item['unit']}"
+                source_quantity = read_quantity(amount, legacy_float=version == 1)
+                quantity = quantity_json(source_quantity * factor)
+            except ValueError as exc:
+                raise RecipeError(f"scaled ingredient quantity: {exc}") from exc
+            amount = quantity
+            item["quantity"] = quantity if version == 2 else float(source_quantity * factor)
+            display = quantity_text(quantity) if version == 2 else _format_number(item["quantity"])
+            item["amount"] = f"{display} {item['unit']}"
             item["raw"] = f"{item['amount']} {item['item']}"
+            if version == 2 and factor != 1:
+                evidence = item["evidence"]["quantity"]
+                previous = evidence.get("calculation", {})
+                serving_evidence = deepcopy(result["portions_evidence"])
+                serving_calculation = serving_evidence.pop("calculation", {})
+                evidence["calculation"] = {
+                    "operation": "portion_scale",
+                    "input_quantity": previous.get("input_quantity", quantity_json(source_quantity)),
+                    "factor": quantity_json(read_quantity(previous.get("factor", 1)) * factor),
+                    "input_portions": previous.get("input_portions", serving_calculation.get("input_quantity", quantity_json(read_quantity(base)))),
+                    "portions_evidence": previous.get("portions_evidence", serving_evidence),
+                }
+        reason = "person_servings_unknown" if base is None else (
+            "serving_evidence_needs_input" if "portions" in missing else
+            "ingredient_evidence_needs_input" if any(f"ingredients.{index}.{key}" in missing for key in ("quantity", "unit")) else None
+        )
         scaled.append(item)
-        requirements.append({
-            "query": item.get("item"),
-            "item": item.get("item"),
-            "quantity": item.get("quantity"),
-            "unit": item.get("unit"),
-            "optional": item.get("optional", False),
-            "pantry": item.get("pantry", False),
-            "scalable": item.get("scalable") is True,
-        })
+        requirement = {
+            "query": item.get("item"), "item": item.get("item"),
+            "quantity": amount, "unit": item.get("unit"),
+            "optional": item.get("optional", False), "pantry": item.get("pantry", False),
+            "scalable": item.get("scalable") is True and reason is None,
+        }
+        if reason:
+            requirement["unresolved_reason"] = reason
+        requirements.append(requirement)
     result["ingredients"] = scaled
     result["portions"] = target
-    result["scaled_from_portions"] = base
+    if version == 2 and factor != 1:
+        previous = result["portions_evidence"].get("calculation", {})
+        result["portions_evidence"]["calculation"] = {
+            "operation": "portion_scale",
+            "input_quantity": previous.get("input_quantity", quantity_json(read_quantity(base))),
+            "factor": quantity_json(read_quantity(previous.get("factor", 1)) * factor),
+        }
+    if base is not None:
+        result["scaled_from_portions"] = base
     result["recipe_key"] = recipe_key(result)
     if result.get("id"):
         result["recipe_ref"] = {"id": result["id"], "revision": result["revision"]}
     result["shopping_requirements"] = requirements
+    result["readiness"] = {"scaling_ready": not missing, "missing_decisions": missing}
     return result
 
 
@@ -1203,6 +1548,7 @@ class RecipeStore:
     ) -> dict[str, Any]:
         result = _stored_recipe_document(row["document"])
         result.update({
+            "recipe_digest": _hash(result),
             "id": row["id"], "revision": row["revision"], "status": row["status"],
             "created_at": row["created_at"], "updated_at": row["updated_at"],
             "created_via": row["created_via"],
@@ -1323,6 +1669,7 @@ class RecipeStore:
             raise RecipeError("recipe bank is unavailable")
         return {
             "recipe": recipe,
+            "recipe_digest": _hash(recipe),
             "discovery_ref": row["discovery_ref"],
             "content_hash": row["content_hash"],
             "attribution_digest": row["attribution_digest"],
@@ -3594,6 +3941,7 @@ class RecipeStore:
                 if version is None or current is None:
                     raise RecipeError("recipe revision was not found")
                 result = _stored_recipe_document(version["document"])
+                result["recipe_digest"] = _hash(result)
                 result.update({"id": recipe_id, "revision": revision, "status": current["status"], "revision_status": version["status"], "created_at": current["created_at"], "updated_at": version["created_at"], "created_via": current["created_via"], "content_fingerprint": content_fingerprint(result), "recipe_key": f"bank:{recipe_id}", "library_recipe_ref": {"library_id": "builtin", "recipe_id": recipe_id, "version": str(revision)}})
                 favorite = self._favorite_state(connection, recipe_id)
                 result.update({key: favorite[key] for key in ("library_id", "is_favorite", "favorite_revision")})
@@ -3874,7 +4222,7 @@ class RecipeStore:
                         key = None
                     if status not in {"active", "draft"}:
                         raise RecipeError(f"record {index} has an invalid status")
-                    recipe = normalize_recipe(recipe_value)
+                    recipe = prepare_recipe_input(recipe_value)
                     key = key or f"import:{_hash(recipe)}"
                     result = self._save(connection, recipe, status, key, "import")
                     if result.get("created"):

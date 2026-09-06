@@ -27,7 +27,7 @@ from recipe_libraries import (
     validate_library_id,
     validate_library_recipe_ref,
 )
-from recipes import RecipeError, normalize_recipe, normalize_source_url
+from recipes import RecipeError, evidence_inputs, normalize_recipe, normalize_source_url, source_ingredient, source_yield, recipe_evidence_fields
 
 
 MINIMUM_MEALIE_VERSION = (3, 24, 0)
@@ -704,11 +704,17 @@ class MealieAdapter(RecipeLibraryAdapter):
                 raise RecipeLibraryError("Mealie Hermes metadata is incompatible")
             try:
                 document = normalize_recipe(stored)
+                if any(e.get("acceptance") is not None for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
+                    raise RecipeLibraryError("external recipe metadata cannot establish local estimate acceptance")
+                if document.get("schema_version") == 2 and document["source"]["relationship"] == "generated" and any(e["basis"] != "estimate" for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
+                    raise RecipeLibraryError("generated external metadata cannot relabel estimate evidence")
                 payload, _ = self._native_payload(document, origin)
             except (RecipeError, RecipeLibraryError) as exc:
                 raise RecipeLibraryError("Mealie Hermes metadata is incompatible") from exc
             if self._native_matches(raw, payload, document):
                 return document
+            if document.get("schema_version") == 2:
+                raise RecipeLibraryError("edited native schema 2 metadata needs an explicit own-bank import; evidence cannot be silently reassigned")
             source = deepcopy(document["source"])
             rights = deepcopy(document["rights"])
         else:
@@ -773,6 +779,18 @@ class MealieAdapter(RecipeLibraryAdapter):
                     if field in document:
                         candidate[field] = deepcopy(document[field])
         try:
+            if stored is None:
+                candidate["schema_version"] = 2
+                if raw.get("orgURL"):
+                    candidate["source"]["original"] = {"url": raw["orgURL"]}
+                if rights["storage"] == "full":
+                    candidate["ingredients"] = [source_ingredient(text) for text in ingredients]
+                    yield_text = str(raw.get("recipeYield") or "")
+                    yield_quantity = raw.get("recipeYieldQuantity")
+                    if yield_quantity is not None and yield_quantity != 0:
+                        yield_text = f"{yield_quantity} {yield_text}".strip()
+                    candidate["yield"] = source_yield(yield_text)[0] if yield_text else None
+                    candidate["portions_evidence"] = {"basis": "source" if portions is not None else "unknown", "input": f"recipeServings: {servings}"}
             return normalize_recipe(candidate)
         except RecipeError as exc:
             raise RecipeLibraryError("Mealie recipe content is incompatible") from exc
@@ -1101,6 +1119,8 @@ class MealieAdapter(RecipeLibraryAdapter):
         return self.create_with_progress(snapshot, operation, lambda progress: None)
 
     def create_with_progress(self, snapshot, operation, record_progress):
+        if snapshot.get("schema_version") == 2:
+            raise RecipeLibraryError("Mealie legacy writes do not support recipe schema 2; use the builtin bank")
         if self.read_only:
             raise RecipeLibraryDefiniteError("Mealie connection is read-only")
         try:

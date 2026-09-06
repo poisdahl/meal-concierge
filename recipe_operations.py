@@ -18,7 +18,7 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from core import HouseholdError
-from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week
+from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
 from recipe_libraries import CAPABILITY_NAMES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
 from service_common import (
@@ -748,6 +748,8 @@ class RecipeOperations:
 
     @staticmethod
     def _outbound_library_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        if snapshot.get("schema_version") == 2:
+            raise RecipeLibraryError("legacy external recipe writes do not support schema 2 evidence, yield or assets; save to the builtin bank")
         if snapshot.get("rights", {}).get("storage") != "link_only":
             return deepcopy(dict(snapshot))
         return {
@@ -1701,6 +1703,13 @@ class RecipeOperations:
             target = validate_library_id(explicit_target)
         if target not in self.recipe_libraries:
             raise RecipeLibraryError("library_id must name one exact configured recipe library")
+        if target != "builtin":
+            try:
+                candidate = self.recipes.resolve_discovery(discovery_ref)["recipe"]
+            except RecipeError:
+                candidate = None  # Preserve existing expired-reference journal recovery.
+            if candidate is not None and candidate.get("schema_version") == 2:
+                raise RecipeLibraryError("legacy external writes do not support recipe schema 2; use the builtin bank")
         operation = self.recipes.begin_library_create(
             discovery_ref,
             target,
@@ -1991,6 +2000,8 @@ class RecipeOperations:
                 "external update requires one configured versioned library_recipe_ref"
             )
         replacement = normalize_recipe(request.get("recipe"))
+        if replacement.get("schema_version") == 2:
+            raise RecipeLibraryError("legacy external updates do not support recipe schema 2; use the builtin bank")
         request_digest = hashlib.sha256(canonical({
             "kind": "conditional_update",
             "library_recipe_ref": reference,
@@ -2605,6 +2616,23 @@ class RecipeOperations:
 
     def _recipes(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "search")
+        if action == "accept_estimates":
+            has_discovery = request.get("discovery_ref") is not None
+            has_recipe = request.get("recipe_id") is not None
+            if has_discovery == has_recipe or request.get("recipe") is not None:
+                raise RecipeError("accept_estimates requires exactly one saved recipe revision or discovery_ref, and no replacement document")
+            if has_discovery:
+                original = self.recipes.resolve_discovery(request["discovery_ref"])["recipe"]
+            else:
+                if type(request.get("expected_revision")) is not int:
+                    raise RecipeError("accept_estimates requires an exact expected_revision")
+                original = self.recipes.get(request["recipe_id"], request["expected_revision"])
+            accepted = accept_recipe_estimates(original, request.get("recipe_digest"), request.get("estimate_fields"), request.get("confirmation_statement"))
+            if has_discovery:
+                return {**self.recipes.persist_discovery(accepted), "personal_entry_created": False}
+            if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():
+                raise RecipeError("estimate acceptance requires an idempotency_key")
+            return {"recipe": self.recipes.update(request["recipe_id"], request["expected_revision"], accepted, idempotency_key=request["idempotency_key"])}
         if action == "discover":
             return self._discover_recipes(request)
         if action == "libraries":
@@ -3015,7 +3043,7 @@ class RecipeOperations:
             target = self.primary_recipe_library_id if request.get("library_id") is None else request.get("library_id")
             if target != "builtin":
                 raise RecipeLibraryError("external recipe create requires an exact discovery_ref")
-            value = normalize_recipe(request.get("recipe"))
+            value = prepare_recipe_input(request.get("recipe"))
             return {
                 "saved": True,
                 "library_id": "builtin",
@@ -3038,9 +3066,10 @@ class RecipeOperations:
                 raise RecipeLibraryError(
                     "external update requires one exact library_recipe_ref"
                 )
-            value = normalize_recipe(request.get("recipe"))
             recipe_id = str(request.get("recipe_id") or "")
             expected = request.get("expected_revision")
+            prior = self.recipes.get(recipe_id, expected)
+            value = prepare_recipe_input(request.get("recipe"), prior=prior)
             key = request.get("idempotency_key")
             return {"recipe": self.recipes.update(recipe_id, expected, value, status=request.get("status"), idempotency_key=key)}
         if action == "archive":

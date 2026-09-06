@@ -59,11 +59,15 @@ your usual Hermes chat. No separate web app or database server is required.
 
 ## Agent support
 
-**Available now:** Hermes Agent.
+**Established integration:** Hermes Agent.
 
-**Coming soon:** OpenClaw, NanoClaw, Codex, Claude Code and Grok Bot integrations.
-These integrations are planned and are not available to install yet. The standalone runtime below can serve trusted local MCP clients; this does not
-certify the pending platform packages or their complete workflows.
+[Codex and Claude Code packages](clients/README.md) are available with verified
+native setup, permissions and persisted state. [OpenClaw](docs/openclaw.md) and
+[NanoClaw](docs/nanoclaw.md) adapters have verified native discovery and lifecycle
+baselines. Their complete recipe, attachment and scheduling workflows remain
+under integration. The [Grok guide](docs/grok.md) provides a synthetic runtime
+harness; native Grok MCP registration and the complete VM workflow remain
+unverified.
 
 ## Supported stores
 

@@ -27,7 +27,7 @@ from recipe_libraries import (
     validate_library_id,
     validate_library_recipe_ref,
 )
-from recipes import RecipeError, normalize_recipe, normalize_source_url
+from recipes import RecipeError, evidence_inputs, normalize_recipe, normalize_source_url, source_ingredient, source_yield, recipe_evidence_fields
 
 
 MINIMUM_RECIPESAGE_VERSION = (4, 0, 3)
@@ -1307,9 +1307,15 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         user_notes: str | None = None
         if metadata is not None:
             origin, _raw_stored, document, user_notes = metadata
+            if any(e.get("acceptance") is not None for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
+                raise RecipeLibraryError("external recipe metadata cannot establish local estimate acceptance")
+            if document.get("schema_version") == 2 and document["source"]["relationship"] == "generated" and any(e["basis"] != "estimate" for evidence in recipe_evidence_fields(document).values() for e in evidence_inputs(evidence)):
+                raise RecipeLibraryError("generated external metadata cannot relabel estimate evidence")
             payload, expected_document = self._native_payload(document, origin)
             if self._native_matches(raw, payload, expected_document, origin):
                 return document
+            if document.get("schema_version") == 2:
+                raise RecipeLibraryError("edited native schema 2 metadata needs an explicit own-bank import; evidence cannot be silently reassigned")
             stored = document
             source = deepcopy(document["source"])
             rights = deepcopy(document["rights"])
@@ -1357,6 +1363,14 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
                     if field in stored:
                         candidate[field] = deepcopy(stored[field])
         try:
+            if stored is None:
+                candidate["schema_version"] = 2
+                candidate["source"]["original"] = {"url": raw.get("url") or None, "publisher": _body(raw.get("source"), "recipe source", 300) or None}
+                if rights["storage"] == "full":
+                    candidate["ingredients"] = [source_ingredient(text) for text in candidate["ingredients"]]
+                    yield_text = _body(raw.get("yield"), "recipe yield", 500)
+                    candidate["yield"], candidate["portions"] = source_yield(yield_text)
+                    candidate["portions_evidence"] = {"basis": "source" if candidate["portions"] is not None else "unknown", "input": yield_text or None}
             return normalize_recipe(candidate)
         except RecipeError as exc:
             raise RecipeLibraryError(
@@ -1619,6 +1633,8 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
     def create_from_snapshot(
         self, snapshot: Mapping[str, Any], operation: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        if snapshot.get("schema_version") == 2:
+            raise RecipeLibraryDefiniteError("RecipeSage legacy writes do not support recipe schema 2; use the builtin bank")
         if self.read_only:
             raise RecipeLibraryDefiniteError("RecipeSage connection is read-only")
         try:

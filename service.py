@@ -812,8 +812,12 @@ def run(args) -> None:
             vipps_phone_number=settings.get("vipps_phone_number"),
         )
     email_provider_clients: dict[str, Any] = {}
-    if settings["provider"] == "meny" and args.tokens is not None and args.tokens.is_dir():
-        email_provider_clients["oda"] = RetailMcpClient(args.tokens)
+    if args.tokens is not None:
+        for retained_provider in ("oda", "mathem"):
+            if retained_provider != settings["provider"]:
+                email_provider_clients[retained_provider] = RetailMcpClient(
+                    args.tokens, provider=retained_provider,
+                )
     recipe_library_adapters: dict[str, RecipeLibraryAdapter] = {}
     for connection in settings["recipe_libraries"]:
         library_id = connection["library_id"]

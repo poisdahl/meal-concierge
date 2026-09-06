@@ -6,6 +6,7 @@ from fractions import Fraction
 
 from core import HouseholdError
 import menu_planning as mp
+from recipe_quantities import read_quantity, quantity_json
 
 CONFIRMATION_STATEMENT = "I confirm these exact batch portions, suitability and storage facts for this plan."
 
@@ -112,10 +113,9 @@ def shopping(menu):
         if recipe['recipe_key']!=source['recipe_key']: continue
         for requirement in recipe['shopping_requirements']:
             if requirement.get('scalable') is True:
-                # Rational quantities are local shopping metadata, not recipe documents.
                 try:
-                    amount=Fraction(str(requirement['quantity']))*factor
-                    requirement['quantity']=rational(amount)
+                    amount=read_quantity(requirement['quantity'], legacy_float=True)*factor
+                    requirement['quantity']=quantity_json(amount)
                 except (ValueError, ZeroDivisionError):
                     requirement['scalable']=False
         recipe['batch_prepared_portions']=deepcopy(batch['prepared_portions'])

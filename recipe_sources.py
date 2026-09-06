@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from core import DEFAULT_RECIPE_SOURCES, HouseholdError, RECIPE_SOURCE_IDS
-from recipes import RecipeError, normalize_recipe, normalize_source_url
+from recipes import RecipeError, normalize_recipe, normalize_source_url, source_ingredient
 
 
 SOURCE_IDS = RECIPE_SOURCE_IDS
@@ -141,10 +141,7 @@ class TheMealDBSource:
             if not item:
                 continue
             raw = " ".join(part for part in (measure, item) if part)
-            ingredients.append({
-                "raw": raw or item, "amount": measure or None, "item": item,
-                "quantity": None, "unit": None, "scalable": False,
-            })
+            ingredients.append(source_ingredient(raw or item, item=item, measure=measure))
         steps = [_text(line, maximum=4_000) for line in re.split(r"[\r\n]+", instructions)]
         steps = [line for line in steps if line]
         if not ingredients or not steps:
@@ -156,6 +153,7 @@ class TheMealDBSource:
                 if cleaned and cleaned not in tags:
                     tags.append(cleaned)
         recipe = {
+            "schema_version": 2,
             "name": name,
             "language": "en",
             "portions": None,
@@ -179,6 +177,8 @@ class TheMealDBSource:
                 "changes": "Normalized into Meal Concierge's structured format; artwork was not copied.",
             },
         }
+        if value.get("strSource"):
+            recipe["source"]["original"] = {"url": value["strSource"]}
         return normalize_recipe(recipe)
 
 
@@ -338,13 +338,11 @@ class WikibooksSource:
         source_url = normalize_source_url(f"https://en.wikibooks.org/wiki/{encoded_title}")
         permanent_url = normalize_source_url(f"https://en.wikibooks.org/wiki/Special:PermanentLink/{revision}")
         recipe = {
+            "schema_version": 2,
             "name": name,
             "language": "en",
             "portions": None,
-            "ingredients": [
-                {"raw": item, "item": item, "quantity": None, "unit": None, "scalable": False}
-                for item in ingredients[:200]
-            ],
+            "ingredients": [source_ingredient(item) for item in ingredients[:200]],
             "steps": steps[:100],
             "tags": ["Wikibooks Cookbook"],
             "source": {
@@ -387,6 +385,7 @@ def provider_recipe_candidates(provider: str, value: Any, limit: int) -> list[di
         if not name or not external_id or urlsplit(url or "").hostname not in allowed_hosts:
             continue
         results.append(normalize_recipe({
+            "schema_version": 2,
             "name": name, "language": "sv-SE" if provider == "mathem" else "nb-NO", "tags": [provider.upper()],
             "source": {
                 "kind": provider, "publisher": provider.upper(), "title": name,

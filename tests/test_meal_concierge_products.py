@@ -997,8 +997,11 @@ class ProductRuntimeTests(unittest.TestCase):
 
     def test_prepare_rejects_provider_results_beyond_declared_scope(self):
         self.provider.product_count = 6
-        with self.assertRaisesRegex(HouseholdError, "bounded candidate scope"):
-            self.prepare(approve=False)
+        plan = self.prepare(approve=False)
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(len(plan["requirements"]), 1)
+        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "provider_search_unavailable_or_scope_changed")
+        self.assertNotIn("observation", plan["requirements"][0])
 
     def test_public_catalog_product_limit_matches_normalizer_bound(self):
         with self.assertRaisesRegex(HouseholdError, "one to 20"):
@@ -1345,13 +1348,7 @@ class MenuCostComparisonTests(unittest.TestCase):
         self.compare()
         self.assertEqual(len(self.calls), 3)
 
-    def test_budget_preflight_no_search_and_maximum_alternatives(self):
-        from unittest import mock
-        with mock.patch("planning_operations.MAX_REQUIREMENTS", 2):
-            result = self.compare()
-        self.assertEqual(self.calls, [])
-        self.assertEqual(result["status"], "unavailable")
-        self.assertEqual(len(result["alternatives"]), 3)
+    def test_maximum_alternatives(self):
         self.request["planner_input"]["alternatives"] = 4
         with self.assertRaises(HouseholdError):
             self.compare()
@@ -1372,7 +1369,7 @@ class MenuCostComparisonTests(unittest.TestCase):
 
     def test_per_menu_budget_and_nonconvertible_requirements(self):
         from test_meal_concierge_planner import recipe
-        for count, unit in ((21, "g"), (1, "pinch")):
+        for count, unit in ((65, "g"), (1, "pinch")):
             raw = recipe("many", f"many-{count}", unit=unit)
             raw["ingredients"] = [{"raw": f"1 {unit} item{i}", "item": f"item{i}", "quantity": 1, "unit": unit, "scalable": True} for i in range(count)]
             saved = self.app.handle({"operation": "recipes", "action": "save", "recipe": raw, "idempotency_key": f"many-{count}"})["recipe"]

@@ -29,7 +29,8 @@ details. Run shell examples from the repository root.
 ## Message presentation
 
 The shared [skill's destination profiles](../skill/SKILL.md#messages-and-destination-profiles)
-control meal-concierge replies. The installer copies this self-contained skill. There is no separate renderer,
+control meal-concierge replies. The installer copies this self-contained skill.
+There is no separate renderer,
 per-household formatting setting or duplicated agent instruction file.
 
 The profiles cover simple text, formatted chat and larger-screen interfaces,
@@ -344,10 +345,10 @@ needs a private graphical session. Do not clone refresh credentials or cookies
 between installations. Oda and Mathem use the standalone
 [provider OAuth helper](runtime.md#provider-oauth). The helper reuses the
 configured token directory and keeps login separate from service startup. Its
-read-only `--status` reports stored auth state without refreshing; ordinary
-calls never open a login browser or register a new client. A healthy core or
-saved OAuth grant does not certify provider connectivity or the dedicated
-browser account.
+read-only `--status` reports stored auth state without refreshing; ordinary calls
+never open a login browser or register a new client. A healthy core or saved
+OAuth grant does not certify provider connectivity or the dedicated browser
+account.
 
 Close visible Chromium after login so the supervised browser can own that
 profile. For Oda protected checkout, verify that this profile shows the
@@ -637,6 +638,13 @@ The service resolves credentials beside a conventional `HOME/state` directory
 or inside a state-root container mount, without exposing either path through MCP.
 
 ## Private recipe bank
+
+The [versioned recipe contract](recipe-contract.md) defines exact quantities,
+original source wording, separate yield/person servings, field evidence and
+explicit estimate acceptance. New typed writers use recipe schema 2. Existing
+schema-1 documents, revisions and discovery digests retain their exact content.
+Schema-2 external-library writes and new managed-image mutations are staged
+unsupported; the built-in bank supports the culinary/evidence representation.
 
 The recipe bank is household-bound SQLite at
 `$HERMES_HOME/meal-concierge/state/recipes.sqlite3`. It is opened only by recipe
@@ -1066,14 +1074,42 @@ single-agent installation pays no coordination overhead.
 
 `meal_concierge_products(action="lowest_cost", planner_input=..., candidate_approvals=...)`
 compares at most three deterministic alternatives from one exact planner input.
-The default planner and scheduled strategy are unchanged. The comparison shares
-at most 20 unique ingredient/unit requirements and 20 canonical ingredient
-searches, each page 1 with at most five results, across all alternatives. It
-preflights the whole union before searching; no partial budget prefix is ranked.
-Each product plan retains its existing limit of 10,000 combinations per
-requirement (at most three plans). Exact user-approved candidate refs remain
-required; missing approvals, unknown amounts/eligibility or incompatible units
-keep the original non-price order and prevent a cheapest-menu claim.
+The default planner and scheduled strategy are unchanged. Each menu supports
+at most 64 combined aggregated ingredient/unit requirements and unresolved
+ingredient lines. Prepare and apply retain that per-menu limit; comparison
+accepts at most 192 unique requirements, canonical ingredient searches and
+exact approval entries across three alternatives. Compatible searches share
+observations only within that comparison. Each search uses page 1 with at most
+five results, and each requirement retains its 10,000-combination package
+search limit. The whole requirement union is checked before provider searches;
+an oversized menu returns an explicit capacity error, never a first-64 prefix.
+Missing approvals, unknown amounts/eligibility or incompatible units keep the
+original non-price order and prevent a cheapest-menu claim.
+
+Product reads and package planning share one 240-second operation deadline inside the
+300-second products RPC timeout. No new provider read or cart write starts
+after expiry; package calculation also checks the deadline between bounded
+requirements. Failed and unfinished searches remain attached to every affected
+requirement as `needs_input`, preserving completed observations and structural
+unknowns. Such a plan cannot be applied. Apply retains independent fresh
+product reads before cart preparation, immediately before mutation, and after
+verified cart synchronization. An unverified write remains gated on cart
+reconciliation; a later request does not retry it automatically. Product facts
+that become unavailable after an already verified cart write are reported as
+unavailable, without claiming a verified price change.
+
+The finite bounds were exercised with a synthetic seven-dinner Application
+fixture: 52 source rows produced 37 resolved shopping needs and three pantry/
+optional questions. Explicit decisions yielded a complete 37-need plan and one
+cart mutation, with independent package arithmetic and exact fractional pantry
+subtraction. Three full-week alternatives reused 37 compatible searches; a
+separate boundary fixture exercised three disjoint 64-need alternatives with
+192 approvals and searches. A 65-need menu failed before dispatch. The measured 37-need preparation made 37 synthetic searches and returned 50
+packages costing 5,000 øre in 0.15 seconds. A stress fixture of 64 needs with five
+candidates and an analytic bound of 7,776 combinations per need took 9.17 seconds;
+a fixture exceeding the unchanged 10,000-combination limit returned all 64 needs
+unresolved in 11.28 seconds. These are synthetic local measurements under
+concurrent validation load, not live-store speed estimates.
 
 A complete comparison ranks total payable product amounts including mandatory
 deposits, then exact dimensionless excess, package count, original rank and

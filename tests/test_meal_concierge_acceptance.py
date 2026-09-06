@@ -77,7 +77,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         saved = self.app.handle({"operation": "recipes", "action": "save", "recipe": full_recipe(), "idempotency_key": "portion-recipe"})["recipe"]
         result = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40", {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}})})["menu"]
         self.assertEqual(2, result["dishes"][0]["portions"])
-        self.assertEqual(200, result["dishes"][0]["shopping_requirements"][0]["quantity"])
+        self.assertEqual({"numerator": 200, "denominator": 1}, result["dishes"][0]["shopping_requirements"][0]["quantity"])
 
     def test_cart_ready_continues_to_confirmed_order_after_restart(self):
         case = flow_fixture.FlowTests("test_cart_ready_occurrence_must_be_carried_into_manual_checkout")

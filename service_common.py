@@ -15,7 +15,7 @@ import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from oda_browser import delivery_signature as oda_delivery_signature
 from core import HouseholdError, cart_summary, validate_delivery_slot
-from recipes import RecipeError, normalize_source_url, validate_week
+from recipes import RecipeError, evidence_inputs, normalize_source_url, validate_week
 
 MAX_REQUEST = 2 * 1024 * 1024
 
@@ -215,7 +215,7 @@ def menu_digest(menu: Mapping[str, Any]) -> str:
     import hashlib
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
-def menu_email_html(menu: Mapping[str, Any], *, test: bool = False) -> str:
+def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None) -> str:
     escape = lambda value: html.escape(str(value or ""))
 
     def ingredients(values: Any) -> str:
@@ -226,6 +226,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False) -> str:
                 item = str(value.get("item") or value.get("name") or "").strip()
                 raw = str(value.get("raw") or "").strip()
                 text = " ".join(part for part in (amount, item) if part) if amount else raw or item
+                estimates = [e for evidence in value.get("evidence", {}).values() for e in evidence_inputs(evidence) if e.get("basis") == "estimate"]
+                if estimates:
+                    text += " (godkjent anslag)" if all(e.get("acceptance") for e in estimates) else " (anslag; må avklares)"
             else:
                 text = str(value).strip()
             if text:
@@ -274,6 +277,18 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False) -> str:
         except RecipeError:
             permanent_url = None
         details = []
+        if metadata.get("author"):
+            details.append(escape(metadata["author"]))
+        original = metadata.get("original")
+        if isinstance(original, Mapping):
+            from recipes import normalize_attribution_url
+            try:
+                original_url = normalize_attribution_url(original.get("url"))
+            except RecipeError:
+                original_url = None
+            original_credit = " – ".join(str(original[key]) for key in ("publisher", "author", "title") if original.get(key)) or original_url
+            if original_credit:
+                details.append("Opprinnelig kilde: " + (f'<a href="{escape(original_url)}">{escape(original_credit)}</a>' if original_url else escape(original_credit)))
         if credit:
             details.append(escape(credit))
         if license_name:
@@ -287,6 +302,33 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False) -> str:
             details.append(f"Endringer: {escape(snapshot['changes'])}")
         suffix = f". {' · '.join(details)}" if details else ""
         return f"<p><strong>{escape(label)}:</strong> {rendered}{suffix}</p>"
+
+    def cover(value: Mapping[str, Any]) -> str:
+        image = value.get("image")
+        if not isinstance(image, Mapping):
+            return ""
+        from recipes import normalize_attribution_url
+        details = []
+        for field in ("creator", "credit", "changes"):
+            if image.get(field):
+                label = "Endringer: " if field == "changes" else ""
+                details.append(label + escape(image[field]))
+        for field, label in (("source_url", "Bildekilde"), ("license_url", image.get("license") or "Bildelisens")):
+            try:
+                url = normalize_attribution_url(image.get(field))
+            except RecipeError:
+                url = None
+            if url:
+                details.append(f'<a href="{escape(url)}">{escape(label)}</a>')
+            elif field == "license_url" and image.get("license"):
+                details.append(escape(image["license"]))
+        cid = (image_cids or {}).get(image.get("asset_id"))
+        rendered = ""
+        if isinstance(cid, str) and re.fullmatch(r"recipe-[0-9a-f]{64}@meal-concierge\.local", cid):
+            rendered = f'<img src="cid:{cid}" alt="{escape(image.get("alt") or value.get("name"))}" style="max-width:100%;height:auto">'
+        if details:
+            rendered += "<p><strong>Bilde:</strong> " + " · ".join(details) + "</p>"
+        return rendered
 
     week = menu_email_period(menu)
     title = f"Ukesmeny og oppskrifter – {week}"
@@ -324,11 +366,20 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False) -> str:
         for recipe in recipes:
             if not isinstance(recipe, Mapping):
                 continue
+            portions_text = f"{recipe['portions']} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
+            portion_evidence = recipe.get("portions_evidence") or {}
+            if portion_evidence.get("basis") == "estimate":
+                portions_text += " (godkjent anslag)" if portion_evidence.get("acceptance") else " (anslag; må avklares)"
+                if portion_evidence.get("assumptions"):
+                    portions_text += ": " + portion_evidence["assumptions"]
+            source_yield = recipe.get("yield") or {}
             parts.extend([
                 '<section class="recipe">',
                 f"<h2>{escape(recipe.get('name'))}</h2>",
                 source(recipe),
-                f"<p>{escape(recipe.get('portions'))} porsjoner</p>" if recipe.get("portions") else "",
+                cover(recipe),
+                f"<p>{escape(portions_text)}</p>",
+                f"<p>Kildens utbytte: {escape(source_yield['original_text'])}</p>" if source_yield.get("original_text") else "",
                 "<h3>Ingredienser</h3><ul>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 ingredients(recipe.get("ingredients")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 "</ul><h3>Fremgangsmåte</h3><ol>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",

@@ -169,6 +169,8 @@ class Migration:
     def storage_supported(self, doc, destination):
         if destination == "builtin":
             return True
+        if doc.get("schema_version") == 2:
+            return False
         # Both installed adapters construct native payloads without HTTP. Check
         # size limits and exact attribution/content before authorizing a create.
         adapter = self.app.recipe_library_adapters[destination]

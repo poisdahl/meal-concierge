@@ -2341,6 +2341,8 @@ class RecipeSourceAdapterTests(unittest.TestCase):
             "raw": "a generous handful penne", "item": "penne", "quantity": None,
             "unit": None, "scalable": False, "notes": None, "optional": False,
             "pantry": False, "amount": "a generous handful",
+            "original_text": "a generous handful penne",
+            "evidence": {field: {"basis": "source", "input": "a generous handful penne", "assumptions": None, "conversion": None} for field in ("quantity", "unit")},
         }])
         self.assertEqual(recipe["steps"], ["Boil water.", "Serve."])
         self.assertEqual(recipe["source"]["external_id"], "52771")
@@ -2386,7 +2388,7 @@ class RecipeSourceAdapterTests(unittest.TestCase):
             "https://en.wikibooks.org/wiki/Special:PermanentLink/4332792",
         )
         self.assertIn("images were omitted", recipe["external_snapshot"]["changes"])
-        self.assertFalse(any("image" in key.casefold() for key in recipe))
+        self.assertIsNone(recipe["image"])
 
     def test_http_boundary_rejects_errors_html_invalid_json_and_oversized_payload(self):
         class Response:
@@ -4007,7 +4009,7 @@ class RecipeFlowTests(unittest.TestCase):
         restarted = Application(StateStore(directory, changed_settings), self.oda, self.browser)
         frozen = restarted.handle({"operation": "menu", "action": "get"})["menu"]
         self.assertEqual(frozen["dishes"][0]["name"], "Frozen external")
-        self.assertEqual(frozen["dishes"][0]["shopping_requirements"][0]["quantity"], 200)
+        self.assertEqual(frozen["dishes"][0]["shopping_requirements"][0]["quantity"], {"numerator": 200, "denominator": 1})
         self.assertIn("Frozen external", menu_email_html(frozen))
         with self.assertRaisesRegex(RecipeLibraryError, "unavailable|not installed"):
             restarted.handle({
@@ -4487,7 +4489,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertTrue(result["menu_id"].startswith("menu_"))
         self.assertEqual(result["revision"], 1)
         self.assertEqual(result["dishes"][0]["ingredients"][0]["amount"], "200 g")
-        self.assertEqual(result["dishes"][0]["shopping_requirements"][0]["quantity"], 200)
+        self.assertEqual(result["dishes"][0]["shopping_requirements"][0]["quantity"], {"numerator": 200, "denominator": 1})
         self.assertEqual(result["dishes"][0]["recipe_key"], f"bank:{saved['id']}")
         self.assertEqual(self.store.read()["recipe_usage"][result["menu_id"]]["status"], "planned")
         rendered = menu_email_html(result)

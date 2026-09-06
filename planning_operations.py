@@ -17,9 +17,9 @@ import time
 from typing import Any, Mapping
 from core import HouseholdError, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyCartStoppedError
-from recipes import RecipeError, normalize_recipe, recipe_key, scale_recipe, validate_week
+from recipes import RecipeError, normalize_recipe, prepare_recipe_input, recipe_key, scale_recipe, validate_week
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
-from product_planner import MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
+from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
 import menu_planning as mp
 import planning_feedback as pf
@@ -38,6 +38,9 @@ from service_common import (
     menu_email_html,
     validate_schedule
 )
+
+
+PRODUCT_OPERATION_TIMEOUT = 240
 
 
 class PlanningOperations:
@@ -464,7 +467,7 @@ class PlanningOperations:
         state["menu"] = successor
         return {"menu": deepcopy(successor), "shopping_comparison": deepcopy(supplied["shopping_comparison"])}
 
-    def _materialize_menu(self, value: Any) -> dict[str, Any]:
+    def _materialize_menu(self, value: Any, *, trusted_snapshots: bool = False) -> dict[str, Any]:
         if not isinstance(value, Mapping):
             raise HouseholdError("menu must be an object")
         week = validate_week(value.get("week"))
@@ -507,10 +510,10 @@ class PlanningOperations:
                     recipe = scale_recipe(stored, raw.get("portions") if raw.get("portions") is not None else profile_portions)
                 else:
                     candidate = deepcopy(dict(raw))
-                    candidate.setdefault("portions", profile_portions)
                     if not isinstance(candidate.get("source"), Mapping) or not isinstance(candidate.get("rights"), Mapping):
                         raise HouseholdError("new menu recipes require explicit source, relationship and rights metadata")
-                    recipe = scale_recipe(normalize_recipe(candidate), candidate["portions"])
+                    document = normalize_recipe(candidate) if trusted_snapshots else prepare_recipe_input(candidate)
+                    recipe = scale_recipe(document, candidate.get("portions"))
                 materialized.append(recipe)
                 count += 1
             result[collection] = materialized
@@ -811,7 +814,7 @@ class PlanningOperations:
             "dishes": dishes,
             "salads": [],
             "schedule": schedule,
-        })
+        }, trusted_snapshots=True)
         menu["slots"] = [{
             "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": slot["date"]})[:32],
             "date": slot["date"], "meal_type": "dinner", "recipe_key": slot["recipe_key"],
@@ -1140,44 +1143,51 @@ class PlanningOperations:
             if query in cache:
                 observations[requirement["requirement_id"]] = deepcopy(cache[query])
                 continue
-            kwargs = {
-                "deadline": deadline,
-                "allow_recovery": False,
-            } if self.provider == "meny" else {}
-            observation = self.provider_client.call(
-                "product_search",
-                {"queries": [query], "page": 1, "size": MAX_CANDIDATES_PER_REQUIREMENT},
-                **kwargs,
-            )
-            if not isinstance(observation, Mapping) or observation.get("provider") != self.provider:
-                raise HouseholdError("provider product search is not normalized")
-            observed_query = observation.get("query")
-            if observed_query not in {None, query}:
-                raise HouseholdError("provider product search query changed")
-            normalized = deepcopy(dict(observation))
-            normalized["query"] = query
-            scope = normalized.get("scope")
-            if (not isinstance(scope, Mapping) or scope.get("semantics") != "bounded_relevance_ranked"
-                or scope.get("kind") != "provider_search"
-                or type(scope.get("page")) is not int or scope["page"] != 1
-                or type(scope.get("requested_size")) is not int
-                or scope["requested_size"] != MAX_CANDIDATES_PER_REQUIREMENT):
-                raise HouseholdError("provider product search scope changed")
-            products = normalized.get("products")
-            returned = scope.get("returned")
-            if (
-                not isinstance(products, list)
-                or len(products) > MAX_CANDIDATES_PER_REQUIREMENT
-                or isinstance(returned, bool)
-                or not isinstance(returned, int)
-                or returned != len(products)
-            ):
-                raise HouseholdError("provider product search exceeded its bounded candidate scope")
-            normalized["scope"] = {
-                **deepcopy(dict(scope)),
-                "page": 1,
-                "requested_size": MAX_CANDIDATES_PER_REQUIREMENT,
-            }
+            try:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HouseholdError("product search deadline reached")
+                kwargs = {"deadline": deadline}
+                if self.provider == "meny":
+                    kwargs["allow_recovery"] = False
+                observation = self.provider_client.call(
+                    "product_search",
+                    {"queries": [query], "page": 1, "size": MAX_CANDIDATES_PER_REQUIREMENT},
+                    **kwargs,
+                )
+                if not isinstance(observation, Mapping) or observation.get("provider") != self.provider:
+                    raise HouseholdError("provider product search is not normalized")
+                observed_query = observation.get("query")
+                if observed_query not in {None, query}:
+                    raise HouseholdError("provider product search query changed")
+                normalized = deepcopy(dict(observation))
+                normalized["query"] = query
+                scope = normalized.get("scope")
+                if (not isinstance(scope, Mapping) or scope.get("semantics") != "bounded_relevance_ranked"
+                    or scope.get("kind") != "provider_search"
+                    or type(scope.get("page")) is not int or scope["page"] != 1
+                    or type(scope.get("requested_size")) is not int
+                    or scope["requested_size"] != MAX_CANDIDATES_PER_REQUIREMENT):
+                    raise HouseholdError("provider product search scope changed")
+                products = normalized.get("products")
+                returned = scope.get("returned")
+                if (
+                    not isinstance(products, list)
+                    or len(products) > MAX_CANDIDATES_PER_REQUIREMENT
+                    or isinstance(returned, bool)
+                    or not isinstance(returned, int)
+                    or returned != len(products)
+                ):
+                    raise HouseholdError("provider product search exceeded its bounded candidate scope")
+                normalized["scope"] = {
+                    **deepcopy(dict(scope)),
+                    "page": 1,
+                    "requested_size": MAX_CANDIDATES_PER_REQUIREMENT,
+                }
+            except HouseholdError:
+                normalized = {"unavailable_reason": (
+                    "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline
+                    else "provider_search_unavailable_or_scope_changed"
+                )}
             cache[query] = normalized
             observations[requirement["requirement_id"]] = deepcopy(normalized)
         return observations
@@ -1290,7 +1300,7 @@ class PlanningOperations:
             observations=observations,
             candidate_approvals=candidate_approvals,
             hard_product_constraints=hard_constraints,
-            ingredient_decisions=ingredient_decisions, budget_ore=budget_ore, price_mode=price_mode,
+            ingredient_decisions=ingredient_decisions, budget_ore=budget_ore, price_mode=price_mode, deadline=deadline,
         )
 
     def _compare_menu_costs(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1303,8 +1313,10 @@ class PlanningOperations:
         comparison = {
             "mode": "lowest_cost", "status": "unavailable", "comparison_claim": None,
             "planner_version": result["planner_version"], "input_digest": result["input_digest"],
-            "work_limits": {"maximum_alternatives": 3, "maximum_unique_requirements": MAX_REQUIREMENTS,
-                            "maximum_unique_searches": MAX_REQUIREMENTS,
+            "work_limits": {"maximum_alternatives": 3, "maximum_requirements_per_menu": MAX_REQUIREMENTS,
+                            "maximum_unique_requirements": MAX_ALTERNATIVE_REQUIREMENTS,
+                            "maximum_unique_searches": MAX_ALTERNATIVE_REQUIREMENTS,
+                            "operation_timeout_seconds": PRODUCT_OPERATION_TIMEOUT,
                             "maximum_candidates_per_search": MAX_CANDIDATES_PER_REQUIREMENT,
                             "maximum_product_plans": 3},
             "alternatives": [], "unavailable": [],
@@ -1321,7 +1333,7 @@ class PlanningOperations:
             requirement_error = str(exc)
         ids = {r["requirement_id"] for rows in requirements for r in rows}
         queries = {r["identity"] for rows in requirements for r in rows}
-        if requirement_error or len(ids) > MAX_REQUIREMENTS or len(queries) > MAX_REQUIREMENTS:
+        if requirement_error or len(ids) > MAX_ALTERNATIVE_REQUIREMENTS or len(queries) > MAX_ALTERNATIVE_REQUIREMENTS:
             comparison["alternatives"] = [{"original_rank": rank, "selection_digest": h["selection_digest"],
                 "non_price_selection": deepcopy(h["selection"]), "save_handoff": deepcopy(h),
                 "product_plan": None, "cost_status": "comparison_work_budget_exceeded"}
@@ -1338,10 +1350,7 @@ class PlanningOperations:
         # dispatch order is independent of planner rank and caller candidate order.
         for query in sorted(queries):
             synthetic = {"dishes": [{"shopping_requirements": [{"item": query, "unit": "g", "quantity": 1, "scalable": True}]}], "salads": []}
-            try:
-                self._product_observations(synthetic, deadline=request.get("_deadline"), search_cache=cache)
-            except HouseholdError:
-                comparison["unavailable"].append({"search": query, "reason": "provider_search_unavailable_or_scope_changed"})
+            self._product_observations(synthetic, deadline=request.get("_deadline"), search_cache=cache)
         for rank, (handoff, menu, rows) in enumerate(zip(result["save_handoffs"], menus, requirements, strict=True), 1):
             observations = {r["requirement_id"]: cache[r["identity"]] for r in rows if r["identity"] in cache}
             selected_approvals = [{key: value for key, value in approvals[r["requirement_id"]].items() if key != "source"}
@@ -1349,6 +1358,7 @@ class PlanningOperations:
             product_plan = build_product_plan(
                 provider=self.provider, binding={"kind": "planner_selection", "planner_handoff": handoff},
                 menu=menu, observations=observations, candidate_approvals=selected_approvals, hard_product_constraints=hard,
+                deadline=request.get("_deadline"),
             )
             comparison["alternatives"].append({
                 "original_rank": rank, "selection_digest": handoff["selection_digest"],
@@ -1384,7 +1394,10 @@ class PlanningOperations:
 
     def _products(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
-        deadline = request.get("_deadline")
+        deadline = time.monotonic() + PRODUCT_OPERATION_TIMEOUT
+        if request.get("_deadline") is not None:
+            deadline = min(deadline, request["_deadline"])
+        request = {**request, "_deadline": deadline}
         if action == "lowest_cost":
             return self._compare_menu_costs(request)
         if action == "prepare":
@@ -1527,7 +1540,13 @@ class PlanningOperations:
                     deadline=deadline,
                 )
                 if postwrite_plan.get("product_plan_digest") != supplied.get("product_plan_digest"):
-                    price_verification = "changed_after_cart_write"
+                    read_unavailable = any(row.get("reason") in {
+                        "provider_search_deadline", "provider_search_unavailable_or_scope_changed", "product_planning_deadline"
+                    } for row in postwrite_plan["unresolved_requirements"])
+                    if not read_unavailable:
+                        price_verification = "changed_after_cart_write"
+                    elif price_verification == "unchanged":
+                        price_verification = "unavailable_after_cart_write"
             except HouseholdError:
                 if price_verification == "unchanged":
                     price_verification = "unavailable_after_cart_write"
@@ -1632,16 +1651,22 @@ class PlanningOperations:
             batches.append(batch)
         return batches
 
+    def _cart_provider_call(self, tool: str, arguments: Mapping[str, Any], *, deadline: float | None) -> dict[str, Any]:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise HouseholdError("cart operation deadline reached; reconcile any unverified changes")
+        kwargs = {"deadline": deadline} if deadline is not None else {}
+        return self.provider_client.call(tool, arguments, **kwargs)
+
     def _apply_meny_cart_batches(
         self, operations: list[dict[str, Any]], acknowledged: dict[str, int],
         *, deadline: float | None,
     ) -> dict[str, int]:
         for batch in self._meny_cart_batches(operations):
-            before = self.provider_client.call("get_cart", {}, deadline=deadline)
+            before = self._cart_provider_call("get_cart", {}, deadline=deadline)
             before_live, _before_names = self._cart_lines(cart_summary(before))
             if before_live != acknowledged:
                 raise HouseholdError("MENY cart changed between bounded batches")
-            changed_cart = self.provider_client.call(
+            changed_cart = self._cart_provider_call(
                 "manipulate_cart", {"operations": batch}, deadline=deadline
             )
             for operation in batch:
@@ -1787,7 +1812,7 @@ class PlanningOperations:
         if not isinstance(extra_values, list):
             raise HouseholdError("start_as_extra_product_ids must be a list")
         start_as_extra = {self._product_id(value) for value in extra_values}
-        first_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+        first_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
         first_summary = cart_summary(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         if not start_as_extra.issubset(first_live):
@@ -1881,7 +1906,7 @@ class PlanningOperations:
                             if isinstance(guard, Mapping) else None
                         ),
                     }
-            prewrite_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+            prewrite_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
             prewrite_summary = cart_summary(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != self._cart_digest(first_live):
@@ -1904,10 +1929,19 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self.provider_client.call("manipulate_cart", {"operations": operations})
+                    self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
             except HouseholdError as exc:
                 mutation_error = exc
-        verified_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+        try:
+            verified_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
+        except HouseholdError:
+            if operations:
+                with self.store.locked() as state:
+                    plan = state["cart_plan"]
+                    plan["status"] = "needs_input"
+                    plan["approved_cart_digest"] = None
+                    plan["pending_cart_digest"] = None
+            raise
         verified_summary = cart_summary(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         expected = dict(first_live)
@@ -1970,7 +2004,7 @@ class PlanningOperations:
             raise HouseholdError("cart exclusions and accepted missing products must be lists")
         excluded = {self._product_id(value) for value in excluded_values}
         accepted_missing = {self._product_id(value) for value in accepted_missing_values}
-        first_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+        first_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
         first_summary = cart_summary(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         first_digest = self._cart_digest(first_live)
@@ -2012,7 +2046,7 @@ class PlanningOperations:
         mutation_error = None
         acknowledged_live = dict(first_live)
         if operations:
-            prewrite_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+            prewrite_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
             prewrite_summary = cart_summary(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != supplied_digest:
@@ -2027,10 +2061,19 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self.provider_client.call("manipulate_cart", {"operations": operations})
+                    self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
             except HouseholdError as exc:
                 mutation_error = exc
-        verified_cart = self.provider_client.call("get_cart", {}, deadline=deadline) if self.provider == "meny" else self.provider_client.call("get_cart", {})
+        try:
+            verified_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
+        except HouseholdError:
+            if operations:
+                with self.store.locked() as state:
+                    plan = state["cart_plan"]
+                    plan["status"] = "needs_input"
+                    plan["approved_cart_digest"] = None
+                    plan["pending_cart_digest"] = None
+            raise
         verified_summary = cart_summary(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         if mutation_error is not None or verified_live != target:

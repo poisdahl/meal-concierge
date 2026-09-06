@@ -11,6 +11,8 @@ import json
 import secrets
 from typing import Any, Mapping
 from core import HouseholdError, mask_email, valid_email_address
+from recipe_assets import RecipeAssets
+from recipe_email import prepare_recipe_media
 from service_common import (
     EMAIL_AUTOMATION_PROTOCOL,
     EMAIL_CLAIM_LEASE,
@@ -29,6 +31,184 @@ from service_common import (
 
 
 class EmailOperations:
+    def _email_media_payload(self, menu: Mapping[str, Any], fallback_html: str,
+                             request: Mapping[str, Any], *, test: bool = False) -> dict[str, Any]:
+        supported = request.get("images_supported", False)
+        if not isinstance(supported, bool):
+            raise HouseholdError("images_supported must be a boolean")
+        if any(isinstance(recipe, Mapping) and isinstance(recipe.get("image"), Mapping)
+               for group in ("dishes", "salads") if isinstance(menu.get(group), list) for recipe in menu[group]):
+            # Queued jobs can predate image-credit rendering. Upgrade both
+            # alternatives from their frozen snapshot, never from the bank.
+            fallback_html = menu_email_html(menu, test=test)
+        media = prepare_recipe_media(menu, RecipeAssets(self.store.directory / "recipe-assets"),
+                                     images_supported=supported)
+        payload = {"html": fallback_html, "inline_images": media["inline_images"],
+                   "image_warnings": media["image_warnings"]}
+        if media["image_cids"]:
+            payload["html_without_images"] = fallback_html
+            payload["html"] = menu_email_html(menu, test=test, image_cids=media["image_cids"])
+        return payload
+
+    @staticmethod
+    def _email_payload_within_transport(payload: dict[str, Any]) -> dict[str, Any]:
+        def fits() -> bool:
+            return len(json.dumps({"ok": True, "result": payload}, ensure_ascii=True).encode()) <= MAX_REQUEST - 1_024
+        if not fits():
+            payload["html"] = payload.pop("html_without_images", payload["html"])
+            payload["inline_images"] = []
+            payload["image_warnings"] = [{"reason": "optional_image_payload_exceeds_transport"}]
+            if not fits():
+                payload.pop("inline_images")
+                payload.pop("image_warnings")
+            if not fits():
+                raise HouseholdError("email cannot fit the meal concierge response transport")
+        return payload
+
+    @staticmethod
+    def _scheduler_binding(value: Any) -> dict[str, str]:
+        if not isinstance(value, Mapping) or set(value) != {"platform", "scope", "job_id"}:
+            raise HouseholdError("scheduler binding requires exact platform, private scope and job_id")
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 512
+               or any(ord(char) < 32 for char in item) for item in value.values()):
+            raise HouseholdError("scheduler binding fields must be bounded nonempty text")
+        return dict(value)
+
+    @staticmethod
+    def _email_occurrence(job: Mapping[str, Any]) -> str:
+        # One recipe email per provider order, even when delivery is rescheduled.
+        return email_automation_key(email_job_provider(job), safe_order_id(job.get("order_id")))
+
+    def _scheduler_invocation(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        scheduler = job["scheduler"]
+        return {"binding": deepcopy(scheduler["binding"]), "generation": scheduler["generation"],
+                "occurrence_id": self._email_occurrence(job)}
+
+    def _require_email_scheduler(self, job: Mapping[str, Any], request: Mapping[str, Any]) -> None:
+        # Presence, including an unfinished first adoption, permanently fences
+        # this job from the unowned legacy invocation path.
+        if "scheduler" not in job:
+            return
+        scheduler = job["scheduler"]
+        if scheduler.get("state") != "active":
+            raise HouseholdError("email scheduler is paused or awaiting verified handover")
+        if scheduler.get("delivery_date") != job.get("delivery_date") or job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL:
+            raise HouseholdError("email scheduler delivery changed; call scheduler_plan and verify the native update before ack_scheduler")
+        if canonical(request.get("scheduler")) != canonical(self._scheduler_invocation(job)):
+            raise HouseholdError("email scheduler identity, generation or occurrence does not match")
+
+    def _scheduler_plan_result(self, job: Mapping[str, Any]) -> dict[str, Any]:
+        scheduler = job["scheduler"]
+        invocation = self._scheduler_invocation(job)
+        prompt = email_automation_prompt(email_job_provider(job), job["order_id"],
+                                         job["delivery_date"], self._email_occurrence(job))
+        prompt += (" For both due and begin_send, include this exact scheduler object: "
+                   + canonical(invocation) + ". Preserve the same occurrence on every retry. "
+                   "An uncertain sender result stays locked; reconcile_send requires the original claim_token "
+                   "and affirmative sender evidence before recording sent or not_sent.")
+        return {"scheduler": deepcopy(scheduler), "invocation": invocation,
+                "cron_prompt": prompt, "automation_digest": hashlib.sha256(prompt.encode()).hexdigest(),
+                "delivery_date": job["delivery_date"], "scheduler_protocol": 1}
+
+    def _email_scheduler(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        action = request["action"]
+        provider = request.get("provider")
+        order_id = safe_order_id(request.get("order_id"))
+        supplied = request.get("scheduler")
+        if provider not in {"oda", "meny", "mathem"} or not isinstance(supplied, Mapping):
+            raise HouseholdError("scheduler management requires exact provider, order_id and scheduler object")
+        with self.store.locked() as state:
+            jobs = [job for job in state["email_jobs"]
+                    if job.get("order_id") == order_id and email_job_provider(job) == provider]
+            if len(jobs) != 1 or jobs[0].get("status") not in {"pending", "claimed", "sending"}:
+                raise HouseholdError("scheduler management requires one nonterminal email job")
+            job = jobs[0]
+            scheduler = job.get("scheduler")
+            if action == "pause_scheduler":
+                if not scheduler or canonical(supplied) != canonical(self._scheduler_invocation(job)):
+                    raise HouseholdError("pause requires the exact current scheduler invocation")
+                if scheduler["state"] != "paused":
+                    scheduler["state"] = "paused"
+                    scheduler["generation"] = secrets.token_urlsafe(18)
+                    scheduler.pop("ack", None)
+            elif action == "scheduler_plan":
+                if job["status"] == "sending":
+                    raise HouseholdError("email send outcome needs reconciliation before handover")
+                binding = self._scheduler_binding(supplied.get("binding"))
+                if scheduler and (scheduler["state"] == "handover" or
+                                  (scheduler.get("previous_binding") and not scheduler.get("previous_job_removed"))):
+                    if binding != scheduler["binding"]:
+                        raise HouseholdError("reconcile the existing scheduler plan before replacing it")
+                    if scheduler["delivery_date"] != job["delivery_date"]:
+                        scheduler["delivery_date"] = job["delivery_date"]
+                        scheduler["generation"] = secrets.token_urlsafe(18)
+                    return {"acknowledged": False, **self._scheduler_plan_result(job)}
+                if scheduler:
+                    if supplied.get("generation") != scheduler["generation"]:
+                        raise HouseholdError("scheduler plan generation is stale")
+                    previous = scheduler["binding"]
+                else:
+                    # The trusted adapter must inspect the old private scope;
+                    # absence of a saved binding does not establish no old jobs.
+                    inventory = supplied.get("inventory")
+                    if not isinstance(inventory, Mapping) or inventory.get("verified") is not True:
+                        raise HouseholdError("inspect the authoritative old scheduler inventory before adoption")
+                    scope = inventory.get("scope")
+                    platform = inventory.get("platform")
+                    self._scheduler_binding({"platform": platform, "scope": scope, "job_id": "inventory"})
+                    previous = supplied.get("previous_binding")
+                    if previous is not None:
+                        previous = self._scheduler_binding(previous)
+                        if (previous["platform"], previous["scope"]) != (platform, scope):
+                            raise HouseholdError("previous scheduler does not match the inspected inventory scope")
+                        if inventory.get("matching_jobs") != 1 or isinstance(inventory.get("matching_jobs"), bool):
+                            raise HouseholdError("reconcile multiple old scheduler jobs before adoption")
+                    elif inventory.get("matching_jobs") != 0 or isinstance(inventory.get("matching_jobs"), bool):
+                        raise HouseholdError("verified old inventory must establish zero matching jobs or exact previous binding")
+                for other in state["email_jobs"]:
+                    owner = other.get("scheduler")
+                    if other is job or not owner or other.get("status") == "sent":
+                        continue
+                    reserved = [owner["binding"]]
+                    if owner.get("previous_binding") and not owner.get("previous_job_removed"):
+                        reserved.append(owner["previous_binding"])
+                    if any(candidate is not None and candidate in reserved for candidate in (binding, previous)):
+                        raise HouseholdError("native scheduler job is already bound to another email follow-up")
+                scheduler = {"binding": binding, "previous_binding": deepcopy(previous) if previous != binding else None,
+                             "state": "handover", "generation": secrets.token_urlsafe(18),
+                             "delivery_date": job["delivery_date"]}
+                if not job.get("scheduler"):
+                    scheduler["adoption_inventory"] = {key: inventory[key] for key in ("platform", "scope", "verified", "matching_jobs")}
+                job["scheduler"] = scheduler
+            elif action == "ack_scheduler":
+                if not scheduler or supplied.get("generation") != scheduler["generation"]:
+                    raise HouseholdError("scheduler acknowledgement generation is stale")
+                binding = self._scheduler_binding(supplied.get("binding"))
+                wanted = supplied.get("state")
+                expected = self._scheduler_plan_result(job)
+                if (binding != scheduler["binding"] or wanted not in {"active", "paused"}
+                        or supplied.get("verified") is not True
+                        or supplied.get("previous_binding") != scheduler.get("previous_binding")
+                        or (scheduler.get("previous_binding") is not None and supplied.get("previous_job_removed") is not True)
+                        or scheduler["delivery_date"] != job["delivery_date"]
+                        or request.get("automation_digest") != expected["automation_digest"]):
+                    raise HouseholdError("scheduler acknowledgement needs the exact plan, verified old removal and native job state")
+                if scheduler.get("ack"):
+                    if canonical(scheduler["ack"]) != canonical(supplied):
+                        raise HouseholdError("scheduler acknowledgement differs from the completed plan")
+                    return {"acknowledged": True, "idempotent": True, **expected}
+                if job["status"] == "sending":
+                    raise HouseholdError("email send outcome needs reconciliation before enabling a scheduler")
+                scheduler["state"] = wanted
+                scheduler["ack"] = deepcopy(dict(supplied))
+                scheduler["previous_job_removed"] = supplied.get("previous_job_removed") is True
+                job["automation_protocol"] = EMAIL_AUTOMATION_PROTOCOL
+            if job["status"] == "claimed":
+                job["status"] = "pending"
+                job.pop("claim_token", None)
+                job.pop("claim_expires_at", None)
+            return {"acknowledged": action == "ack_scheduler", **self._scheduler_plan_result(job)}
+
     def _email_order_read(self, provider: str, order_id: str, request: Mapping[str, Any]) -> dict[str, Any]:
         client = self.email_provider_clients.get(provider)
         if client is None:
@@ -58,6 +238,8 @@ class EmailOperations:
             not isinstance(requested_provider, str) or requested_provider not in {"oda", "meny", "mathem"}
         ):
             raise HouseholdError("email provider must be oda, meny or mathem")
+        if action in {"scheduler_plan", "ack_scheduler", "pause_scheduler"}:
+            return self._email_scheduler(request)
 
         def matching_jobs(state: Mapping[str, Any], order_id: str, statuses: set[str] | None = None) -> list[dict[str, Any]]:
             candidates = [
@@ -77,8 +259,13 @@ class EmailOperations:
         def cleanup_action(job: Mapping[str, Any]) -> dict[str, Any]:
             provider = email_job_provider(job)
             order_id = safe_order_id(job.get("order_id"))
+            scheduler = deepcopy(job.get("scheduler"))
+            if scheduler and scheduler.get("previous_job_removed") is True:
+                # The old ID may since have been reused by a different job.
+                scheduler["previous_binding"] = None
             return {"provider": provider, "order_id": order_id,
                     "automation_key": job.get("automation_key") or email_automation_key(provider, order_id),
+                    **({"scheduler": scheduler} if scheduler else {}),
                     "action": "remove", "reason": "order cancelled"}
 
         if action in {"cancel_followup", "reconcile"}:
@@ -117,14 +304,26 @@ class EmailOperations:
                 "status": job.get("status"), "sent_at": job.get("sent_at"),
                 "provider": email_job_provider(job),
                 "recipient": mask_email(job.get("recipient_snapshot")),
+                "scheduler": deepcopy(job.get("scheduler")),
+                "scheduler_ownership": "managed" if "scheduler" in job else "unowned_legacy",
+                "occurrence_id": self._email_occurrence(job) if email_job_provider(job) and job.get("status") != "invalid" else None,
                 "automation_update_required": job.get("status") == "pending" and job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL,
             } for job in state["email_jobs"]]
             return {"jobs": jobs, "automation_updates_required": sum(bool(job["automation_update_required"]) for job in jobs)}
         if action == "automation_plan":
             state = self.store.read()
             updates = []
+            scheduler_updates = []
             for job in state["email_jobs"]:
-                if job.get("status") != "pending" or job.get("automation_protocol") == EMAIL_AUTOMATION_PROTOCOL:
+                if job.get("status") != "pending":
+                    continue
+                if "scheduler" in job:
+                    if job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL or job["scheduler"]["state"] != "active":
+                        scheduler_updates.append({"provider": email_job_provider(job), "order_id": job["order_id"],
+                                                  "scheduler": self._scheduler_invocation(job),
+                                                  "next": "Call scheduler_plan, apply and verify its native update, then ack_scheduler."})
+                    continue
+                if job.get("automation_protocol") == EMAIL_AUTOMATION_PROTOCOL:
                     continue
                 provider = email_job_provider(job)
                 order_id = safe_order_id(job.get("order_id"))
@@ -137,7 +336,7 @@ class EmailOperations:
                     "cron_prompt": email_automation_prompt(provider, order_id, delivery_date, automation_key),
                     "ack": email_automation_ack(provider, order_id, delivery_date, automation_key),
                 })
-            return {"protocol": EMAIL_AUTOMATION_PROTOCOL, "updates": updates,
+            return {"protocol": EMAIL_AUTOMATION_PROTOCOL, "updates": updates, "scheduler_updates": scheduler_updates,
                     "removals": [cleanup_action(job) for job in state["email_jobs"] if job.get("status") == "cancelled"]}
         if action == "ack_automation":
             order_id = safe_order_id(request.get("order_id"))
@@ -148,6 +347,8 @@ class EmailOperations:
                 raise HouseholdError(f"email automation protocol must be {EMAIL_AUTOMATION_PROTOCOL}")
             with self.store.locked() as state:
                 jobs = matching_jobs(state, order_id, {"pending"})
+                if any("scheduler" in job for job in jobs):
+                    raise HouseholdError("managed email requires scheduler_plan and ack_scheduler after a verified native update")
                 provider = email_job_provider(jobs[0]) if len(jobs) == 1 else None
                 expected_key = (
                     str(jobs[0].get("automation_key") or email_automation_key(provider, order_id))
@@ -220,7 +421,7 @@ class EmailOperations:
                     raise HouseholdError("the order has multiple email jobs")
                 job = (existing or [locked["email_jobs"][-1]])[0]
                 automation_update_required = job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL
-            return {
+            result = {
                 "scheduled": created,
                 "provider": self.provider,
                 "idempotent": not created and not rescheduled,
@@ -232,6 +433,12 @@ class EmailOperations:
                 "cron_prompt": email_automation_prompt(self.provider, order_id, delivery_date, automation_key),
                 "automation_ack": email_automation_ack(self.provider, order_id, delivery_date, automation_key),
             }
+            if "scheduler" in job:
+                result.pop("cron_prompt")
+                result.pop("automation_ack")
+                result.update(scheduler=self._scheduler_invocation(job), scheduler_update_required=automation_update_required,
+                              next="Call scheduler_plan for the managed job, apply and verify its native update, then ack_scheduler.")
+            return result
         if action == "test":
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()
@@ -252,9 +459,10 @@ class EmailOperations:
                 "mark_sent_after_success": False,
                 "next": "Send this test once; do not call mark_sent.",
             }
+            result.update(self._email_media_payload(menu, result["html"], request, test=True))
             if self.email_automation_profile:
                 result["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
-            return result
+            return self._email_payload_within_transport(result)
         if action == "due":
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()
@@ -264,6 +472,7 @@ class EmailOperations:
             if len(matching) != 1:
                 return {"send": False, "reason": "multiple email jobs for the provider order"}
             initial_job = deepcopy(matching[0])
+            self._require_email_scheduler(initial_job, request)
             job_provider = email_job_provider(initial_job)
             if job_provider is None:
                 raise HouseholdError("email job has no valid bound provider")
@@ -334,9 +543,13 @@ class EmailOperations:
                 automation_key = job.get("automation_key") or email_automation_key(job_provider, order_id)
                 job["automation_key"] = automation_key
                 local_today = self._household_today(state).isoformat()
-                if delivery != local_today:
+                if delivery != local_today or ("scheduler" in job and delivery != job["delivery_date"]):
                     job["delivery_date"] = delivery
                     job["automation_protocol"] = 0
+                    if "scheduler" in job:
+                        return {"send": False, "reason": "delivery moved", "delivery_date": delivery,
+                                "scheduler": self._scheduler_invocation(job), "scheduler_update_required": True,
+                                "next": "Call scheduler_plan, apply and verify its native update, then ack_scheduler."}
                     return {
                         "send": False, "reason": "delivery moved", "delivery_date": delivery,
                         "automation_key": automation_key,
@@ -358,6 +571,9 @@ class EmailOperations:
                     "mark_sent_after_success": True,
                     "next": f"Call begin_send with provider={job_provider}, this exact order_id and claim_token. Invoke the sender only with the payload returned when dispatch=true. After confirmed success call mark_sent with provider={job_provider}. On a definite no-send failure only call release with provider={job_provider}; leave uncertain post-dispatch outcomes locked.",
                 }
+                if "scheduler" in job:
+                    result["scheduler"] = self._scheduler_invocation(job)
+                    result["occurrence_id"] = self._email_occurrence(job)
                 return result
         if action == "begin_send":
             order_id = safe_order_id(request.get("order_id"))
@@ -368,6 +584,7 @@ class EmailOperations:
                 jobs = matching_jobs(state, order_id, {"claimed"})
                 if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match a claimed job")
+                self._require_email_scheduler(jobs[0], request)
                 pending_cancellation = state.get("pending_cancellation")
                 if email_job_provider(jobs[0]) == self.provider and isinstance(pending_cancellation, Mapping) and pending_cancellation.get("order_id") == order_id:
                     raise HouseholdError("order cancellation is pending; do not send its recipe email")
@@ -391,27 +608,59 @@ class EmailOperations:
                     "html": jobs[0].get("html") or menu_email_html(menu),
                     "provider": email_job_provider(jobs[0]), "order_id": order_id, "claim_token": claim_token,
                 }
+                payload.update(self._email_media_payload(menu, payload["html"], request))
+                if "scheduler" in jobs[0]:
+                    payload["scheduler"] = self._scheduler_invocation(jobs[0])
+                    payload["occurrence_id"] = self._email_occurrence(jobs[0])
                 if self.email_automation_profile:
                     payload["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
-                if len(json.dumps({"ok": True, "result": payload}, ensure_ascii=True).encode()) > MAX_REQUEST - 1_024:
-                    raise HouseholdError("claimed email cannot fit the meal concierge response transport")
+                self._email_payload_within_transport(payload)
                 jobs[0]["status"] = "sending"
+                jobs[0].pop("sender_receipt", None)
                 jobs[0].pop("claim_expires_at", None)
                 jobs[0]["dispatch_started_at"] = self._now().isoformat()
             return payload
+        if action == "reconcile_send":
+            order_id = safe_order_id(request.get("order_id"))
+            outcome = request.get("send_outcome")
+            token = request.get("claim_token")
+            if requested_provider is None or outcome not in {"sent", "not_sent", "unknown"} or not isinstance(token, str) or not token:
+                raise HouseholdError("send reconciliation requires exact provider, order, claim_token and send_outcome")
+            with self.store.locked() as state:
+                jobs = matching_jobs(state, order_id, {"sending", "sent"})
+                if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or jobs[0].get("sent_claim_token") or ""), token):
+                    raise HouseholdError("send reconciliation token does not match the original dispatch")
+                if outcome == "unknown":
+                    return {"resolved": jobs[0]["status"] == "sent", "status": jobs[0]["status"], "retry_allowed": False}
+                receipt = request.get("sender_receipt")
+                if not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 1024 or any(ord(char) < 32 for char in receipt):
+                    raise HouseholdError("affirmative sender evidence requires a bounded sender_receipt reference")
+                if jobs[0]["status"] == "sent" and outcome != "sent":
+                    raise HouseholdError("a confirmed sent email cannot be released")
+            # The token is rechecked under the write lock by the existing final
+            # transition. A pause/generation change never changes this identity.
+            return self._email({**request, "action": "mark_sent" if outcome == "sent" else "release"})
         if action == "mark_sent":
             order_id = safe_order_id(request.get("order_id"))
             claim_token = request.get("claim_token")
             if not isinstance(claim_token, str) or not claim_token:
                 raise HouseholdError("the email claim_token is required")
+            receipt = request.get("sender_receipt")
+            if receipt is not None and (not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 1024 or any(ord(char) < 32 for char in receipt)):
+                raise HouseholdError("sender_receipt must be a bounded evidence reference")
             with self.store.locked() as state:
-                jobs = matching_jobs(state, order_id, {"sending"})
+                jobs = matching_jobs(state, order_id, {"sending", "sent"})
                 if len(jobs) != 1:
                     raise HouseholdError("email is not claimed for sending")
-                if not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
+                if not secrets.compare_digest(str(jobs[0].get("claim_token") or jobs[0].get("sent_claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match")
+                if jobs[0]["status"] == "sent":
+                    return {"sent": True, "idempotent": True}
                 jobs[0]["status"] = "sent"
                 jobs[0]["sent_at"] = self._now().isoformat()
+                jobs[0]["sent_claim_token"] = claim_token
+                if request.get("sender_receipt"):
+                    jobs[0]["sender_receipt"] = request["sender_receipt"]
                 jobs[0].pop("claim_token", None)
                 jobs[0].pop("dispatch_started_at", None)
                 jobs[0].pop("html", None)
@@ -428,6 +677,11 @@ class EmailOperations:
                 jobs = matching_jobs(state, order_id, {"claimed", "sending"})
                 if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match a claimed or sending job")
+                if "scheduler" in jobs[0] and jobs[0]["status"] == "sending":
+                    receipt = request.get("sender_receipt")
+                    if request.get("send_outcome") != "not_sent" or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 1024 or any(ord(char) < 32 for char in receipt):
+                        raise HouseholdError("dispatched email requires affirmative not_sent sender evidence; uncertainty stays locked")
+                    jobs[0]["sender_receipt"] = receipt
                 jobs[0]["status"] = "pending"
                 jobs[0].pop("claim_token", None)
                 jobs[0].pop("claim_expires_at", None)
