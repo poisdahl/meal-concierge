@@ -234,41 +234,24 @@ the shared bounded archive codec. It verifies the descriptor's hash, size and
 format; `--recipe-pack PATH` accepts only a local artifact matching that descriptor
 and only during `install` or `update`. Archive data does not pass through RPC.
 
-This runtime pins [recipe pack 2026-09-06.3](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.3).
-Its 92,860,588-byte archive contains 3,807 Wikibooks recipes: 25 marked ready
-under the pack's quantity/readiness rules and 3,782 drafts. It includes 784
-managed JPEGs and source/image notices. Twenty parse failures and 793 withheld
-TheMealDB records remain explicit coverage limits; this is not a complete
-normalized collection. The installer verifies the exact published SHA256 and
-format for both the default HTTPS URL and an explicit local archive.
+This runtime pins [recipe pack 2026-09-06.4](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.4).
+It contains 4,600 English recipes: 3,807 from Wikibooks and 793 from TheMealDB,
+with 1,576 compressed JPEGs used by 1,586 recipes. The download is 186,706,769
+bytes (about 178 MiB); archive contents occupy 223,672,835 bytes (about 213 MiB)
+before import into the bank. Twenty Wikibooks pages could not be parsed.
 
-Actual offline native macOS and Linux ARM64 fresh installs imported the .3
-archive, selected and saved seven dinners and preserved them across restart and
-new-client attachment. Retained-bank upgrades created 28 drafts, preserved 3,703
-entries unchanged and retained 76 upstream/local conflicts under KEEP. The
-partial result preserves previous content, favorites, archived entries, image
-history and operation journals. The Mac restart needed a reviewed fix and
-resume; a Linux cleanup error and a host-specific preflight lookup were
-reconciled without repeating installation. Earlier .2 tests demonstrated
-interrupted import and relocated database-plus-assets restore, including recovery
-from two Linux disk-full failures. An unchanged archive is idempotent, and a
-pack acquisition failure reports that the pack needs attention while leaving
-the core runtime usable.
+Twenty-five recipes meet the pack’s quantity and serving checks. The other 4,575
+remain readable drafts; portions or quantities must be completed before scaling
+and shopping. Source links, revision information where available, and separate
+text and image credits are included. TheMealDB content uses attribution-based
+redistribution; its supplied upstream recipe links are retained.
 
-Actual fresh default HTTPS installations from public `d8ee7a8d` passed on
-macOS and Linux without a descriptor override or offline fallback: 3,807 recipes,
-784 JPEG assets, seven distinct dinners and new-client attachment after restart.
-Installed external-primary retirement and idempotent replay also passed on both
-OSes using synthetic library transport and credentials. Existing data, images
-and unfinished obligations were preserved; builtin became primary and the old
-source remained read-only for recovery. Linux preserved one existing mapping
-and one unfinished migration plan; macOS preserved zero mappings and two
-unfinished plans, so it does not independently prove the populated-mapping case.
-Both preserved one pending and one uncertain library operation. The original
-Mac fixture failure was reconciled with a native-only resume, without repeating
-update or retirement. Both final independent reviews approved this native
-runtime/pack/legacy scope; it does not close all recipe/client acceptance under
-[#46](https://github.com/poisdahl/meal-concierge/issues/46).
+Use the latest repository code when installing or updating. The installer
+verifies the published digest and format for both the default HTTPS download
+and a local `--recipe-pack` file. Repeated imports are idempotent; local edits,
+favorites, archived entries and recipe history are preserved. Conflicts are
+reported for explicit resolution. A pack download failure leaves the core
+runtime usable and reports that the recipe collection needs attention.
 
 ## Verification boundary
 

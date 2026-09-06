@@ -974,9 +974,11 @@ snapshot never updates an existing same-source recipe silently: save returns
 that existing recipe plus a conflict requiring an explicit update with its
 `expected_revision`.
 
-TheMealDB uses its official V1 API with the public/private-use test key `1` by
-default; a private key can be supplied only through `THEMEALDB_API_KEY`. Review
-TheMealDB's current terms before using this integration in a public app.
+TheMealDB uses its official V1 API; a private key can be supplied only through
+`THEMEALDB_API_KEY`. Recipe data and artwork are distributed with TheMealDB
+attribution, upstream recipe links where supplied, and separate image credits.
+Copyright and trademark notices are retained; API resale requires separate
+permission under the [TheMealDB Terms of Use](https://www.themealdb.com/terms_of_use.php).
 Wikibooks Cookbook recipes pass a strict ingredients-plus-procedure gate and
 are stored with CC BY-SA 4.0 attribution, the exact permanent revision URL, a
 content hash and a change statement. Images are never copied. Selected

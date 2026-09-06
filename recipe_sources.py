@@ -166,9 +166,9 @@ class TheMealDBSource:
                 "external_id": meal_id, "relationship": "original",
             },
             "rights": {
-                "storage": "full", "license": "TheMealDB terms for private API use",
+                "storage": "full", "license": "TheMealDB Terms of Use",
                 "license_url": "https://www.themealdb.com/terms_of_use.php",
-                "credit": "Recipe data from TheMealDB; fetched through the official V1 API.",
+                "credit": "Recipe data sourced via TheMealDB. Recipe source listed by TheMealDB is retained separately.",
             },
             "external_snapshot": {
                 "fetched_at": self.clock(), "content_hash": _hash(value),

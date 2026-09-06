@@ -140,14 +140,14 @@ class SourceMappingTests(unittest.TestCase):
         self.assertIn('Source author', credit['source_notices'])
         self.assertIsNone(recipe['source_provider'])
 
-    def test_mealdb_missing_provenance_does_not_establish_rights(self):
+    def test_mealdb_policy_preserves_provenance_without_inventing_authorship(self):
         meal = {'idMeal': '123', 'strIngredient1': 'flour', 'strMeasure1': '200 g', 'strInstructions': 'Mix.'}
         recipe, credit = mealdb_recipe(entry('themealdb'), {'meals': [meal]})
-        self.assertEqual(credit['text_rights'], 'source_authorship_unresolved')
+        self.assertEqual(credit['text_rights'], 'permitted_with_attribution')
         self.assertIsNone(recipe['portions'])
         meal['strSource'] = 'https://example.org/original?id=3'
         recipe, credit = mealdb_recipe(entry('themealdb'), {'meals': [meal]})
-        self.assertEqual(credit['text_rights'], 'third_party_source_permission_unresolved')
+        self.assertEqual(credit['text_rights'], 'permitted_with_attribution')
         self.assertEqual(recipe['source']['original']['url'], meal['strSource'])
 
     def test_revision_mismatch_is_rejected(self):
@@ -276,7 +276,7 @@ class ImageCreditTests(unittest.TestCase):
         record, notices = _image_credit(image)
         self.assertIsNone(record)
         self.assertEqual(notices['Attribution'], 'Serendipity1987 at English Wikibooks')
-        self.assertEqual(notices['reviewed_source']['omission_reason'], 'unresolved_transfer_source_verification')
+        self.assertEqual(notices['reviewed_source']['omission_reason'], 'source_cover_not_selected')
         image['file']['sha256'] = '0' * 64
         self.assertIsNotNone(_image_credit(image)[0])
 
@@ -372,6 +372,76 @@ class BuildRoundtripTests(unittest.TestCase):
                 self.assertEqual([r['recipe_id'] for r in records], ['wikibooks:123', 'wikibooks:124'])
                 self.assertTrue(all(r['recipe']['source_provider'] is None for r in records))
                 self.assertFalse(any('cache' in name or name.startswith('/') for name in archive.entries))
+
+    def test_mealdb_text_and_cover_survive_build_resume_and_policy_cache_change(self):
+        from unittest.mock import patch
+        import build_recipe_pack
+        from recipe_portable import open_archive
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, _ = self.fixture(root)
+            covers_root = root / 'covers'
+            _, manifest, _, image_bytes = CoverHandoffTests().fixture(covers_root)
+            meal = {'idMeal': '123', 'strIngredient1': 'flour', 'strMeasure1': '200 g',
+                    'strInstructions': 'Mix.', 'strSource': 'https://example.org/recipes',
+                    'strImageSource': None, 'strCreativeCommons': None}
+            row = entry('themealdb')
+            row.pop('rendered')
+            row.update(revision=None, classification='recipe',
+                       raw=write_file(source, 'meal.json', encoded({'meals': [meal]})),
+                       image={'file': {'sha256': '3' * 64},
+                              'source_url': 'https://www.themealdb.com/images/example.jpg',
+                              'source_image_credit': None, 'source_creative_commons_flag': None})
+            snapshot = json.loads((source / 'snapshot.json').read_bytes())
+            snapshot['files']['themealdb-manifest.json'] = write_file(source, 'themealdb-manifest.json', encoded([row]))
+            snapshot_bytes = encoded(snapshot)
+            write_file(source, 'snapshot.json', snapshot_bytes)
+            sha = digest(snapshot_bytes)
+            manifest['source_snapshot_sha256'] = sha
+            association = manifest['recipes'][0]
+            association.update(source='themealdb', revision=None,
+                               source_raw_sha256=row['raw']['sha256'], source_rendered_sha256=None)
+            for wiki_row in json.loads((source / 'wikibooks-manifest.json').read_bytes()):
+                manifest['recipes'].append({'source': 'wikibooks', 'source_id': wiki_row['source_id'],
+                    'revision': wiki_row['revision'], 'source_raw_sha256': wiki_row['raw']['sha256'],
+                    'source_rendered_sha256': wiki_row['rendered']['sha256'], 'status': 'no_source_cover'})
+            manifest['profile_sha256'] = '5' * 64
+            cover_bytes = encoded(manifest)
+            write_file(covers_root, 'covers-manifest.json', cover_bytes)
+            options = {'snapshot_sha256': sha, 'pack_version': 'test.4', 'covers_root': covers_root,
+                       'covers_manifest_sha256': digest(cover_bytes)}
+            output = root / 'output'
+            with patch.object(build_recipe_pack, 'RIGHTS_POLICY', 'earlier-policy'):
+                build(source, output, **options)
+            partial = build(source, output, stop_after=1, **options)
+            self.assertFalse(partial['complete'])
+            result = build(source, output, **options)
+            self.assertEqual(result['cache_reused'], 1)
+            self.assertEqual(result['counts']['themealdb.included'], 1)
+            self.assertEqual(result['counts']['themealdb.image_included'], 1)
+            path = output / result['archive']
+            original = path.read_bytes()
+            with open_archive(path) as archive:
+                records = list(archive.records())
+                meal_row = next(r for r in records if r['recipe_id'] == 'themealdb:123')
+                recipe = meal_row['recipe']
+                self.assertEqual(meal_row['status'], 'draft')
+                self.assertIsNone(recipe['portions'])
+                self.assertEqual(recipe['source']['original']['url'], meal['strSource'])
+                self.assertEqual(recipe['ingredients'][0]['original_text'], '200 g flour')
+                self.assertEqual(archive.read_asset(recipe['image']['asset_id']), image_bytes)
+                credits = json.loads(b''.join(archive.chunks('attribution.json')))['themealdb:123']
+                self.assertEqual(credits['redistribution_policy']['redistribution_status'], 'permitted_with_attribution')
+                self.assertIsNone(credits['image_notices']['source_creative_commons_flag'])
+                self.assertIsNone(credits['image_notices']['creator'])
+                self.assertIn('TheMealDB', recipe['image']['credit'])
+                self.assertNotIn('CC', recipe['image']['license'])
+            self.assertEqual(build(source, output, **options)['cache_reused'], 3)
+            self.assertEqual(path.read_bytes(), original)
+            write_file(covers_root, association['path'], b'corrupt')
+            with self.assertRaises(PackBuildError):
+                build(source, output, **options)
+            self.assertEqual(path.read_bytes(), original)
 
     def test_build_rejects_overlapping_source_and_wrong_seal(self):
         with tempfile.TemporaryDirectory() as temporary:

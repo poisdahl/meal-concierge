@@ -13,6 +13,16 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+THEMEALDB_TERMS = "https://www.themealdb.com/terms_of_use.php"
+THEMEALDB_POLICY = {
+    "redistribution_status": "permitted_with_attribution",
+    "attribution_required": True,
+    "preserve_copyright_and_trademark_notices": True,
+    "api_resale_requires_separate_permission": True,
+    "terms_url": THEMEALDB_TERMS,
+}
+
+
 class SourceParseError(ValueError):
     pass
 
@@ -186,9 +196,9 @@ def _base(entry: dict) -> dict:
         "source": {"kind": entry["source"], "publisher": "Wikibooks Cookbook" if wiki else "TheMealDB",
                    "title": entry["title"], "author": "Wikibooks contributors" if wiki else None,
                    "url": entry["url"], "external_id": entry["source_id"], "relationship": "adapted"},
-        "rights": {"storage": "full", "license": "CC BY-SA 4.0" if wiki else "TheMealDB API terms; redistribution unresolved",
+        "rights": {"storage": "full", "license": "CC BY-SA 4.0" if wiki else "TheMealDB Terms of Use",
                    "license_url": "https://creativecommons.org/licenses/by-sa/4.0/" if wiki else "https://www.themealdb.com/terms_of_use.php",
-                   "credit": entry.get("credit") or "Recipe data from TheMealDB; original attribution retained separately."},
+                   "credit": entry.get("credit") or "Recipe data sourced via TheMealDB. Recipe source listed by TheMealDB is retained separately."},
         "external_snapshot": {"fetched_at": entry["fetched_at"], "content_hash": entry["raw"]["sha256"],
                               "source_revision_id": str(entry["revision"]) if entry.get("revision") is not None else None,
                               "permanent_url": entry.get("permanent_url"),
@@ -215,7 +225,11 @@ def mealdb_recipe(entry: dict, payload: dict) -> tuple[dict, dict]:
     result["steps"] = [line.strip() for line in re.split(r"[\r\n]+", meal.get("strInstructions") or "") if line.strip()]
     result["tags"] = list(dict.fromkeys(x.strip() for x in [meal.get("strCategory") or "", meal.get("strArea") or ""] if x.strip()))
     return normalize_recipe(result), {
-        "text_rights": "third_party_source_permission_unresolved" if source else "source_authorship_unresolved",
+        "text_rights": "permitted_with_attribution",
+        "redistribution_policy": THEMEALDB_POLICY.copy(),
+        "provider": "TheMealDB", "provider_url": "https://www.themealdb.com/",
+        "credit": result["rights"]["credit"],
+        "original_source_label": "Recipe source listed by TheMealDB",
         "original_source": source, "terms_url": result["rights"]["license_url"],
     }
 

@@ -17,7 +17,7 @@ python build_recipe_pack.py \
   --snapshot /absolute/path/to/sealed-source-snapshot \
   --snapshot-sha256 EXPECTED_SNAPSHOT_JSON_SHA256 \
   --output /absolute/path/to/separate-build-directory \
-  --pack-version 2026-09-06.1 \
+  --pack-version 2026-09-06.4 \
   --covers-root /absolute/path/to/reviewed-cover-derivatives \
   --covers-manifest-sha256 EXPECTED_COVERS_MANIFEST_JSON_SHA256
 ```
@@ -85,11 +85,20 @@ product matching must exercise the installed artifact through the runtime.
 
 ## Rights, attribution and images
 
-The initial redistribution policy admits Wikibooks text under CC BY-SA 4.0 with
-source, revision, contributor/history attribution, source notices and change
-notes. It treats image rights separately. Explicit supported CC/CC0/public-domain
-image metadata can establish eligibility; absent or unsupported notices remain
-unresolved. License labels do not grant trusted pack origin.
+Wikibooks text is distributed under CC BY-SA 4.0 with source, revision,
+contributor/history attribution, source notices and change notes. Wikibooks
+images use their own supported CC, CC0 or public-domain notices. Images outside
+that policy are omitted. License labels do not grant trusted pack origin.
+
+TheMealDB recipe text and artwork are distributed with attribution under the
+project's `permitted_with_attribution` policy and the
+[TheMealDB Terms of Use](https://www.themealdb.com/terms_of_use.php).
+Credit identifies TheMealDB as the provider, retains `strSource` as “Recipe source
+listed by TheMealDB”, and preserves copyright and trademark notices. Recipe
+source links are separate from image credits. API resale requires separate
+permission. Source image creator, license and `strCreativeCommons` values remain
+as supplied, including null; the project policy does not assign a Creative
+Commons license. Image changes are recorded separately from source credit.
 
 Image notices retain the supplied title, attribution requirement, separate
 credit and requested attribution, copyright notices, and attribution/source-review
@@ -103,21 +112,9 @@ The supplements were reviewed on 6 September 2026. A Commons revision permalink
 pins the description; editor notes can come from the separately displayed file
 history, which MediaWiki does not freeze with the description revision.
 
-One reviewed exception omits the optional `SN1.JPG` cover for unresolved
-transfer-source verification. Its original Wikibooks description was deleted
-after transfer; the public upload log cannot recover the original permission
-text, and Commons still carries the transfer-review warning. This is not a finding
-of infringement. The recipe and its supplied Serendipity1987 attribution, declared
-licenses, warning and source references remain in the pack. Other unknown-author
-images retain their existing eligibility.
-
-TheMealDB text is normalized locally but withheld from the initial public ZIP
-pending a supported redistribution basis. Entries with upstream attribution and
-entries with unknown authorship receive different reasons. An empty `strSource`
-does not establish first-party ownership. Missing image CC flags likewise remain
-uncertainty. See the [API terms](https://www.themealdb.com/terms_of_use.php) and
-[Wikibooks reuse policy](https://en.wikibooks.org/wiki/Wikibooks:Copyrights).
-These exclusions are visible distribution gaps, not full-collection acceptance.
+The optional `SN1.JPG` cover is not selected for this collection. Its recipe,
+supplied Serendipity1987 attribution, declared licenses and original source
+notices are retained in `attribution.json`.
 
 A separate source compression job owns canonical managed renditions. The builder
 checks the reviewed derivative manifest digest, complete recipe associations,

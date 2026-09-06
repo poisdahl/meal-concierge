@@ -106,11 +106,28 @@ The desktop attachment attempt reached the native file chooser with the exact
 synthetic PDF selected, but `Open` remained disabled; a reviewed plain-text
 fixture behaved the same way. Later inspection found delayed, unsent composer
 input that earlier accessibility snapshots had not shown. Further editing and
-clicks also produced delayed or conflicting UI observations; no newly sent
-message, successful attachment, native MCP registration or cloud test service
-was verified. Reconcile the actual draft and transcript before another attempt.
-These UI failures are separate from the browser package's automatic-review
-rejection.
+clicks also produced delayed or conflicting UI observations. The read-only
+status prompt was subsequently confirmed in both the transcript and screenshot:
+it was sent at 10:28 and answered at 10:29 on 2026-09-06. Grok reported the task
+source and pinned environment present, with no task socket or active process.
+That delivery does not establish reliable subsequent input or MCP acceptance.
+
+Two later focus calibrations used exclusive native UI control and a 60-second
+outer tool timeout. A coordinate click failed after 31 ms with
+`noWindowsAvailable`. After resetting only the tool's JavaScript session and
+reacquiring Grok by its bundle ID, one click on a fresh accessibility Prompt
+element returned success after 681 ms. Immediate and delayed observations still
+reported focus on the account-menu control, with no visible text caret. This
+does not distinguish an accessibility-reporting error from unsuccessful focus.
+Neither calibration proceeded to text entry or submission; longer clipboard
+timeouts therefore remain untested. No successful attachment, native MCP
+registration or cloud test service has been verified.
+
+Resume with a materially different documented input mechanism or user-assisted
+focus, and reconcile the actual draft and transcript. Verify control of the
+Prompt and one intended delivery before starting cloud service or native MCP
+tests. The input blocker is separate from the browser package's automatic-review
+rejection; repeated blind input or package-install retries do not resolve either.
 
 Upstream references: [cloud computer and account sharing](https://docs.x.ai/grok-bot/computer-and-apps),
 [skills and routines](https://docs.x.ai/grok-bot/skills-routines-and-automations),

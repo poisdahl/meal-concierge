@@ -17,11 +17,11 @@ import tempfile
 import time
 import unicodedata
 
-from recipe_pack_sources import SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
+from recipe_pack_sources import THEMEALDB_POLICY, THEMEALDB_TERMS, SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
 
 FORMAT = 'meal-concierge-recipes'
 NORMALIZER_VERSION = '1'
-RIGHTS_POLICY = 'wikibooks-cc-text-explicit-cc-pd-images-v2'
+RIGHTS_POLICY = 'wikibooks-cc-themealdb-attribution-v3'
 MAX_RECORD_BYTES = 512 * 1024
 MAX_SOURCE_BODY = 32 * 1024 * 1024
 MAX_ENTRIES = 10_000
@@ -238,8 +238,8 @@ REVIEWED_IMAGE_CREDITS = {
         'description_url': 'https://commons.wikimedia.org/wiki/File:SN1.JPG',
         'revision_url': 'https://commons.wikimedia.org/w/index.php?title=File:SN1.JPG&oldid=844877492',
         'creator': None,
-        'notice': 'Declared copyright holder and requested attribution: Serendipity1987 at English Wikibooks. Commons retains an unreviewed bot-transfer warning. Original Wikibooks description was deleted after transfer; its public upload log says own work and permission below, but the original permission text cannot be independently recovered. Optional cover omitted for unresolved transfer-source verification; no infringement finding.',
-        'omission_reason': 'unresolved_transfer_source_verification',
+        'notice': 'Declared copyright holder and requested attribution: Serendipity1987 at English Wikibooks. Commons retains an unreviewed bot-transfer warning. Original Wikibooks description was deleted after transfer; its public upload log says own work and permission below, but the original permission text cannot be independently recovered. Optional cover not selected for this collection.',
+        'omission_reason': 'source_cover_not_selected',
         'evidence_links': [
             'https://commons.wikimedia.org/w/index.php?title=File:SN1.JPG&oldid=255804028',
             'https://en.wikibooks.org/w/index.php?title=Special:Log&page=File:SN1.JPG',
@@ -331,6 +331,28 @@ def fingerprint():
     values['python'] = '.'.join(map(str, sys.version_info[:3]))
     values['unicode'] = unicodedata.unidata_version
     return values
+
+
+def _mealdb_image_credit(image):
+    notices = {
+        'provider': 'TheMealDB', 'provider_url': 'https://www.themealdb.com/',
+        'redistribution_policy': THEMEALDB_POLICY.copy(),
+        'source_url': image.get('source_url'),
+        'creator': image.get('creator'), 'source_license': image.get('license'),
+        'source_image_credit': image.get('source_image_credit'),
+        'source_creative_commons_flag': image.get('source_creative_commons_flag'),
+    }
+    credit = 'Artwork sourced via TheMealDB.'
+    if image.get('source_image_credit'):
+        credit += ' ' + plain(str(image['source_image_credit']))
+    if len(credit) > 500:
+        credit = 'Artwork sourced via TheMealDB. Complete image credit is preserved in attribution.json.'
+    return {
+        'alt': None, 'source_url': image.get('source_url'),
+        'creator': image.get('creator'), 'credit': credit,
+        'license': 'TheMealDB Terms of Use', 'license_url': THEMEALDB_TERMS,
+        'changes': 'Image processed and compressed by Meal Concierge.',
+    }, notices
 
 
 def _image_credit(image):
@@ -518,10 +540,11 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                     status = 'draft'
                 image_status = entry.get('image_status') or 'no_candidate'
                 if entry.get('image'):
-                    image_record, notices = _image_credit(entry['image'])
+                    image_reader = _mealdb_image_credit if entry['source'] == 'themealdb' else _image_credit
+                    image_record, notices = image_reader(entry['image'])
                     credit['image_notices'] = notices
                     credit['image_source_url'] = entry['image'].get('description_url') or entry['image'].get('source_url')
-                    image_status = notices.get('reviewed_source', {}).get('omission_reason') or 'rights_unresolved'
+                    image_status = notices.get('reviewed_source', {}).get('omission_reason') or 'not_selected_by_image_policy'
                     if image_record:
                         image_status = 'awaiting_reviewed_derivative'
                         if covers:
@@ -551,7 +574,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         base.update({k: v for k, v in cached.items() if k not in {'recipe', 'credit'}})
         if 'recipe' in cached:
             counts[(entry['source'], 'image_' + cached['image_status'])] += 1
-            public = entry['source'] == 'wikibooks' and cached['credit']['text_rights'] == 'CC-BY-SA-4.0'
+            public = ((entry['source'] == 'wikibooks' and cached['credit']['text_rights'] == 'CC-BY-SA-4.0')
+                      or (entry['source'] == 'themealdb' and cached['credit']['text_rights'] == 'permitted_with_attribution'))
             base['distribution'] = 'included' if public else 'excluded_rights'
             counts[(entry['source'], base['distribution'])] += 1
             if public:
@@ -633,7 +657,9 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 'pack_id': 'wikibooks-themealdb-en', 'pack_version': pack_version,
                 'recipe_schema_version': 2, 'normalizer_version': NORMALIZER_VERSION,
                 'source_snapshot': {'id': source['snapshot_id'], 'sha256': snapshot_sha256},
-                'scope': source['scope'], 'source_limitations': source['source_limitations'],
+                'scope': source['scope'],
+                # Acquisition policy is superseded by this pack's explicit source policy.
+                'source_limitations': [item for item in source['source_limitations'] if not item.startswith('Image rights')],
                 'rights_policy': RIGHTS_POLICY, 'build_versions': versions,
                 'records_count': len(record_paths), 'counts': {f'{k[0]}.{k[1]}': v for k, v in sorted(counts.items())},
                 'files': files}

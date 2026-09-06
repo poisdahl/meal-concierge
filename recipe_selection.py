@@ -33,7 +33,9 @@ def source_identities(recipe: Mapping[str, Any]) -> set[str]:
         external_id = str(attribution.get("external_id") or "").strip()
         if publisher and external_id:
             result.add(f"source:{publisher}:{external_id}")
-        if attribution.get("url"):
+        # An original attribution can name an article containing many recipes.
+        # Only its explicit publisher/recipe ID above establishes an alias.
+        if attribution is source and attribution.get("url"):
             url = normalize_attribution_url(attribution["url"])
             parsed = urlsplit(url)
             # These are observed aliases for the same retailer recipe route.

@@ -70,6 +70,40 @@ class SelectionTests(unittest.TestCase):
         self.assertIn(ready["reference"], [item["reference"] for item in result["candidates"]])
         self.assertEqual(draft["materialization_error"], "draft")
 
+    def test_original_article_does_not_merge_distinct_recipes_or_history(self):
+        asado, empanadas = candidate(1), candidate(2)
+        article = "https://example.org/the-ten-iconic-dishes-of-argentina"
+        for item, external_id, name in ((asado, "53133", "Asado"), (empanadas, "53134", "Empanadas")):
+            item["recipe"]["name"] = name
+            item["recipe"]["source"] = {
+                "kind": "themealdb", "publisher": "TheMealDB", "external_id": external_id,
+                "url": f"https://www.themealdb.com/meal/{external_id}", "relationship": "original",
+                "original": {"publisher": "Upstream publisher", "url": article},
+            }
+        original_sources = [deepcopy(item["recipe"]["source"]) for item in (asado, empanadas)]
+        self.assertFalse(source_identities(asado["recipe"]) & source_identities(empanadas["recipe"]))
+        self.assertEqual(len(candidate_groups([asado, empanadas])), 2)
+        index = history_source_index({"menu": {"dishes": [
+            {**asado["recipe"], "recipe_key": asado["recipe_key"]}]}}, lambda ref: self.fail("frozen path"))
+        usage = family_history_usage(empanadas, index, lambda key: {"eligible": key != asado["recipe_key"]})
+        self.assertTrue(usage["eligible"])
+        self.assertNotIn(asado["recipe_key"], usage["family_recipe_keys"])
+        self.assertEqual([item["recipe"]["source"] for item in (asado, empanadas)], original_sources)
+
+    def test_explicit_original_recipe_id_preserves_known_family_and_history(self):
+        original, saved = candidate(1), candidate(2, saved=True)
+        saved["recipe"]["source"]["original"] = {
+            "publisher": original["recipe"]["source"]["publisher"],
+            "external_id": original["recipe"]["source"]["external_id"],
+            "url": "https://example.org/attribution",
+        }
+        self.assertEqual(len(candidate_groups([original, saved])), 1)
+        index = history_source_index({"menu": {"dishes": [
+            {**original["recipe"], "recipe_key": original["recipe_key"]}]}}, lambda ref: self.fail("frozen path"))
+        usage = family_history_usage(saved, index, lambda key: {"eligible": key != original["recipe_key"]})
+        self.assertFalse(usage["eligible"])
+        self.assertIn(original["recipe_key"], usage["family_recipe_keys"])
+
     def test_preferences_change_selection_and_work_budget_is_real(self):
         values = [candidate(i) for i in range(1, 11)]
         values[-1]["recipe"]["tags"] = ["Thai", "spicy"]

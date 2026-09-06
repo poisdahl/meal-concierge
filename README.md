@@ -123,6 +123,23 @@ changing either. Provider login is not performed by installation. See the
 [standalone runtime guide](docs/runtime.md) for exact paths, prerequisites,
 provider limitations, existing-installation adoption and safe data handling.
 
+## Offline recipe collection
+
+The English recipe collection includes Wikibooks Cookbook and TheMealDB recipes,
+compressed cover images where available, and source credits. It works offline.
+Recipes with missing portions or quantities remain drafts until completed for
+scaling and shopping.
+
+Use the latest repository code. `install` downloads the matching recipe release
+automatically; existing installations receive it with `./install.sh update`.
+Your saved recipes and favorites are preserved; conflicting changes are reported.
+
+For an offline installation, download `meal-concierge-recipes-2026-09-06.4.zip`
+from the [recipe release](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.4)
+and add `--recipe-pack /absolute/path/to/the.zip` to your `install` or `update`
+command. Choose the recipe ZIP in **Assets**; GitHub's “Source code” downloads
+contain the program source. See [installation](#installation) for prerequisites.
+
 ## First use
 
 Start with a planning request:
