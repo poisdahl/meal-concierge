@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import datetime, timedelta
 import importlib.util
 import importlib.metadata
@@ -87,6 +88,33 @@ def serve(root, empty):
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
+class MenuProjectionTests(unittest.TestCase):
+    def test_rejection_groups_preserve_order_missing_metadata_and_input(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        first = {"name": "Draft", "recipe_ref": {"id": "one", "revision": 1},
+                 "hard_constraints": {"status": "fail", "reasons": ["draft"]},
+                 "detail_fields": {"steps": "not_loaded"}, "source": {"author": None}}
+        second = {**first, "name": "Other", "recipe_ref": {"id": "two", "revision": 2}}
+        missing = {"name": "No metadata", "source": {"author": None}}
+        explicit_null = {**missing, "detail_fields": None}
+        rejected = [first, second, missing, explicit_null, first]
+        original = {"status": "no_plan", "discovery": {"rejected": rejected, "unknown": ["kept"]}}
+        before = deepcopy(original)
+        projected = module._menu_plan_projection(original)
+        groups = projected["discovery"]["rejected_groups"]
+        self.assertEqual([len(group["recipes"]) for group in groups], [2, 1, 1, 1])
+        self.assertEqual(groups[0]["hard_constraints"], first["hard_constraints"])
+        self.assertEqual(groups[0]["detail_fields"], first["detail_fields"])
+        reconstructed = [{**recipe, **{key: value for key, value in group.items() if key != "recipes"}}
+                         for group in groups for recipe in group["recipes"]]
+        self.assertEqual(reconstructed, rejected)
+        self.assertEqual(projected["discovery"]["unknown"], ["kept"])
+        self.assertEqual(original, before)
+
+
+@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
 class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.assertEqual(importlib.metadata.version("mcp"), "2.1.1")
@@ -150,9 +178,18 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def call(self, client, tool, **arguments):
         result = await client.call_tool("meal_concierge_" + tool, arguments)
         self.assertFalse(result.is_error, result)
-        self.assertIsInstance(result.structured_content, dict)
-        self.assertEqual(json.loads(result.content[0].text), result.structured_content)
-        return result.structured_content
+        text = json.loads(result.content[0].text)
+        if tool == "menu":
+            self.assertEqual(len(result.content), 1)
+            self.assertEqual(result.content[0].type, "text")
+            self.assertIsNone(result.structured_content)
+            self.assertIsInstance(text, dict)
+            self.assertEqual(result.content[0].text, json.dumps(text, ensure_ascii=False, separators=(",", ":")))
+            self.last_menu_text = result.content[0].text
+        else:
+            self.assertIsInstance(result.structured_content, dict)
+            self.assertEqual(text, result.structured_content)
+        return text
 
     async def cli(self, request):
         process = await asyncio.create_subprocess_exec(sys.executable, "-I", "-B", str(SOURCE / "cli.py"),
@@ -189,6 +226,11 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         origins = json.loads((self.root / "manifest.json").read_text())["origins"]
         async with self.client() as client:
             self.assertIn("meal_concierge_menu", {tool.name for tool in (await client.list_tools()).tools})
+            setup_gate = await self.call(client, "menu", action="plan", planner_input={"week": self.week()})
+            self.assertNotIn("plan", setup_gate)
+            self.assertTrue(setup_gate["configuration_required"])
+            self.assertEqual(setup_gate, await self.cli({"operation": "menu", "action": "plan", "interactive": True,
+                                                       "planner_input": {"week": self.week()}}))
             await self.call(client, "setup", action="apply", keep_current=True)
             page = await self.call(client, "recipe_discovery", projection="summary", source="internal", limit=3)
             self.assertIsNotNone(page["next_cursor"])
@@ -212,7 +254,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             planned = (await self.call(client, "menu", action="plan", planner_input={"week": self.week()}))["plan"]
             cold_seconds = time.monotonic() - started
             self.assertEqual(planned["status"], "planned")
-            slots = planned["selection"]["slots"]
+            slots = planned["save_handoff"]["selection"]["slots"]
             self.assertEqual(len(slots), 7)
             self.assertEqual(len({slot["date"] for slot in slots}), 7)
             self.assertEqual({origins[slot["reference"]["recipe_ref"]["id"]] for slot in slots}, {"user", "bundled"})
@@ -223,6 +265,8 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             via_cli = (await self.cli({"operation": "menu", "action": "plan", "planner_input": {"week": self.week()}}))["plan"]
             warm_seconds = time.monotonic() - started
             self.assertEqual(via_cli["selection_digest"], planned["selection_digest"])
+            self.assertEqual(via_cli["save_handoff"], planned["save_handoff"])
+            self.assertEqual(planned["alternative_handoffs"], [])
             print(json.dumps({"mc41_runtime": {"summary_bytes": summary_bytes, "full_bytes": full_bytes,
                 "mcp_cold_seconds": round(cold_seconds, 3), "cli_warm_seconds": round(warm_seconds, 3),
                 "explored_states": planned["explored_states"], "discovery_work": planned["discovery"]["work"]}}), flush=True)
@@ -242,6 +286,56 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         state = json.loads((self.root / "state/state.json").read_text())
         self.assertEqual(state["order_snapshots"], {})
         self.assertIsNone(state["cart_plan"])
+
+    async def test_three_complete_mcp_alternatives_save_and_stale_rejection(self):
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            request = {"week": self.week(), "alternatives": 3}
+            planned = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
+            # Regression: 22 draft rejections previously pushed three handoffs to 68,840 chars.
+            # The native acceptance client truncates each whole result at 64,000.
+            self.assertLess(len(self.last_menu_text), 64000)
+            print(json.dumps({"mc41_mcp_three_alternatives_chars": len(self.last_menu_text)}), flush=True)
+            full = (await self.cli({"operation": "menu", "action": "plan", "planner_input": request}))["plan"]
+            handoffs = [planned["save_handoff"], *planned["alternative_handoffs"]]
+            self.assertEqual(len(handoffs), 3)
+            self.assertEqual(handoffs, full["save_handoffs"])
+            self.assertEqual(full["selection"], full["selections"][0])
+            self.assertEqual(full["request"], full["canonical_input"]["request"])
+            self.assertEqual(planned["effective_profile"], full["canonical_input"]["profile"])
+            self.assertEqual(planned["effective_feedback"], full["canonical_input"]["feedback"])
+            for field in ("candidate_evaluations", "work_limits", "input_digest", "selection_digest",
+                          "planner_version", "explored_states", "cooking_experiences"):
+                self.assertEqual(planned[field], full[field])
+            for field in ("sources", "unknown"):
+                self.assertEqual(planned["discovery"][field], full["discovery"][field])
+            restored_rejections = []
+            for group in planned["discovery"]["rejected_groups"]:
+                metadata = {key: value for key, value in group.items() if key != "recipes"}
+                restored_rejections.extend({**recipe, **metadata} for recipe in group["recipes"])
+            self.assertEqual(restored_rejections, full["discovery"]["rejected"])
+            self.assertEqual(len(restored_rejections), 22)
+            self.assertTrue({"canonical_input", "selection", "selections", "save_handoffs", "request"}.isdisjoint(planned))
+
+            # A failed plan has no handoff carrying its request or explanation.
+            insufficient = {"week": self.week(), "candidates": full["request"]["candidates"][:1]}
+            no_plan = (await self.call(client, "menu", action="plan", planner_input=insufficient))["plan"]
+            no_plan_cli = (await self.cli({"operation": "menu", "action": "plan", "planner_input": insufficient}))["plan"]
+            self.assertEqual(no_plan["status"], "no_plan")
+            for field in ("request", "issues", "candidate_evaluations"):
+                self.assertEqual(no_plan[field], no_plan_cli[field])
+            self.assertNotIn("save_handoff", no_plan)
+
+            await self.call(client, "profile", action="update", changes={"meals": {"portions": 3}})
+            stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_handoff": handoffs[1]})
+            self.assertTrue(stale.is_error)
+            self.assertIn("stale", stale.content[0].text.lower())
+            self.assertIsNone((await self.call(client, "menu"))["menu"])
+            fresh = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
+            alternative = fresh["alternative_handoffs"][1]
+            saved = (await self.call(client, "menu", action="save", planner_handoff=alternative))["menu"]
+            self.assertEqual((await self.call(client, "menu"))["menu"], saved)
+            self.assertEqual(saved["planner_selection"]["selection_digest"], alternative["selection_digest"])
 
     async def test_empty_bank_and_unavailable_provider_never_authorize_ai(self):
         async with self.client() as client:

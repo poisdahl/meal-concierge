@@ -930,6 +930,23 @@ breakdown and planner provenance in the menu. Repeating the same successful
 handoff is idempotent. Planning and saving never search products or change a
 provider cart, delivery, order, checkout or payment state.
 
+The MCP menu tool returns one compact JSON text block without a duplicate
+structured result. For planning, the winner is `save_handoff`; any remaining
+requested alternatives appear once in `alternative_handoffs`, in rank order.
+Each handoff retains its complete request, selection, slots, reasons and digests.
+The MCP plan also retains candidate evaluations (including usage and blockers),
+all discovery source/unknown/rejected facts, cooking experiences and work limits,
+and exposes the effective preferences as `effective_profile` and
+`effective_feedback`. Nonempty discovery rejections use `rejected_groups`: each
+group contains shared `hard_constraints` and `detail_fields` (when present) plus
+`recipes` with every remaining summary field unchanged. Groups are consecutive;
+flatten them in order and merge each group's shared fields into each recipe to
+recover the exact original rejection list. Empty `rejected` lists stay empty.
+It omits the repeated canonical input/history journal and
+standalone selection views. When no handoff is available, any existing request and all
+issues remain in the plan. Core RPC and CLI results retain their full existing
+shape; other MCP menu actions retain their result fields.
+
 To favorite one unambiguously selected unsaved discovery, Hermes first saves
 its exact `discovery_ref` to the resolved destination with a stable save
 idempotency key, then

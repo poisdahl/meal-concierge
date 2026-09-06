@@ -145,9 +145,14 @@ async def session(root, *, killable=False):
 async def call(client, tool, **args):
     result = await client.call_tool("meal_concierge_" + tool, args)
     assert not result.is_error, result
-    assert isinstance(result.structured_content, dict), result
     text = json.loads(result.content[0].text)
-    assert text == result.structured_content, "text/structured output diverged"
+    if tool == "menu":
+        assert len(result.content) == 1 and result.content[0].type == "text", result
+        assert result.structured_content is None, result
+        assert isinstance(text, dict), result
+    else:
+        assert isinstance(result.structured_content, dict), result
+        assert text == result.structured_content, "text/structured output diverged"
     return text
 
 
@@ -168,7 +173,7 @@ async def sdk_checks(root, process):
         assert {t.name for t in discovered.tools} == expected
         for tool in discovered.tools:
             assert tool.input_schema["type"] == "object"
-            if tool.name == "meal_concierge_recipe_image":
+            if tool.name in {"meal_concierge_recipe_image", "meal_concierge_menu"}:
                 assert tool.output_schema is None
             else:
                 assert tool.output_schema["type"] == "object"
