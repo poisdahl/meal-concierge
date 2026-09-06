@@ -254,7 +254,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             planned = (await self.call(client, "menu", action="plan", planner_input={"week": self.week()}))["plan"]
             cold_seconds = time.monotonic() - started
             self.assertEqual(planned["status"], "planned")
-            slots = planned["save_handoff"]["selection"]["slots"]
+            slots = planned["selection"]["slots"]
             self.assertEqual(len(slots), 7)
             self.assertEqual(len({slot["date"] for slot in slots}), 7)
             self.assertEqual({origins[slot["reference"]["recipe_ref"]["id"]] for slot in slots}, {"user", "bundled"})
@@ -265,13 +265,14 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             via_cli = (await self.cli({"operation": "menu", "action": "plan", "planner_input": {"week": self.week()}}))["plan"]
             warm_seconds = time.monotonic() - started
             self.assertEqual(via_cli["selection_digest"], planned["selection_digest"])
-            self.assertEqual(via_cli["save_handoff"], planned["save_handoff"])
-            self.assertEqual(planned["alternative_handoffs"], [])
+            self.assertEqual(via_cli["save_handoff"], {**planned["save_ref"], "selection": planned["selection"]})
+            self.assertLess(len(json.dumps(planned["save_ref"])), len(json.dumps(via_cli["save_handoff"])) / 4)
+            self.assertEqual(planned["alternatives"], [])
             print(json.dumps({"mc41_runtime": {"summary_bytes": summary_bytes, "full_bytes": full_bytes,
                 "mcp_cold_seconds": round(cold_seconds, 3), "cli_warm_seconds": round(warm_seconds, 3),
                 "explored_states": planned["explored_states"], "discovery_work": planned["discovery"]["work"]}}), flush=True)
-            saved = (await self.call(client, "menu", action="save", planner_handoff=planned["save_handoff"]))["menu"]
-            repeated = await self.call(client, "menu", action="save", planner_handoff=planned["save_handoff"])
+            saved = (await self.call(client, "menu", action="save", planner_ref=planned["save_ref"]))["menu"]
+            repeated = await self.call(client, "menu", action="save", planner_ref=planned["save_ref"])
             self.assertTrue(repeated["idempotent"])
             self.assertEqual(repeated["menu"], saved)
         self.stop_service()
@@ -279,6 +280,9 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         async with self.client() as client:
             restored = (await self.call(client, "menu"))["menu"]
             self.assertEqual(restored, saved)
+            replay = await self.call(client, "menu", action="save", planner_ref=planned["save_ref"])
+            self.assertTrue(replay["idempotent"])
+            self.assertEqual(replay["menu"], saved)
         self.assertEqual(self.bank_counts(), before)
         calls = [json.loads(line) for line in (self.root / "provider.jsonl").read_text().splitlines()]
         self.assertTrue(calls)
@@ -297,7 +301,8 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(len(self.last_menu_text), 64000)
             print(json.dumps({"mc41_mcp_three_alternatives_chars": len(self.last_menu_text)}), flush=True)
             full = (await self.cli({"operation": "menu", "action": "plan", "planner_input": request}))["plan"]
-            handoffs = [planned["save_handoff"], *planned["alternative_handoffs"]]
+            choices = [{"save_ref": planned["save_ref"], "selection": planned["selection"]}, *planned["alternatives"]]
+            handoffs = [{**choice["save_ref"], "selection": choice["selection"]} for choice in choices]
             self.assertEqual(len(handoffs), 3)
             self.assertEqual(handoffs, full["save_handoffs"])
             self.assertEqual(full["selection"], full["selections"][0])
@@ -315,7 +320,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 restored_rejections.extend({**recipe, **metadata} for recipe in group["recipes"])
             self.assertEqual(restored_rejections, full["discovery"]["rejected"])
             self.assertEqual(len(restored_rejections), 22)
-            self.assertTrue({"canonical_input", "selection", "selections", "save_handoffs", "request"}.isdisjoint(planned))
+            self.assertTrue({"canonical_input", "selections", "save_handoff", "save_handoffs", "request"}.isdisjoint(planned))
 
             # A failed plan has no handoff carrying its request or explanation.
             insufficient = {"week": self.week(), "candidates": full["request"]["candidates"][:1]}
@@ -324,18 +329,56 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(no_plan["status"], "no_plan")
             for field in ("request", "issues", "candidate_evaluations"):
                 self.assertEqual(no_plan[field], no_plan_cli[field])
-            self.assertNotIn("save_handoff", no_plan)
+            self.assertNotIn("save_ref", no_plan)
 
             await self.call(client, "profile", action="update", changes={"meals": {"portions": 3}})
-            stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_handoff": handoffs[1]})
+            stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_ref": choices[1]["save_ref"]})
             self.assertTrue(stale.is_error)
             self.assertIn("stale", stale.content[0].text.lower())
             self.assertIsNone((await self.call(client, "menu"))["menu"])
             fresh = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
-            alternative = fresh["alternative_handoffs"][1]
-            saved = (await self.call(client, "menu", action="save", planner_handoff=alternative))["menu"]
+            alternative = fresh["alternatives"][1]["save_ref"]
+            saved = (await self.call(client, "menu", action="save", planner_ref=alternative))["menu"]
             self.assertEqual((await self.call(client, "menu"))["menu"], saved)
             self.assertEqual(saved["planner_selection"]["selection_digest"], alternative["selection_digest"])
+
+    async def test_resolved_handoff_supports_unsaved_products_and_feedback(self):
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            planned = (await self.call(client, "menu", action="plan",
+                                       planner_input={"week": self.week()}))["plan"]
+            handoff = (await self.call(client, "menu", action="resolve_handoff",
+                                      planner_ref=planned["save_ref"]))["planner_handoff"]
+            self.assertEqual(handoff, {**planned["save_ref"], "selection": planned["selection"]})
+            self.assertIsNone((await self.call(client, "menu"))["menu"])
+            # Explicit synthetic pantry coverage avoids any product-provider effects.
+            decisions = [{"source": {"collection": "dishes", "recipe_index": i,
+                                      "ingredient_index": 0}, "action": "have_all"}
+                         for i in range(7)]
+            prepared = await self.call(client, "products", action="prepare",
+                                       planner_handoff=handoff, ingredient_decisions=decisions)
+            self.assertEqual(prepared["product_plan"]["binding"]["planner_handoff"], handoff)
+            self.assertEqual(prepared["product_plan"]["requirements"], [])
+            accepted = await self.call(client, "feedback", action="accept",
+                                      planner_handoff=handoff, idempotency_key="accept-resolved")
+            replay = await self.call(client, "feedback", action="accept",
+                                    planner_handoff=handoff, idempotency_key="accept-resolved")
+            self.assertEqual(replay["event"], accepted["event"])
+            fresh = (await self.call(client, "menu", action="plan",
+                                     planner_input={"week": self.week()}))["plan"]
+            current = (await self.call(client, "menu", action="resolve_handoff",
+                                      planner_ref=fresh["save_ref"]))["planner_handoff"]
+            slot = current["selection"]["slots"][0]
+            await self.call(client, "feedback", action="reject", planner_handoff=current,
+                            recipe_key=slot["recipe_key"], reference=slot["reference"],
+                            idempotency_key="reject-resolved")
+            stale = await client.call_tool("meal_concierge_menu", {
+                "action": "resolve_handoff", "planner_ref": fresh["save_ref"]})
+            self.assertTrue(stale.is_error)
+            self.assertIn("stale", stale.content[0].text.lower())
+            self.assertIsNone((await self.call(client, "menu"))["menu"])
+        calls = [json.loads(line) for line in (self.root / "provider.jsonl").read_text().splitlines()]
+        self.assertEqual({row["tool"] for row in calls}, {"recipe_search"})
 
     async def test_empty_bank_and_unavailable_provider_never_authorize_ai(self):
         async with self.client() as client:

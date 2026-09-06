@@ -340,14 +340,16 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 with self._recipe_planner_operation(), self.product_plan_lock:
                     result = self._handle(request)
             elif operation == "menu" and action in {"save", "clear"}:
-                if action == "save" and request.get("planner_handoff") is not None:
+                if action == "save" and (
+                    request.get("planner_handoff") is not None or request.get("planner_ref") is not None
+                ):
                     with self._recipe_planner_operation():
                         result = self._handle(request)
                 else:
                     result = self._handle(request)
             elif operation in {"recipes", "feedback", "migration"} or (
                 operation == "menu" and (
-                    action == "plan"
+                    action in {"plan", "resolve_handoff"}
                 )
             ):
                 with self._recipe_planner_operation():

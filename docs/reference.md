@@ -919,21 +919,37 @@ candidate set, never objectively best.
 
 A planned result carries `input_digest`, an independent `selection_digest` for
 every exact selection, its original/relaxed hard results, all score reasons and
-a complete `save_handoff`. Pass one returned handoff back unchanged as
-`planner_handoff` to `meal_concierge_menu(action="save")`; do not reconstruct it.
+a complete `save_handoff` in the service/CLI result. For menu save, pass the
+small returned `save_ref` unchanged as `planner_ref` to
+`meal_concierge_menu(action="save")`. It contains exactly `planner_version`,
+`input_digest`, `selection_digest` and the complete resolved `request`. The
+service recomputes and matches the full selection; the model does not reconstruct
+its slots or derived fields. Complete full handoffs remain supported as
+`planner_handoff` and are still checked in full. Do not mix the two forms or
+supply a legacy `menu` with either form.
 Save re-resolves the exact local references, recomputes both digests and hard
 constraints from the current profile and history, and rejects any expired ref,
 changed profile/history/fact/portion/selection or altered payload before
 mutation. The canonical date remains the one anchored by the initial plan. Save
 then freezes the exact recipe snapshots, dates, portions, reason
 breakdown and planner provenance in the menu. Repeating the same successful
-handoff is idempotent. Planning and saving never search products or change a
+handoff or reference is idempotent, including after service restart. References
+retain the exact resolved candidates, so saving does not repeat source discovery.
+They have no cache or new expiry rule and carry no additional authorization.
+Planning and saving never search products or change a
 provider cart, delivery, order, checkout or payment state.
 
 The MCP menu tool returns one compact JSON text block without a duplicate
-structured result. For planning, the winner is `save_handoff`; any remaining
-requested alternatives appear once in `alternative_handoffs`, in rank order.
-Each handoff retains its complete request, selection, slots, reasons and digests.
+structured result. For planning, the winner has `save_ref` and `selection`;
+requested `alternatives` appear in rank order, each with its own `save_ref`
+and `selection`. References retain the complete request and both digests, while
+selections retain every slot and reason. This separates the small save payload
+from the presentation evidence without discarding either. The full service/CLI
+handoffs are unchanged. For existing pre-save feedback and product preparation,
+call menu `resolve_handoff` with the selected `save_ref` as `planner_ref`. This
+read-only action revalidates the reference and returns a complete
+`planner_handoff` for those tools without saving the menu. The caller need not
+reconstruct a handoff from the presentation fields; stale references are rejected.
 The MCP plan also retains candidate evaluations (including usage and blockers),
 all discovery source/unknown/rejected facts, cooking experiences and work limits,
 and exposes the effective preferences as `effective_profile` and

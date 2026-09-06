@@ -339,6 +339,86 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(repeated["menu"], saved)
         self.assertEqual(self.provider.calls, [])
 
+    def test_compact_ref_saves_complete_alternative_and_retries_after_restart(self):
+        plan = self.plan(self.request(self.save_candidates(3), alternatives=3))
+        choice = plan["alternatives"][-1]
+        response = self.socket_call({
+            "operation": "menu", "action": "save", "planner_ref": choice["save_ref"],
+        })
+        self.assertTrue(response["ok"], response)
+        saved = response["result"]["menu"]
+        self.assertEqual(saved["planner_selection"], plan["save_handoffs"][-1])
+        restarted = Application(self.store, self.provider, object())
+        for field, value in (("planner_ref", choice["save_ref"]),
+                             ("planner_handoff", plan["save_handoffs"][-1])):
+            repeated = restarted.handle({"operation": "menu", "action": "save", field: value})
+            self.assertTrue(repeated["idempotent"])
+            self.assertEqual(repeated["menu"], saved)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_compact_ref_rejects_tampering_and_mixed_forms_without_writes(self):
+        plan = self.plan(self.request(self.save_candidates(2)))
+        ref = plan["save_ref"]
+        invalid = [{key: value for key, value in ref.items() if key != "request"},
+                   [], {**ref, "selection": plan["selection"]},
+                   {**ref, "selected_slot_ids": []},
+                   {**ref, "planner_version": "unknown"}]
+        for field in ("input_digest", "selection_digest"):
+            invalid.extend([{**ref, field: "a" * 64}, {**ref, field: False}])
+        for change in ({"portions": 9}, {"candidates": None},
+                       {"candidates": []}, {"as_of_date": "2026-09-01"}):
+            invalid.append({**ref, "request": {**ref["request"], **change}})
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(PlannerError):
+                self.app.handle({"operation": "menu", "action": "save", "planner_ref": value})
+        for extra in ({"planner_handoff": plan["save_handoff"]}, {"menu": {}},
+                      {"allow_repeat_keys": ["invented"]}, {"override_reason": "invented"},
+                      {"action": "plan"}):
+            with self.subTest(extra=extra), self.assertRaises(PlannerError):
+                self.app.handle({"operation": "menu", "action": "save", "planner_ref": ref, **extra})
+        self.assertIsNone(self.store.read()["menu"])
+        self.assertEqual(self.provider.calls, [])
+
+    def test_compact_ref_rejects_profile_history_and_recipe_drift(self):
+        candidates = self.save_candidates(2)
+        plan = self.plan(self.request(candidates))
+        with self.store.locked() as state:
+            state["profile"]["cuisine"]["wanted"] = ["Changed"]
+        with self.assertRaisesRegex(PlannerError, "stale"):
+            self.app.handle({"operation": "menu", "action": "save", "planner_ref": plan["save_ref"]})
+        plan = self.plan(self.request(candidates))
+        with self.store.locked() as state:
+            state["recipe_usage"]["other"] = {
+                "week": "2026-W36", "status": "cooked", "recipe_keys": [plan["selection"]["slots"][0]["recipe_key"]],
+                "cooked_keys": [plan["selection"]["slots"][0]["recipe_key"]],
+                "not_cooked_keys": [], "cooldown_overrides": {}, "order_id": None,
+            }
+        with self.assertRaisesRegex(PlannerError, "stale"):
+            self.app.handle({"operation": "menu", "action": "save", "planner_ref": plan["save_ref"]})
+        with self.store.locked() as state:
+            state["recipe_usage"].clear()
+        plan = self.plan(self.request(candidates))
+        exact = plan["selection"]["slots"][0]["reference"]["recipe_ref"]
+        self.app.recipes.archive(exact["id"], exact["revision"])
+        with self.assertRaises(PlannerError):
+            self.app.handle({"operation": "menu", "action": "save", "planner_ref": plan["save_ref"]})
+        self.assertIsNone(self.store.read()["menu"])
+
+    def test_compact_ref_rechecks_profile_race_before_commit(self):
+        plan = self.plan(self.request(self.save_candidates(2)))
+        original = self.app._materialize_planner_menu
+
+        def materialize_then_change_profile(handoff, resolved):
+            menu = original(handoff, resolved)
+            with self.store.locked() as state:
+                state["profile"]["cuisine"]["wanted"] = ["Changed concurrently"]
+            return menu
+
+        with mock.patch.object(self.app, "_materialize_planner_menu", side_effect=materialize_then_change_profile):
+            with self.assertRaisesRegex(PlannerError, "became stale before save"):
+                self.app.handle({"operation": "menu", "action": "save", "planner_ref": plan["save_ref"]})
+        self.assertIsNone(self.store.read()["menu"])
+
     def test_handoff_remains_anchored_when_save_crosses_household_midnight(self):
         candidate = self.save_candidates(1)[0]
         before_midnight = datetime(2026, 9, 7, 21, 59, tzinfo=timezone.utc)
@@ -349,7 +429,7 @@ class WeeklyPlannerTests(unittest.TestCase):
         with mock.patch("service.now", return_value=after_midnight):
             saved = self.app.handle({
                 "operation": "menu", "action": "save",
-                "planner_handoff": plan["save_handoff"],
+                "planner_ref": plan["save_ref"],
             })["menu"]
         self.assertEqual(
             saved["planner_selection"]["request"]["as_of_date"], "2026-09-07"
@@ -437,7 +517,7 @@ class WeeklyPlannerTests(unittest.TestCase):
             try:
                 save_result.update(self.app.handle({
                     "operation": "menu", "action": "save",
-                    "planner_handoff": plan["save_handoff"],
+                    "planner_ref": plan["save_ref"],
                 }))
             except Exception as exc:  # pragma: no cover - asserted below
                 failures.append(exc)

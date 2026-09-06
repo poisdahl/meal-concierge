@@ -70,7 +70,8 @@ class PlanningOperations:
 
     def _feedback(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "inspect")
-        allowed = {"operation", "action", "planner_handoff", "target", "from_target", "to_target",
+        # The socket server validates the transport contract before dispatch.
+        allowed = {"operation", "contract", "action", "planner_handoff", "target", "from_target", "to_target",
                    "recipe_key", "reference", "event_id", "scope", "reason", "idempotency_key", "view", "limit", "cursor", "experience"}
         if set(request).difference(allowed):
             raise HouseholdError("feedback request has unknown fields")
@@ -795,6 +796,37 @@ class PlanningOperations:
         return result, resolved, request
 
     @staticmethod
+    def _planner_ref(handoff: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: deepcopy(handoff[key]) for key in (
+            "planner_version", "input_digest", "selection_digest", "request"
+        )}
+
+    def _resolve_planner_ref(
+        self, value: Any
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+        if not isinstance(value, Mapping) or set(value) != {
+            "planner_version", "input_digest", "selection_digest", "request"
+        }:
+            raise PlannerError("planner_ref must be one complete server-returned save_ref")
+        if value.get("planner_version") != PLANNER_VERSION or any(
+            not isinstance(value.get(field), str)
+            or re.fullmatch(r"[a-f0-9]{64}", value[field]) is None
+            for field in ("input_digest", "selection_digest")
+        ):
+            raise PlannerError("planner_ref version or digests are invalid")
+        if not isinstance(value.get("request"), Mapping) or not isinstance(
+            value["request"].get("candidates"), list
+        ) or not value["request"]["candidates"]:
+            raise PlannerError("planner_ref requires the exact resolved candidate request")
+        result, resolved, request = self._plan_menu(
+            value["request"], anchor_current_date=False
+        )
+        for handoff in result.get("save_handoffs", []):
+            if canonical(self._planner_ref(handoff)) == canonical(value):
+                return handoff, resolved, request
+        raise PlannerError("planner_ref is stale, changed or fabricated; generate it again")
+
+    @staticmethod
     def _matching_planner_handoff(
         result: Mapping[str, Any], handoff: Mapping[str, Any]
     ) -> dict[str, Any] | None:
@@ -900,6 +932,15 @@ class PlanningOperations:
 
     def _menu(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "get")
+        planner_ref = request.get("planner_ref")
+        if planner_ref is not None and (
+            action not in {"save", "resolve_handoff"} or request.get("planner_handoff") is not None
+            or request.get("menu") is not None
+        ):
+            raise PlannerError("planner_ref requires save or resolve_handoff without planner_handoff or legacy menu")
+        if action == "resolve_handoff":
+            handoff, _resolved, _planner_request = self._resolve_planner_ref(planner_ref)
+            return {"planner_handoff": handoff}
         if action == "assess":
             return {"assessment": assess_menu(self.store.read())}
         if action == "get":
@@ -917,6 +958,12 @@ class PlanningOperations:
             result, _resolved, _planner_request = self._plan_menu(
                 request.get("planner_input")
             )
+            if result.get("save_handoff") is not None:
+                result["save_ref"] = self._planner_ref(result["save_handoff"])
+                result["alternatives"] = [
+                    {"save_ref": self._planner_ref(handoff), "selection": deepcopy(handoff["selection"])}
+                    for handoff in result["save_handoffs"][1:]
+                ]
             return {"plan": result}
         if action == "clear":
             with self.product_plan_lock, self.store.locked() as state:
@@ -944,7 +991,7 @@ class PlanningOperations:
             baseline_menu = deepcopy(self.store.read().get("menu"))
             planner_handoff = request.get("planner_handoff")
             planner_context = None
-            if planner_handoff is not None:
+            if planner_handoff is not None or planner_ref is not None:
                 if (
                     request.get("menu") is not None
                     or request.get("allow_repeat_keys") not in (None, [])
@@ -957,14 +1004,21 @@ class PlanningOperations:
                     baseline_menu.get("planner_selection")
                     if isinstance(baseline_menu, Mapping) else None
                 )
+                if planner_ref is not None:
+                    if isinstance(existing_planner, Mapping) and canonical(
+                        self._planner_ref(existing_planner)
+                    ) == canonical(planner_ref):
+                        return {"menu": baseline_menu, "idempotent": True}
+                    planner_handoff, resolved, planner_request = self._resolve_planner_ref(planner_ref)
                 if (
                     isinstance(existing_planner, Mapping)
                     and canonical(existing_planner) == canonical(planner_handoff)
                 ):
                     return {"menu": baseline_menu, "idempotent": True}
-                _planner_result, resolved, planner_request = self._verify_planner_handoff(
-                    planner_handoff
-                )
+                if planner_ref is None:
+                    _planner_result, resolved, planner_request = self._verify_planner_handoff(
+                        planner_handoff
+                    )
                 menu = self._materialize_planner_menu(planner_handoff, resolved)
                 planner_context = (deepcopy(planner_handoff), resolved, planner_request)
                 override_map = dict(planner_request["cooldown_overrides"])

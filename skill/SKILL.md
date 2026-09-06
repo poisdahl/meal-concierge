@@ -193,8 +193,17 @@ these never authorize automatic AI generation. Only a returned
 For an explicit selected scope, up to 12 exact candidates remain supported; if
 the assignment budget is exceeded, narrow that scope and explain it. Use the ranked winner; request up to three alternatives only
 when useful to the request. Ranking is only within those candidates and the
-returned policy. Preserve the complete `save_handoff` as `planner_handoff` for
-save. Stale facts require a fresh plan. Never invent structured time, nutrition,
+returned policy. Pass the small returned `save_ref` unchanged as `planner_ref`
+for menu save. Show `selection` as the menu and reasons; do not copy or rebuild
+its slots or derived fields into the save request. Each requested `alternatives`
+entry has its own `save_ref` and `selection`. Do not mix `planner_ref` with
+`planner_handoff` or a legacy `menu`. Complete full handoffs from CLI/service
+remain supported as `planner_handoff`; partial handoffs are rejected.
+For feedback on an unsaved proposal or product preparation before saving, call
+menu `resolve_handoff` with the chosen `save_ref` as `planner_ref`. Pass its
+returned complete `planner_handoff` unchanged to feedback/products; do not
+reconstruct it from display fields. Resolution does not save a menu.
+Stale facts require a fresh plan. Never invent structured time, nutrition,
 variety, perishability or safety facts from prose. Configured allergies/avoid
 rules remain hard; no authoritative safety integration currently resolves them.
 Never send `facts.safety` or claim safety compliance. Report named unknowns.
