@@ -70,9 +70,10 @@ and synthetic recipe, cart and menu tests. The [Grok guide](docs/grok.md)
 describes installation on its cloud computer without systemd. The fresh
 repository-URL test downloaded and unpacked pinned source; the subsequent
 canonical `./install.sh` test completed core installation, 4,599-recipe import,
-service startup and native MCP reads. Browser setup, skill installation and
-live-store acceptance remain unverified. The synthetic installation is preserved
-separately.
+service startup and native MCP reads. A separate Oda installation and the
+official native browser executable also passed installation and blank-window
+control tests. Skill installation, authentication and live-store acceptance
+remain unverified. The earlier installations are preserved separately.
 
 ## Supported stores
 
@@ -153,8 +154,9 @@ For **Grok Bot**, use this repository URL and start prompt:
 
 The 2026-09-07 native test acquired the pinned GitHub source ZIP, then completed
 installation, startup and MCP attachment through the existing `./install.sh`
-entry. This was a guided test on commit `9599097`, not yet an unattended run of
-the start prompt or acceptance of later source revisions.
+entry on commit `9599097`. A separate Oda installation on `7ad6e5a9`, with its
+35 pinned packages, also passed core/service/MCP and recipe reads. These were
+guided tests; unattended completion of the start prompt remains unverified.
 The [Grok guide](docs/grok.md#install-from-the-repository) chooses the source,
 runtime and native registration steps; unpacking a ZIP alone does not install
 the service. Store login is separate from core installation.

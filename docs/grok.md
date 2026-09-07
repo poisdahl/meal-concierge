@@ -98,8 +98,9 @@ Python/dependencies, the 4,599-recipe pack, real SDK discovery of 26 tools,
 duplicate-run refusal, attachment while running, retained child ownership after
 launcher interruption, and interrupted-publication recovery. The guided native
 Grok test below now also passed core installation, service/MCP and recipe reads.
-Browser installation, native skill installation, OAuth and live-store acceptance
-remain open. The command-form workaround below is extraction evidence, not an
+The official native browser route also passed the blank-window smoke below.
+Native skill installation, OAuth and live-store acceptance remain open.
+The command-form workaround below is extraction evidence, not an
 alternative complete installer or a guarantee for arbitrary executables.
 
 The native repository-URL attempt on 2026-09-07 used public commit
@@ -135,13 +136,25 @@ Through that new MCP, status returned the intended test household/provider and
 MCP and the new installation remained connected. The new Mathem configuration
 was an unauthenticated installer fixture; Oda was selected for later live testing.
 
-These results were read from Grok's visible conversation, without independently
-exported Shell telemetry. They apply to public commit
+Those installer results were read from Grok's visible conversation, without
+independently exported Shell telemetry. They apply to public commit
 `95990976384b0de1f6804ac1ebe39537c58533ef` and its 34-package requirements,
 not later source revisions with 35 packages. Native skill installation and
 unattended completion of the README start prompt were not tested. Use the
 maintained `./install.sh` entry for new attempts; do not turn a refusal into a
 series of wrappers, command rewrites or identical approval-request retries.
+
+A separate Oda installation on public commit
+`7ad6e5a9f879533196716985fad1cf0b7f57f71b` subsequently passed the same canonical
+install/run/attach path with Python 3.12.12, 35 pinned packages, both MCP 2.1.1
+distributions and 4,599 imported recipes. Its new native MCP exposed 26 tools;
+status identified Oda and the new household as `awaiting_login`, and builtin
+recipe search/get passed. Both earlier installations remained connected. These
+are also Grok-reported results, not an authenticated Oda test. Source acquisition
+initially returned an uncertain Shell spawn error before any lasting effect was
+found. After reconciliation, creating the destination from an existing working
+directory and then downloading into that directory succeeded. The original
+submitted tool arguments were unavailable, so the cause remains unproven.
 
 ## Placement and dependencies
 
@@ -158,6 +171,26 @@ image's system Python 3.13.5 and Node 20.19.2 are not this pinned runtime.
 For the Oda/MENY npm installation path, use `agent-browser@0.33.1` with a
 task-local Node 24 or newer and the existing non-snap Chrome executable.
 Keep package installs and caches within the selected installation.
+
+The tested Grok alternative uses the official native executable from
+[agent-browser v0.33.1](https://github.com/vercel-labs/agent-browser/releases/tag/v0.33.1),
+which starts its own native daemon without a Node/npm installation. On the
+inspected Linux x86_64 cloud computer, the `agent-browser-linux-x64` release asset
+was 13,852,232 bytes with SHA256
+`6e04d06605c4ca62da36e3263086e0f7ceae808b55508de2c3958d4b7fe430aa`.
+Download that exact asset into a new task directory, verify the release digest
+before execution, and make only that file executable. Select the asset matching
+the actual host architecture; this Linux asset is not a Mac/Windows package.
+Pass its verified path to the common installer's `--agent-browser` argument and
+the existing non-snap Chrome path to `--browser-executable`.
+
+The native smoke reported version 0.33.1, headed Chrome launch on the cloud
+display, `about:blank` read-back and session-specific close. The attached cloud
+screenshot was also visually inspected and showed the blank Chrome window.
+The task socket/PID file and that profile's Chrome process were absent after
+close; the binary and profile data were retained. It used vendor defaults,
+which can disable Chrome's sandbox in a container; it does not establish
+sandboxed execution. No store navigation or login occurred in that smoke.
 
 The service's lifetime locks own state, browser and listener paths. Preserve
 those locks, the provider's single OAuth refresh owner and unresolved outcome
