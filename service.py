@@ -393,6 +393,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return {"ok": True, "integration": self.integration}
         if operation == "status":
             state = self.store.read()
+            if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
+                # OAuth can complete after service startup. Retry only the
+                # native connection probe; health stays a local liveness read.
+                self._refresh_integration()
             if self.provider == "meny" and self.integration.get("status") != "ready" and not state.get("pending_cart_change"):
                 deadline = time.monotonic() + MENY_READ_TIMEOUT
                 with self._browser_operation(deadline):

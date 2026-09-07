@@ -77,6 +77,37 @@ class MathemShop(existing.FakeOda):
         return super().call(tool, arguments, **kwargs)
 
 
+class ProviderLoginStatusTests(unittest.TestCase):
+    def test_status_recovers_completed_login_without_service_restart(self):
+        for provider in ('oda', 'mathem'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory(prefix='mc-login-') as temp:
+                shop = MathemShop()
+                calls = []
+                result = {'error': provider.title() + ' login is required'}
+                def probe():
+                    calls.append('probe')
+                    if result.get('error'):
+                        raise HouseholdError(result['error'])
+                    return {'protocol_version': 'synthetic', 'server': {'name': provider}, 'tool_count': 25}
+                shop.probe = probe
+                store = StateStore(Path(temp) / 'state', {**existing.CONFIG, 'provider': provider})
+                app = Application(store, shop, None)
+                self.assertEqual(app.handle({'operation': 'health'})['integration']['status'], 'awaiting_login')
+                self.assertEqual(calls, ['probe'])
+                before = store.read()
+                result['error'] = 'provider is temporarily unavailable'
+                self.assertEqual(app.handle({'operation': 'status'})['integration']['status'], 'unavailable')
+                result.clear()  # The owner's native OAuth helper has completed.
+                status = app.handle({'operation': 'status'})
+                self.assertEqual(status['integration']['status'], 'ready')
+                self.assertEqual(status['store_readiness']['connection_check']['status'], 'verified')
+                self.assertEqual(app.handle({'operation': 'health'})['integration']['status'], 'ready')
+                app.handle({'operation': 'status'})
+                self.assertEqual(calls, ['probe', 'probe', 'probe'])
+                self.assertEqual(shop.calls, [])
+                self.assertEqual(store.read(), before)
+
+
 class MathemFlowTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

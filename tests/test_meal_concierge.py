@@ -5733,13 +5733,15 @@ class FlowTests(unittest.TestCase):
             self.assertTrue(repeated["idempotent"])
             self.assertIsNone(self.app.handle({"operation": "setup", "action": "show"})["question"])
             self.app.handle({"operation": "recipes", "action": "search", "query": "rice", "library_id": "builtin"})
-            self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
+            with mock.patch.object(self.oda, "probe", side_effect=HouseholdError("provider unavailable")):
+                self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
         self.assertEqual(self.oda.calls, [])
 
     def test_store_guidance_distinguishes_missing_browser_and_login(self):
         self.app.browser = None
         self.app.integration = {"status": "awaiting_login"}
-        readiness = self.app.handle({"operation": "status"})["store_readiness"]
+        with mock.patch.object(self.oda, "probe", side_effect=HouseholdError("Oda login is required")):
+            readiness = self.app.handle({"operation": "status"})["store_readiness"]
         self.assertEqual(readiness["connection_check"]["status"], "needs_user_action")
         self.assertEqual(readiness["browser_check"]["status"], "not_configured")
         self.assertIn("same intended Oda account", readiness["connection"])
