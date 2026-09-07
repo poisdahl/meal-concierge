@@ -114,25 +114,46 @@ import/image, scheduler or checkout acceptance does not establish it. See the
 | Shared Application + actual MCP 2.1.1 + Unix RPC/CLI | Verified local synthetic transfer | Verified exact PDF/image byte transfer; native recipient not implied | Verified single MIME send to loopback-only SMTP sink | Unavailable in this implementation |
 | Hermes native host | Unverified for this new occurrence | Unverified | Unverified for this new occurrence | Unavailable here |
 | OpenClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
-| Codex desktop | Verified emitted synthetic seven-day recipe text in the bound task | Unverified native presentation: frozen PDF/image output emitted, file panel queued; UI inspection was denied | Unverified | Unavailable here |
+| Codex desktop | Verified emitted synthetic seven-day recipe text in the bound task | Verified for the original synthetic occurrence: recipient confirmed readable PDF and native image preview; historical transport acknowledgements remain unknown | Unverified | Unavailable here |
 | Codex CLI | Unverified native reply for this occurrence | Local file transfer verified; visual preview unavailable in CLI itself | Unverified | Unavailable here |
 | Claude Code/Desktop | Unverified for this new occurrence | Unverified; earlier PDF import/managed-image results are separate | Unverified | Unavailable here |
-| Grok Bot | Unverified for this new occurrence | Unverified; MC09 owns its concrete UI/attachment test | Unverified | Unavailable here |
+| Grok Bot | Unverified for this new occurrence | Unverified for this new delivery path | Unverified | Unavailable here |
 | NanoClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
 
 Codex desktop documents a PDF preview panel in its
 [official app changelog](https://learn.chatgpt.com/docs/changelog#codex-2026-02-05-app).
 That documented feature is not by itself acceptance of this delivery path.
 
-On 2026-09-07 the current-task Codex probe froze seven dated synthetic recipe
-snapshots scaled from two to six portions. The actual RPC/CLI exported a
-67,971-byte PDF and a 15,175-byte managed synthetic JPEG; the exact 4,010-byte
-recipe text was emitted once in the bound task. The PDF artifact citation and
-image embed were emitted, but `open_in_codex` returned `queued` and Computer Use
-refused Codex application inspection. PDF/image outcomes remain `unknown`,
-with no repeat send. This does not yet satisfy the capable-client attachment
-acceptance gate. Grok's separately inspected native `SendToUser` attachment
-schema is not a performed transfer and is not counted as acceptance.
+On 2026-09-07 the original Codex desktop probe froze seven dated synthetic
+recipe snapshots (recipe revision 1), scaled from two to six portions, with
+600 g carrots and 3 l water per recipe and distinct recipe/image credits.
+The actual RPC/CLI exported a 67,971-byte PDF and a 15,175-byte managed synthetic
+JPEG; the exact 4,010-byte recipe text was emitted once in the bound task.
+The PDF SHA-256 is
+`67892fb792b39cebd8254c8612ada3be0eb65636cb408165212a19c7c26556a8`;
+the image SHA-256 is
+`01359d0f5a975cbbfe00ce0c7fb862b38584b6aaed012130e1f3a749eff1ea18`.
+
+The file panel initially returned `queued` and automated Codex UI inspection
+was denied. During subsequent reconciliation, the recipient explicitly answered
+“ja og ja” when asked whether the PDF in the original task could be opened and
+read and whether the image actually appeared as a preview. This affirmative
+recipient observation satisfies the remaining native presentation gate for that
+original occurrence; it is not a new send or an automated transport receipt.
+The immutable original journal still records text `accepted`, PDF/image
+`unknown`, with the original attempt tokens and destination. It was not edited,
+reseeded, retargeted or resent, and the refused inspection route was not retried.
+
+These observed payload sizes establish one successful native presentation,
+not a measured maximum Codex message/attachment limit. The probe used conservative
+operational bounds of 16,000 text bytes and 1,000,000 attachment bytes. Shared
+integration tests separately exercise bounded splitting, oversized attachments,
+missing/disabled assets, text fallback and partial/unknown outcome recovery.
+Existing six-page native and thirteen-page long-fixture visual reviews apply to
+unchanged PDF bytes; no renderer or layout changed. Grok's introspected
+`SendToUser` schema remains unperformed transfer, and other host qualifications
+remain as listed above. See [issue 53](https://github.com/poisdahl/meal-concierge/issues/53)
+for the acceptance result reusable by issue 52.
 
 ## Validation
 
