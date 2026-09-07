@@ -237,6 +237,9 @@ class InstallerTests(unittest.TestCase):
             'tokens': 'tokens', 'browser_home': 'browser', 'browser_profile': 'browser/profile',
             'browser_socket_directory': 'browser/run',
         }.items()}
+        # macOS's default TMPDIR can exceed the browser's Unix socket limit.
+        sockets = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='mc50-', dir='/tmp')))
+        paths.update(socket=str(sockets / 'service.sock'), browser_socket_directory=str(sockets / 'browser'))
         meta = {'format': 1, 'home': str(home), 'code_root': str(self.root / 'code'),
                 'name': 'mc50-test', 'manager': 'external', 'unit': None, 'paths': paths}
         manifest = home / 'runtime.json'
