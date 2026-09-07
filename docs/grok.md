@@ -37,6 +37,68 @@ journals. A successful core status read does not authenticate a provider.
 Use the [standalone provider OAuth flow](runtime.md) inside the cloud VM;
 do not copy another host's refresh credentials to create a second owner.
 
+## Cloud Shell command form
+
+On 2026-09-07, [Cursor support confirmed a known Shell pre-check defect](https://forum.cursor.com/t/grok-bot-0-44-0-on-macos-shell-executable-binding-rejection-persists-approval-card-never-appears/170819/5).
+It can reject an absolute interpreter path or inline Python before normal review
+runs. That explains why requesting an approval card for the same command also
+failed. The check is outside the desktop app; updating that app or increasing
+an input timeout does not address this defect.
+
+Support recommends an explicit cloud `working_directory`, a relative interpreter
+path and a relative script path, with no interpreter flags before the script:
+
+```text
+working_directory: /tmp/meal-concierge-mc09-20260906
+command: venv/bin/python extract_bundle_8333ae16_workaround_20260907.py ATTACHMENT_PATH ARCHIVE_SHA256
+```
+
+This is the command shape for our existing test bundle, not a shipped installer
+or a command to replay against an installed destination. Resolve and inspect the
+complete script first; substitute the actual cloud attachment path and verified
+digest as safely quoted arguments. For a repeat extraction, use a new script
+with an exclusive new destination. Preserve the installed source and state.
+The recommended form goes through normal review; it does not guarantee approval.
+If review rejects it or its outcome is uncertain, stop and reconcile that attempt.
+Check the actual Shell search path as well. An explicit working directory does
+not put `/usr/local/bin` on `PATH`. If an observed executable is outside `PATH`,
+resolve its relative path from that working directory; do not silently substitute
+an absolute first token for an instruction that requires the relative form.
+
+The 2026-09-07 regression test used that form with a new extraction script and
+destination. Grok reported exit code zero, all 48 pinned source files verified,
+and no rejection or approval card. The retained installation's status, cart and
+menu matched their pre-test values. The script also disabled subsequent bytecode
+writes and rejected optimized Python so its verification assertions would run.
+This demonstrates the reported extraction workaround, not an upstream fix.
+
+The fresh-environment follow-up remained blocked. Grok first substituted
+`/usr/local/bin/uv` for the requested command form when creating the new venv.
+After read-only reconciliation, one explicitly authorized corrected attempt used
+`../../../usr/local/bin/uv` from the new runtime directory, verified to resolve
+to the same executable. Grok reported the same executable-binding rejection
+for both calls, without an approval card. Only the empty new runtime directory
+was created; no new venv, dependency sync, service or MCP registration followed.
+The successful relative Python-script form therefore does not establish that
+every relative executable works, or that a complete fresh installation now
+passes. Preserve the working installation while this setup step is unresolved.
+
+Until the upstream defect is fixed, support advises avoiding absolute interpreter
+paths, `python3 -`, `python3 -c`, `python3 -m` and heredocs into Python in Shell
+calls. Removing `-I` changes Python's import isolation: use a trusted task script
+directory and check for inherited Python path overrides or local modules that
+could shadow its imports. Do not apply this Shell workaround indiscriminately
+to native MCP registration, which has a separate command/arguments interface.
+
+The earlier user-operated installation succeeded with `unzip` followed by
+verification of all 48 source files against the pinned bundle manifest. Archive
+extraction and runtime setup are separate steps: verify the archive's expected
+digest, inspect member paths/types before extraction, use a new destination, and
+verify the extracted source before executing it. Neither method requires
+resetting a working Grok computer. A new-install acceptance test needs its own
+environment, state, socket and MCP record; calls through the previous MCP do not
+prove that the new installation works.
+
 ## Native registration
 
 Use Grok Bot's native `AddMcpServer` command/stdio route with the pinned Python
@@ -96,38 +158,39 @@ capabilities, timeout, malformed and partial results. OAuth and provider browser
 effects in this harness are replaced; it does not certify live authentication
 or actual browser navigation. There is no production synthetic fallback.
 
-Native model-to-MCP workflow, long-call/restart recovery, real attachment
-extraction/save/get, pooled menus, browser profile and cart/menu/partial-result
-presentation remain pending this installation's observed acceptance. Unavailable
-provider checks must be reported as **synthetically verified; live not verified**.
-Use the shared simple-text presentation profile until those observations pass.
+The subsequent user-operated tests used public source
+`8333ae16c1231dad2ff127a52ad0473acc8bc0ca`. Grok reported successful archive
+verification, a fresh pinned environment, a running synthetic Application and
+native stdio MCP registration with 26 tools. Its reported native tests passed:
 
-The desktop attachment attempt reached the native file chooser with the exact
-synthetic PDF selected, but `Open` remained disabled; a reviewed plain-text
-fixture behaved the same way. Later inspection found delayed, unsent composer
-input that earlier accessibility snapshots had not shown. Further editing and
-clicks also produced delayed or conflicting UI observations. The read-only
-status prompt was subsequently confirmed in both the transcript and screenshot:
-it was sent at 10:28 and answered at 10:29 on 2026-09-06. Grok reported the task
-source and pinned environment present, with no task socket or active process.
-That delivery does not establish reliable subsequent input or MCP acceptance.
+- Setup and profile persistence, with portions changed from two to three.
+- Cart `ensure` followed by the identical request: one synthetic item remained
+  at quantity one, with no operations on the second request.
+- Built-in recipe-library discovery and an initially empty library.
+- Pasted-text recipe import and save, scaling from two to three portions while
+  preserving original ingredient text, and plan/save/read-back of one explicitly
+  selected dinner. The existing synthetic cart remained unchanged.
 
-Two later focus calibrations used exclusive native UI control and a 60-second
-outer tool timeout. A coordinate click failed after 31 ms with
-`noWindowsAvailable`. After resetting only the tool's JavaScript session and
-reacquiring Grok by its bundle ID, one click on a fresh accessibility Prompt
-element returned success after 681 ms. Immediate and delayed observations still
-reported focus on the account-menu control, with no visible text caret. This
-does not distinguish an accessibility-reporting error from unsuccessful focus.
-Neither calibration proceeded to text entry or submission; longer clipboard
-timeouts therefore remain untested. No successful attachment, native MCP
-registration or cloud test service has been verified.
+These results were relayed by the user from Grok's responses; they are not
+independently captured native Shell or MCP telemetry. A separate local SDK test
+also exercised the recipe import/scaling/menu sequence against the synthetic
+Application. Neither test certifies a real store. The original service, MCP and
+synthetic state were retained at the end of the 2026-09-06 session.
 
-Resume with a materially different documented input mechanism or user-assisted
-focus, and reconcile the actual draft and transcript. Verify control of the
-Prompt and one intended delivery before starting cloud service or native MCP
-tests. The input blocker is separate from the browser package's automatic-review
-rejection; repeated blind input or package-install retries do not resolve either.
+Long-call/restart recovery in native Grok, actual recipe document/image
+extraction, pooled menus, browser installation/login, live provider authentication
+and store operations remain unverified here. The successful pasted-text recipe
+test does not establish native PDF/image handling. Use the shared simple-text
+presentation profile and report provider acceptance as **synthetically verified;
+live not verified** for this Grok installation.
+
+Earlier desktop automation produced delayed or conflicting focus and composer
+observations, and disabled file-chooser submission. User-operated prompts
+allowed the native MCP tests to proceed. Computer use is an optional way to
+deliver setup instructions; normal Meal Concierge use is Grok calling the
+registered MCP. A visible, verified manual submission is a valid fallback when
+automation is unstable. Do not infer delivery from a successful input-tool return
+alone, and reconcile the draft/transcript before another submission.
 
 Upstream references: [cloud computer and account sharing](https://docs.x.ai/grok-bot/computer-and-apps),
 [skills and routines](https://docs.x.ai/grok-bot/skills-routines-and-automations),
