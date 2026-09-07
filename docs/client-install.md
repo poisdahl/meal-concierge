@@ -138,7 +138,9 @@ review. If a new conversation is necessary, give the user the exact next step.
 
 In the actual native conversation, load the packaged Meal Concierge skill and
 use its discovered MCP tools to show status/setup, verify the selected household
-and provider, and read stored recipes. Check the installed pack’s reported count,
+and provider, and read stored recipes. In Claude Code, including Desktop Code,
+invoke the registered skill; a matching skill file/hash alone is not native skill
+invocation. Check the installed pack’s reported count,
 version and managed assets; distinguish a metadata reference from a readable
 image. Keep existing household settings unless the user chooses a change.
 
@@ -176,10 +178,69 @@ uses the controlled stopped update path. Do not blindly reinstall or reset data.
 Native refusal remains a refusal, distinct from a missing dependency or crashed
 process. Resume only after the underlying cause or native approval is resolved.
 
-## Acceptance boundary
+## Verified installation lifecycle
 
-The [existing client evidence](../clients/README.md#client-contract-and-checks)
-establishes component workflows with the exact limitations recorded there.
-It does not establish the full fresh repo-URL prompt lifecycle for all three
-surfaces. Record actual client versions, source revisions, approvals and remaining
-bounds for each new trial; never infer Desktop Code success from CLI success.
+On 2026-09-07–08, the README prompt was exercised through real agents on Apple
+Silicon macOS 26.6.2 with user launchd. These were fresh, disjoint household homes
+on a preprovisioned host whose known earlier installations were inspected, not
+a claim that the whole host was empty.
+
+| Actual client surface | Version | Fresh installation source | Second client on that same service |
+|---|---|---|---|
+| Codex CLI | 0.153.4 | `3982f62ad5fa63dddb2bb9ee57b89023da001bad` | Claude Code CLI |
+| Claude Code CLI | 2.1.241 | `3982f62ad5fa63dddb2bb9ee57b89023da001bad` | Claude Desktop Code |
+| Claude Desktop → Code → Local | Desktop 1.46388.4, embedded Code 2.1.260 | `e36815fd01b9100d903e6e8c0ba68a1db9ab6384` | Codex CLI |
+
+Each agent used the existing installer, persistent unit and native plugin
+registration. Installed source/dependency/skill bytes matched its recorded
+checkout. Each household received pack `wikibooks-themealdb-en` version
+`2026-09-06.5`: 4,599 recipes and 1,570 managed JPEG assets. Actual native skill,
+identity/setup, stored recipe revision and image reads succeeded. SDK probes
+made during initial registration were kept separate from native acceptance.
+
+Sending the same README prompt again reused each household, release, service
+and registration without another installation or silent upgrade. New CLI
+processes and a normal full Desktop quit/relaunch restored MCP and skill.
+Separate controlled restarts of each household service preserved its data and
+registration; both clients read the same saved recipe and managed image again.
+For Desktop, the app restart left the service PID unchanged; only the later
+service restart changed it. The compared JPEG was 122,076 bytes with SHA-256
+`c5ecbe93fe85873762990f8585ea23b982da1623505ac0f2d2d6f66b2b4afda2`.
+Recipe IDs differed between fresh households; cross-client comparisons used
+the correct identity within each household.
+
+These were guided runs: the operator selected host, store, household, paths and
+current setup defaults, completed native approvals and opened the required new
+conversations. Desktop's repeat initially checked only the skill file/hash;
+one explicit reminder caused the registered Skill invocation to succeed without
+repeating business reads. Desktop's quota interruption resumed after the normal
+quota reset and manual Mac unlock, without changing limits or approvals.
+
+Incomplete paths were retained and reconciled:
+
+- Codex and Claude CLI reported the missing pinned Oda browser prerequisite
+  during read-only preflight. Mathem core installation did not require login.
+- A native Desktop Code discovery action was explicitly denied. The agent
+  stopped; only later explicit authorization of the same action and native
+  **Allow once** resumed it. No substitute command bypassed the refusal.
+- Claude CLI's initial background installation ended after core publication,
+  before recipe-pack completion. The agent inspected the original process and
+  markers, then used the same source's stopped update recovery and verified the
+  terminal result. Data and the old release remained; recovery created a new
+  release UUID at the same source revision. Subsequent repeats kept it unchanged.
+- An initially supplied recipe ID from another household returned not found in
+  Desktop. Those failures were preserved; the correct household's recipe and
+  image then matched. This was not treated as missing data or a reinstall trigger.
+
+The [issue #54 acceptance record](https://github.com/poisdahl/meal-concierge/issues/54)
+identifies the retained evidence and final review. Earlier
+[client component tests](../clients/README.md#client-contract-and-checks) retain
+their own narrower bounds and were not repeated for this lifecycle work.
+
+Linux/user-systemd remains an installer target, but this trial does not establish
+its fresh native-client lifecycle. Codex Desktop/IDE, Windows/WSL, remote/cloud
+execution and Claude Desktop Chat were not tested here. A user login/reboot was
+not exercised; persistent launchd configuration and controlled service restarts
+were verified. Store authentication remained `awaiting_login`; delivery/payment
+readiness remained unknown. No purchase, real-recipient send or scheduler was
+activated. This acceptance does not extend to shopping, menu or delivery flows.

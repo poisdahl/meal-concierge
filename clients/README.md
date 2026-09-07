@@ -1,5 +1,8 @@
 # Codex and Claude Code
 
+The [verified installation lifecycle](../docs/client-install.md#verified-installation-lifecycle)
+records the separately tested Codex CLI, Claude Code CLI and Desktop Code flows.
+
 Start with the [repo-URL installation guide](../docs/client-install.md) for fresh
 setup, reuse, native activation and recovery. The commands below describe the
 existing package component; they do not by themselves prove end-to-end setup.
