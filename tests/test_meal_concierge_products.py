@@ -1381,3 +1381,85 @@ class MenuCostComparisonTests(unittest.TestCase):
             self.assertIsNone(result["comparison_claim"])
             self.assertEqual(len(result["alternatives"]), 1)
             self.assertEqual(self.calls, [])
+
+
+class WholeWeekProductTests(unittest.TestCase):
+    def test_seven_days_aggregate_stock_and_keep_manual_cart_for_each_provider(self):
+        from test_meal_concierge_planner import recipe
+        class Shop:
+            def __init__(self, provider):
+                self.provider, self.calls = provider, []
+                self.ids={name:('/varer/test/item-'+str(i)+'-700000000000'+str(i) if provider=='meny' else str(100+i))
+                          for i,name in enumerate(['ris','gulrot','brokkoli','linser','løk'])}
+                self.cart={'items':[{'product_id':('/varer/test/manual-7000000000099' if provider=='meny' else 99),
+                    'name':'Manual item','quantity':2,'price':10.0}], 'count':2,'subtotal':10.0,'total':10.0,'delivery':None}
+            def probe(self):
+                return {'protocol_version':'fixture','server':{'name':'fixture'},'tool_count':2}
+            def call(self, name, args, **kwargs):
+                self.calls.append((name,deepcopy(args)))
+                if name=='product_search':
+                    query=args['queries'][0]
+                    candidate=product(self.ids[query],query,500,'g',[option(2000)])
+                    candidate['provider']=self.provider
+                    unavailable=deepcopy(candidate)
+                    unavailable.update(product_ref=candidate['product_ref']+'0', product_id=candidate['product_id']+'0',availability='unavailable')
+                    result=observation(query,[unavailable,candidate])
+                    result['provider']=self.provider
+                    return result
+                if name=='get_cart':return deepcopy(self.cart)
+                assert name=='manipulate_cart', name
+                for change in args['operations']:
+                    assert set(change)=={'productId','quantity'}, 'No uncontrolled recipe/cart bulk operation'
+                    pid=change['productId']
+                    row=next((x for x in self.cart['items'] if str(x['product_id'])==str(pid)),None)
+                    if row is None:
+                        row={'product_id':pid,'name':'Synthetic grocery','quantity':0,'price':0.0}
+                        self.cart['items'].append(row)
+                    row['quantity']+=change['quantity']
+                    row['price']=20.0*row['quantity']
+                self.cart['count']=sum(x['quantity'] for x in self.cart['items'])
+                self.cart['subtotal']=self.cart['total']=sum(x['price'] for x in self.cart['items'])
+                return deepcopy(self.cart)
+        for provider in ('oda','mathem','meny'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                store=StateStore(Path(temp),{'instance':'week','household':'Synthetic','provider':provider})
+                shop=Shop(provider); app=Application(store,shop,object())
+                app._now=lambda:datetime(2026,9,7,8,tzinfo=timezone.utc)
+                with store.locked() as state:
+                    state['setup']['status']='complete'
+                    state['profile']['recipes']['sources']={key:key=='internal' for key in state['profile']['recipes']['sources']}
+                refs=[]
+                for index,rice in enumerate([200,250,50,50,50,50,50]):
+                    value=recipe('Synthetic dinner '+str(index),'week-'+str(index))
+                    value['ingredients']=[{'item':item,'raw':f'{amount} g {item}','quantity':amount,'unit':'g','scalable':True}
+                                          for item,amount in [('ris',rice),('gulrot',100),('brokkoli',100),('linser',100),('løk',100)]]
+                    saved=app.handle({'operation':'recipes','action':'save','recipe':value,'idempotency_key':'week-'+str(index)})['recipe']
+                    refs.append({'recipe_ref':{'id':saved['id'],'revision':saved['revision']}})
+                plan=app.handle({'operation':'menu','action':'plan','planner_input':{'week':'2026-W37',
+                    'dates':[f'2026-09-{7+i:02d}' for i in range(7)],'portions':2,'candidates':refs,
+                    'available_ingredients':[{'item':'ris','quantity':250,'unit':'g'}]}})['plan']
+                self.assertEqual(plan['status'],'planned')
+                menu=app.handle({'operation':'menu','action':'save','planner_ref':plan['save_ref']})['menu']
+                needs,unresolved=menu_requirements(menu)
+                self.assertFalse(unresolved)
+                self.assertEqual(len(needs),5)
+                rice=next(x for x in needs if x['identity']=='ris')
+                self.assertEqual(rice['gross_quantity'],{'numerator':700,'denominator':1})
+                self.assertEqual(rice['quantity'],{'numerator':450,'denominator':1})
+                request={'operation':'products','action':'prepare','menu_ref':{k:menu[k] for k in ('menu_id','revision','digest')},
+                    'candidate_approvals':[{'requirement_id':x['requirement_id'],'candidate_refs':[shop.ids[x['identity']]]} for x in needs]}
+                purchase=app.handle(request)['product_plan']
+                self.assertEqual(purchase['status'],'prepared')
+                self.assertEqual(purchase['totals']['package_count'],9)
+                self.assertEqual([n for n,_ in shop.calls],['product_search']*5)
+                self.assertEqual(shop.cart['count'],2)
+                apply={'operation':'products','action':'apply','product_plan':purchase,
+                       'product_plan_digest':purchase['product_plan_digest'],'cart_change_requested':True}
+                result=app.handle(apply)
+                self.assertTrue(result['applied'],result)
+                self.assertEqual(shop.cart['items'][0]['quantity'],2)
+                self.assertEqual(shop.cart['count'],11)
+                writes=sum(n=='manipulate_cart' for n,_ in shop.calls)
+                self.assertTrue(Application(store,shop,object()).handle(apply)['applied'])
+                self.assertEqual(sum(n=='manipulate_cart' for n,_ in shop.calls),writes)
+                self.assertEqual(shop.cart['count'],11)

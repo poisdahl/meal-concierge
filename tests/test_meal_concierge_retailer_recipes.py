@@ -207,3 +207,73 @@ class MenyRecipeInputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetailerPaginationTests(unittest.TestCase):
+    def test_authenticated_mcp_page_shape_refills_with_bound_cursor(self):
+        import tempfile
+        from core import StateStore
+        from service import Application
+        class Provider:
+            def __init__(self, provider):
+                self.provider, self.pages, self.more = provider, [], True
+            def probe(self):
+                return {'protocol_version':'fixture', 'server':{'name':'fixture'}, 'tool_count':1}
+            def call(self, name, args, **kwargs):
+                self.pages.append(args['page'])
+                assert name == 'recipe_search'
+                return {'hasMore':self.more, 'recipes':[{'id':str(args['page']), 'title':'Synthetic recipe',
+                    'url':f'https://www.{self.provider}.{"se" if self.provider == "mathem" else "com"}/recipes/{args["page"]}-synthetic/'}]}
+        for provider in ('oda', 'mathem'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                client=Provider(provider)
+                app=Application(StateStore(Path(temp), {'instance':'paging','household':'Synthetic','provider':provider}),client,None)
+                request={'operation':'recipes','action':'discover','projection':'summary','source':provider,'query':'rice','limit':1}
+                first=app.handle(request)
+                self.assertFalse(first['exhausted'])
+                self.assertEqual(first['next_cursor'], {'provider':provider,'query':'rice','page':2,'size':1})
+                for changed in ({'query':'pasta'}, {'limit':2}, {'cursor':{**first['next_cursor'],'provider':'meny'}},
+                                {'cursor':{**first['next_cursor'],'page':True}}):
+                    with self.assertRaises(HouseholdError):
+                        app.handle({**request,'cursor':first['next_cursor'],**changed})
+                self.assertEqual(client.pages,[1])
+                client.more=False
+                second=app.handle({**request,'cursor':first['next_cursor']})
+                self.assertTrue(second['exhausted'])
+                self.assertIsNone(second['next_cursor'])
+                self.assertEqual(client.pages,[1,2])
+                self.assertNotEqual(first['recipes'][0]['discovery_ref'],second['recipes'][0]['discovery_ref'])
+                client.more='false'
+                self.assertFalse(app.handle(request)['exhausted'])
+                client.more=True
+                last=app.handle({**request,'cursor':{**first['next_cursor'],'page':50}})
+                self.assertIsNone(last['next_cursor'])
+                self.assertFalse(last['exhausted'])
+
+    def test_unrepresentable_provider_rows_cannot_authorize_ai_fallback(self):
+        import tempfile
+        from core import StateStore
+        from service import Application
+        class Provider:
+            def probe(self):
+                return {'protocol_version':'fixture','server':{'name':'fixture'},'tool_count':1}
+            def call(self, name, args, **kwargs):
+                assert name=='recipe_search'
+                return {'recipes':self.rows,'hasMore':False}
+        for provider in ('oda','mathem'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as temp:
+                client=Provider()
+                store=StateStore(Path(temp),{'instance':'rows','household':'Synthetic','provider':provider})
+                app=Application(store,client,None)
+                with store.locked() as state:
+                    state['setup']['status']='complete'
+                    state['profile']['recipes']['sources']={key:key==provider for key in state['profile']['recipes']['sources']}
+                request={'operation':'menu','action':'plan','planner_input':{'week':'2026-W37','dates':['2026-09-07'],'portions':2}}
+                for row in ({'id':1,'title':'Existing recipe','url':None}, {}, None,
+                            {'id':2,'title':'Existing recipe','url':'https://unrelated.example/recipe'}):
+                    client.rows=[row]
+                    discovery=app.handle(request)['plan']['discovery']
+                    self.assertFalse(discovery['ai_fallback_eligible'])
+                    self.assertEqual(next(x for x in discovery['sources'] if x['source']==provider)['status'],'search_limit')
+                client.rows=[]
+                self.assertTrue(app.handle(request)['plan']['discovery']['ai_fallback_eligible'])

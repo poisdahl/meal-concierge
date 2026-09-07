@@ -28,8 +28,25 @@ Bounded refill must preserve this limitation rather than inventing pagination.
 | Provider | Detail evidence | Native portions, associations and bulk recipe cart | Fallback |
 |---|---|---|---|
 | MENY | Public page JSON-LD observed 2026-09-06; authenticated adapter acceptance pending | No integration contract established; adapter reports unsupported | Base ingredients, shared exact scaling and ordinary product matching through the integrated private boundary |
-| Oda | Existing MCP recipe search returns links; public page JSON-LD is separate website evidence | No observed MCP detail or native recipe-operation contract | Link handoff; generic matching for an independently available eligible recipe |
-| Mathem | Existing synthetic search integration; authenticated detail schema remains unknown | No observed Mathem detail or native recipe-operation contract | Link handoff; generic matching for an independently available eligible recipe |
+| Oda | Authenticated MCP 1.1.0 discovery on 2026-09-07: recipe search metadata only; bounded recipe read was unavailable | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no detail or exact product-expansion preview tool is exposed | Link handoff; explicit product matching and journalled product deltas for an independently available eligible recipe |
+| Mathem | Authenticated MCP 1.1.0 discovery and two-result recipe search on 2026-09-07: IDs, titles, links and timing metadata; no ingredients, method or yield | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no detail or exact product-expansion preview tool is exposed | Link handoff; explicit product matching and journalled product deltas for an independently available eligible recipe |
+
+Both MCP discoveries returned 25 tools through the existing authenticated
+provider client and its ordinary provider lock. Native recipe addition is an
+observed write capability, **not a safe approved-plan expansion**: its schema
+cannot establish the product identities and quantities before dispatch. It is
+therefore not used by recipe planning or cart application. Separate provider
+credentials and household locks remain in place. The successful Mathem read
+must not be represented as a successful Oda recipe response.
+
+Oda/Mathem compact discovery consumes their observed `page` (1–50), `size`
+(1–20), and boolean `hasMore` contract. Continuations bind provider, query and
+page size. Only explicit `hasMore: false` establishes query exhaustion; missing
+or malformed metadata, unrepresentable rows (including nullable recipe URLs),
+oversized pages, and the page-50 bound do not. These incomplete results cannot
+authorize automatic AI generation. This
+adds no detail contract and cannot make link-only results menu-ready. Automatic
+selection retains its six-page, 80-detail and 30-second source-search budgets.
 
 The exact [MENY reference page](https://meny.no/oppskrifter/pasta/hjemmelaget-lasagne)
 returned one `application/ld+json` Recipe object with `recipeIngredient` and
@@ -57,7 +74,17 @@ recipe addition, retry or alternate checkout path is introduced here.
 
 The actual Application detail-to-private-snapshot, exact scaling and approved
 product-plan path has passed with synthetic observed-contract responses.
-Whole-week integration remains pending, so issue #43 stays open.
+A synthetic seven-day Application flow now covers all three selected providers:
+35 ingredient occurrences aggregate into five searches per preparation. Seven
+rice quantities total 700 g; one explicit 250 g pantry amount leaves 450 g and
+one 500 g pack. The four other shared ingredients require eight packs together.
+Unavailable candidates are excluded; exact approved candidates produce nine
+packs while preserving two existing manual cart items. Restart/replay does not
+dispatch another cart mutation. Existing cart tests cover intervening manual
+changes, partial writes and reconciliation. These are controlled provider
+fixtures, not authenticated purchases or a measured native-hint speedup.
+
+Issue #43 remains open for authenticated MENY adapter acceptance.
 Authenticated MENY reads remain a separate gate requiring the coordinated
 existing browser target. Oda/Mathem synthetic acceptance may replace an
 unavailable service only where an actual contract is known; it cannot invent

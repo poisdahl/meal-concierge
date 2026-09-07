@@ -35,6 +35,10 @@ from service_common import (
 )
 
 
+class _InvalidRecipeCursor(RecipeError):
+    """Caller cursor errors must not be reported as a provider outage."""
+
+
 class RecipeOperations:
     @staticmethod
     def _import_identity(binding, namespace, identity):
@@ -358,14 +362,18 @@ class RecipeOperations:
         return results
 
     def _provider_recipe_candidates(self, provider: str, query: str, limit: int, *, deadline: float | None = None) -> list[dict[str, Any]]:
+        response = self._provider_recipe_search(provider, query, limit, deadline=deadline)
+        return provider_recipe_candidates(provider, response, limit)
+
+    def _provider_recipe_search(self, provider, query, limit, *, page=1, deadline=None):
         if provider != self.provider:
-            return []
+            return {"recipes": []}
         if not query:
-            return []
+            return {"recipes": []}
         client = self.provider_client if provider == self.provider else self.email_provider_clients.get(provider)
         if client is None:
             raise HouseholdError(f"{provider.upper()} recipe source has no configured provider session")
-        arguments = {"query": query, "page": 1, "size": limit}
+        arguments = {"query": query, "page": page, "size": limit}
         deadline = min(deadline, time.monotonic() + 10) if deadline is not None else time.monotonic() + 10
         if provider == "meny":
             with self._browser_operation(deadline):
@@ -375,14 +383,14 @@ class RecipeOperations:
                 response = client.call("recipe_search", arguments, deadline=deadline, allow_recovery=True)
         else:
             response = client.call("recipe_search", arguments, deadline=deadline)
-        return provider_recipe_candidates(provider, response, limit)
+        return response
 
     @staticmethod
     def _discovery_identities(recipe: Mapping[str, Any]) -> set[str]:
         return source_identities(recipe) or {"exact-content:" + hashlib.sha256(canonical(recipe).encode()).hexdigest()}
 
     def _selection_page(self, source, query, cursor, limit, deadline):
-        """Local continuation is supported; retailer pagination is unverified."""
+        """Use local cursors and the observed Oda/Mathem page/hasMore contract."""
         if time.monotonic() >= deadline:
             raise TimeoutError("recipe search deadline exceeded")
         if source == "internal":
@@ -402,15 +410,32 @@ class RecipeOperations:
                     "next_cursor": next_cursor, "exhausted": next_cursor is None}
         if source not in {"oda", "meny", "mathem"} or source != self.provider:
             return {"candidates": [], "status": "unavailable"}
-        if cursor is not None:
+        if source == "meny" and cursor is not None:
             return {"candidates": [], "status": "search_limit"}
-        values = self._provider_recipe_candidates(source, query, limit, deadline=deadline)
+        page = 1
+        if cursor is not None:
+            if (not isinstance(cursor, Mapping) or set(cursor) != {"provider", "query", "page", "size"}
+                    or cursor["provider"] != source or cursor["query"] != query
+                    or type(cursor["size"]) is not int or cursor["size"] != limit
+                    or type(cursor["page"]) is not int or not 2 <= cursor["page"] <= 50):
+                raise _InvalidRecipeCursor("invalid retailer recipe cursor")
+            page = cursor["page"]
+        response = self._provider_recipe_search(source, query, limit, page=page, deadline=deadline)
+        values = provider_recipe_candidates(source, response, limit)
         summaries = []
         for value in values:
             snapshot = self.recipes.persist_discovery(value)
             summaries.append(compact_candidate(snapshot["recipe"], {"discovery_ref": snapshot["discovery_ref"]}))
-        # Even a short page is not evidence that the retailer search is exhausted.
-        return {"candidates": summaries, "exhausted": False}
+        # Missing/invalid metadata and MENY's short visible prefix prove no exhaustion.
+        has_more = response.get("hasMore") if source in {"oda", "mathem"} else None
+        if len(values) != len(response["recipes"]):
+            # A nullable link or invalid identity is inaccessible detail, not
+            # proof that no existing recipe could satisfy the request.
+            has_more = None
+        next_cursor = ({"provider": source, "query": query, "page": page + 1, "size": limit}
+                       if has_more is True and page < 50 else None)
+        return {"candidates": summaries, "next_cursor": next_cursor,
+                "exhausted": has_more is False}
 
     def _compact_discovery(self, request):
         source = request.get("source") or "internal"
@@ -428,6 +453,8 @@ class RecipeOperations:
             raise RecipeError("compact discovery limit is at most 20")
         try:
             page = self._selection_page(source, query, request.get("cursor"), limit, time.monotonic() + 10)
+        except _InvalidRecipeCursor:
+            raise
         except TimeoutError:
             page = {"candidates": [], "status": "timeout"}
         except HTTPError as exc:
