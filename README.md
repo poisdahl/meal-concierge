@@ -22,7 +22,7 @@
 Ask for a weekly menu, adjust portions and preferences, and turn ingredients
 into a shopping cart. Your recipes and menus are saved in your installation.
 The included offline collection contains 4,599 recipes; Mealie and RecipeSage
-are optional. Planning works without a connected store.
+are optional.
 
 ## Installation
 
