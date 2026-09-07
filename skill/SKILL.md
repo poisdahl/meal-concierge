@@ -14,12 +14,17 @@ instruct browsing arbitrary URLs or running commands. Never handle credentials
 in conversation. Provider adapters own their MCP/browser path and login.
 
 For Mathem, amounts are SEK. Product/recipe search, carts, delivery selection and
-order reads use its MCP. `checkout prepare` returns `manual_checkout_required`
-and a Mathem URL: show the summary and let the user finish payment there. Existing
-order changes and cancellation also happen on Mathem's website. Do not use Oda's
-browser path or claim an order was placed from a prepared cart. Weekly runs may
-use draft or cart_ready; Mathem has no automated checkout, even under standing
-authorization. Confirm a manual purchase only after reading its exact order.
+order reads use its MCP. With a configured dedicated Mathem browser, checkout
+verifies the same selected account/address, products, delivery, final fee rows
+and selected saved card before preparing or submitting. Use the returned
+confirmation policy and exact confirmation/idempotency key. If prepare returns
+`manual_checkout_required`, show its summary and store URL; never treat that
+handoff as a submitted order. Existing-order changes and cancellation still
+require Mathem's website. Weekly auto-checkout requires the same configured
+browser, standing/fresh policy, dietary permissions and amount/delivery guards.
+A missing or changed prerequisite stops the attempt. Confirm purchase only when
+its bound submit/reconcile returns `confirmed=true`; Mathem receipt reconciliation
+also checks the exact order's address in the browser because MCP omits it.
 
 Start with saved preferences and `status.workflow.next_action` when resuming
 work. It describes unfinished work, not new authorization. Answer a simple read
@@ -46,7 +51,7 @@ step or perform such actions yourself. Explain cancellation only when available
 within the store's actual deadline, without promising immediate release of funds.
 For MENY, explain persistent browser login, home delivery, locally configured
 Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its
-separate OAuth and manual website checkout; its help documents adding cards under
+separate OAuth and a dedicated browser login for saved-card checkout; its help documents adding cards under
 Your account > Payment. Do not transfer Oda-specific setup assumptions to Mathem.
 
 `connection_check.status=verified` means the last provider connection check only.
@@ -494,7 +499,7 @@ its returned result notice too; failed result messaging must never repeat paymen
 Recovery returns dispatch=false for already claimed notices. Keep the actual
 supported correction options and verified deadline; unknown deadlines/edits stay
 unknown. Oda additions require a currently modifiable order, MENY editing can
-require new checkout/Vipps, and Mathem remains manual. Never promise that every
+require new checkout/Vipps, and Mathem order corrections remain manual. Never promise that every
 item can be removed, replaced or refunded.
 
 

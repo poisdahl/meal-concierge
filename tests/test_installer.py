@@ -228,6 +228,43 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_mathem_stopped_update_adds_browser_without_retargeting_private_data(self):
+        home = self.root / 'home'; home.mkdir()
+        config = home / 'config.json'
+        config.write_text(json.dumps({**CONFIG, 'provider': 'mathem'}))
+        paths = {key: str(home / value) for key, value in {
+            'config': 'config.json', 'state': 'state', 'socket': 'run/service.sock',
+            'tokens': 'tokens', 'browser_home': 'browser', 'browser_profile': 'browser/profile',
+            'browser_socket_directory': 'browser/run',
+        }.items()}
+        meta = {'format': 1, 'home': str(home), 'code_root': str(self.root / 'code'),
+                'name': 'mc50-test', 'manager': 'external', 'unit': None, 'paths': paths}
+        manifest = home / 'runtime.json'
+        manifest.write_text(json.dumps(meta))
+        adapter = self.root / 'agent-browser'
+        adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1\\n"\n')
+        adapter.chmod(0o700)
+        chrome = self.root / 'chromium'
+        chrome.write_text('#!/bin/sh\nexit 0\n'); chrome.chmod(0o700)
+        before = manifest.read_bytes()
+        argv = ['install.py', 'update', '--home', str(home)]
+        with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
+            install.main()
+        self.assertEqual(publish.call_args.args[0]['paths'], paths)
+        with patch.object(sys, 'argv', argv + ['--agent-browser', str(adapter), '--browser-executable', str(chrome)]), \
+             patch.object(install, 'publish') as publish:
+            install.main()
+        updated = publish.call_args.args[0]['paths']
+        self.assertEqual(updated, {**paths, 'browser_binary': str(adapter), 'browser_executable': str(chrome)})
+        self.assertEqual(manifest.read_bytes(), before)  # Publication owns the actual metadata replacement.
+        adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.1.0\\n"\n')
+        with patch.object(sys, 'argv', argv + ['--agent-browser', str(adapter), '--browser-executable', str(chrome)]), \
+             patch.object(install, 'publish') as publish:
+            with self.assertRaisesRegex(RuntimeError, 'tested agent-browser'):
+                install.main()
+        publish.assert_not_called()
+        self.assertEqual(manifest.read_bytes(), before)
+
     def test_recipe_artifact_requires_release_digest_and_exact_bounded_size(self):
         source = self.root / 'offline.zip'
         payload = b'synthetic artifact' * 70000

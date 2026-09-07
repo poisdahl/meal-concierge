@@ -85,17 +85,21 @@ vary by store.
 
 | | Oda | Mathem | MENY |
 |---|---|---|---|
-| Connection | Oda MCP, plus browser for protected order actions | Mathem MCP | Logged-in MENY website |
-| Sign-in | Standalone OAuth **and** browser login to the same Oda account | Separate standalone Mathem OAuth | Persistent browser login |
-| Checkout | Configured Oda payment method | Review the cart in chat, then pay on Mathem's website | Home delivery and payment via Vipps (a Norwegian mobile payment service), approved on your phone |
+| Connection | Oda MCP, plus browser for protected order actions | Mathem MCP, plus optional checkout browser | Logged-in MENY website |
+| Sign-in | Standalone OAuth **and** browser login to the same Oda account | Separate Mathem OAuth; same-account dedicated browser for checkout | Persistent browser login |
+| Checkout | Configured Oda payment method | Guarded saved-card checkout, or manual website handoff without a browser | Home delivery and payment via Vipps (a Norwegian mobile payment service), approved on your phone |
 | Existing orders | Read, supported changes and cancellation | Read and track; change or cancel on Mathem's website | Read, supported changes and cancellation |
 
 Complete Oda/Mathem sign-in with the explicit [provider OAuth helper](docs/runtime.md#provider-oauth).
 Installation does not log in, and MCP OAuth does not authenticate a browser profile.
 
-Mathem uses Swedish kronor (SEK). Its `checkout prepare` returns a cart summary
-and a link to finish on Mathem. Automatic payment, order changes and cancellation
-are not supported for Mathem; weekly runs can prepare a draft or ready cart.
+Mathem uses Swedish kronor (SEK). With its dedicated browser configured and
+logged in, checkout verifies the account, cart, delivery, final amount and saved
+card. Without an available checkout browser, prepare returns a summary and
+manual cart link. Failed login, account/address or saved-card checks stop
+checkout and require attention before a fresh review.
+Existing-order changes and cancellation still happen on Mathem's website.
+Complete native payment/cancellation acceptance remains tracked in #50.
 
 By default, Hermes asks you to confirm the prepared summary before checkout or
 cancellation. An optional standing-authorization policy is described in the
@@ -135,10 +139,10 @@ recipes, imports and menu planning remain usable without a connected store.
   prepare Vipps on your phone. This integration uses Vipps with phone approval;
   Oda's saved-card procedure does not apply.
 - **Mathem:** complete separate Mathem OAuth and sign into the same intended
-  account on the website for manual checkout. Mathem's
+  account in the dedicated browser for saved-card checkout. Mathem's
   [card help](https://support.mathem.se/sv/article/b8d1e5) describes adding cards
   under **Your account > Payment**; check your account's actual options.
-  Automated Mathem payment remains unsupported.
+  Other payment methods require manual checkout on the website.
 
 The linked card-help pages were checked on 2026-09-07; this is documentation
 verification, not an authenticated test of your account. Enter cards, passwords

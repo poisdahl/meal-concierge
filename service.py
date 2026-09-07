@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sys
 import socket
 import struct
@@ -31,7 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from oda_browser import OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
+from oda_browser import MathemBrowser, OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from core import (
     CancellationPreconditionError,
     CheckoutPreconditionError,
@@ -409,7 +410,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 "confirmation_policy": self.confirmation_policy,
                 "workflow": workflow_status(self.store.read()),
                 "store_readiness": self._store_readiness(),
-                **({"currency": "SEK", "checkout": "manual", "store_url": "https://www.mathem.se/se/"} if self.provider == "mathem" else {}),
+                **({"currency": "SEK", "checkout": "guarded_saved_card" if self.browser is not None else "manual", "store_url": "https://www.mathem.se/se/"} if self.provider == "mathem" else {}),
             }
         if operation == "setup":
             return self._setup(request)
@@ -543,8 +544,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "mathem": {
                 "store_url": "https://www.mathem.se/",
                 "account": "Use your own Mathem account with complete contact and delivery details in a supported delivery area.",
-                "connection": "Complete separate Mathem OAuth. Sign into that same intended account on Mathem's website for manual checkout.",
-                "payment": "Finish payment manually on Mathem's website. Mathem documents adding cards under Your account > Payment; verify the options available in your account. Oda first-card instructions do not apply.",
+                "connection": "Complete separate Mathem OAuth. Log the dedicated checkout browser into that same intended account and selected delivery address.",
+                "payment": "Saved-card checkout requires one selected, usable saved card in the dedicated Mathem browser. Complete card entry and any bank approval on Mathem's website; complete other payment methods manually there.",
             },
         }[self.provider]
         payment_status = "unknown"
@@ -553,7 +554,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             payment_status = "not_configured"
             payment_action = "Configure the intended Vipps phone number locally before MENY checkout."
         browser_status = (
-            "not_configured" if self.provider == "oda" and self.browser is None else "unknown"
+            "not_configured" if self.provider in {"oda", "mathem"} and self.browser is None else "unknown"
         )
         return {
             "provider": self.provider,
@@ -565,7 +566,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             },
             "browser_check": {
                 "status": browser_status,
-                "next_action": "Configure Oda's dedicated browser before checkout." if browser_status == "not_configured" else None,
+                "next_action": f"Configure {self.provider.upper()}'s dedicated browser before checkout." if browser_status == "not_configured" else None,
             },
             "delivery_check": {"status": "unknown", "scope": "Address and delivery are checked during the requested shopping/checkout flow."},
             "payment_check": {"status": payment_status, "next_action": payment_action},
@@ -897,10 +898,15 @@ def run(args) -> None:
             # An optional connection is reported unavailable by the recipes tool;
             # it must not block the built-in bank or grocery/order paths.
             continue
+    if settings["provider"] == "mathem":
+        available = shutil.which(str(args.browser_binary)) and shutil.which(str(args.browser_executable))
+        checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments) if available else None
+    else:
+        checkout_browser = OdaBrowser(**browser_arguments)
     app = Application(
         StateStore(args.state, settings),
         provider_client,
-        None if settings["provider"] == "mathem" else OdaBrowser(**browser_arguments),
+        checkout_browser,
         email_provider_clients=email_provider_clients,
         recipe_library_adapters=recipe_library_adapters,
     )

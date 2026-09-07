@@ -124,7 +124,7 @@ def executable(value, candidates, label):
 
 
 def browser_paths(args, provider):
-    if provider == 'mathem':
+    if provider == 'mathem' and not (args.agent_browser or args.browser_executable):
         return {}
     adapter = executable(args.agent_browser, ['agent-browser', str(Path.home() / '.local/lib/meal-concierge/node_modules/.bin/agent-browser')], 'agent-browser')
     version = run(adapter, '--version', capture_output=True, text=True).stdout.strip()
@@ -476,10 +476,12 @@ def main():
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
         actual_settings = settings or json.loads(Path(meta['paths']['config']).read_text())
+        if manifest.exists() and actual_settings.get('provider') == 'mathem' and (args.agent_browser or args.browser_executable):
+            meta['paths'].update(browser_paths(args, 'mathem'))
         socket_limit = 103 if platform.system() == 'Darwin' else 107
         socket_paths = [meta['paths']['socket']]
-        if actual_settings.get('provider') != 'mathem':
-            prefix = 'meal-concierge-meny-' if actual_settings.get('provider') == 'meny' else 'oda-household-'
+        if actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary'):
+            prefix = {'meny': 'meal-concierge-meny-', 'mathem': 'mathem-household-'}.get(actual_settings.get('provider'), 'oda-household-')
             session = prefix + str(actual_settings.get('instance') or 'household')
             socket_paths.append(str(Path(meta['paths']['browser_socket_directory']) / (session + '.sock')))
         if any(len(os.fsencode(p)) > socket_limit for p in socket_paths):

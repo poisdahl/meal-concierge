@@ -201,8 +201,19 @@ Do not clone refresh credentials across installations.
 Oda additionally needs the dedicated browser profile logged into the same
 account, with the intended delivery address and payment method. MCP OAuth does
 not authenticate that browser or prove account binding. Existing protected-order
-browser review remains the account/address check. Mathem retains its manual
-website checkout; MENY retains its dedicated browser login.
+browser review remains the account/address check. Mathem also uses a dedicated
+browser for guarded saved-card checkout; its selected MCP address reference
+must match that browser account. MENY retains its dedicated browser login.
+
+Mathem core installation keeps browser prerequisites optional. To enable its
+checkout browser, pass the tested `--agent-browser` and `--browser-executable`
+paths to install, or to an explicit stopped-service update of the same home.
+The installer validates the native adapter version and retains the installation's
+existing private browser profile/home/socket ownership. Log that profile into
+Mathem normally; never copy another browser's cookies or refresh tokens. The
+`run-service.sh` launcher also discovers available browser executables; absent
+prerequisites leave Mathem core operations and the manual checkout handoff usable.
+A configured browser is not evidence of login, account matching or card readiness.
 
 The provider auth tests use actual MCP/mcp-types 2.1.1 with test-only OAuth/MCP
 responses against the [MCP authorization contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).

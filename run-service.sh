@@ -88,6 +88,11 @@ provider="$("$python" -c 'from pathlib import Path; from service import config; 
 if [[ "$provider" != "mathem" ]]; then
   agent_browser="$(find_agent_browser)"
   chromium="$(find_chromium)"
+elif agent_browser="$(find_agent_browser 2>/dev/null)" && chromium="$(find_chromium 2>/dev/null)"; then
+  : # Mathem shopping remains available when optional checkout tools are absent.
+else
+  agent_browser=""
+  chromium=""
 fi
 
 umask 077
@@ -109,7 +114,7 @@ service_args=(
   --browser-gid "$(id -g)"
 )
 
-if [[ "$provider" != "mathem" ]]; then
+if [[ -n "$agent_browser" && -n "$chromium" ]]; then
   service_args+=(--browser-binary "$agent_browser" --browser-executable "$chromium")
 fi
 

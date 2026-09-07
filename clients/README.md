@@ -46,7 +46,13 @@ normal tool permissions. The packages do not auto-approve tools or change the
 household's confirmation policy. A client permission denial does not authorize
 using another tool to perform the same action. An uncertain cart or checkout
 response must be reconciled through the existing service workflow before any
-new attempt. Mathem payment remains a manual website handoff.
+new attempt. Mathem supports guarded saved-card checkout when the installation
+has a configured dedicated browser logged into the same account. Without an
+available checkout browser, it returns a manual website handoff. Failed login,
+account/address or saved-card checks stop checkout and require attention before
+a fresh review. Other payment methods and existing-order
+changes/cancellation still require the website; native purchase acceptance
+remains open in #50.
 
 The attachment uses the installation's stable `current` paths. Rebuild packages
 from the updated running release into a new output directory. Attachment or skill

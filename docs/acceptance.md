@@ -27,7 +27,7 @@ provider outcome.
 
 | Feature | Served tools or normal path | Current evidence | Remaining boundary |
 |---|---|---|---|
-| Setup, status and continuity | `status`, `setup`, `profile`; installer, service/bridge restart | `test_installer.py`, `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`; 15 native Bob prerequisite conversations and native profile/menu flows | Mathem protected-action installation/upgrade is pending its implementation; bank use works independently |
+| Setup, status and continuity | `status`, `setup`, `profile`; installer, service/bridge restart | `test_installer.py`, `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`; 15 native Bob prerequisite conversations and native profile/menu flows | Mathem can add optional checkout browser paths on a stopped update; native protected-action installation/upgrade acceptance remains pending |
 | Recipe search and details | `recipes`, `recipe_discovery` | `test_meal_concierge_recipes.py`, `test_meal_concierge_retailer_recipes.py`, `test_meal_concierge_recipe_selection.py`; native seven-day store scenarios below; authenticated MENY adapter search/detail and Oda/Mathem MCP search plus exact public details | Later Oda calls returned MCP internal error -32603; a repeat MENY search timed out rendering; no exact native bulk-cart preview exists |
 | Import and migration | `recipe_import`, `migration`; `import_recipes.py` | `test_recipe_import.py`, `test_meal_concierge_migration.py`; authenticated real Mealie 3.24.0 import and independent bank readback; prior scoped MC-07 extraction acceptance | New imports target builtin. RecipeSage source-account and further client/input acceptance remain unverified/deferred; fixture formats are documented separately |
 | Recipe writes, favorites and labels | `recipe_write`, `recipe_favorite`, `recipe_labels`, `recipe_lifecycle` | `test_meal_concierge_recipes.py`, `test_meal_concierge_private_recipes.py`, `test_meal_concierge_acceptance.py`; new builtin saves and exact original-operation recovery covered | External labels/lifecycle writes exist only for exact retained recovery, not new primary-library use |
@@ -38,8 +38,8 @@ provider outcome.
 | Pantry and exact quantities | `menu` available_ingredients; `products` decisions | `test_meal_concierge_pantry_selection.py`, `test_meal_concierge_products.py`; native Thai/spicy/stock ranking below | Request-scoped exact stock, not an inventory ledger; unknown measures remain actionable unresolved needs |
 | Catalog, product planning and substitutions | `catalog`, `products` | `test_meal_concierge_products.py`, `test_meal_concierge_product_capacity.py`; whole-week and offline-pack preparation below | No measured native-hint speedup; current prices/availability and exact candidate approval remain required |
 | Favorites and recurring goods | `product_favorites`, `recurring` | `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`, `test_meal_concierge_products.py` | Shared persistence/interval behavior verified; real account cart effects remain separately pending |
-| Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | One real item added and removed; live delivery selection remains untested |
-| Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Oda/MENY guarded paths remain; MENY phone approval is external. Mathem still returns a manual checkout handoff. Automated Mathem submit/change/cancel and real payment-result verification remain #50 |
+| Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | One real item added and removed; a later native delivery selection and checkout review passed, but reservation release remains unverified |
+| Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Oda/MENY guarded paths remain; MENY phone approval is external. Mathem has guarded saved-card checkout when its dedicated browser is configured, otherwise manual handoff. Native submit/payment acceptance and automated change/cancel remain #50 |
 | Scheduling and email | `schedule`, `email` | `test_meal_concierge.py`, `test_weekly_scheduler.py`, `test_email_scheduler.py`; recorded local-sender/occurrence/recovery checks | No real recipients used; synthetic scheduling does not certify unattended live Mathem checkout |
 
 ## Native menu conversations
@@ -124,9 +124,15 @@ failures remain explicit failures, not exhausted recipe sources.
 #50 remains open: Mathem website login in Bob is now complete alongside MCP
 OAuth, and authenticated MCP recipe search passed again. The connected
 seven-dinner purchase conversation,
-automated protected-action implementation, normal installation/upgrade,
-account-mismatch checks and observed order/payment/change/cancellation outcomes
-are not complete. Missing login/card/challenge and drift/uncertain-effect
+normal installation/upgrade and observed order/payment/change/cancellation
+outcomes are not complete. Guarded saved-card prepare/submit/reconcile is
+implemented with synthetic account/card/cart/delivery/amount-drift and uncertain
+response checks. Native MCP and browser reads established the Swedish fee rows,
+selected address binding, masked saved-card selection and order-specific receipt
+address; they did not exercise a final payment click. A later one-item checkout
+review ended with the test item removed and no pending cart change. The selected
+delivery reservation was retained with release unverified. Existing-order
+changes and cancellation still require the website. Missing login/card/challenge and drift/uncertain-effect
 fixtures must accompany the eventual verified implementation. Owner test
 purchase authorization is available; authorization alone is not provider
 capability evidence. No order or payment should be inferred from the reads above.

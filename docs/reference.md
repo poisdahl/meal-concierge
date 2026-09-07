@@ -88,19 +88,34 @@ have the form `mathem:YYYY-MM-DD:ID`; selection sends the numeric provider ID,
 then verifies the selected slot from MCP and its ID in the cart. It does not
 parse Swedish delivery labels with Oda's Norwegian text parser.
 
-Mathem `checkout prepare` returns `manual_checkout_required`, `currency="SEK"`,
-the current cart summary and a Mathem cart URL. It creates no pending payment
-attempt. Finish payment and any existing-order change or cancellation on Mathem;
-standing authorization does not enable those unsupported operations. Weekly
-`draft` and `cart_ready` runs are supported; `auto_checkout` is rejected. Mathem
-requires no `agent-browser`, Node.js or private automated browser login.
+Mathem guarded saved-card checkout uses its dedicated browser and normal
+`prepare`/`confirm`/`submit`/`reconcile` journal. The selected MCP address reference
+must match the authenticated browser account before each review. The checkout
+must match every product/quantity, selected delivery, address, saved card and
+exact SEK fee row. The final browser turn checks those visible values again;
+the native callback rechecks cart/delivery and the authorization before dispatch.
+The observed `Gratis leverans` credit offsets gross delivery while the selected
+slot reports its net price. Other unverified discounts/deposits stop checkout.
 
-Unauthenticated endpoint/OAuth discovery has been checked against Mathem.
-Local transport, installer and household-flow tests use synthetic responses
-based on the observed Oda MCP contract with provider-specific Mathem adaptations.
-An authenticated Mathem account is still required to validate the actual tool
-schemas, product/cart/delivery responses
-and completed customer flow. No Mathem purchase is part of local validation.
+Without browser prerequisites, `prepare` returns `manual_checkout_required`,
+the SEK cart summary and store URL, without creating a payment attempt. Recipe,
+cart and draft/cart_ready operations remain available. Enabling scheduled
+checkout requires its existing amount/delivery/confirmation/dietary gates plus
+the configured, authenticated browser; installation does not log it in.
+Existing-order change/cancellation remains a manual website operation.
+
+Mathem MCP receipts omit the address. Reconciliation therefore reads the exact
+order URL, its visible order reference and receipt address, then matches MCP
+currency, products, total, delivery window and fulfillable tracking state. A
+missing or unreadable receipt keeps the attempt uncertain and never authorizes
+another payment. Repeated confirmation/reconciliation uses the original journal.
+
+Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
+amount/account/card helper reads and read-only receipt address verification have
+been exercised. Local tests cover guarded Application preparation, final DOM
+drift and lost-response reconciliation. Complete native model checkout/payment,
+order-change and cancellation acceptance remains tracked in #50; these local
+checks do not establish a completed customer purchase.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths

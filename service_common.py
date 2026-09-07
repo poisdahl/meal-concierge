@@ -480,7 +480,7 @@ def validate_schedule(schedule: Mapping[str, Any], provider: str) -> float | Non
         if delivery.get(key) is not None and re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(delivery[key])) is None:
             raise HouseholdError(f"schedule delivery {key} is invalid")
     if schedule.get("auto_checkout"):
-        if provider != "oda":
+        if provider not in {"oda", "mathem"}:
             raise HouseholdError(f"{provider.upper()} supports cart_ready scheduling; checkout continues manually in the browser")
         if maximum is None or not (delivery_weekday or delivery.get("latest_end")):
             raise HouseholdError("auto-checkout requires maximum total and a delivery weekday or latest end")
@@ -498,7 +498,9 @@ def money_cents(value: Any) -> int | None:
         return None
     return int(round(scaled))
 
-def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any]) -> bool:
+def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any], *, provider: str = "oda") -> bool:
+    if provider == "mathem" and order.get("currency") != "SEK":
+        return False
     products = order.get("products")
     if not isinstance(products, list):
         return False
@@ -549,7 +551,10 @@ def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any])
             "nov": 11, "november": 11,
             "des": 12, "desember": 12,
         }
-        for match in re.finditer(r"\b(\d{1,2})\.\s*([A-Za-zÆØÅæøå]+)", display):
+        if provider == "mathem":
+            months.update({"januari": 1, "februari": 2, "maj": 5, "augusti": 8, "dec": 12, "december": 12})
+        date_pattern = r"\b(\d{1,2})(?:\.\s*|\s+(?=jan|feb|mar|apr|maj|jun|jul|aug|sep|okt|nov|dec))([A-Za-zÆØÅæøå]+)" if provider == "mathem" else r"\b(\d{1,2})\.\s*([A-Za-zÆØÅæøå]+)"
+        for match in re.finditer(date_pattern, display):
             month = months.get(match.group(2).casefold())
             if not month:
                 return None
@@ -562,11 +567,10 @@ def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any])
             return None
         date_key = next(iter(date_keys))
         explicit_times = tuple(re.findall(r"\b(?:[01]\d|2[0-3]):[0-5]\d(?=$|\s|[-–,])", display))
-        compact = re.search(
-            r"\bmellom\s+(?:kl\.?\s*)?([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![:.]\d)\s+og\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![:.]\d)\b",
-            display,
-            re.IGNORECASE,
-        )
+        compact_pattern = r"\bmellom\s+(?:kl\.?\s*)?([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![:.]\d)\s+og\s+([01]?\d|2[0-3])(?:[:.]([0-5]\d))?(?![:.]\d)\b"
+        if provider == "mathem":
+            compact_pattern = compact_pattern.replace("mellom", "mellan").replace("og", "och")
+        compact = re.search(compact_pattern, display, re.IGNORECASE)
         compact_times = None
         if compact:
             compact_times = (

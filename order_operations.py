@@ -588,7 +588,7 @@ class OrderOperations:
         }
 
     @staticmethod
-    def _bind_delivery_summary(summary: Mapping[str, Any], binding: Mapping[str, Any]) -> dict[str, Any]:
+    def _bind_delivery_summary(summary: Mapping[str, Any], binding: Mapping[str, Any], *, provider: str = "oda") -> dict[str, Any]:
         result = deepcopy(dict(summary))
         slot = validate_delivery_slot(binding["selected"])
         existing = result.get("delivery")
@@ -605,9 +605,14 @@ class OrderOperations:
             amounts = deepcopy(dict(amounts))
             exact_price = slot["price_ore"] / 100
             supplied = amounts.get("delivery_price")
-            if supplied is not None and supplied != exact_price:
+            # Mathem exposes gross delivery and an observed full delivery credit
+            # as separate checkout rows; the selected slot reports the net price.
+            credit = amounts.get("discounts") if provider == "mathem" else None
+            free_mathem_delivery = supplied is not None and supplied > 0 and credit == -supplied and exact_price == 0
+            if supplied is not None and supplied != exact_price and not free_mathem_delivery:
                 raise HouseholdError("provider checkout delivery price disagrees with the selected slot")
-            amounts["delivery_price"] = exact_price
+            if not free_mathem_delivery:
+                amounts["delivery_price"] = exact_price
             result["amounts"] = amounts
         return result
 
@@ -1586,7 +1591,7 @@ class OrderOperations:
 
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
-        if self.provider == "mathem" and action not in {"prepare", "auto"}:
+        if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
             raise HouseholdError("Mathem checkout is manual; use prepare for the cart summary and finish at https://www.mathem.se/se/cart/")
         deadline = time.monotonic() + (MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240)
         if action == "prepare":
@@ -1771,7 +1776,7 @@ class OrderOperations:
                         if self.provider == "meny"
                         else self.provider_client.call("get_cart", {}, deadline=deadline)
                     )
-                    summary = self._bind_delivery_summary(cart_summary(cart), delivery_choice)
+                    summary = self._bind_delivery_summary(cart_summary(cart), delivery_choice, provider=self.provider)
                     with self.store.locked() as state:
                         self._guard_scheduled_context(state, context)
                         self._weekly_attempt_status(state, context, "cart_ready")
@@ -1835,7 +1840,7 @@ class OrderOperations:
         automatic_checkout: bool = False,
         scheduler_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if self.provider == "mathem":
+        if self.provider == "mathem" and self.browser is None:
             if automatic_checkout:
                 raise HouseholdError("Mathem supports manual checkout only")
             with self._browser_operation(deadline):
@@ -1924,7 +1929,7 @@ class OrderOperations:
                 return cart_gate
             cart_plan_baseline = deepcopy(self.store.read().get("cart_plan"))
         delivery_change = bool(order_change and order_change.get("requested_delivery"))
-        if self.provider == "oda" and not delivery_change:
+        if self.provider in {"oda", "mathem"} and not delivery_change:
             delivery = summary.get("delivery")
             if not isinstance(delivery, Mapping) or not delivery.get("display"):
                 raise HouseholdError("select a delivery slot before checkout")
@@ -2035,7 +2040,7 @@ class OrderOperations:
                     raise HouseholdError("Oda cart or delivery changed while preparing checkout; prepare a new summary")
                 cart = refreshed_cart
                 summary = refreshed_summary
-            if self.provider == "oda" and isinstance(review.get("amounts"), Mapping):
+            if self.provider in {"oda", "mathem"} and isinstance(review.get("amounts"), Mapping):
                 amount_cart = dict(cart)
                 amount_cart["amounts"] = deepcopy(dict(review["amounts"]))
                 reviewed_amounts = cart_summary(amount_cart).get("amounts")
@@ -2043,7 +2048,7 @@ class OrderOperations:
                     raise HouseholdError("Oda checkout returned no verified amounts")
                 summary["amounts"] = deepcopy(dict(reviewed_amounts))
             payment_display = None
-            if self.provider == "oda":
+            if self.provider in {"oda", "mathem"}:
                 payment_display = str((review.get("summary") or {}).get("payment") or review.get("payment_display") or "")
                 if re.fullmatch(r"•••• \d{4}", payment_display) is None:
                     raise HouseholdError("Oda checkout returned no verified masked payment identity")
@@ -2060,7 +2065,7 @@ class OrderOperations:
                     allow_recovery=allow_recovery,
                     scope_cart=cart,
                 )
-            summary = self._bind_delivery_summary(summary, delivery_binding)
+            summary = self._bind_delivery_summary(summary, delivery_binding, provider=self.provider)
             if self.provider == "meny":
                 review = deepcopy(dict(review))
                 review["delivery_guard"] = deepcopy(dict(delivery_binding))
@@ -2109,7 +2114,7 @@ class OrderOperations:
             "confirmation_required": self.confirmation_policy == "fresh",
             "summary": {
                 **deepcopy(summary),
-                **({"payment": payment_display} if self.provider == "oda" else {}),
+                **({"payment": payment_display} if self.provider in {"oda", "mathem"} else {}),
             },
             "order_change": {"order_id": order_change["order_id"], "kind": order_change.get("kind")} if order_change else None,
             "next": (
@@ -2186,7 +2191,7 @@ class OrderOperations:
                 def before_click() -> None:
                     # MENY's provider client is this same locked browser tab;
                     # submit_checkout performs its own exact fresh review.
-                    if self.provider == "oda":
+                    if self.provider in {"oda", "mathem"}:
                         fresh = self.provider_client.call("get_cart", {}, deadline=deadline)
                         expected = cart_summary(pending["cart"])
                         if canonical(cart_summary(fresh)) != canonical(expected):
@@ -2411,6 +2416,19 @@ class OrderOperations:
             tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
             order = {**candidates[0], **details}
         tracking_status = str((tracking or {}).get("status") or "").casefold()
+        receipt_order = order
+        if self.provider == "mathem" and order is not None and candidate_id == details_id == tracking_id:
+            address = (pending["summary"].get("delivery") or {}).get("address")
+            verified = False
+            if isinstance(address, str) and address.strip() and self.browser is not None:
+                try:
+                    verified = self.browser.receipt_address_matches(candidate_id, address, deadline=deadline)
+                except HouseholdError:
+                    pass  # Keep this attempt uncertain; no second payment.
+            if verified is True:
+                receipt_order = {**order, "deliveryAddress": address}
+            else:
+                receipt_order = {**order, "deliveryAddress": None, "delivery_address": None}
         if self.provider == "meny":
             confirmed = (
                 order is not None
@@ -2421,7 +2439,7 @@ class OrderOperations:
             )
         else:
             fulfillable = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
-            confirmed = order is not None and candidate_id and candidate_id == details_id == tracking_id and tracking_status in fulfillable and order_matches_checkout(order, pending["summary"])
+            confirmed = order is not None and candidate_id and candidate_id == details_id == tracking_id and tracking_status in fulfillable and order_matches_checkout(receipt_order, pending["summary"], provider=self.provider)
         expired_unpaid = False
         candidate_matches = order is not None and meny_order_matches_checkout(order, pending["summary"])
         undispatched_retryable = payment_not_dispatched and confirmation_order_id is None and not candidates

@@ -1,8 +1,8 @@
 """Shared Oda/Mathem MCP transport, not an adapter for arbitrary stores.
 
 Live initialize/tools-list establishes the available operations. The observed
-Oda schema has provider-specific Mathem adaptations tested synthetically;
-authenticated Mathem response schemas remain unverified. Endpoints, OAuth
+Oda schema has provider-specific Mathem adaptations verified against selected
+authenticated product/cart/delivery/order responses and synthetic tests. Endpoints, OAuth
 registrations, prices and cart displays remain provider-specific.
 """
 
