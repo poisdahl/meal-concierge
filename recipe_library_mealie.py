@@ -223,9 +223,9 @@ class MealieAdapter(RecipeLibraryAdapter):
             raise RecipeLibraryError("Mealie pagination response is incompatible")
         items = value["items"]
         page = value.get("page")
-        per_page = value.get("perPage")
+        per_page = value.get("per_page")
         total = value.get("total")
-        total_pages = value.get("totalPages")
+        total_pages = value.get("total_pages")
         if (
             isinstance(page, bool)
             or not isinstance(page, int)

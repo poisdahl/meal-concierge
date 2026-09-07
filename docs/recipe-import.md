@@ -253,8 +253,20 @@ RecipeSage v4.0.6 API fixtures with real adapters against ephemeral loopback HTT
 servers. It covers mapped pagination and authentication, redirect refusal,
 response limits, native quantities and sidecar removal, favorite observations,
 and Mealie cover retrieval followed by actual managed-image sanitization.
-Public DNS/socket/TLS are exercised with synthetic boundaries; no live public
-TLS or authenticated source-account acceptance is claimed.
+Public DNS/socket/TLS failure cases use synthetic boundaries.
+
+Authenticated self-hosted import was also exercised on 2026-09-07 against the
+official Mealie v3.24.0 container, with a newly isolated source account and two
+invented recipes. Native login, capability discovery and one-item pagination
+fed the real Application import/save/get path. Quantities, four-person servings,
+ordered steps, source links, notes and tags survived reopening the bank and
+repeating the original save intents; exactly two built-in entries remained.
+All 23 source calls during import were GETs and the native records were unchanged.
+Mealie's response fields are `per_page` and `total_pages`; its request parameter
+remains `perPage`. This acceptance uses a real authenticated service with test
+data, not an existing household account or public TLS endpoint. Native image
+and RecipeSage source-account acceptance remain distinct from the fixture checks
+above; this test does not certify those unexercised account paths.
 
 The plain HTML fallback preserves paragraph/list/table-cell separation and
 contiguous inline text. It ignores script/style/template and explicitly hidden

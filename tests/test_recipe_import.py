@@ -907,6 +907,8 @@ from recipe_import_readers import RecipeImportReaderError, read_webpage, MAX_WEB
 import recipe_import_sources as sources
 
 SOURCE_FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+if not SOURCE_FIXTURE_ROOT.is_dir():
+    SOURCE_FIXTURE_ROOT = Path(__file__).resolve().parents[3] / "scripts/tests/fixtures"
 FIXTURES = {provider: json.loads((SOURCE_FIXTURE_ROOT / provider / version).read_text())
             for provider, version in [("mealie", "v3.24.0.json"), ("recipesage", "v4.0.6.json")]}
 
@@ -990,7 +992,7 @@ class SourceTests(unittest.TestCase):
                     return 200, {}, fixture[mapping[path]]
                 if path == '/api/recipes':
                     page = deepcopy(fixture['recipe_page'])
-                    page['perPage'] = int(query['perPage'][0])
+                    page['per_page'] = int(query['perPage'][0])
                     return 200, {}, page
                 if path == '/api/recipes/' + fixture['recipe_get']['id']:
                     return 200, {}, fixture['recipe_get']
@@ -1573,9 +1575,9 @@ class AdapterRecoveryTests(unittest.TestCase):
                 if path=='/api/recipes':
                     if state['wire'] is not None: return 200,state['wire']
                     page=deepcopy(fixture['recipe_page'])
-                    page['perPage']=int(query['perPage'][0])
+                    page['per_page']=int(query['perPage'][0])
                     if state['recovery']:
-                        page.update({'items':[state['raw']]*(2 if state['duplicate'] else 1),'total':2 if state['duplicate'] else 1,'totalPages':1})
+                        page.update({'items':[state['raw']]*(2 if state['duplicate'] else 1),'total':2 if state['duplicate'] else 1,'total_pages':1})
                     return 200,page
                 if path=='/api/recipes/'+raw['id']: return 200,state['raw']
             else:

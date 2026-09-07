@@ -6788,7 +6788,7 @@ class MealieAdapterTests(unittest.TestCase):
 
     def test_exact_tag_read_and_explicit_create_shapes_without_recipe_replacement(self):
         tag_page = deepcopy(self.fixture["tag_page"])
-        tag_page["perPage"] = 100
+        tag_page["per_page"] = 100
         adapter, opener = self.adapter(
             *self.capability_responses(),
             (200, tag_page),
@@ -6886,7 +6886,7 @@ class MealieAdapterTests(unittest.TestCase):
     def test_paginated_search_and_exact_get_use_uuid_identity_and_display_only_slug(self):
         next_page = deepcopy(self.fixture["recipe_page"])
         next_page["total"] = 2
-        next_page["totalPages"] = 2
+        next_page["total_pages"] = 2
         adapter, opener = self.adapter((200, next_page), (200, self.fixture["recipe_get"]))
         page = adapter.search("vegetable", {"tags": ["fixture"]}, None, 1)
         self.assertEqual(page["cursor"], "page:2")
@@ -7055,7 +7055,7 @@ class MealieAdapterTests(unittest.TestCase):
             key: patched[key]
             for key in ("id", "name", "slug", "tags", "orgURL", "updatedAt")
         }
-        page = {"page": 1, "perPage": 50, "total": 1, "totalPages": 1, "items": [summary]}
+        page = {"page": 1, "per_page": 50, "total": 1, "total_pages": 1, "items": [summary]}
         adapter, _ = self.adapter((200, page), (200, patched))
         reconciled = adapter.reconcile_create(snapshot, operation)
         self.assertEqual(reconciled["library_recipe_ref"]["recipe_id"], self.recipe_id)

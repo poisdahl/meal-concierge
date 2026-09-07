@@ -8,6 +8,7 @@
     "stable_schema_source": "Mealie v3.24.0 tag schemas and routes",
     "runtime_schema_source": "https://demo.mealie.io/openapi.json",
     "runtime_reported_version": "nightly",
+    "pagination_response_evidence": "Authenticated isolated official Mealie v3.24.0 on 2026-09-07 returns per_page and total_pages; its request parameter remains perPage. Fixture values remain synthetic.",
     "sanitization": "Complete response keys with synthetic public values and non-account UUIDs; no token, private recipe, real household/user identifier, internal hostname, or other account data."
   },
   "endpoints": {
@@ -72,9 +73,9 @@
   },
   "recipe_page": {
     "page": 1,
-    "perPage": 1,
+    "per_page": 1,
     "total": 1,
-    "totalPages": 1,
+    "total_pages": 1,
     "next": null,
     "previous": null,
     "items": [
@@ -327,9 +328,9 @@
   },
   "tag_page": {
     "page": 1,
-    "perPage": 1,
+    "per_page": 1,
     "total": 1,
-    "totalPages": 1,
+    "total_pages": 1,
     "next": null,
     "previous": null,
     "items": [{

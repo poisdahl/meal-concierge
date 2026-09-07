@@ -306,7 +306,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         def remote(method, path, **arguments):
             calls.append((method, path))
             if path == "/api/recipes":
-                return {"items": [deepcopy(stub)], "page": 1, "perPage": 50, "total": 1, "totalPages": 1}
+                return {"items": [deepcopy(stub)], "page": 1, "per_page": 50, "total": 1, "total_pages": 1}
             return deepcopy(stub)
         adapter._request = remote
         found = adapter.inspect_incomplete_create(full_recipe("Missing response"), operation, {"provider_principal": "fixture", "provider_binding": "a" * 64})
