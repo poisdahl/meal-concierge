@@ -100,7 +100,9 @@ launcher interruption, and interrupted-publication recovery. The guided native
 Grok test below now also passed core installation, service/MCP and recipe reads.
 The official native browser route also passed the blank-window smoke below.
 The native pointer-skill installation and invocation below also passed.
-OAuth, live-store and PDF-attachment acceptance remain open.
+The later guided Oda OAuth and native catalog/cart reads below also passed.
+Cart writes, checkout, unattended installation and PDF-attachment acceptance
+remain open.
 The command-form workaround below is extraction evidence, not an
 alternative complete installer or a guarantee for arbitrary executables.
 
@@ -151,7 +153,8 @@ install/run/attach path with Python 3.12.12, 35 pinned packages, both MCP 2.1.1
 distributions and 4,599 imported recipes. Its new native MCP exposed 26 tools;
 status identified Oda and the new household as `awaiting_login`, and builtin
 recipe search/get passed. Both earlier installations remained connected. These
-are also Grok-reported results, not an authenticated Oda test. Source acquisition
+were installation-only results; the later authenticated reads are recorded below.
+Source acquisition
 initially returned an uncertain Shell spawn error before any lasting effect was
 found. After reconciliation, creating the destination from an existing working
 directory and then downloading into that directory succeeded. The original
@@ -222,8 +225,24 @@ Oda installation. Grok reported the exact marker URL and unchanged daemon/Chrome
 PID/start identities; selecting the observed task tab then made that same marker
 visible in the original Bot's cloud window, independently inspected by the
 operator. Direct Chrome dispatch had not delivered the marker to the task tab.
-No reset, browser restart or OAuth was used. This verifies browser handoff only;
-authenticated Oda and unattended installation acceptance remain open.
+No reset, browser restart or OAuth was used in that inert test.
+
+The subsequent guided stock Oda OAuth completed with exit zero and a stored
+grant on the same cloud computer. The first helper had timed out without
+storing a grant; its failed outcome was reconciled before starting a fresh login. On 2026-09-07, the retained native Oda MCP then returned three
+products for `ris` and successfully read the authenticated empty cart. These
+results were read from Grok's visible conversation, without independently
+exported Shell or MCP telemetry. No cart, delivery, order or payment was changed.
+
+The tested source `7ad6e5a9f879533196716985fad1cf0b7f57f71b` still reported
+`awaiting_login` after successful OAuth: it cached Oda integration status at
+service startup. The installed code, service token directory and native MCP
+socket were checked before accepting the actual authenticated cart read as
+evidence. A product search alone does not establish account authentication.
+This retained runtime has not been updated or restarted; the stale diagnostic
+remains a separate defect. The test establishes guided OAuth and native Oda
+read access, not browser website login, cart writes, checkout, unattended
+installation or PDF delivery.
 
 ## Cloud Shell command form
 
