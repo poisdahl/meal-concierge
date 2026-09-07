@@ -100,6 +100,29 @@ service restart. These checks used the authenticated CLI and generated plugin;
 the desktop app's model session remains a separate check. Model-client
 acceptance must be recorded independently of SDK checks or login status.
 
-Full menu and file/photo/document import acceptance remains pending the shared
-recipe/import integration. These packages do not implement a second importer,
-normalizer, scheduler, sender or credential owner.
+On 2026-09-07, the isolated native Claude Code workflow also loaded the complete
+packaged skill, read original text, a photo and all three PDF pages, and returned
+schema-2 import previews. Text and PDF recipes were explicitly saved to builtin;
+the photo recipe was saved as a draft after attaching its cover. An automatic
+menu selected and saved seven distinct dated dinners for two without a
+client-supplied candidate list. A separate native save denial caused no service
+save dispatch. Unknown quantities and unrelated favorites/preferences/cart state
+were preserved.
+
+Cover bytes crossed the host-file boundary through the existing CLI's stdin;
+recipe saves and image reads used native MCP. ImageContent responses before and
+after saving matched the managed JPEG and included separate image credits. Fresh
+CLI conversations after service restarts retrieved the same recipe revisions,
+menu and image bytes. These are synthetic-provider subprocess-service results,
+not desktop rendering, native service-manager or scheduler acceptance.
+
+The photo/PDF runs first encountered a test permission mismatch between `/tmp`
+and its `/private/tmp` alias; same-file Read retries passed after correcting the
+exact path allowance. The final photo read recovered from two nonexistent tool
+names before using the discovered tools. Those failures remain recorded. Some
+model narration misstated cooking-time, readable-note or source-yield details;
+the actual recipe fields remained correct. Flawless presentation is not claimed.
+Codex's later attachment/preparation attempts timed out before model events;
+its full menu/attachment workflow and the Claude desktop model session remain
+unverified. These packages do not implement a second importer, normalizer,
+scheduler, sender or credential owner.
