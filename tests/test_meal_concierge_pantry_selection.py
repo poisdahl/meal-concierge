@@ -24,6 +24,7 @@ class PantrySelectionTests(unittest.TestCase):
         self.provider = NoProviderCalls()
         self.app = Application(self.store, self.provider, object())
         self.app._now = lambda: datetime(2026, 9, 7, 8, tzinfo=timezone.utc)
+        self.app._household_today = lambda state=None: self.app._now().date()
         with self.store.locked() as state:
             state['setup']['status'] = 'complete'
             state['profile']['recipes']['sources'] = {k: k == 'internal' for k in state['profile']['recipes']['sources']}
