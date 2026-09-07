@@ -96,9 +96,9 @@ write response with exactly one dispatch. These are subprocess-service checks;
 native service-manager installation remains a separate runtime check.
 The native Claude Code run also passed status/setup calls, profile updates,
 client permission denial before service dispatch, and persisted state after a
-service restart. These checks used the authenticated CLI and generated plugin;
-the desktop app's model session remains a separate check. Model-client
-acceptance must be recorded independently of SDK checks or login status.
+service restart. These checks used the authenticated CLI and generated plugin; the bounded
+Desktop result is recorded separately below. Model-client acceptance must be
+recorded independently of SDK checks or login status.
 
 On 2026-09-07, the isolated native Claude Code workflow also loaded the complete
 packaged skill, read original text, a photo and all three PDF pages, and returned
@@ -122,7 +122,29 @@ exact path allowance. The final photo read recovered from two nonexistent tool
 names before using the discovered tools. Those failures remain recorded. Some
 model narration misstated cooking-time, readable-note or source-yield details;
 the actual recipe fields remained correct. Flawless presentation is not claimed.
+A subsequent bounded Claude Desktop 1.46388.4 test with embedded Claude Code
+2.1.260 observed the native packaged skill, MCP status and setup
+show/keep_current. Original PNG, TXT and three-page PDF files were attached
+through the native chooser, produced three separate import previews and were
+explicitly saved as three non-favorite drafts. Source amounts, four steps and
+an unknown tomato unit were preserved; a hostile source instruction had no
+observed effects. Profile and cart state stayed unchanged, with synthetic
+provider reads.
+
+Native recipe_image calls for the preview and saved recipe returned the same
+managed JPEG. Opening View screenshot on the saved tool result displayed the
+actual image in Desktop. Cover bytes entered through one host CLI stdin
+transfer; this does not establish native MCP byte upload.
+
+The project MCP and skill required archive/unarchive of the exact test
+conversation to restart its engine; /reload-plugins alone was insufficient.
+The PDF pages=1-3 read initially failed because pdftoppm was absent, then native
+Read of the complete original PDF succeeded with all three pages. TXT had a
+native attachment and exact original transcript, but no separately observed
+Read tool call.
+
+This Desktop result does not establish full menu/lifecycle acceptance,
+service-restart persistence or native service-manager/scheduler behavior.
 Codex's later attachment/preparation attempts timed out before model events;
-its full menu/attachment workflow and the Claude desktop model session remain
-unverified. These packages do not implement a second importer, normalizer,
-scheduler, sender or credential owner.
+its full menu/attachment workflow remains unverified. These packages do not
+implement a second importer, normalizer, scheduler, sender or credential owner.
