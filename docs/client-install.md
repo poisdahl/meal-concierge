@@ -72,6 +72,10 @@ needed. Long homes can exceed the Unix socket limit: select a short **durable**
 `--socket` and, if needed, `--browser-socket-directory` before creating anything.
 Do not put retained state in `/tmp`. Native install leaves the core stopped;
 `start` starts its persistent unit. Verify that exact unit and service health.
+Keep the installing conversation/process alive and await the installer’s terminal
+result before finishing, even when using a background tool. Background tasks can
+stop when the client exits. If interrupted, reconcile the original attempt below
+before retrying.
 
 On the same prompt again, inspect `runtime.json`, pending/maintenance markers,
 the selected release, service owner and health first. For the correct healthy
