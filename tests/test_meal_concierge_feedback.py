@@ -109,7 +109,7 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(before,self.store.path.read_bytes())
         with self.store.locked() as state:
             state['profile']['diet']['allergies_or_sensitivities']=['milk']
-        self.assertNotEqual(self.plan()['status'],'planned')
+        self.assertEqual(self.plan()['status'],'planned')
         self.assertEqual(self.fixture.provider.calls,[])
 
     def test_inspection_pages_fit_actual_wire_and_stale_cursor_fails(self):

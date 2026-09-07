@@ -119,10 +119,15 @@ def normalize_candidate_facts(value: Any) -> dict[str, Any]:
     if value is None:
         value = {}
     if not isinstance(value, Mapping) or set(value).difference(
-        {"active_minutes", "dietary_facets", "variety_facets", "perishability"}
+        {"active_minutes", "dietary_facets", "variety_facets", "perishability", "batch_guidance"}
     ):
         raise PlannerError("candidate facts have unknown fields")
     result: dict[str, Any] = {}
+    if "batch_guidance" in value:
+        guidance = value['batch_guidance']
+        if not isinstance(guidance, dict) or set(guidance) != {'basis', 'suitability', 'storage', 'reheating'} or any(not isinstance(v, str) or not 1 <= len(v.strip()) <= 1000 for v in guidance.values()) or guidance['suitability'] not in {'suitable', 'unsuitable', 'unknown'}:
+            raise PlannerError('batch guidance needs explicit basis, suitability, storage and reheating text')
+        result['batch_guidance'] = deepcopy(guidance)
     if "active_minutes" in value:
         raw = value["active_minutes"]
         _source(raw, "facts.active_minutes", {"value"})
@@ -301,21 +306,12 @@ def _hard_evaluation(
         if status == "pass":
             status = "unknown"
         reasons.append({"code": "readiness_needs_input", "status": "unknown", "detail": candidate["readiness_unknown"]})
-    safety = candidate["facts"]["safety"]
-    for field in ("allergies_or_sensitivities", "avoid"):
-        supplied = safety.get(field) if isinstance(safety, Mapping) else {}
-        for rule in _profile_rules(profile, field):
-            value = supplied.get(rule, "unknown") if isinstance(supplied, Mapping) else "unknown"
-            reason_status = "pass" if value == "free" else "fail" if value == "contains" else "unknown"
-            reasons.append({
-                "code": f"safety:{field}",
-                "status": reason_status,
-                "detail": {"rule": rule, "evidence": safety.get("source", "unknown")},
-            })
-            if reason_status == "fail":
-                status = "fail"
-            elif reason_status == "unknown" and status == "pass":
-                status = "unknown"
+    from dietary_assessment import assess
+    findings = assess(profile, candidate['recipe'], recipe=True)
+    for finding in findings:
+        reasons.append({'code': 'dietary_assessment', 'status': 'fail' if finding['blocked'] else 'advisory', 'detail': finding})
+        if finding['blocked']:
+            status = 'fail'
     usage = candidate.get("usage")
     if isinstance(usage, Mapping) and usage.get("history_coverage") == "history_work_limit":
         if status == "pass":
@@ -369,7 +365,9 @@ def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping
     recipe = candidate["recipe"]
     tags = {_text(tag) for tag in recipe.get("tags", [])}
     cuisine = profile.get("cuisine") or {}
-    reasons = []
+    from dietary_assessment import assess
+    reasons = [_reason('dietary_preference', -30, f) for f in assess(profile, recipe, recipe=True)
+               if f['condition'] in {'preference_deviation', 'sensitivity_conflict'}]
     for field in ("wanted", "flavours"):
         requested = {_text(value) for value in cuisine.get(field, [])}
         matched = sorted(requested.intersection(tags))
@@ -650,7 +648,7 @@ def _plan_reasons(
 
 def _selection(
     selected: tuple[Mapping[str, Any], ...], dates: list[str], profile: Mapping[str, Any],
-    input_digest: str, scope: list[dict[str, Any]], strict: Mapping[str, Any], portions: int,
+    input_digest: str, scope: list[dict[str, Any]], strict: Mapping[str, Any], portions: int, recurring=None,
 ) -> dict[str, Any]:
     slots = []
     for index, (candidate, day) in enumerate(zip(selected, dates, strict=True)):
@@ -700,6 +698,18 @@ def _selection(
         + sum(reason["weight"] for reason in plan_reasons),
         "tie_break": [slot["reference_key"] for slot in slots],
     }
+    if recurring:
+        payload['source_slots'] = deepcopy(slots)
+        payload['slots'] = []
+        payload['batches'] = []
+        for candidate, slot, allocation in zip(selected, slots, recurring['sources'], strict=True):
+            for day in allocation['eating_dates']:
+                payload['slots'].append({**deepcopy(slot), 'date': day, 'source_date': slot['date'],
+                                         'kind': 'fresh' if day == slot['date'] else 'leftover',
+                                         'new_shopping_requirements': day == slot['date']})
+            if allocation['batch']:
+                payload['batches'].append({**deepcopy(allocation), 'recipe_key': slot['recipe_key'], 'name': slot['name'],
+                    'guidance': deepcopy(candidate.get('supplied_facts', {}).get('batch_guidance') or {'basis': 'unknown', 'suitability': 'unknown', 'storage': 'Recipe-specific storage life must be checked before preparation.', 'reheating': 'Recipe-specific reheating guidance remains unknown.'})})
     payload["selection_digest"] = digest({
         "planner_version": PLANNER_VERSION,
         "input_digest": input_digest,
@@ -711,7 +721,7 @@ def _selection(
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
         "week", "dates", "portions", "candidates", "strict_targets",
-        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients",
+        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch",
     }):
         raise PlannerError("planner input has unknown fields")
     available = normalize_available_ingredients(value.get("available_ingredients"))
@@ -775,6 +785,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError("as_of_date must be an ISO date") from exc
     return {
         "planner_version": PLANNER_VERSION,
+        **({"recurring_batch": deepcopy(value["recurring_batch"])} if value.get("recurring_batch") else {}),
         **({"available_ingredients": available} if available else {}),
         "week": week,
         "dates": dates,
@@ -905,7 +916,11 @@ def plan_week(
     }
     eligible = [item for item in prepared if item["hard_constraints"]["status"] == "pass"]
     unknown = [item for item in prepared if item["hard_constraints"]["status"] == "unknown"]
-    count = len(checked["dates"])
+    layout = checked.get('recurring_batch')
+    if layout and layout['shortages']:
+        return {**base_result, 'status': 'needs_input', 'issues': [{'code': 'batch_portion_shortfall', **layout}], 'selections': []}
+    source_dates = [s['source_date'] for s in layout['sources']] if layout else checked['dates']
+    count = len(source_dates)
     if len(eligible) < count:
         status = "needs_input" if len(eligible) + len(unknown) >= count else "no_plan"
         return {
@@ -939,7 +954,10 @@ def plan_week(
             continue
         if len({item["content_digest"] for item in selected}) != count:
             continue
-        strict = _strict_evaluation(selected, checked["strict_targets"], profile)
+        if layout and any(s['batch'] and c.get('supplied_facts', {}).get('batch_guidance', {}).get('suitability') == 'unsuitable' for c, s in zip(selected, layout['sources'])):
+            continue
+        evaluated = tuple(c for c, allocation in zip(selected, layout['sources']) for _ in allocation['eating_dates']) if layout else selected
+        strict = _strict_evaluation(evaluated, checked["strict_targets"], profile)
         if strict["status"] == "unknown":
             for item in strict["results"]:
                 if item["status"] == "unknown":
@@ -949,8 +967,8 @@ def plan_week(
             strict_failures += 1
             continue
         selection = _selection(
-            selected, checked["dates"], profile, input_digest, scope, strict,
-            checked["portions"],
+            selected, source_dates, profile, input_digest, scope, strict,
+            checked["portions"], recurring=layout,
         )
         ranked.append(selection)
         ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"], item["selection_digest"]))

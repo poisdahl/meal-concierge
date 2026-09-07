@@ -43,6 +43,9 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "portions": 2,
         "dishes": 7,
         "batch_dishes": 0,
+        "meal_mode": "fresh",
+        "prepared_portion_range": [4, 8],
+        "recurring_batch_accepted": False,
         "salads": 0,
         "target_active_minutes": [15, 45],
         "maximum_active_minutes": 60,
@@ -62,6 +65,8 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "diet": {
         "patterns": ["Norwegian dietary guidelines"],
         "allergies_or_sensitivities": [],
+        "rules": [],
+        "uncertainty_permissions": [],
         "avoid": [],
         "prioritise": ["vegetables", "whole grains", "fish", "legumes"],
         "fish_grams_per_person": [300, 450],
@@ -203,11 +208,15 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
         elif isinstance(default, list):
             if not isinstance(value, list) or len(value) > 100:
                 raise HouseholdError(f"profile {path} must be a bounded list")
+            if path in {"diet.rules", "diet.uncertainty_permissions"}:
+                from dietary_assessment import validate_rules, validate_permissions
+                (validate_rules if path == "diet.rules" else validate_permissions)(value)
+                return
             if path == "diet.leafy_green_days" and all(type(x) is int for x in value):
                 if len(value) != len(set(value)) or any(not 1 <= x <= 7 for x in value):
                     raise HouseholdError("profile leafy_green_days must contain distinct day numbers from 1 to 7")
                 return
-            numeric = path in {"meals.target_active_minutes", "diet.fish_grams_per_person"}
+            numeric = path in {"meals.target_active_minutes", "meals.prepared_portion_range", "diet.fish_grams_per_person"}
             if numeric:
                 if len(value) != 2 or any(isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x) or x < 0 for x in value) or value[0] > value[1]:
                     raise HouseholdError(f"profile {path} must be an ordered pair of non-negative numbers")
@@ -215,6 +224,10 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
                 raise HouseholdError(f"profile {path} must contain bounded non-empty text")
     check(profile, DEFAULT_PROFILE, "")
     meals = profile["meals"]
+    if meals["meal_mode"] not in {"fresh", "batch", "mixed"}:
+        raise HouseholdError("meal_mode must be fresh, batch or mixed")
+    if any(type(v) is not int or not 1 <= v <= 100 for v in meals["prepared_portion_range"]):
+        raise HouseholdError("prepared_portion_range must be integers from 1 to 100")
     if any(not isinstance(value, int) or isinstance(value, bool) for value in meals["target_active_minutes"]) or meals["target_active_minutes"][1] > meals["maximum_active_minutes"]:
         raise HouseholdError("profile active-time targets must be integers within maximum_active_minutes")
     for field, minimum, maximum in (("people", 1, 100), ("portions", 1, 100), ("dinner_days", 0, 7), ("dishes", 0, 31), ("batch_dishes", 0, 31), ("salads", 0, 31), ("guest_meals", 0, 31), ("maximum_active_minutes", 1, 1440)):
@@ -755,6 +768,9 @@ def _migrate_state(
     profile = state.get("profile")
     if not isinstance(profile, dict):
         raise HouseholdError("household profile is invalid")
+    for section, fields in (("meals", ("meal_mode", "prepared_portion_range", "recurring_batch_accepted")), ("diet", ("rules", "uncertainty_permissions"))):
+        for field in fields:
+            profile[section].setdefault(field, deepcopy(DEFAULT_PROFILE[section][field]))
     profile.setdefault("recipes", deepcopy(DEFAULT_PROFILE["recipes"]))
     recipe_profile = profile.get("recipes")
     if not isinstance(recipe_profile, dict):

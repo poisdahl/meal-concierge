@@ -44,28 +44,26 @@ def assess_menu(state):
     if not slots:
         issues.append({"code": "meal_dates_unverified", "detail": "Legacy recipe lists do not establish which dates are covered."})
     unknown_quantities = []
+    from dietary_assessment import assess
+    findings = []
     conflicts = []
     diet = profile["diet"]
     rules = [*diet["allergies_or_sensitivities"], *diet["avoid"]]
     for recipe in recipes:
         key = recipe.get("recipe_key")
+        findings.extend({**f, "recipe_key": key} for f in assess(profile, recipe, recipe=True))
         if not slots and recipe.get("portions") != expected_portions:
             issues.append({"code": "portion_mismatch", "recipe_key": key, "expected": expected_portions, "actual": recipe.get("portions")})
         for index, ingredient in enumerate(recipe.get("ingredients", [])):
             if ingredient.get("quantity") is None or not ingredient.get("unit"):
                 unknown_quantities.append({"recipe_key": key, "ingredient_index": index, "item": ingredient.get("item"), "pantry": ingredient.get("pantry", False)})
-            identity = _text(ingredient.get("item", ""))
-            for rule in rules:
-                if re.search(r"(?<!\w)" + re.escape(_text(rule)) + r"(?!\w)", identity):
-                    conflicts.append({"recipe_key": key, "item": ingredient.get("item"), "rule": rule})
+    conflicts = [f for f in findings if f['blocked']]
     if conflicts:
-        issues.append({"code": "explicit_ingredient_conflict", "conflicts": conflicts[:25], "total": len(conflicts)})
-    if rules:
-        issues.append({"code": "diet_safety_unverified", "detail": "No authoritative allergy or ingredient-safety evidence is connected."})
+        issues.append({'code': 'explicit_ingredient_conflict', 'conflicts': conflicts})
     result = {"menu_ref": {k: menu[k] for k in ("menu_id", "revision", "digest")},
               "ready": not issues, "status": "ready" if not issues else "needs_input",
               "dinner_days": {"expected": expected_days, "verified": covered_days},
-              "portions": expected_portions, "issues": issues[:25], "issue_count": len(issues),
+              "dietary_assessments": findings, "portions": expected_portions, "issues": issues[:25], "issue_count": len(issues),
               "ingredients_needing_quantity_or_pantry_decision": unknown_quantities[:25],
               "ingredients_needing_decision_count": len(unknown_quantities),
               "scope": "Menu coverage and explicit conflicts only; nutrition and allergy safety are not certified."}

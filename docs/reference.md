@@ -853,14 +853,14 @@ content digests, the complete bounded recipe-usage history, the complete current
 profile, current request overrides and every effective fact are included in the
 canonical input and `input_digest`.
 
-Configured allergies/sensitivities and avoid rules are hard constraints. Each
-configured rule requires server-owned authoritative evidence. V1 has no
-such safety evidence integration, rejects caller-supplied `facts.safety`, and
-therefore keeps those candidates unknown. Recipe prose, title, ingredients,
-tags, steps, notes and model classifications do not establish safety; unknown
-candidates are excluded, and the result is `needs_input` when those unknowns
-prevent a complete plan. This is a bounded evidence check, not an allergen,
-medical or nutritional guarantee. Cooldown is also hard. Its only bypass is an
+Dietary findings distinguish missing evidence, documented conflicts and preference
+deviations. Missing generic safety metadata is advisory during planning; actual
+selected products are assessed before checkout. Confirmed allergy and never-buy
+conflicts require alternatives. Legacy ambiguous allergy/sensitivity statements
+and avoid exclusions retain their meaning. See [recurring batches and dietary
+checkout](recurring-batch-dietary.md) for typed rules, exact retail evidence,
+manual review and notification-conditioned standing permission. Caller-supplied
+`facts.safety` remains unsupported. Cooldown is also hard. Its only bypass is an
 exact currently blocked `recipe_key` in this request's `cooldown_overrides`,
 with a non-empty bounded reason. Unneeded, historical or other-recipe overrides
 are rejected.
@@ -1346,7 +1346,10 @@ usable and unknown newer versions fail closed.
 ## Deliberate batch leftovers
 
 The default remains different freshly cooked dinners with `batch_dishes=0`.
-Batch planning is opt-in for one exact current plan. `menu.batch_prepare` takes
+Accepted structured recurring settings support multiple sources through ordinary
+`menu plan`, with every eating day and storage uncertainty visible before save;
+see [recurring batch settings](recurring-batch-dietary.md). Existing manual
+arrangements support multiple disjoint sources too. `menu.batch_prepare` takes
 `menu_ref` and `batch_spec` with an exact `source_slot_id`,
 `source_snapshot_digest`, `prepared_portions`, `consumed_at_source`, structured
 `suitability={source:"current_user",value:"suitable"}`, and

@@ -40,8 +40,9 @@ def normalize(state, menu, value, today):
     expected={'source_slot_id','source_snapshot_digest','prepared_portions','consumed_at_source','suitability','storage','leftovers'}
     if not isinstance(value,dict) or set(value) != expected:
         raise HouseholdError('batch specification needs exact source, portions, suitability, storage and dependent slots')
-    if menu.get('batch'):
-        raise HouseholdError('replan the existing batch dependency before creating another specification')
+    reserved = {b['source_slot_id'] for b in sources(menu)} | {s['slot_id'] for s in menu['slots'] if s.get('kind') == 'leftover'}
+    if value['source_slot_id'] in reserved or (isinstance(value['leftovers'], list) and any(x.get('slot_id') in reserved for x in value['leftovers'] if isinstance(x, dict))):
+        raise HouseholdError('batch component intersects an existing source or leftover')
     source=mp.slot_by_id(menu,value['source_slot_id'])
     if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
         raise HouseholdError('batch source must be one exact fresh recipe snapshot')
@@ -102,41 +103,40 @@ def normalize(state, menu, value, today):
 
 
 def shopping(menu):
-    result=deepcopy(menu)
-    batch=menu.get('batch')
-    if not batch: return result
-    source=mp.slot_by_id(menu,batch['source_slot_id'])
-    if source['slot_id'] in menu.get('historical_slot_ids',[]):
-        return result
-    factor=fraction(batch['prepared_portions'])/fraction(batch['consumed_at_source'])
-    for recipe in result['dishes']+result['salads']:
-        if recipe['recipe_key']!=source['recipe_key']: continue
-        for requirement in recipe['shopping_requirements']:
-            if requirement.get('scalable') is True:
-                try:
-                    amount=read_quantity(requirement['quantity'], legacy_float=True)*factor
-                    requirement['quantity']=quantity_json(amount)
-                except (ValueError, ZeroDivisionError):
-                    requirement['scalable']=False
-        recipe['batch_prepared_portions']=deepcopy(batch['prepared_portions'])
+    result = deepcopy(menu)
+    for batch in sources(menu):
+        source = mp.slot_by_id(menu, batch['source_slot_id'])
+        if source['slot_id'] in menu.get('historical_slot_ids', []):
+            continue
+        factor = fraction(batch['prepared_portions']) / fraction(batch['consumed_at_source'])
+        for recipe in result['dishes'] + result['salads']:
+            if recipe['recipe_key'] != source['recipe_key']:
+                continue
+            for requirement in recipe['shopping_requirements']:
+                if requirement.get('scalable') is True:
+                    try:
+                        requirement['quantity'] = quantity_json(read_quantity(requirement['quantity'], legacy_float=True) * factor)
+                    except (ValueError, ZeroDivisionError):
+                        requirement['scalable'] = False
+            recipe['batch_prepared_portions'] = deepcopy(batch['prepared_portions'])
     return result
 
 
-def dependency_status(state,menu):
-    batch=menu.get('batch')
-    if not batch: return []
-    actual=state['batch_outcomes']['sources'].get(batch['source_slot_id'])
-    statuses=[]
-    for slot in menu['slots']:
-        if slot.get('source_slot_id')!=batch['source_slot_id']: continue
-        recorded=state['batch_outcomes']['leftovers'].get(slot['slot_id'])
-        status=recorded['outcome'] if recorded else ('needs_replan' if actual and (actual['outcome']!='cooked' or not actual['matches_plan']) else 'confirmed_source' if actual else 'planned_not_confirmed')
-        statuses.append({'slot_id':slot['slot_id'],'source_slot_id':batch['source_slot_id'],'status':status,'new_shopping_requirements':0})
+def dependency_status(state, menu):
+    statuses = []
+    for batch in sources(menu):
+        actual = state['batch_outcomes']['sources'].get(batch['source_slot_id'])
+        for slot in menu['slots']:
+            if slot.get('source_slot_id') != batch['source_slot_id']:
+                continue
+            recorded = state['batch_outcomes']['leftovers'].get(slot['slot_id'])
+            status = recorded['outcome'] if recorded else ('needs_replan' if actual and (actual['outcome'] != 'cooked' or not actual['matches_plan']) else 'confirmed_source' if actual else 'planned_not_confirmed')
+            statuses.append({'slot_id': slot['slot_id'], 'source_slot_id': batch['source_slot_id'], 'status': status, 'new_shopping_requirements': 0})
     return statuses
 
 
 def record_outcome(state,menu,slot,request):
-    batch=menu.get('batch')
+    batch = next((b for b in sources(menu) if b['source_slot_id'] in {slot['slot_id'], slot.get('source_slot_id')}), None)
     if not batch:
         if slot.get('kind')=='leftover':
             raise HouseholdError('historical leftover source context is unavailable; no outcome changed')
@@ -192,3 +192,82 @@ def evaluate_plan(state, original, successor):
     strict=_strict_evaluation(tuple(candidates),handoff['request'].get('strict_targets',[]),state['profile'])
     return {'status':'pass' if all(c['status']=='pass' for c in hard) and strict['status']=='pass' else 'unknown',
             'hard':hard,'strict':strict}
+
+
+def sources(menu):
+    return menu.get('batches', []) or ([menu['batch']] if menu.get('batch') else [])
+
+
+def recurring_layout(profile, eating_dates):
+    """Allocate accepted preparation ranges without changing consumption or dates."""
+    meals = profile['meals']
+    if meals.get('meal_mode', 'fresh') == 'fresh':
+        return None
+    if not meals.get('recurring_batch_accepted'):
+        raise HouseholdError('Accept the exact recurring batch settings before reusing them.')
+    cooking = [day for day in eating_dates if date.fromisoformat(day).strftime('%A').casefold() in {d.casefold() for d in meals['cook_days']}]
+    if not cooking or cooking[0] != eating_dates[0] or len(cooking) != meals['dishes']:
+        raise HouseholdError('Cooking days must start on the first eating day and match dishes; propose explicit cooking-day/dish settings.')
+    count = meals['batch_dishes']
+    if not 1 <= count <= len(cooking) or (meals['meal_mode'] == 'batch' and count != len(cooking)):
+        raise HouseholdError('Batch count must fit cooking days; batch mode requires every dish to be a batch.')
+    low, high = meals['prepared_portion_range']
+    portions = meals['portions']
+    intervals = {day: [d for d in eating_dates if day < d < (cooking[i + 1] if i + 1 < len(cooking) else '9999-12-31')] for i, day in enumerate(cooking)}
+    # Repeated eating dates determine which cooking sessions need batches.
+    batch_days = {day for day in cooking if intervals[day]}
+    if len(batch_days) != count:
+        raise HouseholdError('batch_dishes must match cooking sessions with dependent eating days; adjust cooking days or batch count explicitly')
+    result = []
+    shortages = []
+    for index, day in enumerate(cooking):
+        next_day = cooking[index + 1] if index + 1 < len(cooking) else '9999-12-31'
+        dependents = [d for d in eating_dates if day < d < next_day]
+        is_batch = day in batch_days
+        needed = portions * (1 + len(dependents))
+        prepared = max(low, needed) if is_batch else portions
+        if (is_batch and (not dependents or prepared > high)) or (dependents and not is_batch):
+            shortages.append({'source_date': day, 'needed_portions': needed, 'available_portions': high if is_batch else portions,
+                              'uncovered_dates': dependents, 'proposed_prepared_portions': needed,
+                              'adjustment': 'Explicitly accept this prepared quantity or add a fresh cooking meal on the uncovered days.'})
+        result.append({'source_date': day, 'eating_dates': [day] + dependents, 'batch': is_batch,
+                       'prepared_portions': prepared, 'consumed_at_source': portions})
+    return {'sources': result, 'shortages': shortages, 'required_portions': len(eating_dates) * portions,
+            'available_portions': sum(min(s['prepared_portions'], high) if s['batch'] else portions for s in result),
+            'accepted_settings': deepcopy(meals)}
+
+
+def attach_recurring(menu, layout, resolved):
+    original = deepcopy(menu['slots'])
+    by_day = {s['date']: s for s in original}
+    candidates = {c['recipe_key']: c for c in resolved}
+    batches = []
+    for allocation in layout['sources']:
+        if not allocation['batch']:
+            continue
+        source = by_day[allocation['source_date']]
+        candidate = candidates[source['recipe_key']]
+        guidance = deepcopy(candidate.get('supplied_facts', {}).get('batch_guidance'))
+        if guidance is None:
+            guidance = {'basis': 'unknown', 'suitability': 'unknown', 'storage': 'Recipe-specific storage life not established; plan prompt cooling and freezing only if suitable.',
+                        'reheating': 'Check recipe-specific reheating instructions before using leftovers.'}
+        spec = {'source_slot_id': source['slot_id'], 'source_snapshot_digest': source['snapshot_digest'],
+                'prepared_portions': rational(Fraction(allocation['prepared_portions'])),
+                'consumed_at_source': rational(Fraction(allocation['consumed_at_source'])),
+                'unallocated_portions': rational(Fraction(allocation['prepared_portions'] - len(allocation['eating_dates']) * allocation['consumed_at_source'])),
+                'suitability': {'source': guidance['basis'], 'value': guidance['suitability']},
+                'storage': guidance, 'leftovers': [], 'recurring_settings': deepcopy(layout['accepted_settings'])}
+        for day in allocation['eating_dates'][1:]:
+            slot = {**deepcopy(source), 'date': day, 'kind': 'leftover', 'source_slot_id': source['slot_id'],
+                    'portions': rational(Fraction(allocation['consumed_at_source']))}
+            slot['slot_id'] = 'slot_' + mp.digest({'source': source['slot_id'], 'date': day})[:32]
+            menu['slots'].append(slot)
+            spec['leftovers'].append({'slot_id': slot['slot_id'], 'date': day, 'portions': slot['portions'], 'meal_type': 'dinner'})
+        spec['spec_digest'] = mp.digest(spec)
+        batches.append(spec)
+    menu['batches'] = batches
+    menu['slots'].sort(key=lambda s: s['date'])
+    menu['planning_scope'] = {'dates': [s['date'] for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
+    names = {r['recipe_key']: r['name'] for r in menu['dishes']}
+    menu['schedule'] = [{'day': s['date'], 'meal': names[s['recipe_key']] + (' (rester)' if s.get('kind') == 'leftover' else ''),
+                         'slot_id': s['slot_id'], 'recipe_key': s['recipe_key']} for s in menu['slots']]

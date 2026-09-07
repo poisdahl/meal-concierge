@@ -160,8 +160,8 @@ class SelectionTests(unittest.TestCase):
                 fetch_page=lambda *args: {"candidates": [{"discovery_ref": "one"}], "exhausted": True},
                 resolve=lambda *args: candidate(1), request=request(), profile=profile)
             self.assertFalse(result["ai_fallback_eligible"])
-            self.assertEqual(result["suitable_count"], 0 if allergy else 1)
-            self.assertEqual(len(result["unknown"]), 1 if allergy else 0)
+            self.assertEqual(result["suitable_count"], 1)
+            self.assertEqual(len(result["unknown"]), 0)
 
     def test_queries_use_actual_preferences_without_user_query(self):
         profile = deepcopy(DEFAULT_PROFILE)

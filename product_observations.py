@@ -431,6 +431,8 @@ def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
         "name": name, "availability": availability, "observed_at": observed_at,
         "purchase_options": options, "display": display,
     }
+    from dietary_assessment import observation
+    result["dietary_evidence"] = observation(raw)
     if package is not None:
         result["package"] = package
     return result
@@ -500,6 +502,8 @@ def _normalize_retail_product(raw: Any, observed_at: str, *, provider: str = "od
         "name": name, "availability": availability, "observed_at": observed_at,
         "purchase_options": [option], "display": display,
     }
+    from dietary_assessment import observation
+    result["dietary_evidence"] = observation(raw)
     if package is not None:
         result["package"] = package
     return result

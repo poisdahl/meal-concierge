@@ -535,11 +535,11 @@ class ProductPlannerTests(unittest.TestCase):
             }],
             hard_product_constraints={"avoid": ["peanøtter"]},
         )
-        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(plan["status"], "prepared")
         self.assertEqual(plan["hard_product_constraints"], {"avoid": ["peanøtter"]})
         self.assertEqual(
-            plan["unresolved_requirements"][0]["reason"],
-            "hard_product_constraints_unverified",
+            plan["requirements"][0]["selection"]["products"][0]["dietary_assessments"][0]["condition"],
+            "unknown",
         )
 
     def test_excess_and_work_boundaries_fail_closed(self):

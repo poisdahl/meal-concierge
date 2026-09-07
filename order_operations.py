@@ -1437,7 +1437,154 @@ class OrderOperations:
                     state["pending_cancellation"]["status"] = "uncertain"
             return {"cancelled": cancelled, "tracking": current["tracking"], "retry_allowed": False}
 
-    def _checkout(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def _checkout_dietary(self, summary, deadline=None):
+        from dietary_assessment import assess, digest, rules
+        profile = self.store.read()['profile']
+        findings = []
+        if rules(profile):
+            for item in summary.get('items', []):
+                reference = item.get('product_id')
+                product = {'product_ref': reference, 'name': item.get('name'), 'dietary_evidence': {}}
+                try:
+                    observed = self.provider_client.call('product_search', {'queries': [item.get('name') or str(reference)], 'page': 1, 'size': 20}, deadline=deadline)
+                    matches = [p for p in observed.get('products', []) if str(p.get('product_ref')) == str(reference)]
+                    if observed.get('provider') == self.provider and len(matches) == 1:
+                        product = matches[0]
+                except HouseholdError:
+                    pass
+                reader = getattr(self.provider_client, 'product_dietary_evidence', None)
+                if reader is not None:
+                    try:
+                        details = reader(reference, deadline=deadline)
+                        if isinstance(details, Mapping):
+                            product = {**product, 'dietary_evidence': {**product.get('dietary_evidence', {}), **details}}
+                    except HouseholdError:
+                        pass
+                findings.extend(assess(profile, product))
+        value = {'findings': findings, 'profile_digest': digest(profile['diet'])}
+        value['assessment_digest'] = digest(value)
+        return value
+
+    def _checkout_notice(self, confirmation_id, phase, payload):
+        from dietary_assessment import digest
+        descriptions = {'unknown': 'information unresolved', 'preference_deviation': 'preference deviation',
+                        'sensitivity_conflict': 'contains a sensitivity-related ingredient', 'conflict': 'excluded ingredient'}
+        lines = [f"{f['item']} (product {f['product_ref']}): {f['kind']} / {f['term']} — {descriptions.get(f['condition'], f['condition'])}."
+                 + (f" Source: {f['evidence']['source_url']}" if f.get('evidence', {}).get('source_url') else ' Product information is incomplete.')
+                 for f in payload.get('findings', [])]
+        if phase == 'before_dispatch':
+            message = f"Before checkout at {self.provider.upper()}:\n" + '\n'.join(lines) + "\nProceeding under your accepted rule after this notice; no reply is required."
+        else:
+            options = payload['correction_options']
+            message = f"Order {payload['order_id']} confirmed at {self.provider.upper()} (provider status: {payload.get('tracking_status') or 'confirmed'}).\n" + '\n'.join(lines)
+            availability = {'additions_only': 'additions currently supported', 'unavailable': 'currently unavailable',
+                            'unknown': 'unknown', 'requires_current_provider_review': 'requires current provider review',
+                            'manual_provider_review': 'manual provider review only'}
+            message += '\nCurrent editing: ' + availability[options['edit_availability']] + '. ' + options['message']
+            message += '\nModification deadline: ' + (options['deadline'] or 'unknown') + '.'
+        payload = {**deepcopy(payload), 'message': message}
+        key = digest({'confirmation_id': confirmation_id, 'phase': phase, 'payload': payload})
+        with self.store.locked() as state:
+            notices = state.setdefault('checkout_notices', {})
+            existing = notices.get(key)
+            if existing:
+                return {**deepcopy(existing), 'dispatch': False}
+            if len(notices) >= 2000:
+                raise HouseholdError('checkout notice journal is full')
+            notice = {'notice_token': key, 'confirmation_id': confirmation_id, 'phase': phase,
+                      'payload': deepcopy(payload), 'status': 'sending', 'delivered': False}
+            notices[key] = notice
+            return {**deepcopy(notice), 'dispatch': True,
+                    'next': 'Send payload.message exactly once through the existing authorized native household messaging route. Record the actual sender outcome with notice_result, then resume checkout confirm with this confirmation_id (or the same submit idempotency key / auto occurrence). No user reply is required. An uncertain send must be reconciled, never resent blindly.'}
+
+    def _checkout_notice_result(self, request):
+        outcome = request.get('send_outcome')
+        receipt = request.get('sender_receipt')
+        if outcome not in {'sent', 'not_sent', 'unknown'} or not isinstance(receipt, str) or not 1 <= len(receipt.strip()) <= 1000:
+            raise HouseholdError('notice_result requires actual native sender outcome and bounded sender receipt')
+        with self.store.locked() as state:
+            notice = state.get('checkout_notices', {}).get(request.get('notice_token'))
+            if not notice:
+                raise HouseholdError('notice token does not identify an existing dispatch')
+            if notice['status'] == 'sent' and (outcome != 'sent' or notice.get('sender_receipt') != receipt):
+                raise HouseholdError('a verified sent notice cannot be overwritten')
+            notice.update(status=outcome, delivered=outcome == 'sent', sender_receipt=receipt)
+            return deepcopy(notice)
+
+    def _dietary_checkout_gate(self, pending, request=None):
+        from dietary_assessment import covered
+        request = request or {}
+        findings = pending.get('dietary_assessment', {}).get('findings', [])
+        material = [f for f in findings if f['condition'] != 'compatible_label']
+        blocked = [f for f in material if f['blocked']]
+        if blocked:
+            return {'confirmed': False, 'dietary_review_required': True, 'findings': blocked,
+                    'reason': 'Choose another item for each documented allergy or never-buy conflict; the order remains incomplete.'}
+        reviewed = request.get('dietary_review') or []
+        if not isinstance(reviewed, list) or any(not isinstance(v, str) for v in reviewed) or len(reviewed) != len(set(reviewed)) or not set(reviewed) <= {f['finding_id'] for f in findings}:
+            raise HouseholdError('dietary_review must contain distinct current-summary finding IDs actually reviewed in the final confirmation')
+        manually_reviewed = bool(reviewed) and {f['finding_id'] for f in material} <= set(reviewed)
+        automatic = pending.get('automatic_checkout') or (self.confirmation_policy == 'standing' and not manually_reviewed)
+        profile = self.store.read()['profile']
+        if automatic:
+            uncovered = [f for f in material if not covered(profile, f)]
+        else:
+            uncovered = [f for f in material if f['kind'] in {'allergy', 'never_buy', 'allergy_or_sensitivity'} and f['finding_id'] not in reviewed]
+        if uncovered:
+            return {'confirmed': False, 'dietary_review_required': True, 'findings': uncovered,
+                    'reason': 'Affected-item review or an explicitly covering standing uncertainty rule is required; other work may continue.'}
+        if automatic and material:
+            notice = self._checkout_notice(pending['confirmation_id'], 'before_dispatch', {'provider': self.provider, 'summary': pending['summary'], 'findings': material})
+            if notice['status'] != 'sent':
+                return {'confirmed': False, 'notification_required': True, 'notice': notice,
+                        'reason': 'The required pre-dispatch notice has no verified successful sender result.'}
+        return None
+
+    def _checkout_result_notice(self, result):
+        confirmation_id = result.get('confirmation_id')
+        if not result.get('confirmed') or not confirmation_id:
+            return result
+        state = self.store.read()
+        before = next((n for n in state.get('checkout_notices', {}).values() if n['confirmation_id'] == confirmation_id and n['phase'] == 'before_dispatch'), None)
+        if not before:
+            return result
+        existing = next((n for n in state.get('checkout_notices', {}).values() if n['confirmation_id'] == confirmation_id and n['phase'] == 'after_reconciliation'), None)
+        if existing:
+            return {**result, 'notice': {**deepcopy(existing), 'dispatch': False}}
+        order_id = result.get('order_id')
+        options = {'edit_availability': 'unknown', 'deadline': None, 'deadline_status': 'unknown',
+                   'message': 'Edit availability and deadline are unknown; removal, replacement and refund are not guaranteed.'}
+        try:
+            current = self._orders({'action': 'get', 'order_id': order_id})
+            status = str((current.get('tracking') or {}).get('status') or '').casefold()
+            for source_name in ('tracking', 'order'):
+                raw_deadline = (current.get(source_name) or {}).get('modificationDeadline')
+                try:
+                    parsed_deadline = datetime.fromisoformat(raw_deadline.replace('Z', '+00:00')) if isinstance(raw_deadline, str) else None
+                except ValueError:
+                    parsed_deadline = None
+                if parsed_deadline is not None and parsed_deadline.tzinfo is not None:
+                    options.update(deadline=parsed_deadline.isoformat(), deadline_status='provider_reported', deadline_source=source_name + '.modificationDeadline')
+                    break
+            if self.provider == 'oda':
+                options.update(edit_availability='additions_only' if status == 'paid_and_modifiable' else 'unavailable' if status in {'paid_and_not_modifiable', 'picking', 'shipped', 'delivered', 'cancelled', 'canceled'} else 'unknown',
+                               message='User-directed additions are supported only while this order remains modifiable. Removal/replacement/refund is not promised.')
+            elif self.provider == 'meny':
+                options.update(edit_availability='requires_current_provider_review', message='MENY full-order editing requires a current editable order, another checkout and Vipps approval; no removal/refund guarantee.')
+            else:
+                options.update(edit_availability='manual_provider_review', message='Review changes manually with Mathem; no automatic edit or refund promise.')
+        except HouseholdError:
+            pass
+        notice = self._checkout_notice(confirmation_id, 'after_reconciliation', {'provider': self.provider, 'confirmed': True,
+            'order_id': order_id, 'tracking_status': result.get('tracking_status'), 'findings': before['payload']['findings'], 'correction_options': options})
+        return {**result, 'notice': notice}
+
+    def _checkout(self, request):
+        if request.get('action') == 'notice_result':
+            return self._checkout_notice_result(request)
+        return self._checkout_result_notice(self._checkout_operation(request))
+
+    def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
         if self.provider == "mathem" and action not in {"prepare", "auto"}:
             raise HouseholdError("Mathem checkout is manual; use prepare for the cart summary and finish at https://www.mathem.se/se/cart/")
@@ -1466,7 +1613,7 @@ class OrderOperations:
                 cart_ready_continuation=occurrence is not None,
             )
         if action == "confirm":
-            return self._checkout_confirm(deadline, str(request.get("confirmation_id") or ""))
+            return self._checkout_confirm(deadline, str(request.get("confirmation_id") or ""), request=request)
         if action == "submit":
             if self.confirmation_policy != "standing":
                 raise HouseholdError("standing authorization is not configured; prepare checkout and ask for confirmation")
@@ -1538,6 +1685,13 @@ class OrderOperations:
             return self._checkout_reconcile(deadline, str(request.get("confirmation_id") or ""))
         if action == "auto":
             occurrence = str(request.get("occurrence") or "")
+            state = self.store.read()
+            pending = state.get('pending_checkout')
+            if self.confirmation_policy == 'standing' and pending and pending.get('occurrence') == occurrence and pending.get('status') == 'awaiting_confirmation' and pending.get('automatic_checkout'):
+                self._require_weekly_scheduler(state, request.get('scheduler'))
+                self._pending_scheduler_guard(state, pending)
+                result = self._checkout_confirm(deadline, pending['confirmation_id'])
+                return {**result, 'completed': result.get('confirmed') is True, 'confirmation_id': result.get('confirmation_id', pending['confirmation_id'])}
             with self.store.locked() as state:
                 scheduler_identity = self._require_weekly_scheduler(state, request.get("scheduler"))
                 if self._unresolved_scheduled_effects(state):
@@ -1562,6 +1716,7 @@ class OrderOperations:
                         raise HouseholdError("the completed scheduled occurrence has no bound order")
                     return {
                         "completed": True, "confirmed": True, "order_id": order_id,
+                        "confirmation_id": existing.get("confirmation_id"),
                         "idempotent": True, "retry_allowed": False,
                     }
                 if isinstance(existing, Mapping) and existing.get("status") == "started":
@@ -1689,6 +1844,7 @@ class OrderOperations:
                     raise HouseholdError("finish the pending provider operation before manual checkout")
                 self._require_menu_provider(state.get("menu"))
                 summary = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
+                summary["dietary_assessment"] = self._checkout_dietary(summary, deadline)
                 return {
                     "provider": "mathem", "currency": "SEK", "confirmed": False,
                     "manual_checkout_required": True,
@@ -1908,6 +2064,8 @@ class OrderOperations:
             if self.provider == "meny":
                 review = deepcopy(dict(review))
                 review["delivery_guard"] = deepcopy(dict(delivery_binding))
+            dietary_assessment = self._checkout_dietary(summary, deadline)
+            summary["dietary_assessment"] = dietary_assessment
             confirmation_id = secrets.token_urlsafe(18)
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) != canonical(baseline):
@@ -1937,6 +2095,7 @@ class OrderOperations:
                     } if isinstance(menu_baseline, Mapping) else None,
                     "occurrence": occurrence,
                     "automatic_checkout": automatic_checkout,
+                    "dietary_assessment": dietary_assessment,
                     "order_change": order_change,
                     "delivery_reselections": delivery_reselections,
                 }
@@ -1960,7 +2119,7 @@ class OrderOperations:
             ),
         }
 
-    def _checkout_confirm(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
+    def _checkout_confirm(self, deadline: float | None = None, confirmation_id: str = "", *, request=None) -> dict[str, Any]:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout")
@@ -1994,6 +2153,14 @@ class OrderOperations:
                 if canonical(state.get("pending_checkout")) == canonical(pending):
                     state["pending_checkout"] = None
             raise HouseholdError("cart or delivery changed; show a new summary")
+        current_dietary = self._checkout_dietary(cart_summary(cart), deadline)
+        if canonical(current_dietary) != canonical(pending.get('dietary_assessment')):
+            return {'confirmed': False, 'reprepared': True, **self._checkout_prepare(deadline,
+                occurrence=pending.get('occurrence'), automatic_checkout=pending.get('automatic_checkout', False),
+                scheduler_context=pending.get('scheduler_context'), delivery_reselections=pending.get('delivery_reselections', 0))}
+        gate = self._dietary_checkout_gate(pending, request)
+        if gate:
+            return {**gate, 'confirmation_id': pending['confirmation_id'], 'summary': pending['summary']}
         with self.store.locked() as state:
             if canonical(state.get("order_change")) != canonical(pending.get("order_change")):
                 raise HouseholdError("order change changed; show a new summary")
@@ -2050,7 +2217,10 @@ class OrderOperations:
                             fresh_target = self._orders({"action": "get", "order_id": pending_change["order_id"], "_deadline": deadline})
                             if canonical(fresh_target) != canonical(pending_change["before"]):
                                 raise CheckoutPreconditionError("the target order changed before the final click")
+                    from dietary_assessment import digest
                     with self.store.locked() as state:
+                        if pending.get('dietary_assessment') and digest(state['profile']['diet']) != pending['dietary_assessment']['profile_digest']:
+                            raise CheckoutPreconditionError('dietary rules changed before dispatch; prepare a new summary')
                         try:
                             self._pending_scheduler_guard(state, pending)
                         except HouseholdError as exc:
@@ -2150,6 +2320,7 @@ class OrderOperations:
             if isinstance(record, dict) and (not context or record.get("attempt_id") == context["attempt_id"]):
                 record["status"] = "completed"
                 record["order_id"] = order_id
+                record["confirmation_id"] = pending["confirmation_id"]
                 record["completed_at"] = self._now().isoformat()
         if pending.get("order_change"):
             return
@@ -2287,6 +2458,7 @@ class OrderOperations:
             else:
                 state["pending_checkout"]["status"] = "uncertain"
         return {
+            **(terminal if confirmed else {}),
             "confirmed": confirmed,
             "expired": expired_unpaid,
             "order": order if confirmed else None,
@@ -2365,4 +2537,4 @@ class OrderOperations:
                 )
             else:
                 state["pending_checkout"]["status"] = "uncertain"
-        return {"confirmed": confirmed, "changed_existing_order": confirmed, "order": current["order"] if confirmed else None, "tracking": current["tracking"] if confirmed else None, "retry_allowed": False}
+        return {**(terminal if confirmed else {}), "confirmed": confirmed, "changed_existing_order": confirmed, "order": current["order"] if confirmed else None, "tracking": current["tracking"] if confirmed else None, "retry_allowed": False}

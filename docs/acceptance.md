@@ -134,3 +134,18 @@ capability evidence. No order or payment should be inferred from the reads above
 MC-08 remains complete in its recorded scope. The user-deferred cross-client
 MC follow-up is [#52](https://github.com/poisdahl/meal-concierge/issues/52);
 these results neither reopen that program nor certify its untested clients.
+
+
+## Recurring batches and advisory dietary checkout (#55)
+
+The shared [recurring-batch/dietary path](recurring-batch-dietary.md) has focused
+Application tool-flow coverage using synthetic retailer/state and a verified
+local sender inbox. It includes two batch sources across seven meals, exact
+shopping totals, subsequent-week reuse, explicit shortages, mixed schedules,
+retail findings through manual and standing/scheduled checkout, substitution,
+legacy-pending protection, failed/uncertain notices and payment/result replay.
+An anonymous exact Oda product-detail read additionally verifies the visible
+ingredient/allergen extraction path. This is separate from the historical
+model/provider acceptance described above; no new real purchase, live deployment
+or external recipient effect was authorized. MENY/Mathem detail availability
+remains unknown where not supplied; protected Mathem integration remains #50.

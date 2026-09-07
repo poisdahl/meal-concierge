@@ -251,9 +251,12 @@ menu `resolve_handoff` with the chosen `save_ref` as `planner_ref`. Pass its
 returned complete `planner_handoff` unchanged to feedback/products; do not
 reconstruct it from display fields. Resolution does not save a menu.
 Stale facts require a fresh plan. Never invent structured time, nutrition,
-variety, perishability or safety facts from prose. Configured allergies/avoid
-rules remain hard; no authoritative safety integration currently resolves them.
-Never send `facts.safety` or claim safety compliance. Report named unknowns.
+variety, perishability or safety facts from prose. Missing generic safety data
+is advisory; known allergy/never-buy conflicts require alternatives. Keep legacy
+allergies_or_sensitivities ambiguous and avoid entries as exclusions. Use explicit
+diet.rules kind/term only when stated by the user; never diagnose or weaken rules.
+Never send facts.safety or claim unknown products verified safe. Actual product
+findings remain visible through the final checkout summary.
 A cooldown override needs the exact recipe key and the user's current reason.
 
 Menu get/assess shows coverage, explicit ingredient conflicts and unknowns.
@@ -411,6 +414,40 @@ Never route “favorite this recipe” to the product tool.
 
 ## Delivery, checkout and email
 
+
+Dietary checkout uses the actual final product IDs and Oda's exact public product
+information reader where available. Missing MENY/Mathem detail remains unknown.
+Show affected items, source information, allergy/sensitivity unknowns and material
+preference deviations in the ordinary final summary before its existing
+confirmation. Offer alternatives for exclusions. Unknown allergy/exclusion
+information needs affected-item review in that same confirmation: pass only
+actually reviewed finding_id values as dietary_review on confirm. Never fabricate
+review, and never override a documented allergy/never-buy conflict. A substitution
+or changed finding requires a revised summary.
+
+Automatic uncertainty requires accepted diet.uncertainty_permissions entries
+with exact kind, term, product_ref, condition=unknown|preference_deviation|
+sensitivity_conflict, accepted=true and notify=true. Generic auto-order authority
+does not cover uncertainty. Reuse existing expressly covering permissions; no
+weekly approval is needed. Purchase amount/delivery/scope and native payment
+approvals still apply. No incomplete order or omitted ingredient may be hidden.
+
+When checkout returns notice.dispatch=true, use the existing authorized native
+household messaging route to send the frozen payload.message once; it retains
+all affected items and findings. Do not wait for a user reply. Call checkout
+notice_result with notice_token, actual send_outcome and sender_receipt only after
+the native sender result. Unknown/failed sending is not delivered; reconcile
+uncertainty and report failure if a required notice cannot be established.
+Continue the same confirmation_id, submit idempotency key or auto occurrence.
+Only confirmed reconciliation establishes purchase success. Send and acknowledge
+its returned result notice too; failed result messaging must never repeat payment.
+Recovery returns dispatch=false for already claimed notices. Keep the actual
+supported correction options and verified deadline; unknown deadlines/edits stay
+unknown. Oda additions require a currently modifiable order, MENY editing can
+require new checkout/Vipps, and Mathem remains manual. Never promise that every
+item can be removed, replaced or refunded.
+
+
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as
 returned; “fra 0” is not free. Preserve explicit or provider-external selections.
 Cheapest delivery requires exact prices for every eligible candidate. Checkout
@@ -489,7 +526,16 @@ exact returned handoff/slot references; favorites remain separate native state.
 Menu lock takes exact menu ref/slot and desired boolean. Replan_prepare takes
 explicit remaining dates and candidates; unchanged replan_apply preserves past,
 cooked and locked slots plus predecessor snapshots. Product/cart changes remain
-separate. Batch_prepare is opt-in and needs explicit source, portions,
+separate. For recurring meals use profile meals.meal_mode=fresh|batch|mixed,
+batch_dishes, dishes, prepared_portion_range, existing portions consumed per
+meal, and exact cook_days/eat_days. Set recurring_batch_accepted=true only after
+acceptance of those settings; reuse them in later ordinary menu plan calls with
+no repeated confirmation. Show every proposed eating slot, source, preparation,
+shortfall and recipe-specific guidance. Never silently change quantities.
+Candidate facts.batch_guidance can retain basis, suitability, storage and
+reheating from actual guidance; missing guidance stays unknown, never a household
+storage-life guarantee. Reported food and plans remain distinct.
+Batch_prepare is opt-in and needs explicit source, portions,
 suitability, storage/interval and exact leftover targets. Show the unchanged
 batch plan and get its explicit confirmation before batch_apply. Actual batch
 cooking needs reported prepared/consumed portions; dependent leftovers require a

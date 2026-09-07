@@ -234,6 +234,12 @@ def _json_value(value: Any) -> Any:
 
 
 class RetailMcpClient:
+    def product_dietary_evidence(self, reference, *, deadline=None):
+        if self.provider != 'oda':
+            return {'unavailable': 'provider_product_detail_not_verified'}
+        from dietary_assessment import read_oda_product_evidence
+        return read_oda_product_evidence(reference, deadline)
+
     def __init__(self, token_directory: Path | str, *, provider: str = "oda"):
         if provider not in {"oda", "mathem"}:
             raise HouseholdError("MCP provider must be oda or mathem")

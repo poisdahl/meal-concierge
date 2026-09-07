@@ -192,14 +192,14 @@ class WeeklyPlannerTests(unittest.TestCase):
                     slot["score"], sum(reason["weight"] for reason in slot["reason_contributions"])
                 )
 
-    def test_safety_unknown_blocks_without_using_recipe_text(self):
+    def test_missing_safety_metadata_is_advisory_without_accepting_caller_clearance(self):
         candidate = self.save_candidates(1)[0]
         with self.store.locked() as state:
             state["profile"]["diet"]["allergies_or_sensitivities"] = ["Milk"]
         unknown = self.plan(self.request([candidate]))
-        self.assertEqual(unknown["status"], "needs_input")
+        self.assertEqual(unknown["status"], "planned")
         self.assertEqual(
-            unknown["candidate_evaluations"][0]["hard_constraints"]["status"], "unknown"
+            unknown["candidate_evaluations"][0]["hard_constraints"]["status"], "pass"
         )
         untrusted_clearance = {
             **candidate,

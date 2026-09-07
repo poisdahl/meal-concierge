@@ -276,8 +276,8 @@ class PlanningOperations:
         if not replacing:
             return {"status": "needs_input", "reason": "no requested unlocked future slots"}
         carried = [s for s in slots if s not in replacing]
-        batch = current.get("batch")
-        if batch:
+        batches = bp.sources(current)
+        for batch in batches:
             component = {batch["source_slot_id"]} | {s["slot_id"] for s in slots if s.get("source_slot_id") == batch["source_slot_id"] and s["slot_id"] not in historical}
             changed = {s["slot_id"] for s in replacing}
             invalid = {s["slot_id"] for s in bp.dependency_status(state,current) if s["status"]=="needs_replan" and s["slot_id"] not in historical}
@@ -328,8 +328,11 @@ class PlanningOperations:
         successor["slot_owners"] = {s["slot_id"]: current.get("slot_owners", {}).get(s["slot_id"], current["menu_id"]) for s in carried}
         recipes = {r["recipe_key"]: r for r in current["dishes"] + current["salads"] + replacement["dishes"]}
         successor["dishes"] = [deepcopy(recipes[key]) for key in dict.fromkeys(s["recipe_key"] for s in successor["slots"])]
-        if batch and batch["source_slot_id"] not in {s["slot_id"] for s in replacing}:
-            successor["batch"] = deepcopy(batch)
+        retained_batches = [deepcopy(b) for b in batches if b["source_slot_id"] not in {s["slot_id"] for s in replacing}]
+        if retained_batches:
+            successor["batches"] = retained_batches
+            if current.get("batch") in retained_batches:
+                successor["batch"] = deepcopy(current["batch"])
         successor["schedule"] = [{"day": s["date"], "meal": recipes[s["recipe_key"]]["name"], "recipe_key": s["recipe_key"], "slot_id": s["slot_id"]} for s in successor["slots"]]
         before = deepcopy(current)
         before["historical_slot_ids"] = sorted(historical)
@@ -404,7 +407,8 @@ class PlanningOperations:
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
             "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"]} for d in spec["leftovers"]]
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=lambda s:(s["date"],s["meal_type"])),
-            "dishes":[], "salads":[], "batch":spec, "supersedes":mp.menu_ref(current),
+            "dishes":[], "salads":[], "batch":spec, "batches":deepcopy(bp.sources(current))+[spec], "supersedes":mp.menu_ref(current),
+            "planner_selection":deepcopy(current.get("planner_selection")),
             "historical_slot_ids":[s["slot_id"] for s in carried if s["date"]<today or mp.slot_outcome(state,current,s)=="cooked"],
             "slot_owners":{s["slot_id"]:current.get("slot_owners",{}).get(s["slot_id"],current["menu_id"]) for s in carried}}
         successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({s["date"] for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})
@@ -451,6 +455,7 @@ class PlanningOperations:
                 raise HouseholdError("batch state/date changed before apply")
             commit=deepcopy(supplied); commit["replan_digest"]=supplied["batch_digest"]
             commit["successor"]["batch"]["confirmation"]=deepcopy(confirmation)
+            commit["successor"]["batches"][-1]["confirmation"]=deepcopy(confirmation)
             return self._commit_successor(state,commit)
 
     def _commit_successor(self, state, supplied):
@@ -576,7 +581,7 @@ class PlanningOperations:
         }
         if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 7:
             raise PlannerError("profile dinner_days must be an integer from one to seven")
-        if dishes != count or batch_dishes != 0:
+        if meals.get("meal_mode", "fresh") == "fresh" and (dishes != count or batch_dishes != 0):
             raise PlannerError(
                 "default deterministic planning requires one different dish per dinner day and batch_dishes=0; supply exact dates only for a current explicit count"
             )
@@ -593,7 +598,7 @@ class PlanningOperations:
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value).difference({
             "week", "dates", "portions", "candidates", "strict_targets",
-            "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients",
+            "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch",
         }):
             raise PlannerError("planner input has unknown fields")
         available = normalize_available_ingredients(value.get("available_ingredients"))
@@ -618,7 +623,14 @@ class PlanningOperations:
         meals = profile.get("meals")
         if not isinstance(meals, Mapping):
             raise PlannerError("profile meals are invalid")
+        dates = deepcopy(value.get('dates')) if value.get('dates') is not None else self._default_planner_dates(week, profile)
+        layout = bp.recurring_layout(profile, dates) if value.get('dates') is None or value.get('recurring_batch') else None
+        if layout and value.get('portions', meals['portions']) != meals['portions']:
+            raise PlannerError('recurring batch consumption must match accepted profile portions; update that explicit setting or use fresh dates')
+        if value.get('recurring_batch') is not None and canonical(layout) != canonical(value['recurring_batch']):
+            raise PlannerError('recurring batch settings changed; plan again')
         return {
+            **({'recurring_batch': layout} if layout else {}),
             **({"available_ingredients": available} if available else {}),
             "week": week,
             "dates": deepcopy(value.get("dates")) if value.get("dates") is not None
@@ -871,7 +883,7 @@ class PlanningOperations:
         self, handoff: Mapping[str, Any], resolved: list[Mapping[str, Any]]
     ) -> dict[str, Any]:
         selection = handoff["selection"]
-        slots = selection.get("slots") if isinstance(selection, Mapping) else None
+        slots = selection.get("source_slots", selection.get("slots")) if isinstance(selection, Mapping) else None
         if not isinstance(slots, list) or not slots:
             raise PlannerError("planner_handoff selection is invalid")
         by_reference = {item["reference_key"]: item for item in resolved}
@@ -909,6 +921,8 @@ class PlanningOperations:
             "date": slot["date"], "meal_type": "dinner", "recipe_key": slot["recipe_key"],
             "reference": deepcopy(slot["reference"]), "snapshot_digest": mp.digest(recipe),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
+        if handoff['request'].get('recurring_batch'):
+            bp.attach_recurring(menu, handoff['request']['recurring_batch'], resolved)
         if handoff["request"].get("available_ingredients"):
             menu["available_ingredients"] = deepcopy(handoff["request"]["available_ingredients"])
         menu["planner_selection"] = {
@@ -1693,6 +1707,14 @@ class PlanningOperations:
             for key in ("allergies_or_sensitivities", "avoid")
             if isinstance(diet, Mapping) and diet.get(key)
         }
+        from dietary_assessment import rules
+        reader = getattr(self.provider_client, 'product_dietary_evidence', None)
+        if reader is not None and rules(profile) and isinstance(candidate_approvals, list):
+            approved_refs = {str(ref) for approval in candidate_approvals if isinstance(approval, Mapping) for ref in approval.get('candidate_refs', [])}
+            for observation in observations.values():
+                for product in observation.get('products', []):
+                    if str(product['product_ref']) in approved_refs:
+                        product['dietary_evidence'] = {**product.get('dietary_evidence', {}), **reader(product['product_ref'], deadline=deadline)}
         return build_product_plan(
             provider=self.provider,
             binding=binding,
@@ -1700,6 +1722,7 @@ class PlanningOperations:
             observations=observations,
             candidate_approvals=candidate_approvals,
             hard_product_constraints=hard_constraints,
+            dietary_profile=profile,
             ingredient_decisions=ingredient_decisions, budget_ore=budget_ore, price_mode=price_mode, deadline=deadline,
         )
 
@@ -1727,7 +1750,7 @@ class PlanningOperations:
         menus = [self._materialize_planner_menu(h, resolved) for h in result["save_handoffs"]]
         requirement_error = None
         try:
-            requirements = [exact_menu_requirements(menu)[0] for menu in menus]
+            requirements = [exact_menu_requirements(mp.shopping_menu(menu))[0] for menu in menus]
         except HouseholdError as exc:
             requirements = []
             requirement_error = str(exc)
@@ -1751,13 +1774,21 @@ class PlanningOperations:
         for query in sorted(queries):
             synthetic = {"dishes": [{"shopping_requirements": [{"item": query, "unit": "g", "quantity": 1, "scalable": True}]}], "salads": []}
             self._product_observations(synthetic, deadline=request.get("_deadline"), search_cache=cache)
+        from dietary_assessment import rules
+        reader = getattr(self.provider_client, 'product_dietary_evidence', None)
+        if reader is not None and rules(profile):
+            refs = {str(ref) for approval in approvals.values() for ref in approval['candidate_refs']}
+            for observation in cache.values():
+                for product in observation.get('products', []):
+                    if str(product['product_ref']) in refs:
+                        product['dietary_evidence'] = {**product.get('dietary_evidence', {}), **reader(product['product_ref'], deadline=request.get('_deadline'))}
         for rank, (handoff, menu, rows) in enumerate(zip(result["save_handoffs"], menus, requirements, strict=True), 1):
             observations = {r["requirement_id"]: cache[r["identity"]] for r in rows if r["identity"] in cache}
             selected_approvals = [{key: value for key, value in approvals[r["requirement_id"]].items() if key != "source"}
                                   for r in rows if r["requirement_id"] in approvals]
             product_plan = build_product_plan(
                 provider=self.provider, binding={"kind": "planner_selection", "planner_handoff": handoff},
-                menu=menu, observations=observations, candidate_approvals=selected_approvals, hard_product_constraints=hard,
+                menu=mp.shopping_menu(menu), observations=observations, candidate_approvals=selected_approvals, hard_product_constraints=hard, dietary_profile=profile,
                 deadline=request.get("_deadline"),
             )
             comparison["alternatives"].append({

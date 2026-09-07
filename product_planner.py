@@ -491,6 +491,7 @@ def _select_requirement(
                 {
                     "product_ref": candidates[position][0]["product_ref"],
                     "name": candidates[position][0]["name"],
+                    "dietary_assessments": deepcopy(candidates[position][0].get("dietary_findings", [])),
                     "quantity": count,
                     "purchase_options": bundles[position],
                     "merchandise_ore": sum(
@@ -522,7 +523,8 @@ def _select_requirement(
                 "total_payable_ore": payable,
                 "tie_break": stable_refs,
             }
-            rank = (payable, excess, package_count, canonical(stable_refs))
+            dietary_rank = sum(10 if f['condition'] in {'preference_deviation', 'sensitivity_conflict'} else 1 if f['condition'] == 'unknown' else 0 for product in selected_products for f in product.get('dietary_assessments', []))
+            rank = (dietary_rank, payable, excess, package_count, canonical(stable_refs))
             if best is None or rank < best[0]:
                 best = (rank, selection)
             return True
@@ -600,6 +602,7 @@ def _estimated_single_product(requirement, observation, approval):
         return None
     merchandise = count * option["merchandise_ore"]
     return {"products": [{"product_ref": refs[0], "name": product["name"], "quantity": count,
+                          "dietary_assessments": deepcopy(product.get("dietary_findings", [])),
                           "merchandise_ore": merchandise, "mandatory_deposit_ore": None, "total_payable_ore": None}],
             "coverage": _fraction_json(count * size), "required": _fraction_json(needed),
             "unit": requirement["unit"], "excess_score": _fraction_json(excess), "package_count": count,
@@ -610,6 +613,7 @@ def build_product_plan(
     *, provider: str, binding: Mapping[str, Any], menu: Mapping[str, Any],
     observations: Mapping[str, Mapping[str, Any]], candidate_approvals: Any,
     hard_product_constraints: Any = None,
+    dietary_profile: Any = None,
     ingredient_decisions: Any = None,
     budget_ore: int | None = None,
     price_mode: str = "exact",
@@ -650,15 +654,6 @@ def build_product_plan(
             item["status"] = "needs_input"
             planned.append(item)
             continue
-        if hard_constraints:
-            unresolved.append({
-                "requirement_id": requirement_id,
-                "item": requirement["item"],
-                "reason": "hard_product_constraints_unverified",
-            })
-            item["status"] = "needs_input"
-            planned.append(item)
-            continue
         approval = approvals.get(requirement_id)
         if approval is None:
             unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "exact_candidate_scope_needs_user_approval"})
@@ -675,9 +670,20 @@ def build_product_plan(
             item["status"] = "needs_input"
             planned.append(item)
             continue
-        selection, reason, eligible_count = _select_requirement(requirement, observation, approval)
+        from dietary_assessment import assess
+        product_findings = {p['product_ref']: assess(dietary_profile or {'diet': hard_constraints}, p) for p in observation['products']}
+        item['dietary_assessments'] = [f for values in product_findings.values() for f in values]
+        filtered = deepcopy(approval)
+        filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if not any(f['blocked'] for f in product_findings.get(ref, []))]
+        evaluated_observation = deepcopy(observation)
+        for product in evaluated_observation['products']:
+            product['dietary_findings'] = product_findings[product['product_ref']]
+        selection, reason, eligible_count = _select_requirement(requirement, evaluated_observation, filtered)
+        if not filtered['candidate_refs']:
+            reason = 'dietary_conflict_no_compatible_candidate'
+
         if reason == "candidate_price_or_eligibility_unresolved" and price_mode == "estimate":
-            estimated = _estimated_single_product(requirement, observation, approval)
+            estimated = _estimated_single_product(requirement, evaluated_observation, filtered)
             if estimated is not None:
                 selection, reason, eligible_count = estimated, None, 1
         item["eligible_candidate_count"] = eligible_count
@@ -722,7 +728,7 @@ def build_product_plan(
         "requirements": planned,
         "unresolved_requirements": unresolved,
         "comparison_claim": (
-            f"lowest verified total payable amount among the approved, exactly priced candidates observed for {len(requirements)} bounded {provider.upper()} searches"
+            f"best dietary fit, then lowest verified total payable amount among the approved, exactly priced candidates observed for {len(requirements)} bounded {provider.upper()} searches"
             if status == "prepared" and payable_known else None
         ),
         "excluded_costs": ["delivery", "cart_level_bags", "cart_level_fees", "checkout_price_drift"],
