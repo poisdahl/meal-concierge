@@ -72,8 +72,10 @@ repository-URL test downloaded and unpacked pinned source; the subsequent
 canonical `./install.sh` test completed core installation, 4,599-recipe import,
 service startup and native MCP reads. A separate Oda installation and the
 official native browser executable also passed installation and blank-window
-control tests. Skill installation, authentication and live-store acceptance
-remain unverified. The earlier installations are preserved separately.
+control tests. A native pointer skill was installed and selected through Grok's
+skill menu; its invocation loaded the maintained instructions and read the
+intended Oda MCP. Authentication, live-store and PDF-attachment acceptance remain
+unverified. The earlier installations are preserved separately.
 
 ## Supported stores
 

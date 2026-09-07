@@ -99,7 +99,8 @@ duplicate-run refusal, attachment while running, retained child ownership after
 launcher interruption, and interrupted-publication recovery. The guided native
 Grok test below now also passed core installation, service/MCP and recipe reads.
 The official native browser route also passed the blank-window smoke below.
-Native skill installation, OAuth and live-store acceptance remain open.
+The native pointer-skill installation and invocation below also passed.
+OAuth, live-store and PDF-attachment acceptance remain open.
 The command-form workaround below is extraction evidence, not an
 alternative complete installer or a guarantee for arbitrary executables.
 
@@ -276,9 +277,34 @@ uninstall. The inspected `RestartMcpServers` tool restarts every installed
 server and has no per-server selector. Do not use it for a single-installation
 test or recovery while other clients may be active.
 
-The inspected shared skill library is `/home/box/agent-data/workflows`.
-Install the maintained skill into its own named directory, preserving existing
-skills. A new conversation or skill name does not isolate the account's files,
+The inspected native skill API is `update_state` with `target: "skill"`,
+`action: "write"`, `name`, `description` and a Markdown `body`. Omitting `id`
+creates a new user skill in the shared `/home/box/agent-data/workflows` library.
+Inspect existing names first; do not overwrite another skill. The API stores
+Markdown, without a companion-script installation interface.
+
+Use a short native pointer skill that requires loading the maintained
+`PROGRAM_ROOT/current/skill/SKILL.md` before meal work. Bind it to the actual
+installation's MCP namespace and verify its household/provider with `status`.
+Resolve the maintained skill's directory references and PDF helper against
+`PROGRAM_ROOT/current/skill/`, not the pointer's workflow directory. Keep the
+maintained files in place: copying `scripts/read_pdf.py` into workflows would
+break its runtime lookup, which uses its resolved file location. The pointer
+must not confer additional authentication, shopping or sending authority.
+After an update, reload the maintained instructions; a running conversation
+may retain previously loaded text.
+
+On 2026-09-07, native creation and exact body read-back passed for a separate
+Oda pointer skill. It appeared in Grok's `/` autocomplete, was selected as an
+actual native skill reference, and was invoked in the existing test conversation.
+Grok reported loading the installed instructions and using only the intended
+Oda namespace for status and builtin recipe library/search/get. The returned
+identity matched, with `awaiting_login`; the recipe read retained its source
+ingredient text. The UI selection was independently observed; instruction loads
+and MCP results were read from Grok's report. This tests native skill routing,
+not PDF rendering, authenticated store use or unattended installation.
+
+A new conversation or skill name does not isolate the account's files,
 credentials or browser. Attach only trusted same-owner Bots to the installation.
 
 ## Recovery and input boundaries
