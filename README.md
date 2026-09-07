@@ -280,8 +280,9 @@ reproduction steps and a redacted error message.
 
 Contributions are welcome through
 [pull requests](https://github.com/poisdahl/meal-concierge/pulls). Read the
-[technical reference](docs/reference.md) for implementation details. From the
-repository root, run the test suite:
+[technical reference](docs/reference.md) for implementation details and the
+[acceptance matrix](docs/acceptance.md) for verified paths and remaining provider
+gates. From the repository root, run the test suite:
 
 ```sh
 MC_TEST_ENV="$(mktemp -d)"
