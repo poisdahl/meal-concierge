@@ -111,9 +111,12 @@ The runtime test exercises real MCP 2.1.1 over stdio, Unix Server/Application,
 and CLI: no-ref seven-day planning, compact paging, complete handoff save,
 idempotence, restart, provider outage and unchanged personal bank/favorites.
 The focused Application test runs the production MENY detail extractor against
-synthetic observations of its verified page contract. Native Oda/Mathem detail
-and pagination acceptance remain unavailable; their failed details do not enable
-AI fallback.
+synthetic observations of its verified page contract. Authenticated Oda/Mathem MCP schemas now establish bounded recipe pagination,
+as detailed in [retailer capabilities](retailer-recipes.md). Mathem recipe-search
+reads also passed; Oda recipe reads were unavailable. Neither MCP exposes the
+culinary detail contract needed to materialize those links. Failed or incomplete
+details do not enable AI fallback. Real installed-pack menu/product acceptance
+is described in [the pack guide](recipe-pack-build.md).
 
 ## Request-scoped available ingredients
 
