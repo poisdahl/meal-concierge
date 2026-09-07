@@ -26,6 +26,13 @@ are optional.
 
 ## Installation
 
+For **Codex, Claude Code CLI or Claude Desktop’s Code section**, send:
+
+> Install Meal Concierge from https://github.com/poisdahl/meal-concierge.
+> Follow docs/client-install.md. Preserve existing installations and data.
+> Ask which host, store and household to use; let me complete native approvals.
+> Verify the service, recipes and this client’s tools/skill, and report what remains.
+
 For **Grok Bot**, send this prompt:
 
 > Install Meal Concierge from https://github.com/poisdahl/meal-concierge.

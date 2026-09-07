@@ -1,5 +1,9 @@
 # Codex and Claude Code
 
+Start with the [repo-URL installation guide](../docs/client-install.md) for fresh
+setup, reuse, native activation and recovery. The commands below describe the
+existing package component; they do not by themselves prove end-to-end setup.
+
 These local plugins connect to an already running [standalone service](../docs/runtime.md).
 Each plugin contains a native manifest, MCP attachment configuration and a copy
 of that installation's shared skill. Client exit, plugin removal or a new chat
@@ -56,8 +60,8 @@ remains open in #50.
 
 The attachment uses the installation's stable `current` paths. Rebuild packages
 from the updated running release into a new output directory. Attachment or skill
-changes produce a different content-based plugin version. To replace an installed
-marketplace, run `codex plugin marketplace remove meal-concierge` or
+changes produce a different content-based plugin version. Only after an explicit update request and verifying that the existing
+marketplace belongs to this same household, replace an installed marketplace with `codex plugin marketplace remove meal-concierge` or
 `claude plugin marketplace remove meal-concierge`, then repeat that client's
 marketplace-add and plugin-install commands above with the new output path.
 For Claude's session-only `--plugin-dir`, pass the new plugin path instead.
