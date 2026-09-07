@@ -145,6 +145,18 @@ unknown measures and estimates from the preview. Preview creates no personal
 entry. When the user requested saving, save the returned `discovery_ref` in
 builtin with the existing recipe-write tool; do not ask for that approval again.
 An import source identity conflict requires inspection, never blind overwrite.
+For a short PDF, prefer the client's whole-file read (in Claude Code, omit
+`pages`). If native PDF reading is unavailable, incomplete, or reports a missing
+renderer such as `pdftoppm`, use the bundled host helper:
+`python3 "<this skill directory>/scripts/read_pdf.py" "<original PDF>" --output "<new temporary directory>"`.
+It uses the installation's private PDF runtime; no Homebrew, system package or
+manual dependency installation is needed. Read every returned PNG with the
+client's native image tool, retaining the original `page` numbers in the
+transcript. Rendering alone is not reading or importing. For documents over
+20 pages, render batches with `--pages FIRST-LAST` into separate new directories;
+import each recipe with at most 20 source pages and do not claim unread pages
+were covered. Never use the helper to bypass a permission denial. If the client
+cannot execute a host helper or read images, report that limitation explicitly.
 The transcript object has this shape (replace every example with source facts):
 
 ```json

@@ -291,6 +291,43 @@ Each page supplies `page` and `text`; an unreadable page supplies an explicit
 The reader does not open files or perform OCR. Photo/PDF text must come from
 the host agent's actual access to the original attachment.
 
+### PDF attachments without system packages
+
+The standalone installer includes `pypdfium2` and its PDFium binary in the
+private runtime. Users do not need Poppler, Homebrew or a global PATH change.
+Prefer the client's native whole-PDF reader for short documents. If native PDF
+reading is unavailable or incomplete (including missing `pdftoppm` in Claude
+Code), the shared skill runs its bundled `scripts/read_pdf.py` helper and reads
+the resulting PNGs with the client's native image tool. Both generated local
+client packages bind that helper to the same installed Python as their MCP
+bridge. The host must support command execution and image reading; a remote
+service cannot open an attachment that exists only on the client host.
+
+The helper takes the original PDF and a new `--output` directory. It renders
+up to 20 pages sequentially at scale 2, capped at 2400 pixels on the longest
+edge, including annotations and ordinary form appearances. Its JSON manifest
+records the input SHA-256, document page count, original page numbers, image
+paths, dimensions and scale. `complete_document` means all pages were rendered,
+not that the agent has read them or imported any recipe. Read every relevant
+image before producing the transcript; unreadable wording remains an issue.
+
+For longer documents, `--pages FIRST-LAST` selects at most 20 pages per batch;
+use a new output directory for each batch. Preserve original page numbers and
+the existing 20-page/64-KiB limit per recipe transcript. Do not claim a whole
+book was imported when only selected recipes/pages were read. Inputs over
+64 MiB, invalid or password-protected PDFs, invalid page
+ranges and existing output directories fail explicitly. A failure may leave
+partial images but no success manifest; it never saves a recipe. The host's
+ordinary execution timeout and file/tool permissions still apply. A denied
+native read is not authorization to use the helper instead.
+
+This fallback is local rendering, not OCR or an additional model/service.
+It uses the ordinary prebuilt PDFium wheels (macOS 13+ Apple Silicon and
+supported Linux platforms); an existing installation needs the normal runtime
+update and rebuilt client package to acquire the helper and dependency.
+
+### Transcription and interpretation
+
 The interpretation contains a name, ingredient and step selections, and optional
 yield, notes, tags and language. Selections use `{page, quote}`; each quote must
 occur verbatim on that supplied page. The shared ingredient/yield parsers derive

@@ -91,6 +91,28 @@ class ClientPackages(unittest.TestCase):
             self.assertNotEqual(before["version"], after["version"])
             self.assertIn("Synthetic updated release instruction.", (second / "skills/meal-concierge/SKILL.md").read_text())
 
+    def test_packaged_pdf_helper_uses_installation_runtime_without_poppler(self):
+        from test_pdf_pages import text_pdf
+        source = self.root / "original recipe.pdf"
+        text_pdf(source)
+        bootstrap_bin = self.root / 'bootstrap-bin'
+        bootstrap_bin.mkdir()
+        (bootstrap_bin / 'python3').symlink_to(sys._base_executable)
+        with probe.service(self.root):
+            for client in ('codex', 'claude-code'):
+                plugin = probe.build(client, self.root, self.root / client)
+                result = subprocess.run(['python3', str(plugin / 'skills/meal-concierge/scripts/read_pdf.py'),
+                                         str(source), '--output', str(self.root / (client + '-pages'))],
+                                        text=True, capture_output=True, timeout=30,
+                                        env={**os.environ, 'PATH': str(bootstrap_bin)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([x['page'] for x in json.loads(result.stdout)['pages']], [1, 2, 3])
+            renderer = self.root / 'code/current/pdf_pages.py'
+            renderer.write_text(renderer.read_text() + '\n# Synthetic renderer update.\n')
+            updated = probe.build('claude-code', self.root, self.root / 'updated')
+            self.assertNotEqual(json.loads((plugin / '.claude-plugin/plugin.json').read_text())['version'],
+                                json.loads((updated / '.claude-plugin/plugin.json').read_text())['version'])
+
     def test_native_probe_rejects_cache_bound_to_another_household(self):
         with probe.service(self.root):
             market = self.root / "marketplace"

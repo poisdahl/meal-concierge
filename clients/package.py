@@ -39,7 +39,16 @@ def build(client: str, home: Path, output: Path) -> Path:
         server.update(startup_timeout_sec=20, tool_timeout_sec=TOOL_TIMEOUT_SECONDS)
     else:
         server["timeout"] = TOOL_TIMEOUT_SECONDS * 1000
-    identity = json.dumps({"server": server, "skill": skill_text}, sort_keys=True).encode()
+    # The host attachment stays on this host. Reuse the same private Python as
+    # the MCP bridge, not the client's PATH or a service-side file-reading tool.
+    renderer = skill.parent.parent / 'pdf_pages.py'
+    launcher = ('#!/usr/bin/env python3\nimport os, sys\nfrom pathlib import Path\n'
+                f'root = Path({str(renderer.parent)!r}).resolve()\n'
+                'command = str(root / "venv/bin/python")\n'
+                'os.execv(command, [command, "-I", str(root / "pdf_pages.py"), *sys.argv[1:]])\n')
+    identity = json.dumps({"server": server, "skill": skill_text, "pdf_launcher": launcher,
+                           "pdf_renderer": hashlib.sha256(renderer.read_bytes()).hexdigest()},
+                          sort_keys=True).encode()
     manifest = {
         "name": NAME, "version": VERSION + "+" + hashlib.sha256(identity).hexdigest()[:12],
         "description": "Meal planning and groceries through your independently running Meal Concierge service.",
@@ -66,6 +75,8 @@ def build(client: str, home: Path, output: Path) -> Path:
     skill_dir = plugin / "skills" / NAME
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(skill_text)
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts/read_pdf.py").write_text(launcher)
     if client == "codex":
         marketplace = {
             "name": NAME, "interface": {"displayName": "Meal Concierge"},

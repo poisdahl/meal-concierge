@@ -62,6 +62,29 @@ upgrade or a data rollback. Generated configuration contains local installation
 paths and belongs to its owner/host. Distribute the builder, not a household's
 generated attachment.
 
+## PDF attachments
+
+The normal standalone installation includes a private PDF renderer. When the
+client cannot read a PDF natively, the packaged skill renders its pages locally
+and reads the resulting images. No manual Poppler/Homebrew installation or
+global PATH change is required. The client still needs native image reading
+and permission to run the helper on the attached file. See the
+[PDF import limits and page-batch workflow](../docs/recipe-import.md#pdf-attachments-without-system-packages).
+
+For installations predating this helper, update the runtime normally and
+rebuild/reload the client package. Installing a new plugin against an old
+runtime does not install its missing dependencies. The helper is included in
+both generated package formats and participates in their cache version.
+
+The fallback was verified in a fresh private runtime on macOS with Claude
+Desktop 1.46388.4 / embedded Claude Code 2.1.260: a three-page text PDF hit the
+native missing-`pdftoppm` error, then the packaged helper and native image reads
+completed its import/save. A twelve-page scanned PDF followed the same helper
+path and preserved all twelve source pages in a separate draft. Exact source
+quantities, unknown measures, profile/cart state and non-favorite status were
+checked. Both generated launchers also passed local tests with only the existing
+bootstrap Python on PATH. Other hosts' native PDF workflows remain unverified.
+
 ## Client contract and checks
 
 The package schema targets Codex CLI **0.153.4** and Claude Code **2.1.241**.
