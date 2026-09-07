@@ -1661,3 +1661,18 @@ stop proven to precede every click can close after reading the preserved cart;
 a partial batch still requires the exact result of its earlier clicks. Workflow status
 surfaces this recovery step. A changed Oda addition cart must be reviewed and
 rebound; `orders change_abort(retain_cart=true)` preserves its goods.
+
+### Plan with available ingredients
+
+The shared menu `planner_input` optionally accepts `available_ingredients`: at
+most 32 distinct `{item, quantity?, unit?, use_first?}` assertions from the
+current user. Exact loaded ingredient matches influence eligible recipe
+selection; they do not certify safety or complete coverage. The unchanged
+planner save reference retains this context. See [request-scoped stock](recipe-selection.md#request-scoped-available-ingredients)
+for quantity handling, whole-menu allocation and replanning.
+
+Product preparation subtracts compatible quantified request stock once before
+package rounding. Unknown amounts or incompatible units leave purchase needs
+unchanged. Later `ingredient_decisions` replace that ingredient's request stock
+for the entire menu; do not pass the same stock as another independent amount.
+No inventory, cart or cooked-history mutation accompanies planning.

@@ -460,6 +460,14 @@ class RecipeOperations:
         queries = {"internal": [""] if settings.get("internal") else None}
         for source in ("oda", "meny", "mathem"):
             queries[source] = context_queries(state["profile"], source) if settings.get(source) and source == self.provider else None
+        available = request.get("available_ingredients") or []
+        if available:
+            # The ordinary query receives a turn before additional stock names
+            # or continuation pages can consume the bounded search budget.
+            names = [item["item"][:200] for item in available[:5]]
+            for source, values in queries.items():
+                if values is not None:
+                    queries[source] = list(dict.fromkeys([names[0], values[0], *names[1:], *values[1:]]))[:6]
         history = self._planner_history_index(state)
         def resolve(summary, deadline):
             reference = {key: summary[key] for key in ("recipe_ref", "discovery_ref") if key in summary}

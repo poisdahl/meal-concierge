@@ -63,6 +63,44 @@ def _normalized_unit(value: Any) -> str:
     return " ".join(unicodedata.normalize("NFC", value).split()).casefold()
 
 
+def normalize_available_ingredients(value: Any) -> list[dict[str, Any]]:
+    """An explicit planning-request assertion, never an inferred inventory."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 32:
+        raise HouseholdError("available_ingredients must contain at most 32 items")
+    result, seen = [], set()
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) - {"item", "quantity", "unit", "use_first"}:
+            raise HouseholdError("available ingredient fields are invalid")
+        identity = _identity(raw.get("item"))
+        if identity is None or identity in seen:
+            raise HouseholdError("available ingredients need distinct exact item names")
+        seen.add(identity)
+        unit = raw.get("unit")
+        if unit is not None and (not isinstance(unit, str) or not unit.strip() or len(unit) > 50):
+            raise HouseholdError("available ingredient unit must be bounded text")
+        quantity = raw.get("quantity")
+        if quantity is not None:
+            quantity = _positive_fraction(quantity)
+            if quantity is None:
+                raise HouseholdError("available ingredient quantity must be exact and positive")
+        use_first = raw.get("use_first", False)
+        if not isinstance(use_first, bool):
+            raise HouseholdError("available ingredient use_first must be true or false")
+        result.append({"item": " ".join(unicodedata.normalize("NFC", raw["item"]).split()),
+                       "quantity": _fraction_json(quantity) if quantity is not None else None,
+                       "unit": _normalized_unit(unit) or None, "use_first": use_first})
+    return sorted(result, key=lambda item: (not item["use_first"], _identity(item["item"])))
+
+
+def available_ingredient_matches(recipe, available):
+    """Exact loaded ingredient names only; no substitutions or coverage claims."""
+    identities = {_identity(item.get("item")) for item in recipe.get("ingredients", [])
+                  if isinstance(item, Mapping) and not item.get("optional")}
+    return [deepcopy(item) for item in available if _identity(item["item"]) in identities]
+
+
 def _legacy_scalable(recipe: Mapping[str, Any], index: int, requirement: Mapping[str, Any]) -> bool:
     """Recover only an omitted flag from the same frozen scaled ingredient."""
 
@@ -111,6 +149,9 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
         raise HouseholdError("product preparation needs one exact menu")
     aggregated: dict[tuple[str, str], dict[str, Any]] = {}
     unresolved = []
+    available = menu.get("available_ingredients") or []
+    stock = {_identity(item["item"]): item for item in available}
+    explicit_stock = set()
     decisions = ingredient_decisions or []
     if not isinstance(decisions, list) or len(decisions) > 512:
         raise HouseholdError("ingredient_decisions must be a bounded list")
@@ -156,6 +197,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 action = decision.get("action") if decision else None
                 if decision:
                     used.add(canonical(position))
+                    explicit_stock.add(identity)
                 if action == "omit" and raw.get("optional") is not True:
                     raise HouseholdError("only an optional ingredient can be omitted")
                 if action == "omit" or (action == "have_all" and (quantity is None or conversion is None or identity is None or not scalable)):
@@ -163,7 +205,11 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 reason = None
                 if raw.get("unresolved_reason"):
                     reason = str(raw["unresolved_reason"])
-                elif raw.get("pantry") is True and action is None:
+                elif raw.get("pantry") is True and action is None and not (
+                    identity in stock and stock[identity].get("quantity") is not None
+                    and conversion is not None
+                    and _UNITS.get(_normalized_unit(stock[identity].get("unit")), (None,))[0] == conversion[0]
+                ):
                     reason = "pantry_state_needs_input"
                 elif raw.get("optional") is True and action is None:
                     reason = "optional_requirement_needs_input"
@@ -209,6 +255,16 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 requirement["sources"].append(position)
     requirements = []
     for (identity, unit), value in sorted(aggregated.items(), key=lambda pair: (pair[0][0].encode("utf-8"), pair[0][1])):
+        # Explicit source-position decisions replace this ingredient's request
+        # stock, rather than counting the same household assertion a second time.
+        supplied = stock.get(identity)
+        if supplied and identity not in explicit_stock:
+            amount = _positive_fraction(supplied.get("quantity"))
+            stock_unit = _UNITS.get(_normalized_unit(supplied.get("unit")))
+            if amount is not None and stock_unit is not None and stock_unit[0] == unit:
+                used_stock = min(value["quantity_fraction"], amount * stock_unit[1])
+                value["quantity_fraction"] -= used_stock
+                value["pantry_fraction"] += used_stock
         if value["quantity_fraction"] == 0:
             continue
         requirement_id = "req:" + hashlib.sha256(canonical({"identity": identity, "unit": unit}).encode()).hexdigest()[:24]
@@ -641,13 +697,17 @@ def build_product_plan(
             packages += selection["package_count"]
             excess += _read_fraction(selection["excess_score"])
         planned.append(item)
-    status = "prepared" if (requirements or ingredient_decisions) and not unresolved else "needs_input"
+    stock_covers_menu = bool(menu.get("available_ingredients")) and any(
+        recipe.get("shopping_requirements") for collection in ("dishes", "salads") for recipe in menu[collection]
+    )
+    status = "prepared" if (requirements or ingredient_decisions or stock_covers_menu) and not unresolved else "needs_input"
     plan: dict[str, Any] = {
         "product_plan_version": PRODUCT_PLAN_VERSION,
         "provider": provider,
         "binding": deepcopy(dict(binding)),
         "hard_product_constraints": hard_constraints,
         "ingredient_decisions": deepcopy(ingredient_decisions or []),
+        **({"available_ingredients": deepcopy(menu["available_ingredients"])} if menu.get("available_ingredients") else {}),
         "budget_ore": budget_ore,
         "price_mode": price_mode,
         "cost_status": "exact_product_payable" if payable_known and status == "prepared" else "merchandise_estimate_only" if status == "prepared" else "unresolved",

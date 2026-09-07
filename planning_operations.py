@@ -22,6 +22,7 @@ from recipes import recipe_provider_problem
 from recipe_selection import history_source_index, family_history_usage, compact_candidate
 from planner import _validate_request
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
+from product_planner import normalize_available_ingredients
 from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
 import menu_planning as mp
@@ -322,6 +323,8 @@ class PlanningOperations:
                      "historical_slot_ids": sorted(historical), "supersedes": mp.menu_ref(current),
                      "replan_selection": deepcopy(result["save_handoff"]),
                      "planning_scope": deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({s["date"] for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})}
+        if replacement.get("available_ingredients"):
+            successor["available_ingredients"] = deepcopy(replacement["available_ingredients"])
         successor["slot_owners"] = {s["slot_id"]: current.get("slot_owners", {}).get(s["slot_id"], current["menu_id"]) for s in carried}
         recipes = {r["recipe_key"]: r for r in current["dishes"] + current["salads"] + replacement["dishes"]}
         successor["dishes"] = [deepcopy(recipes[key]) for key in dict.fromkeys(s["recipe_key"] for s in successor["slots"])]
@@ -590,9 +593,10 @@ class PlanningOperations:
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value).difference({
             "week", "dates", "portions", "candidates", "strict_targets",
-            "cooldown_overrides", "alternatives", "as_of_date",
+            "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients",
         }):
             raise PlannerError("planner input has unknown fields")
+        available = normalize_available_ingredients(value.get("available_ingredients"))
         week = validate_week(value.get("week"))
         supplied_as_of_date = value.get("as_of_date")
         if anchor_current_date:
@@ -615,6 +619,7 @@ class PlanningOperations:
         if not isinstance(meals, Mapping):
             raise PlannerError("profile meals are invalid")
         return {
+            **({"available_ingredients": available} if available else {}),
             "week": week,
             "dates": deepcopy(value.get("dates")) if value.get("dates") is not None
             else self._default_planner_dates(week, profile),
@@ -904,6 +909,8 @@ class PlanningOperations:
             "date": slot["date"], "meal_type": "dinner", "recipe_key": slot["recipe_key"],
             "reference": deepcopy(slot["reference"]), "snapshot_digest": mp.digest(recipe),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
+        if handoff["request"].get("available_ingredients"):
+            menu["available_ingredients"] = deepcopy(handoff["request"]["available_ingredients"])
         menu["planner_selection"] = {
             "planner_version": handoff["planner_version"],
             "input_digest": handoff["input_digest"],

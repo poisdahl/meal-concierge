@@ -114,3 +114,45 @@ The focused Application test runs the production MENY detail extractor against
 synthetic observations of its verified page contract. Native Oda/Mathem detail
 and pagination acceptance remain unavailable; their failed details do not enable
 AI fallback.
+
+## Request-scoped available ingredients
+
+`planner_input.available_ingredients` accepts up to 32 distinct exact item names:
+
+```json
+{"available_ingredients": [
+  {"item": "brokkoli", "use_first": true},
+  {"item": "ris", "quantity": 500, "unit": "g"}
+]}
+```
+
+Quantities use the shared exact quantity format (integers, supported decimal
+inputs or numerator/denominator objects). Omitted quantities or unsupported
+units remain unknown. Only the current user's stock assertion belongs here;
+this is not a stock database, freshness check or dietary assurance.
+
+Within the existing six-page-per-source budget, the first stock query is followed
+by an ordinary source query before additional names or continuation pages. These
+first two queries receive a turn before early completion. Derived search queries
+are bounded to 200 characters; full ingredient identities remain unchanged. Scoring uses exact case-insensitive, Unicode-
+normalized names from loaded non-optional ingredients. No translation,
+substitution, summary-derived ingredient or complete-coverage inference occurs.
+A match adds three preference points per meal, six for `use_first`, capped at
+18; hard restrictions and source deduplication still precede this ranking.
+Without stock input, selection and calculation are unchanged.
+
+The request is bound into the existing planner digest and frozen in the saved
+menu. Product preparation aggregates compatible needs across all dishes, then
+subtracts compatible quantified stock once per exact ingredient/unit identity.
+Two 400 g rice meals and 500 g on hand therefore leave 300 g before package
+rounding. Unknown quantity, incompatible unit or a distinct ingredient name
+leaves the purchase unchanged. The returned requirements show gross quantity
+and confirmed pantry quantity; the plan retains the original stock assertions.
+
+Later source-position `ingredient_decisions` replace the request stock for that
+entire ingredient, including `include` as an explicit buy choice. They never
+add a second pool to the planning input. Allocate a newly confirmed total once
+across those positions. Repeated preparation is deterministic and has no stock
+side effects. Replanning takes the new request's stock assertion for its whole
+remaining menu, including carried future meals; omission does not reuse old
+stock after possible cooking. The earlier menu/history stays unchanged.

@@ -282,7 +282,7 @@ def shortlist(candidates: list[Mapping[str, Any]], request: Mapping[str, Any], p
     prepared = []
     for group in candidate_groups(candidates):
         usage = merge_family_usage(group)
-        prepared.extend(prepare_candidate({**item, "usage": usage}, profile, request.get("cooldown_overrides", {}), request.get("portions")) for item in group)
+        prepared.extend(prepare_candidate({**item, "usage": usage}, profile, request.get("cooldown_overrides", {}), request.get("portions"), request.get("available_ingredients")) for item in group)
     representatives = []
     unknown = []
     rejected = []
@@ -323,7 +323,7 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
     states = {source: {"source": source, "enabled": queries is not None,
                        "status": "searching" if queries is not None else "disabled",
                        "pages": 0, "discovered": 0, "details": 0, "rejected_details": 0,
-                       "queries": [], "query_index": 0, "cursor": None, "limited": False}
+                       "queries": [], "pending_queries": [(query, None) for query in queries or []], "limited": False}
               for source, queries in source_queries.items()}
     resolved = []
     seen = set()
@@ -334,22 +334,21 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
         for source, state in states.items():
             if state["status"] != "searching":
                 continue
-            queries = source_queries[source] or []
             if clock() >= deadline:
                 state["status"] = "timeout"
                 continue
-            if state["query_index"] >= len(queries):
+            if not state["pending_queries"]:
                 state["status"] = "search_limit" if state["limited"] or not state["pages"] else "unsuitable" if state["discovered"] else "empty"
                 continue
             if state["pages"] >= MAX_SOURCE_PAGES or detail_count >= MAX_DETAILS:
                 state["status"] = "search_limit"
                 continue
-            query = queries[state["query_index"]]
+            query, request_cursor = state["pending_queries"].pop(0)
             if query not in state["queries"]:
                 state["queries"].append(query)
             state["pages"] += 1
             try:
-                page = fetch_page(source, query, state["cursor"], PAGE_SIZE, deadline)
+                page = fetch_page(source, query, request_cursor, PAGE_SIZE, deadline)
                 if not isinstance(page, Mapping) or not isinstance(page.get("candidates"), list) or len(page["candidates"]) > PAGE_SIZE:
                     raise ValueError("invalid source page")
                 if page.get("status") in {"unavailable", "timeout", "rate_limited", "search_limit"}:
@@ -376,16 +375,15 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
                         state["rejected_details"] += 1
                 cursor = page.get("next_cursor")
                 if cursor is not None:
-                    signature = canonical(cursor)
+                    signature = canonical([query, cursor])
                     if signature in cursors[source]:
                         state["status"] = "search_limit"
                     cursors[source].add(signature)
-                    state["cursor"] = cursor
+                    # Stock preferences must not hide the normal broad query.
+                    index = len(state["pending_queries"]) if request.get("available_ingredients") else 0
+                    state["pending_queries"].insert(index, (query, cursor))
                 else:
                     state["limited"] |= page.get("exhausted") is not True
-                    state["query_index"] += 1
-                    state["cursor"] = None
-                    cursors[source].clear()
             except TimeoutError:
                 state["status"] = "timeout"
             except HTTPError as exc:
@@ -394,7 +392,11 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
                 state["status"] = "unavailable"
         selection = shortlist(resolved, request, profile)
         # Every enabled source had an opportunity; no fixed source quotas.
-        if len(selection["candidates"]) >= selection["capacity"]:
+        ordinary_queries_seen = not request.get("available_ingredients") or all(
+            state["status"] != "searching" or len(state["queries"]) >= min(2, len(source_queries[source] or []))
+            for source, state in states.items()
+        )
+        if len(selection["candidates"]) >= selection["capacity"] and ordinary_queries_seen:
             for state in states.values():
                 if state["status"] == "searching":
                     state["status"] = "search_limit"
@@ -407,7 +409,7 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
         state["needs_input"] = sum(candidate_needs_input(item) for item in evaluated)
         if state["status"] == "unsuitable" and state["suitable"]:
             state["status"] = "ready"
-        for key in ("query_index", "cursor", "limited"):
+        for key in ("pending_queries", "limited"):
             state.pop(key)
     enabled = [state for state in states.values() if state["enabled"]]
     ai_eligible = (bool(enabled) and selection["suitable_count"] == 0 and not selection["unknown"]

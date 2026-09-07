@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import unicodedata
 
 from core import HouseholdError
+from product_planner import normalize_available_ingredients, available_ingredient_matches
 from recipe_selection import candidate_groups, merge_family_usage
 from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
@@ -338,7 +339,7 @@ def _hard_evaluation(
     return {"status": status, "reasons": reasons}
 
 
-def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], portions: int | None = None) -> dict[str, Any]:
+def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], portions: int | None = None, available_ingredients=None) -> dict[str, Any]:
     """Evaluate only a loaded, exact Application candidate; summaries cannot pass."""
     item = deepcopy(dict(candidate))
     recipe = item["recipe"]
@@ -358,6 +359,9 @@ def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], 
     if not item.get("materialization_error"):
         item["facts"]["listed_fish_mass"] = _listed_fish_mass(recipe)
     item["hard_constraints"] = _hard_evaluation(item, profile, overrides)
+    item.pop("available_ingredient_matches", None)
+    if available_ingredients and not item.get("materialization_error"):
+        item["available_ingredient_matches"] = available_ingredient_matches(recipe, available_ingredients)
     return item
 
 
@@ -508,6 +512,11 @@ def _slot_reasons(
     candidate: Mapping[str, Any], day: str, index: int, count: int, profile: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = _preference_reasons(candidate, day, profile)
+    matches = candidate.get("available_ingredient_matches")
+    if matches:
+        reasons.append(_reason("pantry:explicit_request", min(18, sum(6 if item["use_first"] else 3 for item in matches)),
+                               {"matched_ingredients": deepcopy(matches), "coverage": "not_established",
+                                "basis": "user_stock_assertion_and_loaded_exact_ingredient_names"}))
     explicit_feedback = candidate.get("planning_feedback")
     if explicit_feedback is not None:
         reasons.append(_reason("feedback:explicit-v1", explicit_feedback["weight"], deepcopy(explicit_feedback)))
@@ -702,9 +711,10 @@ def _selection(
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
         "week", "dates", "portions", "candidates", "strict_targets",
-        "cooldown_overrides", "alternatives", "as_of_date",
+        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients",
     }):
         raise PlannerError("planner input has unknown fields")
+    available = normalize_available_ingredients(value.get("available_ingredients"))
     week = str(value.get("week") or "")
     if re.fullmatch(r"\d{4}-W\d{2}", week) is None:
         raise PlannerError("planner week must use YYYY-Www")
@@ -765,6 +775,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError("as_of_date must be an ISO date") from exc
     return {
         "planner_version": PLANNER_VERSION,
+        **({"available_ingredients": available} if available else {}),
         "week": week,
         "dates": dates,
         "portions": portions,
@@ -806,7 +817,7 @@ def plan_week(
             blocked_by = item["usage"].get("blocked_by")
             if isinstance(blocked_by, list):
                 item["usage"]["blocked_by"] = sorted(blocked_by, key=canonical)
-        item = prepare_candidate(item, profile, checked["cooldown_overrides"], checked["portions"])
+        item = prepare_candidate(item, profile, checked["cooldown_overrides"], checked["portions"], checked.get("available_ingredients"))
         prepared.append(item)
     status_priority = {"pass": 0, "unknown": 1, "fail": 2}
     for group in candidate_groups(prepared):
