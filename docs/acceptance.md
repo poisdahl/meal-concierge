@@ -12,8 +12,9 @@ maintainer-approved Bob container, using its real Codex model, maintained skill,
 MCP bridge and Application. The model remained `gpt-6-astra` with low effort.
 Grocery responses in these conversations were controlled synthetic fixtures;
 the service rejected external network connections. The installed recipe pack
-was the actual pinned public release. No real cart, order, payment or
-cancellation effects have been demonstrated by this work.
+was the actual pinned public release. Separate authenticated Mathem acceptance
+later added and removed one real cart item through Application, as described
+below. No live delivery selection, order, payment or cancellation was performed.
 
 ## Served features
 
@@ -37,7 +38,7 @@ provider outcome.
 | Pantry and exact quantities | `menu` available_ingredients; `products` decisions | `test_meal_concierge_pantry_selection.py`, `test_meal_concierge_products.py`; native Thai/spicy/stock ranking below | Request-scoped exact stock, not an inventory ledger; unknown measures remain actionable unresolved needs |
 | Catalog, product planning and substitutions | `catalog`, `products` | `test_meal_concierge_products.py`, `test_meal_concierge_product_capacity.py`; whole-week and offline-pack preparation below | No measured native-hint speedup; current prices/availability and exact candidate approval remain required |
 | Favorites and recurring goods | `product_favorites`, `recurring` | `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`, `test_meal_concierge_products.py` | Shared persistence/interval behavior verified; real account cart effects remain separately pending |
-| Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem read-only readiness | Live cart mutation and delivery selection have not been exercised in this backlog run |
+| Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | One real item added and removed; live delivery selection remains untested |
 | Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Oda/MENY guarded paths remain; MENY phone approval is external. Mathem still returns a manual checkout handoff. Automated Mathem submit/change/cancel and real payment-result verification remain #50 |
 | Scheduling and email | `schedule`, `email` | `test_meal_concierge.py`, `test_weekly_scheduler.py`, `test_email_scheduler.py`; recorded local-sender/occurrence/recovery checks | No real recipients used; synthetic scheduling does not certify unattended live Mathem checkout |
 
@@ -100,12 +101,24 @@ search timed out waiting for rendering; subsequent authenticated detail checks
 passed using the previously observed search result. Neither run changed a cart.
 See the [retailer capability matrix](retailer-recipes.md).
 
+A separate Mathem cart probe on the same implementation used the real provider
+client and its lock through a task-only SSH command transport. After a fresh
+empty baseline and product/price verification, Application `cart ensure` added
+one 500 g Fusilli package at 15.95 SEK. MCP readback and the already authenticated
+website showed that exact quantity. Website navigation reached `/se/cart/` and
+`/se/checkout/delivery/`; it did not reach or submit payment. Application
+`cart change` then removed only the test-added quantity. Final readback was an
+empty cart with no pending cart journal. Native delivery-slot reads for two
+future dates also normalized successfully, but no slot was selected. This was
+a direct Application/provider test, not the required connected model purchase
+conversation or proof of full browser/MCP account-identity binding.
+
 ## Open provider acceptance
 
 The authenticated recipe-read gate for #43 is now demonstrated and completes
 the remaining provider input to #41/#45. The native menu conversations and
 seven-day cart fixtures above retain their synthetic provider scope; the new
-reads do not turn them into real purchase acceptance. Provider availability
+reads and the one-item cart probe do not turn them into real purchase acceptance. Provider availability
 failures remain explicit failures, not exhausted recipe sources.
 
 #50 remains open: Mathem website login in Bob is now complete alongside MCP
