@@ -15,7 +15,8 @@ of `install.py run`; the normal service owns its state and listener locks.
 Retain the exact execution and service process identities, inspect health before
 attaching, and stop only that installation before offline updates. Never start
 a service for every conversation. Native Grok acceptance of this new installer
-route remains pending; its local acceptance is described below.
+route stopped at Shell review on 2026-09-07; its local acceptance and the
+native attempt are described below.
 
 ## Install from the repository
 
@@ -47,6 +48,15 @@ after review rejects an operation.
    Oda/MENY also need the browser dependencies below. Ask for the intended
    store/household when not already established; do not switch stores to avoid
    a missing browser.
+   Inspect inherited Python import and package-source overrides without
+   exposing values. Resolve relevant overrides before execution; do not block
+   on unrelated settings merely because their names begin with `UV_` or `PIP_`.
+   `UV_TOOL_DIR` and `UV_TOOL_BIN_DIR` concern `uv tool`, which this installer
+   does not invoke. `uv` ignores pip-specific configuration; the observed
+   `PIP_CONFIG_FILE` was also confirmed by a boolean-only comparison to be
+   `/dev/null`, which disables pip configuration-file loading. Leave these
+   settings unchanged. Scope cache and managed-Python directories per process
+   when needed, and disclose those assignments in the reviewed command.
 4. **Install stopped, then run.** From that reviewed source directory, invoke
    `python3 install.py install --manager external` with the explicit home,
    code root, short socket/browser-socket paths, provider and household. The
@@ -89,6 +99,27 @@ a successful native Grok repository-URL installation, browser install, OAuth
 flow or live-store test. Keep the working installation while those gates remain
 open. The command-form workaround below is troubleshooting evidence, not an
 alternative complete installer.
+
+The native repository-URL attempt on 2026-09-07 used public commit
+`95990976384b0de1f6804ac1ebe39537c58533ef`. Grok reported successful download,
+SHA256 verification, inspection of 146 archive members, ordinary `unzip` into a
+new source directory and verification/read-through of the unchanged installer.
+The archive and 50 source files had also been independently checked against the
+locally tested version. Its exact `env UV_CACHE_DIR=... UV_PYTHON_INSTALL_DIR=...
+python3 install.py install --manager external --uv /usr/local/bin/uv ...`
+operation, with explicit source working directory, received the same executable
+binding rejection before installation. Grok reported an identical native
+approval-request retry despite the instruction to stop after the first refusal;
+that also failed without a usable approval card. This is a test-procedure
+deviation, not evidence of a successful approval path.
+
+The result was captured from Grok's visible conversation, not independently
+exported Shell telemetry. Grok reported only the downloaded ZIP and extracted
+source retained in the new durable root, with the new temporary root empty.
+No installation home, program environment, service, MCP record or skill was
+created, and the older synthetic installation was preserved. Acquisition and
+extraction therefore passed; fresh runtime installation remains blocked. Do not
+retry this operation with a wrapper or alternate command form after refusal.
 
 ## Placement and dependencies
 

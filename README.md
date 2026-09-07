@@ -67,9 +67,10 @@ native setup, permissions and persisted state. [OpenClaw](docs/openclaw.md) and
 baselines. Their complete recipe, attachment and scheduling workflows remain
 under integration. Grok Bot has reported successful native MCP registration
 and synthetic recipe, cart and menu tests. The [Grok guide](docs/grok.md)
-describes installation on its cloud computer without systemd. Fresh installation
-from a repository URL, browser setup and live-store acceptance remain unverified
-on Grok; the successful synthetic installation is preserved separately.
+describes installation on its cloud computer without systemd. The fresh
+repository-URL test downloaded and unpacked the source, but Grok's Shell review
+blocked the installer. Browser setup and live-store acceptance remain unverified;
+the successful synthetic installation is preserved separately.
 
 ## Supported stores
 
@@ -148,7 +149,9 @@ For **Grok Bot**, use this repository URL and start prompt:
 > or household settings, and let me handle required login or platform approvals.
 > Verify the Meal Concierge tools and report any incomplete step accurately.
 
-This is a guided installation route pending a complete fresh native Grok test.
+This guided route is currently blocked at installer execution by Grok's Shell
+review; it is not yet a verified unattended installation. The 2026-09-07 native
+test successfully downloaded and unpacked the pinned GitHub source ZIP.
 The [Grok guide](docs/grok.md#install-from-the-repository) chooses the source,
 runtime and native registration steps; unpacking a ZIP alone does not install
 the service. Store login is separate from core installation.
