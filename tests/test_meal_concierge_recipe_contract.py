@@ -510,14 +510,10 @@ class RecipeContractTests(unittest.TestCase):
             self.app.recipe_libraries[library.library_id] = {"library_id": library.library_id, "provider": "mealie", "display_name": library.library_id, "read_only": False}
             self.app.recipe_library_adapters[library.library_id] = library
         request = {"operation": "migration", "action": "prepare", "source_library_id": "source", "destination_library_id": "destination", "metadata_options": {"favorites": "omit", "labels": "omit"}}
-        plan = self.app.handle(request)
-        self.assertEqual(plan["items"][0]["status"], "unsupported_rights")
-        self.assertEqual(plan["items"][0]["reason"], "destination_storage_unavailable")
-        result = self.app.handle({"operation": "migration", "action": "execute", "plan_id": plan["plan_id"], "confirmation": {"plan_digest": plan["plan_digest"], "statement": plan["confirmation_statement"]}})
-        self.assertEqual(result["items"][0]["copy_status"], "skipped")
+        with self.assertRaisesRegex(RecipeError, "builtin destination"):
+            self.app.handle(request)
         self.assertEqual(destination.create_calls, 0)
-        with sqlite3.connect(self.app.recipes.path) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM library_operations").fetchone()[0], 0)
+        self.assertFalse(self.app.recipes.path.exists())
         plan = self.app.handle({**request, "destination_library_id": "builtin"})
         result = self.app.handle({"operation": "migration", "action": "execute", "plan_id": plan["plan_id"], "confirmation": {"plan_digest": plan["plan_digest"], "statement": plan["confirmation_statement"]}})
         self.assertEqual(result["items"][0]["copy_status"], "confirmed")

@@ -68,6 +68,8 @@ class Migration:
     def handle(self, request):
         action = request.get("action", "inspect")
         if action == "prepare":
+            if request.get("destination_library_id") != "builtin":
+                raise RecipeError("new recipe copies require the builtin destination; resume an existing plan for legacy recovery")
             return self.prepare(request)
         plan = self.load(request.get("plan_id"))
         if action == "inspect":
@@ -605,6 +607,13 @@ class Migration:
                 continue
             try:
                 args = {k: v for k, v in stage.items() if k in {"action", "is_favorite", "library_label_ref", "present"}}
+                if operation is None and progress["destination_ref"]["library_id"] != "builtin":
+                    # These stages come only from the exact persisted, confirmed
+                    # legacy plan; new external plans cannot enter through handle.
+                    if args["action"] == "set_favorite":
+                        self.store.begin_library_favorite(progress["destination_ref"], args["is_favorite"], idempotency_key=key)
+                    elif args["action"] == "set_label":
+                        self.store.begin_library_label_change(progress["destination_ref"], args["library_label_ref"], args["present"], idempotency_key=key)
                 result = self.app._recipes({**args, "library_recipe_ref": progress["destination_ref"], "idempotency_key": key, "_migration_expires_at": plan["expires_at"]})
                 status = result.get("status", "confirmed" if isinstance(result.get("is_favorite"), bool) else "uncertain")
                 completed[index_key] = {"status": status}

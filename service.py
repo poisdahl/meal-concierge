@@ -172,7 +172,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.recipe_libraries = {
             item["library_id"]: item for item in library_configuration["recipe_libraries"]
         }
-        self.primary_recipe_library_id = library_configuration["primary_recipe_library_id"]
+        # Retain old connection configuration for exact reads/recovery, while
+        # every new personal recipe starts in the owned bank.
+        self.primary_recipe_library_id = "builtin"
         self.recipe_library_adapters = dict(recipe_library_adapters or {})
         self.recipe_favorite_locks: dict[tuple[str, str], threading.Lock] = {}
         self.recipe_favorite_locks_guard = threading.Lock()

@@ -24,7 +24,7 @@ from urllib.error import HTTPError
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
 from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value
-from recipe_libraries import CAPABILITY_NAMES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
+from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
 from service_common import (
@@ -40,6 +40,10 @@ class _InvalidRecipeCursor(RecipeError):
 
 
 class RecipeOperations:
+    def _require_legacy_recipe_operation(self, idempotency_key):
+        if self.recipes.library_operation_for_idempotency(idempotency_key) is None:
+            raise RecipeLibraryError("external libraries are import sources; new recipe changes belong in the builtin bank")
+
     @staticmethod
     def _import_identity(binding, namespace, identity):
         return "import:v1:" + hashlib.sha256(canonical([binding, namespace, identity]).encode()).hexdigest()
@@ -1205,6 +1209,7 @@ class RecipeOperations:
         idempotency_key: Any,
         dispatch_before: str | None = None,
     ) -> dict[str, Any]:
+        self._require_legacy_recipe_operation(idempotency_key)
         library_id = reference["library_id"]
         if library_id not in self.recipe_libraries:
             raise RecipeLibraryError(
@@ -1547,6 +1552,7 @@ class RecipeOperations:
         idempotency_key: Any,
         dispatch_before: str | None = None,
     ) -> dict[str, Any]:
+        self._require_legacy_recipe_operation(idempotency_key)
         recipe_ref = validate_library_recipe_ref(recipe_reference)
         label_ref = validate_library_label_ref(label_reference)
         library_id = recipe_ref["library_id"]
@@ -1815,6 +1821,7 @@ class RecipeOperations:
     def _create_external_label(
         self, library_id: Any, name: Any, *, idempotency_key: Any
     ) -> dict[str, Any]:
+        self._require_legacy_recipe_operation(idempotency_key)
         library = validate_library_id(library_id, allow_builtin=False)
         if library not in self.recipe_libraries:
             raise RecipeLibraryError(
@@ -2009,7 +2016,7 @@ class RecipeOperations:
         elif found:
             self.recipes.record_library_create_progress(operation["operation_id"], {**progress, "slug": found["slug"], "library_recipe_ref": found["library_recipe_ref"]})
             response["recovery"] = {"status": "incomplete_import", "library_recipe_ref": found["library_recipe_ref"],
-                "next_action": "Review this exact empty import using delete_prepare; after explicit delete_confirm succeeds, close recovery with its deletion_operation_id. A new save then requires a new idempotency key."}
+                "next_action": "Review this exact empty import using delete_prepare with this original operation_id; after explicit delete_confirm succeeds, close recovery with its deletion_operation_id. A new save then requires a new idempotency key."}
         else:
             response["recovery"] = {"status": "unresolved", "next_action": "The recorded import was changed or cannot be identified; inspect the library and reconcile, without overwriting or recreating it."}
         return response
@@ -2039,6 +2046,8 @@ class RecipeOperations:
         if target not in self.recipe_libraries:
             raise RecipeLibraryError("library_id must name one exact configured recipe library")
         recovering = self.recipes.discovery_save_replay(discovery_ref, target)
+        if target != "builtin" and not self.recipes.has_library_save(discovery_ref, target, request.get("idempotency_key")):
+            raise RecipeLibraryError("external libraries are import sources; new recipes are saved in the builtin bank")
         if imported_source and target != "builtin" and not recovering:
             raise RecipeError("new source imports are saved in the built-in recipe bank")
         if source_recipe is not None and not recovering:
@@ -2250,6 +2259,20 @@ class RecipeOperations:
             raise RecipeLibraryError(
                 f"{kind}_prepare accepts only one exact library_recipe_ref"
             )
+        if request.get("operation_id") is None:
+            raise RecipeLibraryError("external lifecycle is recovery-only; provide the original operation_id")
+        original = self.recipes.library_operation_snapshot(request["operation_id"])
+        if original.get("kind") == kind:
+            if (request.get("library_recipe_ref") != original["library_recipe_ref"]
+                    or request.get("archived") != original.get("requested_archived")):
+                raise RecipeLibraryError("legacy lifecycle recovery must preserve the original target and intent")
+            return self._lifecycle_operation_response(original)
+        if kind != "delete" or original.get("kind") != "create":
+            raise RecipeLibraryError("new external lifecycle is unavailable; only an exact incomplete import can be removed")
+        recovery = self._import_recovery({"operation_id": original["operation_id"]}).get("recovery", {})
+        if (recovery.get("status") != "incomplete_import"
+                or recovery.get("library_recipe_ref") != request.get("library_recipe_ref")):
+            raise RecipeLibraryError("only the exact verified incomplete import can be prepared for removal")
         reference = validate_library_recipe_ref(request.get("library_recipe_ref"))
         library_id = reference["library_id"]
         if library_id == "builtin" or library_id not in self.recipe_libraries:
@@ -2295,6 +2318,7 @@ class RecipeOperations:
                 provider_principal=provider_principal,
                 current_archived=current_archived,
                 requested_archived=requested_archived,
+                recovery_of=original["operation_id"],
             )
             return self._lifecycle_operation_response(operation)
 
@@ -2331,6 +2355,7 @@ class RecipeOperations:
         return self._lifecycle_operation_response(confirmed)
 
     def _update_external_recipe(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        self._require_legacy_recipe_operation(request.get("idempotency_key"))
         if request.get("library_id") is not None or request.get("recipe_id") is not None:
             raise RecipeLibraryError(
                 "external update requires only one exact library_recipe_ref identity"
@@ -2759,6 +2784,14 @@ class RecipeOperations:
                 return self._reconcile_external_lifecycle(
                     operation, adapter, capabilities
                 )
+            if operation.get("recovery_of"):
+                original = self.recipes.library_operation_snapshot(operation["recovery_of"])
+                progress = original.get("provider_progress", {})
+                if (original.get("kind") != "create" or original["status"] != "uncertain"
+                        or progress.get("library_recipe_ref") != reference
+                        or progress.get("provider_principal") != provider_principal
+                        or progress.get("provider_binding") != provider_binding):
+                    raise RecipeLibraryError("the original incomplete import changed; reconcile it before removal")
             capability = "delete" if kind == "delete" else "archive_desired_state"
             reconciliation = (
                 "reconcile_delete" if kind == "delete" else "reconcile_archive"
@@ -3016,8 +3049,11 @@ class RecipeOperations:
                     if key in connection
                 }
                 item["primary"] = library_id == self.primary_recipe_library_id
+                item["read_only"] = library_id != "builtin"
                 try:
                     item["capabilities"] = self._library_capabilities(library_id)
+                    if library_id != "builtin":
+                        item["capabilities"].update(read_only=True, **{name: False for name in WRITE_CAPABILITIES})
                     item["status"] = "available"
                 except Exception as exc:
                     item["capabilities"] = None

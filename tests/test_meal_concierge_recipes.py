@@ -2192,31 +2192,9 @@ class RecipeLibraryContractTests(unittest.TestCase):
             self.assertEqual(load_library_secret(home, "family-mealie"), {"token": "fixture-secret"})
 
             primary_args = argparse.Namespace(config=config_path, home=home, library_id="family-mealie")
-            read_only_adapter = SyntheticLibraryAdapter(
-                "family-mealie", recipe, read_only=True
-            )
-            with mock.patch.object(
-                    library_setup, "load_optional_adapter", return_value=read_only_adapter
-                ), mock.patch("builtins.input") as confirmation, mock.patch.object(
-                    library_setup, "_restart_running_service"
-                ) as restart, self.assertRaisesRegex(
-                    RecipeLibraryError, "cannot be primary because it cannot save"
-                ):
-                library_setup.set_primary(
-                    primary_args, library_setup._read_config(config_path)
-                )
-            confirmation.assert_not_called()
-            restart.assert_not_called()
-            self.assertEqual(
-                json.loads(config_path.read_text(encoding="utf-8"))["primary_recipe_library_id"],
-                "builtin",
-            )
-
-            with mock.patch.object(library_setup, "load_optional_adapter", return_value=adapter), \
-                    mock.patch("builtins.input", return_value="set primary family-mealie"), \
-                    mock.patch.object(library_setup, "_restart_running_service"):
-                library_setup.set_primary(primary_args, library_setup._read_config(config_path))
-            self.assertEqual(json.loads(config_path.read_text(encoding="utf-8"))["primary_recipe_library_id"], "family-mealie")
+            self.assertTrue(next(item for item in configured["recipe_libraries"] if item["library_id"] == "family-mealie")["read_only"])
+            with mock.patch("sys.argv", ["recipe_library_setup.py", "set-primary"]), self.assertRaises(SystemExit):
+                library_setup.main()
 
             with mock.patch.object(library_setup, "load_optional_adapter", side_effect=RecipeLibraryError("probe failed")), \
                     mock.patch.object(library_setup.getpass, "getpass", return_value='{"token":"new-secret"}'):
@@ -2224,10 +2202,6 @@ class RecipeLibraryContractTests(unittest.TestCase):
                     library_setup.update_credential(primary_args, library_setup._read_config(config_path))
             self.assertEqual(load_library_secret(home, "family-mealie"), {"token": "fixture-secret"})
 
-            builtin_args = argparse.Namespace(config=config_path, home=home, library_id="builtin")
-            with mock.patch("builtins.input", return_value="set primary builtin"), \
-                    mock.patch.object(library_setup, "_restart_running_service"):
-                library_setup.set_primary(builtin_args, library_setup._read_config(config_path))
             journal = RecipeStore(home / "state" / "recipes.sqlite3", "Hus A")
             pending_ref = journal.persist_discovery(
                 external_recipe("themealdb", "Pending removal", "pending-removal")
@@ -2690,6 +2664,161 @@ class StateMigrationTests(unittest.TestCase):
             with mock.patch.object(meal_core.os, "write", side_effect=short_write):
                 store.update_profile({"meals": {"people": 3}})
             self.assertEqual(store.read()["profile"]["meals"]["people"], 3)
+
+
+class LegacyJournalApplication(Application):
+    """Historical journal fixture, followed by the unchanged current API.
+
+    Only these recovery tests use this class. Seed the pending journal that an
+    older release would already have persisted; never disable a runtime guard.
+    Fresh-install and new-write rejection tests use Application directly.
+    """
+
+    def handle(self, request):
+        request = deepcopy(request)
+        if request.get("operation") != "recipes":
+            return super().handle(request)
+        action = request.get("action")
+        reference = request.get("library_recipe_ref") or {}
+        library = reference.get("library_id") or request.get("library_id")
+        key = request.get("idempotency_key")
+        existing = self.recipes.library_operation_for_idempotency(key) if key and action != "save" else None
+        if action == "save" and request.get("discovery_ref"):
+            library = library or self.recipes.bound_library_for_discovery(request["discovery_ref"], idempotency_key=key) or self.store.config.get("primary_recipe_library_id", "builtin")
+            if library != "builtin":
+                self.recipes.begin_library_create(request["discovery_ref"], library,
+                    status=request.get("status") or "active", idempotency_key=key)
+        elif action == "set_favorite" and library != "builtin" and reference and not existing:
+            self.recipes.begin_library_favorite(reference, request.get("is_favorite"),
+                expected_favorite_revision=request.get("expected_favorite_revision"), idempotency_key=key)
+        elif action == "set_label" and not existing:
+            self.recipes.begin_library_label_change(reference, request.get("library_label_ref"), request.get("present"),
+                expected_label_revision=request.get("expected_label_revision"), idempotency_key=key)
+        elif action == "create_label" and not existing:
+            self.recipes.begin_library_label_create(library, request.get("label_name"), idempotency_key=key)
+        elif action in {"update", "archive_prepare", "delete_prepare"} and reference and library != "builtin" and not existing and not request.get("operation_id"):
+            adapter = self.recipe_library_adapters[library]
+            principal, binding = self._recipe_library_context(library, adapter)
+            current, returned, archived = self._read_external_lifecycle(adapter, reference,
+                archive_state=action == "archive_prepare", allow_incomplete=action == "delete_prepare",
+                enforce_version=action != "update" and "version" in reference)
+            digest = self._recipe_lifecycle_digest(current)
+            if action == "update":
+                self.recipes.begin_library_conditional_update(reference, request.get("recipe"), digest,
+                    provider_binding=binding, provider_principal=principal, idempotency_key=key)
+            else:
+                operation = self.recipes.prepare_library_lifecycle(action.removesuffix("_prepare"), returned,
+                    current["name"], digest, provider_binding=binding, provider_principal=principal,
+                    current_archived=archived, requested_archived=request.get("archived"))
+                request["operation_id"] = operation["operation_id"]
+                request["library_recipe_ref"] = returned
+        return super().handle(request)
+
+
+class BuiltinTransitionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.adapter = SyntheticLibraryAdapter("legacy", full_recipe("Original"),
+            favorite_state=False, conditional_update=True, archive=True, delete=True, reconcile=True)
+        self.config = {**CONFIG, "primary_recipe_library_id": "legacy", "recipe_libraries": [{
+            "library_id": "legacy", "provider": "mealie", "base_url": "https://recipes.example", "read_only": False}]}
+        self.store = StateStore(Path(self.temp.name), self.config)
+        self.app = Application(self.store, FakeOda(), FakeBrowser(), recipe_library_adapters={"legacy": self.adapter})
+
+    def journal_count(self):
+        with sqlite3.connect(self.app.recipes.path) as db:
+            return db.execute("SELECT count(*) FROM library_operations").fetchone()[0]
+
+    def test_old_primary_is_builtin_with_optional_source_down(self):
+        with mock.patch.object(self.adapter, "capabilities", side_effect=RecipeLibraryError("offline")):
+            self.assertEqual(self.app.primary_recipe_library_id, "builtin")
+            discovery = self.app.recipes.persist_discovery(external_recipe("themealdb", "New local", "new-local"))
+            saved = self.app.handle({"operation": "recipes", "action": "save", "discovery_ref": discovery["discovery_ref"], "idempotency_key": "new-local"})
+            self.assertEqual(saved["library_id"], "builtin")
+            favorite = self.app.handle({"operation": "recipes", "action": "set_favorite", "library_recipe_ref": saved["library_recipe_ref"], "is_favorite": True, "idempotency_key": "favorite-local"})
+            self.assertTrue(favorite["is_favorite"])
+            found = self.app.handle({"operation": "recipes", "action": "search"})
+            self.assertEqual(found["recipes"][0]["name"], "New local")
+        self.assertEqual(self.adapter.create_calls, 0)
+        self.assertEqual(self.config["primary_recipe_library_id"], "legacy")
+        external = self.app.handle({"operation": "recipes", "action": "get", "library_recipe_ref": self.adapter.reference})
+        self.assertEqual(external["recipe"]["name"], "Original")
+
+    def test_new_external_changes_are_blocked_before_journal_or_provider_effect(self):
+        ref = self.adapter.reference
+        discovery = self.app.recipes.persist_discovery(external_recipe("themealdb", "New", "new"))
+        requests = [
+            {"action": "save", "discovery_ref": discovery["discovery_ref"], "library_id": "legacy"},
+            {"action": "update", "library_recipe_ref": ref, "recipe": full_recipe("Changed")},
+            {"action": "set_favorite", "library_recipe_ref": ref, "is_favorite": True},
+            {"action": "create_label", "library_id": "legacy", "label_name": "New"},
+            {"action": "set_label", "library_recipe_ref": ref, "library_label_ref": {"library_id": "legacy", "label_id": "label-1"}, "present": True},
+            {"action": "archive_prepare", "library_recipe_ref": ref, "archived": True},
+            {"action": "delete_prepare", "library_recipe_ref": ref},
+        ]
+        for index, request in enumerate(requests):
+            with self.subTest(action=request["action"]), self.assertRaises((RecipeError, RecipeLibraryError)):
+                self.app.handle({"operation": "recipes", **request, **({"idempotency_key": f"new-{index}"} if not request["action"].endswith("_prepare") else {})})
+        with self.assertRaisesRegex(RecipeError, "builtin destination"):
+            self.app.handle({"operation": "migration", "action": "prepare", "source_library_id": "builtin", "destination_library_id": "legacy"})
+        self.assertEqual(self.journal_count(), 0)
+        self.assertEqual((self.adapter.create_calls, self.adapter.favorite_write_calls, self.adapter.update_calls, self.adapter.archive_write_calls, self.adapter.delete_calls), (0, 0, 0, 0, 0))
+        libraries = self.app.handle({"operation": "recipes", "action": "libraries"})
+        legacy = next(row for row in libraries["recipe_libraries"] if row["library_id"] == "legacy")
+        self.assertTrue(legacy["read_only"])
+        self.assertFalse(legacy["primary"])
+        self.assertTrue(all(legacy["capabilities"][cap] is False for cap in library_module.WRITE_CAPABILITIES))
+
+    def test_exact_pending_save_and_favorite_resume_but_new_key_or_intent_cannot(self):
+        discovery = self.app.recipes.persist_discovery(external_recipe("themealdb", "Old pending", "old-pending"))
+        original = self.app.recipes.begin_library_create(discovery["discovery_ref"], "legacy", idempotency_key="old-save")
+        result = self.app.handle({"operation": "recipes", "action": "save", "discovery_ref": discovery["discovery_ref"], "idempotency_key": "old-save"})
+        self.assertEqual((result["operation_id"], result["library_id"], result["status"]), (original["operation_id"], "legacy", "confirmed"))
+        request = {"operation": "recipes", "action": "set_favorite", "library_recipe_ref": result["library_recipe_ref"], "is_favorite": True, "idempotency_key": "old-favorite"}
+        self.app.recipes.begin_library_favorite(result["library_recipe_ref"], True, idempotency_key="old-favorite")
+        self.assertEqual(self.app.handle(request)["status"], "confirmed")
+        restarted = Application(self.store, FakeOda(), FakeBrowser(), recipe_library_adapters={"legacy": self.adapter})
+        self.assertEqual(restarted.handle(request)["status"], "confirmed")
+        for changes in ({"idempotency_key": "new-favorite"}, {"is_favorite": False}, {"library_recipe_ref": {**result["library_recipe_ref"], "recipe_id": "other"}}):
+            with self.subTest(changes=changes), self.assertRaises((RecipeError, RecipeLibraryError)):
+                restarted.handle({**request, **changes})
+        self.assertEqual((self.adapter.create_calls, self.adapter.favorite_write_calls), (1, 1))
+
+    def incomplete_create(self):
+        discovery = self.app.recipes.persist_discovery(external_recipe("themealdb", "Partial", "partial"))
+        original = self.app.recipes.begin_library_create(discovery["discovery_ref"], "legacy", idempotency_key="old-partial")
+        principal, binding = self.app._recipe_library_context("legacy", self.adapter)
+        self.app.recipes.record_library_create_progress(original["operation_id"], {
+            "slug": "partial-stub", "library_recipe_ref": self.adapter.reference,
+            "provider_principal": principal, "provider_binding": binding})
+        self.app.recipes.finish_library_create(original["operation_id"], "uncertain", error_code="uncertain", error="response lost")
+        self.adapter.inspect_incomplete_create = lambda *_args: {"complete": False, "slug": "partial-stub", "library_recipe_ref": deepcopy(self.adapter.reference)}
+        return {"operation": "recipes", "action": "delete_prepare", "operation_id": original["operation_id"], "library_recipe_ref": deepcopy(self.adapter.reference)}
+
+    def test_partial_import_cleanup_is_bound_to_original_and_preserves_read_only_policy(self):
+        request = self.incomplete_create()
+        for changes in ({"operation_id": None}, {"library_recipe_ref": {**self.adapter.reference, "recipe_id": "other"}}):
+            with self.assertRaises((RecipeError, RecipeLibraryError)):
+                self.app.handle({**request, **changes})
+        self.app.recipe_libraries["legacy"]["read_only"] = True
+        with self.assertRaisesRegex(RecipeLibraryError, "reconcilable delete"):
+            self.app.handle(request)
+        self.app.recipe_libraries["legacy"]["read_only"] = False
+        prepared = self.app.handle(request)
+        confirmed = self.app.handle({"operation": "recipes", "action": "delete_confirm", "confirmation_id": prepared["confirmation_id"], "idempotency_key": "cleanup-partial"})
+        self.assertEqual(confirmed["status"], "confirmed")
+        closed = self.app.handle({"operation": "recipes", "action": "import_recovery", "operation_id": request["operation_id"], "deletion_operation_id": confirmed["operation_id"]})
+        self.assertEqual(closed["status"], "failed")
+        self.assertEqual(self.adapter.delete_calls, 1)
+
+    def test_partial_import_becoming_complete_blocks_cleanup_dispatch(self):
+        request = self.incomplete_create()
+        prepared = self.app.handle(request)
+        self.app.recipes.finish_library_create(request["operation_id"], "confirmed", library_recipe_ref=self.adapter.reference)
+        with self.assertRaisesRegex(RecipeLibraryError, "original incomplete import changed"):
+            self.app.handle({"operation": "recipes", "action": "delete_confirm", "confirmation_id": prepared["confirmation_id"], "idempotency_key": "stale-cleanup"})
+        self.assertEqual(self.adapter.delete_calls, 0)
 
 
 class RecipeFlowTests(unittest.TestCase):
@@ -3323,6 +3452,7 @@ class RecipeFlowTests(unittest.TestCase):
             "idempotency_key": "mixed-destination-key",
         }
         builtin = app.handle({**request, "library_id": "builtin"})
+        app.recipes.begin_library_create(discovery["discovery_ref"], "family-mealie", idempotency_key=request["idempotency_key"])
         app.handle({**request, "library_id": "family-mealie"})
         self.assertEqual(adapter.create_calls, 1)
         app.recipes.delete(builtin["library_recipe_ref"]["recipe_id"], 1)
@@ -3396,7 +3526,7 @@ class RecipeFlowTests(unittest.TestCase):
                 "library_id": "builtin", "cursor": "opaque",
             })
 
-    def test_same_frozen_snapshot_has_independent_builtin_and_external_favorite_identity(self):
+    def test_legacy_same_frozen_snapshot_has_independent_builtin_and_external_favorite_identity(self):
         shared = external_recipe("themealdb", "Shared frozen favorite", "shared-favorite")
         settings = {
             **CONFIG,
@@ -3411,7 +3541,7 @@ class RecipeFlowTests(unittest.TestCase):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", shared, favorite_state=False
         )
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "independent-favorites", settings),
             self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter},
         )
@@ -3462,7 +3592,7 @@ class RecipeFlowTests(unittest.TestCase):
                 "idempotency_key": "favorite-shared-external",
             })
 
-    def test_external_favorite_capability_false_read_only_and_conditional_reject_before_write(self):
+    def test_legacy_external_favorite_capability_false_read_only_and_conditional_reject_before_write(self):
         settings = {
             **CONFIG,
             "recipe_libraries": [
@@ -3490,7 +3620,7 @@ class RecipeFlowTests(unittest.TestCase):
         mealie = SyntheticLibraryAdapter(
             "family-mealie", recipe, favorite_state=False
         )
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "favorite-capability-gates", settings),
             self.oda, self.browser,
             recipe_library_adapters={
@@ -3547,7 +3677,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(mealie.favorite_read_calls, 0)
         self.assertEqual(mealie.favorite_write_calls, 0)
 
-    def test_external_favorite_idempotency_serialization_drift_and_missing(self):
+    def test_legacy_external_favorite_idempotency_serialization_drift_and_missing(self):
         settings = {
             **CONFIG,
             "recipe_libraries": [{
@@ -3559,11 +3689,12 @@ class RecipeFlowTests(unittest.TestCase):
             "family-mealie", full_recipe("Serialized favorite"),
             favorite_state=False,
         )
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "favorite-serialization", settings),
             self.oda, self.browser,
             recipe_library_adapters={"family-mealie": adapter},
         )
+        app.recipes.begin_library_favorite(adapter.reference, True, idempotency_key="favorite-concurrent-one")
         barrier = threading.Barrier(3)
         results = []
         errors = []
@@ -3574,7 +3705,7 @@ class RecipeFlowTests(unittest.TestCase):
                 results.append(app.handle({
                     "operation": "recipes", "action": "set_favorite",
                     "library_recipe_ref": adapter.reference,
-                    "is_favorite": True, "idempotency_key": key,
+                    "is_favorite": True, "idempotency_key": "favorite-concurrent-one",
                 }))
             except Exception as exc:
                 errors.append(exc)
@@ -3591,7 +3722,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual({result["status"] for result in results}, {"confirmed"})
         self.assertEqual(adapter.favorite_write_calls, 1)
-        self.assertEqual(sum(result.get("idempotent", False) for result in results), 1)
+        self.assertEqual(len({result["operation_id"] for result in results}), 1)
 
         repeated = app.handle({
             "operation": "recipes", "action": "set_favorite",
@@ -3724,7 +3855,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(adapter.search_limits, [2])
         self.assertIsNotNone(blocked["cursors"]["family-mealie"])
 
-    def test_external_favorite_lost_response_reconciles_without_repeating_write(self):
+    def test_legacy_external_favorite_lost_response_reconciles_without_repeating_write(self):
         settings = {
             **CONFIG,
             "recipe_libraries": [{
@@ -3736,7 +3867,7 @@ class RecipeFlowTests(unittest.TestCase):
             "family-mealie", full_recipe("Reconciled favorite"),
             favorite_state=False, favorite_set_mode="uncertain_after_state",
         )
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "favorite-reconcile", settings),
             self.oda, self.browser,
             recipe_library_adapters={"family-mealie": adapter},
@@ -3776,7 +3907,7 @@ class RecipeFlowTests(unittest.TestCase):
         })
         self.assertEqual(retried["status"], "uncertain")
         self.assertEqual(unresolved.favorite_write_calls, 1)
-        second_app = Application(
+        second_app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "favorite-reconcile", settings),
             self.oda, self.browser,
             recipe_library_adapters={"family-mealie": unresolved},
@@ -3790,7 +3921,7 @@ class RecipeFlowTests(unittest.TestCase):
             })
         self.assertEqual(unresolved.favorite_write_calls, 1)
 
-    def test_conditional_external_favorite_has_one_winner_for_one_provider_revision(self):
+    def test_legacy_conditional_external_favorite_has_one_winner_for_one_provider_revision(self):
         settings = {
             **CONFIG,
             "recipe_libraries": [{
@@ -3802,7 +3933,7 @@ class RecipeFlowTests(unittest.TestCase):
             "conditional-library", full_recipe("Conditional favorite"),
             favorite_state=False, favorite_conditional=True, favorite_revision=4,
         )
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "conditional-favorite", settings),
             self.oda, self.browser,
             recipe_library_adapters={"conditional-library": adapter},
@@ -3840,7 +3971,7 @@ class RecipeFlowTests(unittest.TestCase):
         )
         self.assertEqual(adapter.favorite_write_calls, 2)
 
-    def test_save_then_external_favorite_stays_on_returned_target_after_restart_and_primary_change(self):
+    def test_legacy_save_then_external_favorite_stays_on_returned_target_after_restart_and_primary_change(self):
         directory = Path(self.temp.name) / "favorite-bound-after-restart"
         base_libraries = [
             {
@@ -3858,7 +3989,7 @@ class RecipeFlowTests(unittest.TestCase):
         second = SyntheticLibraryAdapter(
             "other-mealie", full_recipe("Bound favorite"), favorite_state=False
         )
-        first_app = Application(
+        first_app = LegacyJournalApplication(
             StateStore(directory, {
                 **CONFIG,
                 "primary_recipe_library_id": "family-mealie",
@@ -3886,7 +4017,7 @@ class RecipeFlowTests(unittest.TestCase):
         })
         self.assertEqual(saved_other["library_id"], "other-mealie")
 
-        restarted = Application(
+        restarted = LegacyJournalApplication(
             StateStore(directory, {
                 **CONFIG,
                 "primary_recipe_library_id": "other-mealie",
@@ -3942,7 +4073,7 @@ class RecipeFlowTests(unittest.TestCase):
         adapter = SyntheticLibraryAdapter("family-mealie", full_recipe("Healthy external"))
         app = Application(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
         self.assertEqual(app.handle({"operation": "recipes", "action": "libraries"})["recipe_libraries"][1]["status"], "available")
-        searched = app.handle({"operation": "recipes", "action": "search"})
+        searched = app.handle({"operation": "recipes", "action": "search", "library_id": "family-mealie"})
         self.assertEqual(searched["recipes"][0]["name"], "Healthy external")
         fetched = app.handle({
             "operation": "recipes", "action": "get", "library_recipe_ref": adapter.reference,
@@ -4090,7 +4221,7 @@ class RecipeFlowTests(unittest.TestCase):
         })
         self.assertEqual(marked_builtin["recipe_key"], builtin_menu["dishes"][0]["recipe_key"])
 
-    def test_discovery_save_journals_exact_targets_idempotently_and_detects_source_conflict(self):
+    def test_legacy_discovery_save_journals_exact_targets_idempotently_and_detects_source_conflict(self):
         settings = {
             **CONFIG,
             "primary_recipe_library_id": "family-mealie",
@@ -4102,7 +4233,7 @@ class RecipeFlowTests(unittest.TestCase):
         first_adapter = SyntheticLibraryAdapter("family-mealie", full_recipe("Created first"))
         second_adapter = SyntheticLibraryAdapter("other-mealie", full_recipe("Created second"))
         store = StateStore(Path(self.temp.name) / "journal", settings)
-        app = Application(
+        app = LegacyJournalApplication(
             store, self.oda, self.browser,
             recipe_library_adapters={"family-mealie": first_adapter, "other-mealie": second_adapter},
         )
@@ -4151,7 +4282,7 @@ class RecipeFlowTests(unittest.TestCase):
             "status": "active", "idempotency_key": "journal-reused",
         })
         self.assertEqual(reused_again["library_recipe_ref"], first["library_recipe_ref"])
-        changed_primary = Application(
+        changed_primary = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "journal", {
                 **settings, "primary_recipe_library_id": "other-mealie",
             }),
@@ -4179,7 +4310,7 @@ class RecipeFlowTests(unittest.TestCase):
             serialized = " ".join(str(value) for row in connection.execute("SELECT * FROM library_operations") for value in row)
         self.assertNotIn("Cook it", serialized)
 
-    def test_uncertain_save_stays_bound_after_restart_and_only_semantic_reconcile_may_finish(self):
+    def test_legacy_uncertain_save_stays_bound_after_restart_and_only_semantic_reconcile_may_finish(self):
         directory = Path(self.temp.name) / "uncertain"
         settings = {
             **CONFIG,
@@ -4193,7 +4324,7 @@ class RecipeFlowTests(unittest.TestCase):
             "family-mealie", full_recipe("Uncertain"), create_mode="uncertain"
         )
         store = StateStore(directory, settings)
-        app = Application(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": uncertain_adapter})
+        app = LegacyJournalApplication(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": uncertain_adapter})
         ref = app.recipes.persist_discovery(external_recipe("themealdb", "Uncertain", "uncertain"))["discovery_ref"]
         first = app.handle({"operation": "recipes", "action": "save", "discovery_ref": ref})
         self.assertEqual((first["library_id"], first["status"]), ("family-mealie", "uncertain"))
@@ -4201,7 +4332,7 @@ class RecipeFlowTests(unittest.TestCase):
 
         changed_settings = {**settings, "primary_recipe_library_id": "builtin"}
         no_reconcile = SyntheticLibraryAdapter("family-mealie", full_recipe("No retry"))
-        restarted = Application(
+        restarted = LegacyJournalApplication(
             StateStore(directory, changed_settings), self.oda, self.browser,
             recipe_library_adapters={"family-mealie": no_reconcile},
         )
@@ -4214,7 +4345,7 @@ class RecipeFlowTests(unittest.TestCase):
             create_mode="uncertain", reconcile=True,
         )
         reconciling.reference = deepcopy(uncertain_adapter.reference)
-        reconciled_app = Application(
+        reconciled_app = LegacyJournalApplication(
             StateStore(directory, changed_settings), self.oda, self.browser,
             recipe_library_adapters={"family-mealie": reconciling},
         )
@@ -4224,7 +4355,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(reconciling.create_calls, 0)
         self.assertNotIn("snapshot", reconciling.operation)
 
-    def test_definite_read_only_uncertain_and_attribution_failures_never_fallback_or_leak(self):
+    def test_legacy_definite_read_only_uncertain_and_attribution_failures_never_fallback_or_leak(self):
         for name, adapter, read_only, expected in (
             ("definite", SyntheticLibraryAdapter("family-mealie", full_recipe(), create_mode="definite"), False, "failed"),
             ("read-only", SyntheticLibraryAdapter("family-mealie", full_recipe()), True, "failed"),
@@ -4241,7 +4372,7 @@ class RecipeFlowTests(unittest.TestCase):
                     }],
                 }
                 store = StateStore(directory, settings)
-                app = Application(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
+                app = LegacyJournalApplication(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
                 ref = app.recipes.persist_discovery(external_recipe("themealdb", name, name))["discovery_ref"]
                 result = app.handle({"operation": "recipes", "action": "save", "discovery_ref": ref})
                 self.assertEqual(result["status"], expected)
@@ -4250,7 +4381,7 @@ class RecipeFlowTests(unittest.TestCase):
                 if read_only:
                     self.assertEqual(adapter.create_calls, 0)
 
-    def test_link_only_create_receives_no_full_text_and_pending_journal_pins_are_bounded(self):
+    def test_legacy_link_only_create_receives_no_full_text_and_pending_journal_pins_are_bounded(self):
         link_only = normalize_recipe({
             "name": "Link only",
             "tags": [],
@@ -4272,7 +4403,7 @@ class RecipeFlowTests(unittest.TestCase):
         }
         adapter = SyntheticLibraryAdapter("family-mealie", link_only)
         store = StateStore(Path(self.temp.name) / "link-only", settings)
-        app = Application(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
+        app = LegacyJournalApplication(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
         ref = app.recipes.persist_discovery(link_only)["discovery_ref"]
         result = app.handle({"operation": "recipes", "action": "save", "discovery_ref": ref})
         self.assertEqual(result["status"], "confirmed")
@@ -4298,7 +4429,7 @@ class RecipeFlowTests(unittest.TestCase):
             with self.assertRaisesRegex(RecipeError, "journal is full"):
                 app.recipes.begin_library_create(another, "family-mealie")
 
-    def test_concurrent_same_target_dispatches_create_once(self):
+    def test_legacy_concurrent_same_target_dispatches_create_once(self):
         settings = {
             **CONFIG,
             "primary_recipe_library_id": "family-mealie",
@@ -4309,7 +4440,7 @@ class RecipeFlowTests(unittest.TestCase):
         }
         adapter = SyntheticLibraryAdapter("family-mealie", full_recipe("Concurrent create"))
         store = StateStore(Path(self.temp.name) / "concurrent-library", settings)
-        app = Application(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
+        app = LegacyJournalApplication(store, self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter})
         ref = app.recipes.persist_discovery(external_recipe("themealdb", "Concurrent create", "concurrent-create"))["discovery_ref"]
         barrier = threading.Barrier(10)
         results = []
@@ -4393,7 +4524,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual((recovered["library_id"], recovered["status"]), ("family-mealie", "uncertain"))
         self.assertEqual(adapter.create_calls, 0)
 
-    def test_transient_capability_failure_stays_predispatch_and_can_recover(self):
+    def test_legacy_transient_capability_failure_stays_predispatch_and_can_recover(self):
         class FlakyAdapter(SyntheticLibraryAdapter):
             unavailable = True
 
@@ -4411,7 +4542,7 @@ class RecipeFlowTests(unittest.TestCase):
             }],
         }
         adapter = FlakyAdapter("family-mealie", full_recipe("Recovered create"))
-        app = Application(
+        app = LegacyJournalApplication(
             StateStore(Path(self.temp.name) / "flaky-capability", settings),
             self.oda, self.browser, recipe_library_adapters={"family-mealie": adapter},
         )
@@ -5442,7 +5573,7 @@ class RecipeFlowTests(unittest.TestCase):
             }],
         }
         store = StateStore(Path(self.temp.name) / suffix, settings)
-        app = Application(
+        app = LegacyJournalApplication(
             store,
             self.oda,
             self.browser,
@@ -5450,54 +5581,27 @@ class RecipeFlowTests(unittest.TestCase):
         )
         return app, store
 
-    def test_external_lifecycle_capability_gates_send_no_provider_mutation(self):
-        adapter = SyntheticLibraryAdapter(
-            "family-mealie", full_recipe("Lifecycle gates")
-        )
-        app, _store = self._lifecycle_app(adapter, "lifecycle-gates")
-        reference = deepcopy(adapter.reference)
-        replacement = deepcopy(adapter.recipe)
-        replacement["name"] = "Changed"
-        with self.assertRaisesRegex(RecipeLibraryError, "conditional update"):
-            app.handle({
-                "operation": "recipes", "action": "update",
-                "library_recipe_ref": reference, "recipe": replacement,
-                "idempotency_key": "unsupported-update",
-            })
-        with self.assertRaisesRegex(RecipeLibraryError, "reconcilable archive"):
-            app.handle({
-                "operation": "recipes", "action": "archive_prepare",
-                "library_recipe_ref": reference, "archived": True,
-            })
-        with self.assertRaisesRegex(RecipeLibraryError, "reconcilable delete"):
-            app.handle({
-                "operation": "recipes", "action": "delete_prepare",
-                "library_recipe_ref": reference,
-            })
-        self.assertEqual(
-            (adapter.update_calls, adapter.archive_write_calls, adapter.delete_calls),
-            (0, 0, 0),
-        )
+    def test_legacy_external_lifecycle_capability_gates_send_no_provider_mutation(self):
+        for read_only in (False, True):
+            adapter = SyntheticLibraryAdapter("family-mealie", full_recipe("Lifecycle gates"),
+                read_only=read_only, conditional_update=read_only, archive=read_only, delete=read_only)
+            app, _store = self._lifecycle_app(adapter, f"lifecycle-gates-{read_only}")
+            replacement = deepcopy(adapter.recipe)
+            replacement["name"] = "Changed"
+            updated = app.handle({"operation": "recipes", "action": "update",
+                "library_recipe_ref": deepcopy(adapter.reference), "recipe": replacement,
+                "idempotency_key": "unsupported-update"})
+            self.assertEqual(updated["error_code"], "unsupported")
+            for kind in ("archive", "delete"):
+                prepared = app.handle({"operation": "recipes", "action": kind + "_prepare",
+                    "library_recipe_ref": deepcopy(adapter.reference),
+                    **({"archived": True} if kind == "archive" else {})})
+                result = app.handle({"operation": "recipes", "action": kind + "_confirm",
+                    "confirmation_id": prepared["confirmation_id"], "idempotency_key": "unsupported-" + kind})
+                self.assertEqual(result["error_code"], "unsupported")
+            self.assertEqual((adapter.update_calls, adapter.archive_write_calls, adapter.delete_calls), (0, 0, 0))
 
-        read_only = SyntheticLibraryAdapter(
-            "family-mealie", full_recipe("Read only"), read_only=True,
-            conditional_update=True, archive=True, delete=True,
-        )
-        app, _store = self._lifecycle_app(read_only, "lifecycle-read-only")
-        for action, extra in (
-            ("archive_prepare", {"archived": True}),
-            ("delete_prepare", {}),
-        ):
-            with self.subTest(action=action), self.assertRaises(RecipeLibraryError):
-                app.handle({
-                    "operation": "recipes", "action": action,
-                    "library_recipe_ref": deepcopy(read_only.reference), **extra,
-                })
-        self.assertEqual(
-            (read_only.archive_write_calls, read_only.delete_calls), (0, 0)
-        )
-
-    def test_conditional_external_update_is_exact_idempotent_and_preserves_attribution(self):
+    def test_legacy_conditional_external_update_is_exact_idempotent_and_preserves_attribution(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Original"), conditional_update=True
         )
@@ -5553,7 +5657,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(rejected["error_code"], "attribution_conflict")
         self.assertEqual(adapter.update_calls, 1)
 
-    def test_uncertain_update_reconciles_after_write_capability_is_removed(self):
+    def test_legacy_uncertain_update_reconciles_after_write_capability_is_removed(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Update uncertain"),
             conditional_update=True, lifecycle_mode="uncertain_after_state",
@@ -5576,7 +5680,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertTrue(reconciled["updated"])
         self.assertEqual(adapter.update_calls, 1)
 
-    def test_external_delete_requires_exact_preview_and_reconciles_without_repeat(self):
+    def test_legacy_external_delete_requires_exact_preview_and_reconciles_without_repeat(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Delete me"), delete=True,
             lifecycle_mode="uncertain_after_state",
@@ -5601,7 +5705,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(adapter.delete_calls, 1)
         adapter.read_only = True
 
-        restarted = Application(
+        restarted = LegacyJournalApplication(
             store,
             self.oda,
             self.browser,
@@ -5633,7 +5737,7 @@ class RecipeFlowTests(unittest.TestCase):
                 "idempotency_key": "delete-different",
             })
 
-    def test_external_delete_success_still_requires_authoritative_absence(self):
+    def test_legacy_external_delete_success_still_requires_authoritative_absence(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Delete exactly"), delete=True
         )
@@ -5693,7 +5797,7 @@ class RecipeFlowTests(unittest.TestCase):
                 self.assertEqual(result["status"], "uncertain")
                 self.assertEqual(adapter.delete_calls, 1)
 
-    def test_external_delete_timeout_before_state_never_repeats_write(self):
+    def test_legacy_external_delete_timeout_before_state_never_repeats_write(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Timeout before state"), delete=True,
             lifecycle_mode="uncertain_before_state",
@@ -5713,7 +5817,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(adapter.delete_calls, 1)
         self.assertEqual(adapter.lifecycle_reconcile_calls, 1)
 
-    def test_external_lifecycle_rejects_conflicting_fields_and_provider_context(self):
+    def test_legacy_external_lifecycle_rejects_conflicting_fields_and_provider_context(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Bound context"), delete=True
         )
@@ -5770,12 +5874,12 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(changed["error_code"], "provider_context_changed")
         self.assertEqual(clone.delete_calls, 0)
 
-    def test_concurrent_process_retry_reconciles_in_flight_delete(self):
+    def test_legacy_concurrent_process_retry_reconciles_in_flight_delete(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("In flight"), delete=True
         )
         first, store = self._lifecycle_app(adapter, "lifecycle-in-flight")
-        second = Application(
+        second = LegacyJournalApplication(
             store,
             self.oda,
             self.browser,
@@ -5801,12 +5905,12 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertTrue(retried["deleted"])
         self.assertEqual(adapter.delete_calls, 0)
 
-    def test_dispatch_claim_races_are_returned_uncertain_and_never_repeated(self):
+    def test_legacy_dispatch_claim_races_are_returned_uncertain_and_never_repeated(self):
         updater = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Update race"), conditional_update=True
         )
         app, store = self._lifecycle_app(updater, "lifecycle-update-claim-race")
-        peer = Application(
+        peer = LegacyJournalApplication(
             store,
             self.oda,
             self.browser,
@@ -5841,7 +5945,7 @@ class RecipeFlowTests(unittest.TestCase):
             "family-mealie", full_recipe("Delete race"), delete=True
         )
         app, store = self._lifecycle_app(deleter, "lifecycle-delete-claim-race")
-        peer = Application(
+        peer = LegacyJournalApplication(
             store,
             self.oda,
             self.browser,
@@ -5873,7 +5977,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(raced["error_code"], "uncertain")
         self.assertEqual(deleter.delete_calls, 0)
 
-    def test_uncertain_delete_cannot_reconcile_under_another_provider_account(self):
+    def test_legacy_uncertain_delete_cannot_reconcile_under_another_provider_account(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Account bound"), delete=True,
             lifecycle_mode="uncertain_after_state",
@@ -5895,7 +5999,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(retried["error_code"], "provider_context_changed")
         self.assertEqual(adapter.delete_calls, 1)
 
-    def test_confirmed_delete_removes_mapping_and_never_recreates_saved_identity(self):
+    def test_legacy_confirmed_delete_removes_mapping_and_never_recreates_saved_identity(self):
         adapter = SyntheticLibraryAdapter(
             "family-mealie",
             full_recipe("Mapped deletion", external_id="mapped-deletion"),
@@ -5937,7 +6041,7 @@ class RecipeFlowTests(unittest.TestCase):
                 idempotency_key="do-not-recreate",
             )
 
-    def test_external_lifecycle_drift_expiry_and_archive_desired_state(self):
+    def test_legacy_external_lifecycle_drift_expiry_and_archive_desired_state(self):
         drifting = SyntheticLibraryAdapter(
             "family-mealie", full_recipe("Drift"), delete=True
         )
@@ -6051,14 +6155,14 @@ class RecipeFlowTests(unittest.TestCase):
                 "read_only": adapter.read_only,
             }],
         }
-        return Application(
+        return LegacyJournalApplication(
             StateStore(Path(self.temp.name) / suffix, settings),
             self.oda,
             self.browser,
             recipe_library_adapters={adapter.library_id: adapter},
         )
 
-    def test_external_labels_list_exact_ids_create_explicitly_and_reject_duplicate_names(self):
+    def test_legacy_external_labels_list_exact_ids_create_explicitly_and_reject_duplicate_names(self):
         adapter = SyntheticLabelAdapter()
         app = self._label_app(adapter, "labels-create")
         listed = app.handle({
@@ -6101,7 +6205,7 @@ class RecipeFlowTests(unittest.TestCase):
         )
         self.assertEqual(adapter.create_calls, 1)
 
-    def test_external_label_desired_state_is_exact_idempotent_and_preserves_other_labels(self):
+    def test_legacy_external_label_desired_state_is_exact_idempotent_and_preserves_other_labels(self):
         adapter = SyntheticLabelAdapter(write=True)
         other = adapter._label("label-b", "Keep me", "label-v1")
         adapter.labels.append(other)
@@ -6138,7 +6242,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual((removed["status"], removed["present"]), ("confirmed", False))
         self.assertEqual(adapter.recipe_label_ids, {"label-b"})
 
-    def test_duplicate_normalized_label_names_require_the_exact_provider_id(self):
+    def test_legacy_duplicate_normalized_label_names_require_the_exact_provider_id(self):
         adapter = SyntheticLabelAdapter(write=True)
         adapter.labels.append(adapter._label("label-b", "  WEEKDAY  ", "label-v2"))
         app = self._label_app(adapter, "labels-duplicate-names")
@@ -6162,7 +6266,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(applied["library_label_ref"]["label_id"], "label-b")
         self.assertEqual(adapter.recipe_label_ids, {"label-b"})
 
-    def test_external_label_capability_read_only_conditional_timeout_and_malformed_gates(self):
+    def test_legacy_external_label_capability_read_only_conditional_timeout_and_malformed_gates(self):
         readonly = SyntheticLabelAdapter(read_only=True, write=True)
         app = self._label_app(readonly, "labels-readonly")
         rejected = app.handle({
@@ -6257,7 +6361,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual((failed["status"], failed["error_code"]), ("failed", "unavailable"))
         self.assertEqual(malformed.write_calls, 0)
 
-    def test_external_label_create_lost_response_is_reconciled_only_when_advertised(self):
+    def test_legacy_external_label_create_lost_response_is_reconciled_only_when_advertised(self):
         adapter = SyntheticLabelAdapter(create_mode="uncertain_after_state", reconcile=True)
         app = self._label_app(adapter, "labels-create-timeout")
         result = app.handle({
@@ -6304,9 +6408,10 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertTrue(reconciled_retry["reconciled"])
         self.assertEqual(no_reconcile.create_calls, 1)
 
-    def test_concurrent_equal_external_label_requests_serialize_to_one_write(self):
+    def test_legacy_concurrent_equal_external_label_requests_serialize_to_one_write(self):
         adapter = SyntheticLabelAdapter(write=True)
         app = self._label_app(adapter, "labels-concurrent")
+        app.recipes.begin_library_label_change(adapter.recipe_ref, adapter.labels[0]["library_label_ref"], True, idempotency_key="same-legacy-label")
         barrier = threading.Barrier(3)
         results = []
         errors = []
@@ -6320,7 +6425,7 @@ class RecipeFlowTests(unittest.TestCase):
                     "library_recipe_ref": adapter.recipe_ref,
                     "library_label_ref": adapter.labels[0]["library_label_ref"],
                     "present": True,
-                    "idempotency_key": key,
+                    "idempotency_key": "same-legacy-label",
                 }))
             except Exception as exc:  # pragma: no cover - assertion captures it
                 errors.append(exc)
@@ -7020,7 +7125,7 @@ class MealieAdapterTests(unittest.TestCase):
         for field in ("tags", "times", "storage", "reheating", "external_snapshot"):
             self.assertEqual(recipe[field], snapshot[field])
 
-    def test_real_adapter_save_materializes_once_and_menu_stays_frozen_during_outage(self):
+    def test_legacy_real_adapter_save_materializes_once_and_menu_stays_frozen_during_outage(self):
         snapshot = normalize_recipe(full_recipe("Mealie menu fixture", external_id="fixture-recipe"))
         created = {}
 
@@ -7070,7 +7175,7 @@ class MealieAdapterTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(
+            app = LegacyJournalApplication(
                 store, FakeOda(), FakeBrowser(),
                 recipe_library_adapters={"family-mealie": adapter},
             )
@@ -7891,7 +7996,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         self.assertIsNone(adapter.reconcile_create(snapshot, operation))
         self.assertEqual(len(opener.requests), 1)
 
-    def test_real_adapter_save_is_idempotent_and_menu_stays_frozen_during_outage(self):
+    def test_legacy_real_adapter_save_is_idempotent_and_menu_stays_frozen_during_outage(self):
         snapshot = normalize_recipe(
             full_recipe("RecipeSage menu fixture", external_id="fixture-recipe")
         )
@@ -7930,7 +8035,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(
+            app = LegacyJournalApplication(
                 store,
                 FakeOda(),
                 FakeBrowser(),
@@ -7974,7 +8079,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
             self.assertEqual(app.handle({"operation": "menu", "action": "get"})["menu"], menu)
             self.assertEqual(len(opener.responses), 1)
 
-    def test_create_failures_tokens_and_provider_errors_are_safely_classified(self):
+    def test_legacy_create_failures_tokens_and_provider_errors_are_safely_classified(self):
         snapshot = normalize_recipe(
             full_recipe("Failure fixture", external_id="fixture-recipe")
         )
@@ -8035,7 +8140,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(
+            app = LegacyJournalApplication(
                 store,
                 FakeOda(),
                 FakeBrowser(),
@@ -8052,7 +8157,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
 
             opener.responses = [revoked_session()]
             with self.assertRaisesRegex(RecipeLibraryError, "needs_auth"):
-                app.handle({"operation": "recipes", "action": "search"})
+                app.handle({"operation": "recipes", "action": "search", "library_id": "family-recipesage"})
 
             opener.responses = [revoked_session()]
             with self.assertRaisesRegex(RecipeLibraryError, "needs_auth"):
@@ -8082,7 +8187,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         adapter, opener = self.adapter()
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(
+            app = LegacyJournalApplication(
                 store,
                 FakeOda(),
                 FakeBrowser(),
@@ -8128,7 +8233,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(store, FakeOda(), FakeBrowser())
+            app = LegacyJournalApplication(store, FakeOda(), FakeBrowser())
             discovery_ref = app.recipes.persist_discovery(snapshot)["discovery_ref"]
             operation = app.recipes.begin_library_create(
                 discovery_ref, "family-recipesage"
@@ -8152,7 +8257,7 @@ class RecipeSageAdapterTests(unittest.TestCase):
         adapter, opener = self.adapter()
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory), settings)
-            app = Application(
+            app = LegacyJournalApplication(
                 store,
                 FakeOda(),
                 FakeBrowser(),

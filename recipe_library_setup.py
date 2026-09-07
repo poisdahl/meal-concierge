@@ -217,7 +217,7 @@ def _add_connection(args: argparse.Namespace, config: dict[str, Any]) -> dict[st
         "library_id": library_id,
         "provider": args.provider,
         "base_url": args.base_url,
-        "read_only": args.read_only,
+        "read_only": True,
     }
     if args.display_name is not None:
         candidate["display_name"] = args.display_name
@@ -277,28 +277,6 @@ def _update_credential(args: argparse.Namespace, config: dict[str, Any]) -> dict
     atomic_private_json(path, credential)
     _restart_after_change(args)
     return {"changed": True, "library_id": library_id, "capabilities": capabilities}
-
-
-def set_primary(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    with _configuration_lock(args.config):
-        return _set_primary(args, _read_config(args.config))
-
-
-def _set_primary(args: argparse.Namespace, config: dict[str, Any]) -> dict[str, Any]:
-    library_id = validate_library_id(args.library_id)
-    connection = _connection(config, library_id)
-    capabilities = None
-    if library_id != "builtin":
-        capabilities = _probe(connection, load_library_secret(args.home, library_id))
-        if not capabilities["create_from_discovery"]:
-            raise RecipeLibraryError("connection cannot be primary because it cannot save recipes")
-    _confirm(f"set primary {library_id}")
-    config["primary_recipe_library_id"] = library_id
-    normalized = normalize_library_configuration(config)
-    config.update(normalized)
-    atomic_private_json(args.config, config)
-    _restart_after_change(args)
-    return {"changed": True, "library_id": library_id, "primary": True, "capabilities": capabilities}
 
 
 def _retirement_inventory(state_directory: Path, library_ids: list[str], household: str) -> dict[str, Any]:
@@ -412,7 +390,7 @@ def _remove_connection(args: argparse.Namespace, config: dict[str, Any]) -> dict
     normalized = normalize_library_configuration(config)
     _connection(config, library_id)
     if normalized["primary_recipe_library_id"] == library_id:
-        raise RecipeLibraryError("change primary with set-primary before removing this connection")
+        raise RecipeLibraryError("retire the external primary before removing this connection")
     state_directory = getattr(args, "state_directory", None) or args.home / "state"
     _ensure_no_active_operations(state_directory, library_id)
     _confirm(f"remove {library_id} and its credential")
@@ -464,9 +442,8 @@ def parser() -> argparse.ArgumentParser:
     add.add_argument("--provider", choices=("mealie", "recipesage"), required=True)
     add.add_argument("--base-url", required=True)
     add.add_argument("--display-name")
-    add.add_argument("--read-only", action="store_true")
     commands.add_parser("retire-external", help="Use builtin for new writes and retain external readers; requires a stopped installation")
-    for action in ("test", "update-credential", "set-primary", "remove"):
+    for action in ("test", "update-credential", "remove"):
         command = commands.add_parser(action)
         command.add_argument("--library-id", required=True)
     return result
@@ -480,7 +457,6 @@ def main() -> None:
             "add": add_connection,
             "test": test_connection,
             "update-credential": update_credential,
-            "set-primary": set_primary,
             "remove": remove_connection,
             "retire-external": retire_external,
         }[args.action]

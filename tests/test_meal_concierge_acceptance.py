@@ -269,6 +269,8 @@ class ReviewAcceptanceTests(unittest.TestCase):
         app = reopen()
         ref = app.recipes.persist_discovery(full_recipe("Recoverable import", external_id="recoverable-fixture"))["discovery_ref"]
         intent = {"operation": "recipes", "action": "save", "discovery_ref": ref, "idempotency_key": "import-first"}
+        # This create was already journaled by the previous external-primary release.
+        app.recipes.begin_library_create(ref, "family-mealie", idempotency_key="import-first")
         failed = app.handle(intent)
         self.assertEqual(failed["status"], "uncertain")
         app = reopen()
@@ -281,7 +283,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         changed = app.handle({"operation": "recipes", "action": "import_recovery", "operation_id": failed["operation_id"]})
         self.assertEqual(changed["recovery"]["status"], "unresolved")
         records[exact["recipe_id"]]["description"] = ""
-        deletion = app.handle({"operation": "recipes", "action": "delete_prepare", "library_recipe_ref": exact})
+        deletion = app.handle({"operation": "recipes", "action": "delete_prepare", "library_recipe_ref": exact, "operation_id": failed["operation_id"]})
         deleted = app.handle({"operation": "recipes", "action": "delete_confirm", "confirmation_id": deletion["confirmation_id"], "idempotency_key": "remove-exact-stub"})
         self.assertEqual(deleted["status"], "confirmed")
         closed = app.handle({"operation": "recipes", "action": "import_recovery", "operation_id": failed["operation_id"], "deletion_operation_id": deleted["operation_id"]})
@@ -289,7 +291,8 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(app.handle(intent)["status"], "failed")
         saved = app.handle({**intent, "idempotency_key": "import-new-explicit-intent"})
         self.assertEqual(saved["status"], "confirmed")
-        self.assertEqual(counts, {"POST": 2, "PATCH": 2, "DELETE": 1})
+        self.assertEqual(saved["library_id"], "builtin")
+        self.assertEqual(counts, {"POST": 1, "PATCH": 1, "DELETE": 1})
 
     def test_lost_mealie_post_response_recovers_marker_without_creating_again(self):
         import test_meal_concierge_recipes as recipes_fixture

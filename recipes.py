@@ -2132,9 +2132,11 @@ class RecipeStore:
                 ):
                     raise RecipeError("recipe library journal is unavailable")
             else:
-                if set(metadata) != {
+                if set(metadata) - {"recovery_of"} != {
                     "action", "provider_binding", "provider_principal", "name",
                 }:
+                    raise RecipeError("recipe library journal is unavailable")
+                if "recovery_of" in metadata and re.fullmatch(r"libop:v1:[A-Za-z0-9_-]{16,64}", str(metadata["recovery_of"])) is None:
                     raise RecipeError("recipe library journal is unavailable")
                 name = _bounded_text(
                     metadata.get("name"), "recipe library recipe name",
@@ -2214,6 +2216,8 @@ class RecipeStore:
             result["expires_at"] = (
                 created_at + LIBRARY_LIFECYCLE_CONFIRMATION_TTL
             ).isoformat()
+        if kind == "delete" and "recovery_of" in metadata:
+            result["recovery_of"] = metadata["recovery_of"]
         return result
 
     @classmethod
@@ -2257,6 +2261,16 @@ class RecipeStore:
                 (library_id, discovery_ref),
             ).fetchone()
             return row is not None and (row["status"] in {"confirmed", "failed", "uncertain"} or row["dispatched_at"] is not None)
+
+    def has_library_save(self, discovery_ref: Any, library_id: str, idempotency_key: Any) -> bool:
+        """A prior create authorizes only its exact replay, validated by begin_library_create."""
+        key = self._idempotency_key(idempotency_key)
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM library_operations WHERE library_id=? AND kind='create' "
+                "AND (discovery_ref=? OR idempotency_key=?) LIMIT 1",
+                (library_id, discovery_ref, key),
+            ).fetchone() is not None
 
     def begin_library_create(
         self,
@@ -2883,6 +2897,7 @@ class RecipeStore:
         provider_principal: Any,
         current_archived: Any = None,
         requested_archived: Any = None,
+        recovery_of: str | None = None,
     ) -> dict[str, Any]:
         if kind not in {"archive", "delete"}:
             raise RecipeError("recipe lifecycle prepare action is invalid")
@@ -2923,6 +2938,10 @@ class RecipeStore:
             "provider_principal": principal,
             "name": recipe_name,
         }
+        if recovery_of is not None:
+            if kind != "delete" or re.fullmatch(r"libop:v1:[A-Za-z0-9_-]{16,64}", recovery_of) is None:
+                raise RecipeError("import recovery requires one exact original operation")
+            metadata["recovery_of"] = recovery_of
         if kind == "archive":
             if not isinstance(current_archived, bool) or not isinstance(
                 requested_archived, bool

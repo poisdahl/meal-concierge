@@ -401,9 +401,18 @@ Use a separate private installation and MCP registration for another provider.
 ## Recipe import sources and retained legacy connections
 
 The built-in bank always exists as exact `library_id="builtin"` and is the
-zero-configuration primary and destination for new source imports. The Mealie
+sole primary and destination for all new recipes and recipe changes. The Mealie
 and RecipeSage adapters support native import and retained legacy recovery.
 Merely adding either connection never selects it or blocks the built-in path.
+The provider write contracts below describe retained legacy recovery only. No
+new external create/update/favorite/label operation can be started through MC.
+Lifecycle prepare requires the original archive/delete operation ID, or the
+original uncertain create ID for removal of its verified exact incomplete stub.
+Confirmation still checks unchanged content, version, account and source policy.
+A read-only source must be reconciled without writing; cleanup is not an
+automatic exception to its policy. Remove retained routes only when inventory
+has no frozen references, mappings or unresolved operations needing them.
+
 Connections live only in the private config and use stable IDs:
 
 ```json
@@ -411,17 +420,19 @@ Connections live only in the private config and use stable IDs:
   "primary_recipe_library_id": "builtin",
   "recipe_libraries": [
     {"library_id": "builtin", "provider": "builtin", "read_only": false},
-    {"library_id": "family-mealie", "provider": "mealie", "base_url": "https://recipes.example", "read_only": false}
+    {"library_id": "family-mealie", "provider": "mealie", "base_url": "https://recipes.example", "read_only": true}
   ]
 }
 ```
 
 An ID matches `[a-z][a-z0-9-]{0,62}`, is unique case-insensitively and never
-changes with its URL, display name, credential or primary status. Search/save
-without a library ID uses the primary; a per-call exact `library_id` overrides
-only that call. Provider names are not selectors: if “save in Mealie” matches
-zero or several connections, ask for one exact connection instead of choosing
-by order. Cross-library search requires an explicit list of exact IDs. Its
+changes with its URL, display name, credential or historical primary status.
+Search/save without a library ID uses builtin, except an exact old save remains
+bound to its recorded target. Explicit external IDs permit reads/imports, not
+new writes. `set-primary` is removed; new setup connections are read-only.
+Old primary configuration remains readable for inventory/retirement, but no
+longer selects the runtime primary. Existing connection policy and journals are
+retained for original operation recovery. Cross-library search requires an explicit list of exact IDs. Its
 continuation cursor is a map keyed by those IDs, so one provider's cursor is
 never sent to another connection. Treat every returned cursor as opaque and
 return it unchanged; the service binds it to the exact library and preserves
@@ -623,8 +634,8 @@ removes only the exact confirmed or reconciled UUID. An uncertain cleanup is
 reconciled and never repeated blindly.
 
 The hidden prompt reads credential JSON. Add/update probes authentication and
-semantic read capabilities before writing; primary changes and credential
-removal require exact local confirmations. `update-credential` and `remove`
+semantic read capabilities before saving connection configuration; credential
+removal requires exact local confirmation. `update-credential` and `remove`
 provide the other two lifecycle actions. Remove refuses a connection while its
 journal has pending or uncertain work; resolve that work first. A running service is restarted only
 after a successful local change. First-run conversational setup never requests
@@ -780,12 +791,11 @@ Every external discovery result carries an opaque, store-bound `discovery_ref`
 for its exact normalized household-local snapshot. Tell Hermes to “save this
 recipe” while one displayed result is clearly selected. It passes that exact ref
 to `recipes save`; the target is bound in SQLite before any adapter dispatch.
-An explicit per-call ID wins, otherwise the configured primary is resolved once.
-Retry/restart remains on that target even if the primary changes. A definite
+A new save targets builtin. Only an original journaled legacy save can target
+an external library; retry/restart remains on its exact recorded destination. A definite
 rejection is `failed`; a possibly dispatched lost response is `uncertain` and
 is never blindly retried or redirected to built-in. Only an adapter advertising
-semantic `reconcile_create` may reconcile it. If the selection or connection is
-ambiguous, Hermes asks which exact displayed item or `library_id`.
+semantic `reconcile_create` may reconcile it. If the selected recipe is ambiguous, Hermes asks which exact displayed item.
 An adapter or capability-probe outage before dispatch remains pending and can
 be retried safely after the local connection recovers.
 
@@ -1423,8 +1433,8 @@ fetches an image URL. See [recipe-assets.md](recipe-assets.md).
 primary-library change. Source recipes are never edited, archived or deleted.
 Provider content and label text remain untrusted data, never authorization.
 
-Prepare requires distinct exact `source_library_id` and
-`destination_library_id`, plus either one to 20 exact versioned `source_refs`
+New prepare requires an exact `source_library_id` and
+`destination_library_id="builtin"`, plus either one to 20 exact versioned `source_refs`
 or a complete bounded `query`/`filters` selection. Source paging is bounded to
 20 recipes; narrow an oversized selection. Destination identity checks scan at
 most 500 exact recipes over 20 pages and fail unavailable if incomplete. No
@@ -1486,7 +1496,9 @@ roll back by deleting the recipe. Inspect returns each exact item outcome and
 metadata-stage status. A definitive failure requires reviewing a new preview;
 an uncertain operation always stays attached to its original plan.
 
-Migration never changes `primary_recipe_library_id`. Review the copy report and
+Runtime always uses builtin as primary; migration never rewrites the configuration.
+Existing external-destination plans can still inspect/resume their exact frozen
+copy and metadata stages. New external plans are rejected before source access. Review the copy report and
 retained recovery obligations. For the controlled write transition, use the
 explicit local command on a stopped installation:
 

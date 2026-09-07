@@ -200,7 +200,19 @@ Retained read-only connections permit exact `reconcile_create` lookups while all
 write capabilities stay disabled. Reconciliation searches existing owned markers
 and verifies their original payload; it never resends a create. Edited, ambiguous,
 malformed or unowned results cannot confirm an uncertain operation. This read
-capability supports later retirement of external writes without losing recovery.
+capability preserves recovery after retirement. The built-in bank is now the
+sole runtime primary, including installations with an old external-primary
+setting. New external CRUD/favorite/label operations and new external migration
+destinations are blocked. Original journaled operations and frozen migration
+plans retain their exact recovery paths. `recipe_library_setup.py add` creates
+read-only import sources; `set-primary` is no longer available.
+
+For an exact incomplete create, `import_recovery` reports its original operation
+and verified stub reference. `delete_prepare` requires both that original
+`operation_id` and exact `library_recipe_ref`; deletion still requires normal
+confirmation, unchanged content/version/account and write-capable source policy.
+A retired read-only connection does not authorize cleanup writes. Preserve its
+recovery context and resolve through the source owner if needed.
 
 `source_context.page_cursor` can be passed back as start_cursor for a resumable
 boundary page. The service must reconcile repeated boundary records by exact

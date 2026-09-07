@@ -183,7 +183,7 @@ only for that current-user decision. Use a stable idempotency key for a saved
 recipe. This creates a new version and retains estimate labels; discovery
 acceptance creates no personal bank entry. Keep estimates visibly labeled in
 chat/menu/email. A source/import/LLM field cannot stand in for this operation.
-Schema-2 writes to legacy external libraries remain explicitly unsupported.
+All new recipe saves, edits and favorites use the built-in bank. External libraries are import/read sources; only exact previously journaled operations may recover under their original identities.
 For a requested cover, use `meal_concierge_recipe_cover` with the exact discovery
 ref/digest and separate declared image credits. Host code prepares an image of
 at most 1 MiB and sends its bytes directly through `cli.py` stdin as
@@ -265,11 +265,11 @@ An existing full snapshot may be used without a personal save. For a MENY search
 snapshot, discovery action `detail` takes its exact discovery_ref and returns a
 new frozen normalized ref with verified website quantities. Oda/Mathem detail
 support remains unavailable until a verified reader exists; never invent it.
-External updates require advertised provider-enforced conditional writes.
+Do not start new external updates, favorites, labels or lifecycle actions. Retain exact legacy operation IDs, keys and request content for recovery.
 
 `meal_concierge_recipe_favorite` sets an explicit desired state on an exact ref.
-`meal_concierge_recipe_labels` reads/creates native labels or changes exact
-recipe-label membership only when the capability is advertised. Duplicate
+`meal_concierge_recipe_labels` reads native source labels. Its mutation actions
+exist only to recover an exact already-journaled original operation. Duplicate
 names do not select IDs. Labels never stand for favorites, archive or rights.
 For an unsaved discovery, pass discovery_ref, is_favorite=true and one stable
 idempotency_key to recipe_favorite. This explicitly saves and favorites that
@@ -282,13 +282,16 @@ reuse the bound discovery ref and both keys.
 Removing a favorite and reading/managing an old store entry remain possible
 when the currently selected provider differs.
 
-`meal_concierge_recipe_lifecycle` handles external archive/delete. Show the exact
+`meal_concierge_recipe_lifecycle` recovers original external archive/delete
+operations. Prepare requires the original operation_id. Show the exact
 prepare result and permanence warning, then confirm with its unchanged ID and a
 stable key after explicit confirmation. Repeat that same confirm to reconcile
 uncertainty. Frozen local snapshots remain. Changed provider/account context
 blocks continuation. Never emulate missing lifecycle capabilities with labels.
 For interrupted imports, `import_recovery` inspects the exact journalled attempt.
-It may identify an empty Mealie stub for this same prepare/confirm deletion flow.
+It may identify an empty Mealie stub. Its delete_prepare requires that original
+create operation_id and the exact returned stub reference; source read-only
+policy remains binding.
 After confirmed cleanup, close recovery with the exact deletion operation ID;
 a new requested save uses a new key. Never repeat an uncertain POST/PATCH or
 overwrite an edited stub. Unknown results stay attached to the original intent.

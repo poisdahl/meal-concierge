@@ -84,7 +84,7 @@ class Library(fixtures.SyntheticLibraryAdapter):
         return {'library_id': self.library_id, 'library_recipe_ref': reference, 'library_label_ref': label_reference, 'present': present}
 
 
-class MigrationTests(unittest.TestCase):
+class LegacyMigrationRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp.name), {**fixtures.CONFIG, 'provider': 'oda'})
@@ -99,7 +99,8 @@ class MigrationTests(unittest.TestCase):
         self.temp.cleanup()
 
     def prepare(self, **kwargs):
-        return self.app.handle({'operation': 'migration', 'action': 'prepare', 'source_library_id': 'source', 'destination_library_id': 'destination', 'metadata_options': {'favorites': 'omit', 'labels': 'omit'}, **kwargs})
+        # Seed a plan in the historical journal format; public prepare now rejects external destinations.
+        return migration.Migration(self.app).prepare({'operation': 'migration', 'action': 'prepare', 'source_library_id': 'source', 'destination_library_id': 'destination', 'metadata_options': {'favorites': 'omit', 'labels': 'omit'}, **kwargs})
 
     def execute(self, plan):
         return self.app.handle({'operation': 'migration', 'action': 'execute', 'plan_id': plan['plan_id'], 'confirmation': {'plan_digest': plan['plan_digest'], 'statement': plan['confirmation_statement']}})
@@ -313,11 +314,11 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(self.execute(plan)['status'], 'uncertain')
         discovery = self.app.recipes.persist_discovery(self.source.docs['0'])
         request = {'operation': 'recipes', 'action': 'save', 'library_id': 'destination', 'discovery_ref': discovery['discovery_ref'], 'idempotency_key': 'ordinary-save'}
-        with self.assertRaisesRegex(RecipeError, 'exact source.*migration'):
+        with self.assertRaisesRegex(RecipeLibraryError, 'import sources'):
             self.app.handle(request)
         self.assertEqual(self.dest.create_calls, 1)
         self.assertEqual(self.execute(plan)['status'], 'complete')
-        with self.assertRaisesRegex(RecipeError, 'exact source.*migration'):
+        with self.assertRaisesRegex(RecipeLibraryError, 'import sources'):
             self.app.handle(request)
         self.assertEqual(self.dest.create_calls, 1)
 
