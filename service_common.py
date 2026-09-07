@@ -260,7 +260,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         labels = {
             "adapted": "Tilpasset",
             "inspired_by": "Inspirert av",
-            "generated": "Generert av Hermes",
+            "generated": "Generert oppskrift",
             "user_supplied": "Familiens egen oppskrift",
             "original": "Kilde",
             "unknown": "Kilde",
@@ -271,9 +271,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         except RecipeError:
             url = None
         text = " – ".join(part for part in (publisher, source_title if source_title.casefold() != publisher.casefold() else "") if part)
-        if relationship == "generated":
-            text = "Hermes for denne ukemenyen"
-        elif relationship == "user_supplied" and publisher.casefold() in {"unknown", "user", "bruker"}:
+        if relationship == "user_supplied" and publisher.casefold() in {"unknown", "user", "bruker"}:
             text = "Familiens egen oppskrift"
         rendered = f'<a href="{escape(url)}">{escape(text)}</a>' if url else escape(text)
         rights = value.get("rights") if isinstance(value.get("rights"), Mapping) else {}

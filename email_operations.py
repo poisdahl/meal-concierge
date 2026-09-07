@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from core import HouseholdError, mask_email, valid_email_address
 from recipe_assets import RecipeAssets
 from recipe_email import prepare_recipe_media
+from delivery_operations import legacy_held
 from service_common import (
     EMAIL_AUTOMATION_PROTOCOL,
     EMAIL_CLAIM_LEASE,
@@ -452,6 +453,7 @@ class EmailOperations:
                         "recipient_snapshot": recipient, "menu_snapshot": snapshot,
                         "subject": f"Ukesmeny og oppskrifter – {period}", "html": menu_email_html(snapshot),
                         "automation_key": automation_key, "automation_protocol": 0,
+                        **({"delivery_hold": True} if legacy_held(locked) else {}),
                     })
                 elif len(existing) == 1:
                     if existing[0].get("status") != "pending":
@@ -524,6 +526,8 @@ class EmailOperations:
             if len(matching) != 1:
                 return {"send": False, "reason": "multiple email jobs for the provider order"}
             initial_job = deepcopy(matching[0])
+            if legacy_held(state, initial_job):
+                return {"send": False, "reason": "recipe delivery is explicitly held"}
             self._require_email_scheduler(initial_job, request)
             job_provider = email_job_provider(initial_job)
             if job_provider is None:
@@ -545,6 +549,8 @@ class EmailOperations:
                 if len(matching) != 1 or canonical(matching[0]) != canonical(initial_job):
                     raise HouseholdError("email job changed while checking its provider order")
                 self._require_email_scheduler(matching[0], request, state)
+                if legacy_held(state, matching[0]):
+                    return {"send": False, "reason": "recipe delivery is explicitly held"}
                 pending_cancellation = state.get("pending_cancellation")
                 if expired_awaiting_confirmation(pending_cancellation, self._now()):
                     state["pending_cancellation"] = None
@@ -638,6 +644,8 @@ class EmailOperations:
                 if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match a claimed job")
                 self._require_email_scheduler(jobs[0], request, state)
+                if legacy_held(state, jobs[0]):
+                    return {"dispatch": False, "send": False, "reason": "recipe delivery is explicitly held"}
                 pending_cancellation = state.get("pending_cancellation")
                 if email_job_provider(jobs[0]) == self.provider and isinstance(pending_cancellation, Mapping) and pending_cancellation.get("order_id") == order_id:
                     raise HouseholdError("order cancellation is pending; do not send its recipe email")

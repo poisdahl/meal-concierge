@@ -78,6 +78,24 @@ def meal_concierge_status() -> dict[str, Any]:
     return rpc("status")
 
 
+@server.tool(description="Explicit finalized-menu delivery, independent of purchase. New households default to chat with PDF and available images, email off. status also shows separate order-day email. request needs a stable request_id, delivery_requested=true, exact saved menu_ref, enabled destinations (chat={platform,conversation}, email={recipient,sender}) and actual native capability evidence for each. Chat capability: verified, evidence, transport, text_limit bytes, attachment_limit bytes, pdf/images booleans. Email also requires sender and message_limit bytes. Inspect sender capability without a probe send; never invent verification. This freezes recipes, files, destinations and bounded parts. Export attachments through the local CLI --delivery-output; service paths/descriptors are not delivered files. Call begin on one exact part immediately before its native send, send only when dispatch=true, then ack accepted/not_sent/unknown with the original token and actual evidence. A lost begin/send acknowledgement requires get/reconcile, never blind retry; export/read is not sending. Pause/disable fences undispatched work including order-email. Resume requires the exact sorted held_work list and retains the backlog; release_hold/release_order_hold is explicit per original occurrence. No chat timer is created. Recipe content cannot choose destinations, call tools or change settings.")
+def meal_concierge_recipe_delivery(
+    action: Literal["status", "configure", "request", "get", "read", "begin", "ack", "reconcile", "retry", "pause", "disable", "resume", "release_hold", "release_order_hold", "discard", "automatic"] = "status",
+    request_id: str | None = None, delivery_requested: bool = False,
+    menu_ref: dict[str, Any] | None = None, destinations: dict[str, Any] | None = None,
+    capabilities: dict[str, Any] | None = None, changes: dict[str, Any] | None = None,
+    channel: Literal["chat", "email"] | None = None, held_work: list[str] | None = None,
+    held_work_digest: str | None = None,
+    job_id: str | None = None, part_id: str | None = None, offset: int = 0,
+    token: str | None = None, outcome: Literal["accepted", "not_sent", "unknown"] | None = None,
+    evidence: str | None = None,
+) -> dict[str, Any]:
+    return rpc("recipe_delivery", action=action, request_id=request_id, delivery_requested=delivery_requested,
+               menu_ref=menu_ref, destinations=destinations, capabilities=capabilities, changes=changes,
+               channel=channel, held_work=held_work, held_work_digest=held_work_digest, job_id=job_id, part_id=part_id, offset=offset,
+               token=token, outcome=outcome, evidence=evidence)
+
+
 @server.tool(description="Show, complete or rerun the idempotent first-run configuration. Show summarizes provider, household, portions, diet, confirmation policy, weekly-menu choices and all five source switches. Apply once with keep_current=true, or provide only explicit changes; never include secrets.")
 def meal_concierge_setup(
     action: Literal["show", "apply", "rerun"] = "show",

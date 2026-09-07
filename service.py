@@ -153,9 +153,10 @@ from recipe_operations import RecipeOperations
 from planning_operations import PlanningOperations
 from order_operations import OrderOperations
 from email_operations import EmailOperations
+from delivery_operations import DeliveryOperations
 
 
-class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations):
+class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations, DeliveryOperations):
     def _now(self) -> datetime:
         return now()
 
@@ -421,6 +422,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return self._recipes(request)
         if operation == "menu":
             return self._menu(request)
+        if operation == "recipe_delivery":
+            return self._recipe_delivery(request)
         if operation == "feedback":
             return self._feedback(request)
         if operation == "schedule":

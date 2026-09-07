@@ -66,6 +66,56 @@ approval and reconciliation of that exact payment, never another submission.
 
 ## Messages and destination profiles
 
+### Deliver a finalized menu
+
+An explicit “plan and give me next week's recipes” request includes delivery;
+a menu read, save or edit alone does not. Use `recipe_delivery status` to show
+selected channels/formats and the separate existing order-delivery-day email.
+New households use chat with PDF and available managed covers, email off.
+Keep the saved menu's exact ID/revision/digest and the actual requesting
+conversation. No grocery purchase or recurring chat timer is required.
+
+Inspect this host's actual native text/attachment/sender tools without sending a
+probe. Use verified capabilities and conservative limits no larger than those
+supported by that transport. Email requires explicit opt-in, selected recipient
+and the exact sender verified by its native integration. Configure only choices
+the user made. An outage changes neither preferences nor frozen destinations.
+
+Call `recipe_delivery request` once with a stable request_id, explicit delivery
+intent, exact menu_ref, selected destinations and native capabilities. On a
+lost response, inspect/reuse that original request_id; an explicit resend gets
+a new one. Read all returned parts using get/next_offset. The service freezes
+text, PDF, images and email MIME; never replace them with newer recipe/cover data.
+Show omissions honestly. For unavailable email, readable text_fallback parts
+can be inspected but are not permission to reroute them to chat.
+
+On a local host, export a file with the maintained `cli.py --delivery-output`
+and an exact recipe_delivery read request on stdin. This transfers checked
+bytes over the private socket into a new private file. Do not put base64 into
+model text. Remote hosts need an authorized byte-transfer/resolver path; a
+service path or digest alone is not an attachment. Never create public asset
+links or fetch recipe/image URLs as a fallback. The default image part is an
+inline preview, not a separate image-file attachment.
+
+Immediately before each actual native outbound text message, PDF upload,
+image preview or single MIME email, call `begin` with its original job_id and
+part_id. Send only when dispatch=true, to that exact destination, once. After
+native acceptance call ack with its original token and actual receipt/evidence;
+accepted does not mean read. Exporting or showing a tool descriptor is not a
+send. If the native route cannot supply an observable result, retain unknown.
+A lost begin acknowledgement is recoverable through get for that exact part.
+Never repeat successful parts because another channel/upload failed. Unknown
+attempts require reconciliation of their original content/destination; retry
+is allowed only after affirmative evidence of no send.
+
+Use `pause` to fence all undispatched recipe work, including order emails, or
+`disable` for the explicitly selected channel. Neither recalls a dispatched
+message. Resume requires the exact current held_work list/digest from status
+and leaves it held; release or discard each original part explicitly. Held
+order-email jobs use release_order_hold or their existing scoped native email
+cancellation controls. Enabling a channel does not release held backlog or
+change grocery scheduling. See the [delivery transport details](https://github.com/poisdahl/meal-concierge/blob/main/docs/recipe-delivery.md).
+
 Lead with the verified result or the decision needed. A small top-up may need
 only one sentence; a cart review or weekly menu needs a short overview and
 scannable details. Keep progress updates separate from the final result and use

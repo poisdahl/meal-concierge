@@ -158,6 +158,7 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "pending_cancellation": None,
         "order_change": None,
         "email_jobs": [],
+        "recipe_delivery": initial_recipe_delivery(),
         "occurrences": {},
         "batch_outcomes": {"sources": {}, "leftovers": {}},
         "planning_feedback": [],
@@ -170,6 +171,13 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "protected_results": {},
         "protected_requests": {},
     }
+
+
+def initial_recipe_delivery(*, legacy_email: bool = False, legacy: bool = False) -> dict[str, Any]:
+    return {"preferences": {
+        "chat": {"enabled": not legacy, "pdf": True, "images": True},
+        "email": {"enabled": legacy_email, "pdf": True, "images": True},
+    }, "paused": False, "legacy_email_disabled": False, "jobs": {}}
 
 
 def _merge(target: dict[str, Any], changes: Mapping[str, Any]) -> None:
@@ -719,6 +727,10 @@ def _migrate_state(
         if isinstance(pending, dict) and pending.get("status") == "awaiting_confirmation" and pending.get("occurrence") and "automatic_checkout" not in pending and state.get("schedule", {}).get("mode") == "cart_ready":
             pending["automatic_checkout"] = False
         state["version"] = 12
+    # Additive migration: do not rewrite legacy settings, frozen email jobs or
+    # receipts, and never enqueue an occurrence merely by opening old state.
+    state.setdefault("recipe_delivery", initial_recipe_delivery(
+        legacy=True, legacy_email=valid_email_address(state.get("email_recipient"))))
     batch = state.get("batch_outcomes")
     if not isinstance(batch, dict) or set(batch) != {"sources", "leftovers"} or any(not isinstance(v,dict) or len(v)>2000 for v in batch.values()):
         raise HouseholdError("household batch outcomes are invalid")

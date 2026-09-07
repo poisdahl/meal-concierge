@@ -21,6 +21,7 @@ from rpc_client import ServiceError, rpc
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image-output", type=Path, help="exclusive local output file for an exact managed recipe image read")
+    parser.add_argument("--delivery-output", type=Path, help="exclusive local output file for one frozen delivery attachment; transfer only, never sends")
     args = parser.parse_args()
     try:
         raw = sys.stdin.buffer.read(2 * 1024 * 1024 + 1)
@@ -30,12 +31,20 @@ def main() -> int:
         if not isinstance(request, dict) or not isinstance(request.get('operation'), str):
             raise ValueError('request must be an object with a string operation')
         operation = request.pop('operation')
+        delivery_read = operation == "recipe_delivery" and request.get("action") == "read"
+        if args.delivery_output is not None:
+            if not delivery_read or args.image_output is not None:
+                raise ValueError("--delivery-output requires an exact recipe_delivery read and no image-output")
+            from delivery_transport import export_part
+            result = export_part(rpc, request.get("job_id"), request.get("part_id"), args.delivery_output)
+            print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))
+            return 0
         image_read = operation == "recipes" and request.get("action") == "cover_get"
         if image_read != (args.image_output is not None):
             raise ValueError("cover_get requires --image-output; that option is only for exact managed image reads")
         if args.image_output is not None and args.image_output.exists():
             raise ValueError("image output already exists; choose a new local file")
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, OSError, ServiceError) as exc:
         print(json.dumps({'ok': False, 'error': str(exc), 'dispatched': False}))
         return 2
     try:
