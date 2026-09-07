@@ -27,8 +27,8 @@ Bounded refill must preserve this limitation rather than inventing pagination.
 
 | Provider | Detail evidence | Native portions, associations and bulk recipe cart | Fallback |
 |---|---|---|---|
-| MENY | Public page JSON-LD observed 2026-09-06; authenticated adapter acceptance pending | No integration contract established; adapter reports unsupported | Base ingredients, shared exact scaling and ordinary product matching through the integrated private boundary |
-| Oda | Authenticated MCP 1.1.0 tool discovery; bounded recipe search was unavailable. Public recipe-page detail verified through Application on 2026-09-07 | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no exact product-expansion preview tool is exposed | Exact public page, shared scaling, product matching and journalled product deltas; unresolved details retain a source link |
+| MENY | Authenticated adapter probe/search/detail and Application source-bound detail passed in Bob on 2026-09-07; a repeat search timed out rendering | No integration contract established; adapter reports unsupported | Base ingredients, shared exact scaling and ordinary product matching through the integrated private boundary |
+| Oda | Authenticated MCP 1.1.0 discovery and recipe search; two returned public pages passed Application on 2026-09-07. Subsequent probe/search returned internal error -32603 | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no exact product-expansion preview tool is exposed | Exact public page, shared scaling, product matching and journalled product deltas; unresolved details retain a source link |
 | Mathem | Authenticated MCP 1.1.0 search with integer IDs and exact links; two corresponding public recipe pages verified through Application on 2026-09-07 | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no exact product-expansion preview tool is exposed | Exact public page, shared scaling, product matching and journalled product deltas; unresolved details retain a source link |
 
 Both MCP discoveries returned 25 tools through the existing authenticated
@@ -63,9 +63,17 @@ The observed pages include [Mathem 2713](https://www.mathem.se/se/recipes/2713-m
 and [Oda 5050](https://oda.com/no/recipes/5050-silje-feiring-kremet-pasta-med-sopp/).
 All expose four base portions. The Application read verified exact private
 source binding, scaling to two portions, replay from the same cached snapshot
-and zero personal saves. Mathem used links from a fresh authenticated search;
-Oda used a known public URL, not a successful authenticated search. This is
-public-page detail acceptance, not authenticated website or purchase acceptance.
+and zero personal saves. Mathem used links from a fresh authenticated search.
+The initial Oda detail used a known public URL. A later authenticated Oda
+search returned 3330 (creamy salmon pasta) and 4122 (pasta al limone); both
+corresponding exact public pages passed the same Application checks, with four
+base portions and respectively four/11 ingredients and three/four steps.
+Subsequent Oda probe/search calls returned MCP internal error -32603. The
+successful search establishes the response contract; it does not establish
+continuous service availability or explain the provider error. Website login
+is separate from MCP OAuth, and no additional Oda website login was used.
+This is public-page detail acceptance, not authenticated website or purchase
+acceptance.
 The Swedish measures agree with [Mathem's measuring-set specification](https://www.mathem.se/se/products/7170-gastromax-mattsats/).
 Tests retain only invented text with these observed shapes.
 
@@ -75,7 +83,16 @@ returned one `application/ld+json` Recipe object with `recipeIngredient` and
 metadata, `dateModified`, and `recipeYield: "Antall personer: 4"`. Tests use
 invented recipe text in these observed shapes. No store recipe collection or
 private account/basket response is included. This public HTTP observation is
-not evidence of an authenticated browser read.
+not evidence of an authenticated browser read. A separate 2026-09-07 run
+after owner login exercised the actual MENY adapter through Bob's existing
+reserved browser wrapper: authenticated probe, two search hits and detail from
+this reference page (four portions, 16 ingredients, six steps) passed.
+The searched lasagne with salsiccia also passed Application detail, exact source
+binding, scaling from four portions to two, cache replay and zero personal saves
+(17 ingredients, nine steps). Only command transport was routed through the
+wrapper; adapter login checks, lock, deadlines and parsing were unchanged.
+A second search timed out waiting for rendering; detail acceptance then reused
+the prior successful search result. No recipe or cart control was submitted.
 
 For MENY, only the observed explicit person-count format supplies person servings.
 Other yield text remains preserved with unresolved servings. Ingredient text
@@ -105,8 +122,8 @@ dispatch another cart mutation. Existing cart tests cover intervening manual
 changes, partial writes and reconciliation. These are controlled provider
 fixtures, not authenticated purchases or a measured native-hint speedup.
 
-Issue #43 remains open for authenticated MENY adapter acceptance.
-Authenticated MENY reads remain a separate gate requiring the coordinated
-existing browser target. Oda/Mathem synthetic acceptance may replace an
+The authenticated MENY detail gate is demonstrated. Intermittent MENY
+rendering and Oda service failures are not proof that recipe sources are
+exhausted; existing bounded failure handling remains in place. Oda/Mathem synthetic acceptance may replace an
 unavailable service only where an actual contract is known; it cannot invent
 missing detail or native operation schemas. No speedup has been measured.

@@ -27,7 +27,7 @@ provider outcome.
 | Feature | Served tools or normal path | Current evidence | Remaining boundary |
 |---|---|---|---|
 | Setup, status and continuity | `status`, `setup`, `profile`; installer, service/bridge restart | `test_installer.py`, `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`; 15 native Bob prerequisite conversations and native profile/menu flows | Mathem protected-action installation/upgrade is pending its implementation; bank use works independently |
-| Recipe search and details | `recipes`, `recipe_discovery` | `test_meal_concierge_recipes.py`, `test_meal_concierge_retailer_recipes.py`, `test_meal_concierge_recipe_selection.py`; native seven-day store scenarios below; authenticated Mathem search plus exact public details | Authenticated MENY detail remains pending; Oda authenticated recipe search was unavailable; no exact native bulk-cart preview exists |
+| Recipe search and details | `recipes`, `recipe_discovery` | `test_meal_concierge_recipes.py`, `test_meal_concierge_retailer_recipes.py`, `test_meal_concierge_recipe_selection.py`; native seven-day store scenarios below; authenticated MENY adapter search/detail and Oda/Mathem MCP search plus exact public details | Later Oda calls returned MCP internal error -32603; a repeat MENY search timed out rendering; no exact native bulk-cart preview exists |
 | Import and migration | `recipe_import`, `migration`; `import_recipes.py` | `test_recipe_import.py`, `test_meal_concierge_migration.py`; authenticated real Mealie 3.24.0 import and independent bank readback; prior scoped MC-07 extraction acceptance | New imports target builtin. RecipeSage source-account and further client/input acceptance remain unverified/deferred; fixture formats are documented separately |
 | Recipe writes, favorites and labels | `recipe_write`, `recipe_favorite`, `recipe_labels`, `recipe_lifecycle` | `test_meal_concierge_recipes.py`, `test_meal_concierge_private_recipes.py`, `test_meal_concierge_acceptance.py`; new builtin saves and exact original-operation recovery covered | External labels/lifecycle writes exist only for exact retained recovery, not new primary-library use |
 | Covers, attachments and archives | `recipe_cover`, `recipe_image`; private export/restore and consistent installation backup | `test_recipe_import.py`, `test_meal_concierge_recipe_assets.py`, `test_meal_concierge_recipe_contract.py`; prior scoped MC-07 attachment/image/local-sender acceptance | Original attachment extraction is client-specific. New Mealie source-account test covered text fields, not native image upload; remaining MC-wide client matrix is #52 |
@@ -83,18 +83,34 @@ See [pack coverage and limits](recipe-pack-build.md).
 
 The actual authenticated Mathem recipe search returned two source URLs; both
 public pages resolved through Application with exact source binding, scaling
-from four portions to two, cache replay and zero personal saves. Oda's known
-public page passed the same detail path; its authenticated search did not.
+from four portions to two, cache replay and zero personal saves. A fresh Oda
+authenticated search subsequently returned recipes 3330 and 4122; both exact
+public details passed the same Application checks. Later Oda initialization
+and search calls returned MCP internal error -32603, so this is a successful
+read with intermittent service availability, not proof of stable access.
+
+After owner login, the existing MENY adapter passed authenticated probe, search
+and detail reads in Bob's reserved browser. The reference lasagne yielded four
+portions, 16 ingredients and six steps. A detail from the successful search
+(lasagne with salsiccia) also passed Application source binding, scaling to two,
+cache replay and zero personal saves: four base portions, 17 ingredients and
+nine steps. The adapter's command transport used Bob's existing browser wrapper;
+its login checks, extraction, lock and deadline logic were unchanged. A repeat
+search timed out waiting for rendering; subsequent authenticated detail checks
+passed using the previously observed search result. Neither run changed a cart.
 See the [retailer capability matrix](retailer-recipes.md).
 
 ## Open provider acceptance
 
-#43 still requires the authenticated MENY adapter detail read. #41 and the #45
-integration tracker retain that provider gate rather than describing the
-synthetic rows as authenticated success.
+The authenticated recipe-read gate for #43 is now demonstrated and completes
+the remaining provider input to #41/#45. The native menu conversations and
+seven-day cart fixtures above retain their synthetic provider scope; the new
+reads do not turn them into real purchase acceptance. Provider availability
+failures remain explicit failures, not exhausted recipe sources.
 
-#50 remains open: the Mathem website in Bob still needs its own login after
-successful MCP OAuth. The connected seven-dinner purchase conversation,
+#50 remains open: Mathem website login in Bob is now complete alongside MCP
+OAuth, and authenticated MCP recipe search passed again. The connected
+seven-dinner purchase conversation,
 automated protected-action implementation, normal installation/upgrade,
 account-mismatch checks and observed order/payment/change/cancellation outcomes
 are not complete. Missing login/card/challenge and drift/uncertain-effect
