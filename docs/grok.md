@@ -8,12 +8,87 @@ handoff; it is not the service host. Use the existing shared `service.py`,
 dedicated browser profile on that same cloud computer.
 
 The actual Grok Bot 0.43.0 cloud computer inspected on 2026-09-06 runs Debian 13
-x86_64 without `systemctl`. The [native installer](runtime.md) requires user
-systemd or launchd, so its manager commands are not applicable to this image.
-The cloud Shell can keep an explicitly started service in the background.
-This is a manual lifecycle: retain the exact task process identity, inspect
-health before attaching, and stop only that installation's service before
-offline updates. Never start a service for every conversation.
+x86_64 without `systemctl`. Use the installer's explicit
+[external-manager mode](runtime.md#externally-managed-hosts) instead of its
+default systemd/launchd management. Grok owns one native background execution
+of `install.py run`; the normal service owns its state and listener locks.
+Retain the exact execution and service process identities, inspect health before
+attaching, and stop only that installation before offline updates. Never start
+a service for every conversation. Native Grok acceptance of this new installer
+route remains pending; its local acceptance is described below.
+
+## Install from the repository
+
+The README's start prompt needs the repository URL, not an uploaded test ZIP.
+Grok should follow this sequence and surface the first concrete missing
+prerequisite or platform refusal. Do not improvise an alternate execution form
+after review rejects an operation.
+
+1. **Inspect existing setup.** Read installation metadata in the user-selected
+   home and native MCP registration names/status. Keep matching healthy setup
+   and attach to it; a repeated install request is not an update. Ask about
+   ambiguous household/store identity. A known synthetic test instance must
+   not be silently adopted as the user's store installation. Bots share files
+   and registrations, so a new conversation does not isolate them.
+2. **Acquire program source from this repository.** Choose one immutable commit
+   for the attempt and use its matching guide, source and requirements. If Git
+   is available, clone to a new source directory and record/check out the exact
+   commit. Otherwise use GitHub's source ZIP for that commit, inspect its member
+   names/types and unpack with the available `unzip` into a new directory.
+   Reject traversal, links and unexpected destinations; never unpack over data
+   or an earlier attempt. A checksum found only inside the archive does not
+   independently establish provenance. The source archive, optional recipe
+   collection and MC09 synthetic test harness are different artifacts.
+3. **Inspect prerequisites.** The bootstrap needs Python 3.10+ and `uv`;
+   Python 3.12.12 and the pinned dependencies are installed by the common
+   installer. If `uv` is installed outside Shell's PATH, pass its verified
+   executable with `--uv`; do not change global PATH/settings. Missing tools
+   require their ordinary approved installation from official sources.
+   Oda/MENY also need the browser dependencies below. Ask for the intended
+   store/household when not already established; do not switch stores to avoid
+   a missing browser.
+4. **Install stopped, then run.** From that reviewed source directory, invoke
+   `python3 install.py install --manager external` with the explicit home,
+   code root, short socket/browser-socket paths, provider and household. The
+   [runtime example](runtime.md#externally-managed-hosts) shows all arguments.
+   This installer openly executes `uv venv`, dependency sync, isolated Python
+   checks/migration and the pinned recipe-pack download/import. All are part
+   of the operation being reviewed; the entry point is not a way to conceal
+   blocked commands. A platform refusal stops the attempt. An automatic
+   recipe-pack failure may leave a usable core: inspect the reported state
+   instead of blindly reinstalling.
+5. **Use the native background executor.** Submit
+   `python3 install.py run --home ACTUAL_HOME` from the same source directory
+   through normal Shell review and its background-execution facility. Record
+   the returned execution ID and actual service PID/start identity. The
+   launcher waits for its child; killing the launcher alone may leave that
+   child running. Verify both before any recovery or task-owned stop. Use
+   `python3 install.py attach --home ACTUAL_HOME` once healthy, then create
+   exactly one native MCP registration from that returned configuration.
+   Record its server ID. Reuse an existing exact matching registration;
+   never call the global MCP restart tool for this installation.
+6. **Verify and report separate results.** Test actual native tool discovery,
+   setup/profile reads and the recipe library. Report core runtime, service,
+   MCP, recipe collection/assets and provider authentication separately.
+   Missing store login must be reported as awaiting login, never ready for
+   live shopping. Installation alone does not order, pay, send recipes or
+   create scheduled jobs. Complete provider login separately in the cloud
+   browser with user takeover where required, then test the actual store.
+
+Install the maintained skill only in an available, explicitly selected native
+skill location, preserving other skills; report it separately if the platform
+requires additional approval. MCP registration and skill installation are
+account-wide. Do not assume another Bot or the local Mac/Windows computer has
+isolated credentials or the same filesystem.
+
+The external-manager route has a local integration test with newly installed
+Python/dependencies, the 4,599-recipe pack, real SDK discovery of 26 tools,
+duplicate-run refusal, attachment while running, retained child ownership after
+launcher interruption, and interrupted-publication recovery. This is not yet
+a successful native Grok repository-URL installation, browser install, OAuth
+flow or live-store test. Keep the working installation while those gates remain
+open. The command-form workaround below is troubleshooting evidence, not an
+alternative complete installer.
 
 ## Placement and dependencies
 
@@ -23,8 +98,8 @@ Keep replaceable Python, package caches and sockets in a distinct temporary
 runtime directory. Explicitly pass all service paths; do not inherit another
 Bot's household, OAuth storage or browser session.
 
-Install Python 3.12.12 with `uv`, then sync the matching release's
-`runtime-requirements.txt`. Verify both `mcp` and `mcp-types` are 2.1.1 and their
+The common installer installs Python 3.12.12 with `uv` and syncs the matching
+release's `runtime-requirements.txt`. Verify both `mcp` and `mcp-types` are 2.1.1 and their
 actual imported modules reside in that virtual environment. The inspected
 image's system Python 3.13.5 and Node 20.19.2 are not this pinned runtime.
 For the planned Oda/MENY browser path, use `agent-browser@0.33.1` with a

@@ -153,6 +153,8 @@ def unit_path(manager, name):
 
 
 def active(meta):
+    if meta['manager'] == 'external':
+        raise RuntimeError('inspect the external execution owner; use ownership checks for offline work')
     if meta['manager'] == 'systemd':
         result = subprocess.run(['systemctl', '--user', 'is-active', meta['name'] + '.service'], capture_output=True, text=True)
         return result.stdout.strip() not in {'inactive', 'failed', 'unknown'}
@@ -160,6 +162,10 @@ def active(meta):
 
 
 def assert_stopped(meta):
+    if meta['manager'] == 'external':
+        # Readiness is an ownership operation, not a read-only status probe.
+        with data_ownership(meta):
+            return
     if active(meta):
         raise RuntimeError('service owner is active; use the explicit stop command before offline backup/update')
 
@@ -190,6 +196,19 @@ def health(meta):
 
 
 def lifecycle(meta, action):
+    if meta['manager'] == 'external':
+        if action != 'run':
+            raise RuntimeError('external lifecycle: use run in the native background executor; stop/reconcile that exact execution before running again')
+        home = Path(meta['home'])
+        if not (home / 'runtime.json').exists() or (home / 'pending-install.json').exists() or (home / 'maintenance.json').exists():
+            raise RuntimeError('external run requires a completed installation; recover the stopped installation first')
+        # The caller keeps the installer lock while this foreground child runs.
+        # The child also owns state/listener locks if its parent is interrupted.
+        env = {**os.environ, 'PATH': meta['runtime_path'], 'PYTHONNOUSERSITE': '1'}
+        run(*service_args(meta, meta['release']), env=env)
+        return
+    if action == 'run':
+        raise RuntimeError('run is only for an externally managed installation; use the native start command')
     if action in {'start', 'restart'} and (Path(meta['home']) / 'maintenance.json').exists():
         raise RuntimeError('incomplete migration/update; retry the stopped update or recover offline before starting')
     if action == 'restart':
@@ -228,7 +247,8 @@ def lifecycle(meta, action):
 
 @contextmanager
 def offline(meta):
-    assert_stopped(meta)
+    if meta['manager'] != 'external':
+        assert_stopped(meta)
     with data_ownership(meta):
         yield
 
@@ -269,8 +289,8 @@ def backup(meta, destination):
     return str(destination)
 
 
-def stage_release(code_root):
-    uv = executable(None, ['uv'], 'uv')
+def stage_release(code_root, uv_binary=None):
+    uv = executable(uv_binary, ['uv'], 'uv')
     release = code_root / ('release-' + uuid.uuid4().hex)
     release.mkdir(parents=True, mode=0o700)
     for path in SOURCE.glob('*.py'):
@@ -299,6 +319,8 @@ def migrate_owned(meta):
 
 
 def write_unit(meta):
+    if meta['manager'] == 'external':
+        return
     # The unit points at stable current paths. An atomic code switch never reloads an agent.
     args = service_args(meta, Path(meta['code_root']) / 'current')
     env = {'PATH': meta['runtime_path'], 'PYTHONNOUSERSITE': '1'}
@@ -339,9 +361,11 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'update', 'attach', 'start', 'stop', 'restart', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['install', 'update', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
+    parser.add_argument('--uv', help='explicit uv executable when it is not on the host PATH')
     parser.add_argument('--name', default='meal-concierge' if platform.system() == 'Linux' else 'com.meal-concierge')
     parser.add_argument('--provider', choices=['oda', 'meny', 'mathem'])
     parser.add_argument('--household')
@@ -389,10 +413,12 @@ def main():
         settings = None
         if manifest.exists():
             meta = json.loads(manifest.read_text())
+            if args.manager is not None and (args.manager == 'external') != (meta['manager'] == 'external'):
+                raise RuntimeError('existing installation manager differs; no implicit ownership transfer')
             settings = meta.pop('initial_config', None)
             if args.action == 'install' and path.exists():
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
-            if args.action in {'start', 'stop', 'restart'}:
+            if args.action in {'start', 'stop', 'restart', 'run'}:
                 lifecycle(meta, args.action); return
             if args.action == 'backup':
                 if not args.backup:
@@ -404,11 +430,11 @@ def main():
         else:
             if args.action != 'install':
                 raise RuntimeError('no standalone runtime manifest; discover and explicitly adopt existing paths first')
-            manager = native_manager()
+            manager = 'external' if args.manager == 'external' else native_manager()
             if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,90}', args.name) is None:
                 raise RuntimeError('invalid service name')
-            unit = unit_path(manager, args.name)
-            if unit.exists():
+            unit = None if manager == 'external' else unit_path(manager, args.name)
+            if unit is not None and unit.exists():
                 raise RuntimeError('service definition already exists; choose a distinct name after stopping the old owner')
             found = [item for item in discover(home) if item['config'] or item['state'] or item['standalone']]
             if (found or args.config or args.state) and not args.adopt:
@@ -416,6 +442,8 @@ def main():
             if args.adopt and not args.legacy_unit:
                 raise RuntimeError('--adopt requires --legacy-unit naming the stopped old owner (or none for restored/offline data)')
             if args.legacy_unit and args.legacy_unit != 'none':
+                if manager == 'external':
+                    raise RuntimeError('retire the former supervisor separately before external adoption; no automatic manager transfer')
                 old_name = args.legacy_unit.removesuffix('.service')
                 assert_stopped({'manager': manager, 'name': old_name})
                 if manager == 'systemd':
@@ -444,8 +472,8 @@ def main():
             for target in [home, *[Path(v) for k, v in paths.items() if k not in {'browser_binary', 'browser_executable'}]]:
                 if target == code_root or target.is_relative_to(code_root) or code_root.is_relative_to(target):
                     raise RuntimeError('code and private data paths must be disjoint')
-            meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit), 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
-            if active(meta):
+            meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
+            if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
         actual_settings = settings or json.loads(Path(meta['paths']['config']).read_text())
         socket_limit = 103 if platform.system() == 'Darwin' else 107
@@ -465,11 +493,11 @@ def main():
                 if (code_root / 'current').exists():
                     raise RuntimeError('unowned existing code root; use an empty code directory')
                 write_json(owner, {'home': str(home)})
-            publish(meta, path, home, settings, args.recipe_pack)
+            publish(meta, path, home, settings, args.recipe_pack, args.uv)
 
 
-def publish(meta, path, home, settings, recipe_pack=None):
-    release = stage_release(Path(meta['code_root']))
+def publish(meta, path, home, settings, recipe_pack=None, uv_binary=None):
+    release = stage_release(Path(meta['code_root']), uv_binary)
     archive = None
     pack_error = None
     try:

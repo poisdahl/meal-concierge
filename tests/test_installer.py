@@ -45,8 +45,8 @@ def command(*args, success=True, **kwargs):
     return result
 
 
-def installer(*args, success=True, cwd=None):
-    return command(sys.executable, CORE / 'install.py', *args, success=success, cwd=cwd)
+def installer(*args, success=True, cwd=None, env=None):
+    return command(sys.executable, CORE / 'install.py', *args, success=success, cwd=cwd, env=env)
 
 
 @contextmanager
@@ -127,6 +127,46 @@ def create_v1_bank(path: Path, recipe: dict) -> None:
 
 
 class InstallerTests(unittest.TestCase):
+    def test_external_lifecycle_refuses_native_actions_and_incomplete_install(self):
+        meta = {'manager': 'external', 'home': str(self.root)}
+        with patch.object(install, 'run') as runner:
+            for action in ('start', 'stop', 'restart'):
+                with self.assertRaisesRegex(RuntimeError, 'external lifecycle'):
+                    install.lifecycle(meta, action)
+            with self.assertRaisesRegex(RuntimeError, 'completed installation'):
+                install.lifecycle(meta, 'run')
+            (self.root / 'runtime.json').write_text('{}')
+            for marker in ('pending-install.json', 'maintenance.json'):
+                (self.root / marker).write_text('{}')
+                with self.assertRaisesRegex(RuntimeError, 'completed installation'):
+                    install.lifecycle(meta, 'run')
+                (self.root / marker).unlink()
+            runner.assert_not_called()
+        with patch.object(install, 'unit_path', side_effect=AssertionError('native unit')):
+            install.write_unit(meta)
+
+    def test_external_offline_uses_real_ownership_and_preserves_live_listener(self):
+        with service(self.root) as (process, args):
+            sock = self.root / 'run/service.sock'
+            paths = dict(zip([v[2:].replace('-', '_') for v in args[2::2]], args[3::2]))
+            meta = {'manager': 'external', 'paths': paths}
+            inode = sock.stat().st_ino
+            with self.assertRaisesRegex(RuntimeError, 'owned'):
+                install.assert_stopped(meta)
+            with self.assertRaisesRegex(RuntimeError, 'owned'):
+                with install.offline(meta):
+                    pass
+            self.assertIsNone(process.poll())
+            self.assertEqual(sock.stat().st_ino, inode)
+        with install.offline(meta):
+            pass
+        self.assertFalse(sock.exists())  # Explicit offline readiness removes stale socket.
+        sock.write_text('preserve non-socket')
+        with self.assertRaisesRegex(RuntimeError, 'non-socket'):
+            with install.offline(meta):
+                pass
+        self.assertEqual(sock.read_text(), 'preserve non-socket')
+
     def test_restart_waits_for_retiring_supervisor_and_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             meta = {'manager': 'launchd', 'name': 'mc03-test', 'home': directory,
@@ -599,6 +639,99 @@ def native(root, name, adapter, chrome):
             assert not install.active(meta)
 
 
+def external(root):
+    """Fresh real dependencies/service/MCP without native manager or store auth."""
+    root = Path(root).resolve()
+    home, code = root / 'home', root / 'code'
+    if home.exists() or code.exists():
+        raise RuntimeError('external test requires fresh scratch directories')
+    root.mkdir(parents=True, exist_ok=True)
+    uv = shutil.which('uv')
+    assert uv, 'uv required for fresh dependency acceptance'
+    env = {**os.environ, 'PATH': os.defpath}
+    print(installer('install', '--manager', 'external', '--uv', uv,
+                    '--home', home, '--code-root', code, '--name', 'mc09-external',
+                    '--provider', 'mathem', '--household', 'MC09 installation fixture', env=env).stdout)
+    meta = json.loads((home / 'runtime.json').read_text())
+    assert meta['manager'] == 'external' and meta['unit'] is None
+    assert not (home / 'service.unit').exists() and not (home / 'service.plist').exists()
+    snapshot = (home / 'runtime.json').read_bytes()
+    rejected = installer('update', '--home', home, '--manager', 'native', success=False)
+    assert rejected.returncode and 'manager differs' in rejected.stderr
+    assert (home / 'runtime.json').read_bytes() == snapshot
+    log_path = root / 'service.log'
+    launch_args = [sys.executable, str(CORE / 'install.py'), 'run', '--home', str(home)]
+    process = None
+    group_alive = False
+
+    def ready():
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                return install.health(meta)
+            except (OSError, ValueError):
+                assert process.poll() is None, log_path.read_text()
+                assert time.monotonic() < deadline, log_path.read_text()
+                time.sleep(.05)
+
+    def stop_group():
+        nonlocal group_alive
+        if group_alive:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    install.assert_stopped(meta)
+                    break
+                except RuntimeError:
+                    assert time.monotonic() < deadline
+                    time.sleep(.05)
+            group_alive = False
+
+    with log_path.open('w') as log:
+        try:
+            process = subprocess.Popen(launch_args, stdout=log, stderr=log, start_new_session=True)
+            group_alive = True
+            assert ready()['integration']['status'] == 'awaiting_login'
+            before = Path(meta['paths']['state'], 'state.json').read_bytes()
+            inode = Path(meta['paths']['socket']).stat().st_ino
+            duplicate = installer('run', '--home', home, success=False)
+            assert duplicate.returncode and 'owned' in duplicate.stderr
+            assert installer('install', '--home', home, success=False).returncode
+            attachment = json.loads(installer('attach', '--home', home).stdout)
+            assert Path(meta['paths']['socket']).stat().st_ino == inode
+            print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
+            assert Path(meta['paths']['state'], 'state.json').read_bytes() == before
+            # Parent termination alone cannot establish that its service exited.
+            process.terminate(); process.wait(timeout=10)
+            assert install.health(meta)['ok']
+            blocked = installer('update', '--home', home, '--uv', uv, success=False)
+            assert blocked.returncode and ('owned' in blocked.stderr or 'owns this target' in blocked.stderr)
+            assert (home / 'runtime.json').read_bytes() == snapshot
+            stop_group()
+            # Reconcile an interrupted publication through the existing resume path.
+            archive = next(Path(meta['release']).glob('recipe-pack-*.zip'))
+            (home / 'runtime.json').rename(home / 'pending-install.json')
+            install.write_json(home / 'maintenance.json', {'reason': 'isolated interrupted publication'})
+            assert installer('run', '--home', home, success=False).returncode
+            print(installer('update', '--home', home, '--uv', uv, '--recipe-pack', archive, env=env).stdout)
+            meta = json.loads((home / 'runtime.json').read_text())
+            assert meta['manager'] == 'external' and meta['unit'] is None
+            assert Path(meta['paths']['state'], 'state.json').read_bytes() == before
+            process = subprocess.Popen(launch_args, stdout=log, stderr=log, start_new_session=True)
+            group_alive = True
+            assert ready()['integration']['status'] == 'awaiting_login'
+            print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
+            stop_group()
+            print('PASS external fresh install / explicit uv outside PATH / real MCP / duplicate refusal / surviving-child ownership / interrupted publication recovery; no native manager or provider login')
+        finally:
+            stop_group()
+
+
 def native_mathem(root, name):
     home = Path(root) / 'mathem-home'
     foreign = Path(root) / 'foreign-project'
@@ -728,7 +861,9 @@ def compose_split():
 
 
 if __name__ == '__main__':
-    if sys.argv[1:2] == ['--socket-container']:
+    if sys.argv[1:2] == ['--external']:
+        external(*sys.argv[2:])
+    elif sys.argv[1:2] == ['--socket-container']:
         socket_container(*sys.argv[2:])
     elif sys.argv[1:2] == ['--mathem']:
         native_mathem(*sys.argv[2:])

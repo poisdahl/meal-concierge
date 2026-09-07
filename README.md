@@ -65,9 +65,11 @@ your usual Hermes chat. No separate web app or database server is required.
 native setup, permissions and persisted state. [OpenClaw](docs/openclaw.md) and
 [NanoClaw](docs/nanoclaw.md) adapters have verified native discovery and lifecycle
 baselines. Their complete recipe, attachment and scheduling workflows remain
-under integration. The [Grok guide](docs/grok.md) provides a synthetic runtime
-harness; native Grok MCP registration and the complete VM workflow remain
-unverified.
+under integration. Grok Bot has reported successful native MCP registration
+and synthetic recipe, cart and menu tests. The [Grok guide](docs/grok.md)
+describes installation on its cloud computer without systemd. Fresh installation
+from a repository URL, browser setup and live-store acceptance remain unverified
+on Grok; the successful synthetic installation is preserved separately.
 
 ## Supported stores
 
@@ -97,8 +99,10 @@ any further action.
 
 ## Requirements
 
-The standalone core requires Linux with a running user systemd manager or Apple
-Silicon macOS, Python 3.10+ to bootstrap, and `uv`. It installs its own pinned
+The standalone core uses Linux with a running user systemd manager or Apple
+Silicon macOS by default. Cloud hosts without a service manager can use the
+explicit [externally managed mode](docs/runtime.md#externally-managed-hosts).
+It requires Python 3.10+ to bootstrap and `uv`, and installs its own pinned
 Python 3.12.12 runtime with `mcp==2.1.1` and `mcp-types==2.1.1`.
 Oda/MENY also require `agent-browser@0.33.1` and non-snap Chrome/Chromium.
 Oda/Mathem OAuth uses the standalone runtime. New agent packages and their full
@@ -135,6 +139,21 @@ verification, not an authenticated test of your account. Enter cards, passwords
 and bank/device approvals only in the provider's trusted UI, never in agent chat.
 
 ## Installation
+
+For **Grok Bot**, use this repository URL and start prompt:
+
+> Install Meal Concierge from https://github.com/poisdahl/meal-concierge on your
+> cloud computer. Follow the Grok installation guide in this repository. Inspect
+> any existing installation first and preserve its data. Ask for missing store
+> or household settings, and let me handle required login or platform approvals.
+> Verify the Meal Concierge tools and report any incomplete step accurately.
+
+This is a guided installation route pending a complete fresh native Grok test.
+The [Grok guide](docs/grok.md#install-from-the-repository) chooses the source,
+runtime and native registration steps; unpacking a ZIP alone does not install
+the service. Store login is separate from core installation.
+
+For hosts with the default native service manager:
 
 Clone this repository outside the private data directory. Install the browser
 adapter if using Oda/MENY:

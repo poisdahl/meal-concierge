@@ -1,13 +1,15 @@
 # Standalone runtime and safe updates
 
-The runtime runs independently of agent conversations on Linux/user-systemd and
-Apple Silicon macOS/launchd. Installation, service lifecycle and agent attachment
+The runtime runs independently of agent conversations on Linux/user-systemd,
+Apple Silicon macOS/launchd, or an explicit external process owner.
+Installation, service lifecycle and agent attachment
 are separate commands. The installer never registers an agent, logs in, transfers
 schedulers, sends messages or performs grocery actions.
 
 ## Install and attach
 
-Use Python 3.10+ for the installer and install `uv` on PATH. The installed runtime
+Use Python 3.10+ for the installer and install `uv` on PATH, or pass its verified
+executable path with `--uv`. The installed runtime
 uses Python 3.12.12 and all versions in `runtime-requirements.txt`, including
 `mcp==2.1.1` and `mcp-types==2.1.1`. Installation verifies both SDK versions and
 loaded module paths inside its own virtual environment. Hermes is not required.
@@ -59,6 +61,77 @@ is separate from service health. Existing Compose and explicit legacy runner
 paths remain supported by `service.py`; native adoption does not convert Compose
 or claim live parity. MENY login and its private `vipps_phone_number`
 configuration require the authorized provider setup.
+
+## Externally managed hosts
+
+Use `--manager external` for a host such as the Grok cloud computer that can
+keep a foreground command running as a native background execution but has no
+user systemd/launchd manager. This uses the same release staging, pinned Python
+and dependencies, configuration, recipe-pack import, migration and ownership
+locks as native installations. It writes no systemd unit or launchd plist and
+does not install another supervisor. A normal installation without this option
+retains the native manager behavior.
+
+From the reviewed source directory, for example:
+
+```sh
+python3 install.py install --manager external --uv /usr/local/bin/uv \
+  --home /workspace/meal-concierge/home --code-root /tmp/meal-concierge/program \
+  --socket /tmp/meal-concierge/service.sock \
+  --browser-socket-directory /tmp/meal-concierge/browser \
+  --provider mathem --household "My household"
+python3 install.py run --home /workspace/meal-concierge/home
+```
+
+These are example paths and provider choices; inspect the actual host and use
+the user's intended store. Oda/MENY still require their browser dependencies.
+The first command performs the declared `uv` staging, verification and migration
+subprocesses; it does not start the service or authenticate a store. Do not treat
+this entry point as a bypass for platform review of its underlying operations.
+Grok-specific command review and acceptance limits are in the [Grok guide](grok.md).
+
+Run the second command through the platform's normal background-execution
+facility and retain its exact execution ID and service PID/start identity.
+`run` waits for the selected release's foreground service and holds the installer
+lock until that child exits. The service independently holds its data/listener
+locks. `attach` remains available while it runs:
+
+```sh
+python3 install.py attach --home /workspace/meal-concierge/home
+```
+
+`start`, `stop` and `restart` deliberately refuse this mode: the external owner
+must control its exact execution. Terminating the launcher alone may leave the
+service child alive. Reconcile both the native execution and actual service
+identity before stopping a surviving task-owned process or starting another.
+A timeout, missing output or vanished parent is not proof that the service
+stopped. Never kill by a broad command/name match.
+
+Repeated setup should discover the matching installation, inspect its identity
+and attach to its healthy service. `install` refuses an existing installation;
+it does not mean update. Before an explicit `update` or backup, the owner must
+stop that execution and establish that no service survives. External offline
+checks use the existing ownership locks; acquiring those checks can create lock
+files and remove a proven-stale socket, so they are not read-only inventory.
+Busy, invalid or uncertain targets fail without permission to take them over.
+Manager choice remains in `runtime.json`; install/update and lifecycle commands
+reject a conflicting `--manager` rather than changing ownership.
+
+`run` refuses pending installation or maintenance state. Resume an interrupted
+publication through the existing stopped `update` path, using its original home
+and paths. Retained recipes/assets and outcome journals must not be replaced.
+After cloud runtime loss, rebuild the missing replaceable runtime from the
+matching reviewed source; do not restore older household data. Changing from a
+previous supervisor is a separate explicit ownership transfer, not a side effect
+of selecting external mode.
+
+The focused native-style local test is
+`python tests/test_installer.py --external /explicit/new/scratch-root` with the
+pinned test dependencies. It creates a new unauthenticated Mathem fixture,
+downloads the real runtime and recipe pack, exercises MCP and interrupted-owner
+recovery, then stops its own service. It makes no store or account calls.
+This test does not establish Grok's Shell approval or background-cancellation
+behavior; those require native verification.
 
 ## Provider OAuth
 
