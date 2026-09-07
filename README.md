@@ -33,7 +33,6 @@ For **Grok Bot**, send this prompt:
 > and data. Ask which store and household to use, and let me complete login and
 > required approvals. Verify the tools and tell me what remains incomplete.
 
-Grok may need your help with setup; fully unattended installation is not verified.
 For other agents, use the guide below. The service runs on Linux or Apple Silicon
 macOS, or a supported cloud computer; a desktop chat alone does not host it.
 
