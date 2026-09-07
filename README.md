@@ -68,9 +68,11 @@ baselines. Their complete recipe, attachment and scheduling workflows remain
 under integration. Grok Bot has reported successful native MCP registration
 and synthetic recipe, cart and menu tests. The [Grok guide](docs/grok.md)
 describes installation on its cloud computer without systemd. The fresh
-repository-URL test downloaded and unpacked the source, but Grok's Shell review
-blocked the installer. Browser setup and live-store acceptance remain unverified;
-the successful synthetic installation is preserved separately.
+repository-URL test downloaded and unpacked pinned source; the subsequent
+canonical `./install.sh` test completed core installation, 4,599-recipe import,
+service startup and native MCP reads. Browser setup, skill installation and
+live-store acceptance remain unverified. The synthetic installation is preserved
+separately.
 
 ## Supported stores
 
@@ -149,9 +151,10 @@ For **Grok Bot**, use this repository URL and start prompt:
 > or household settings, and let me handle required login or platform approvals.
 > Verify the Meal Concierge tools and report any incomplete step accurately.
 
-This guided route is currently blocked at installer execution by Grok's Shell
-review; it is not yet a verified unattended installation. The 2026-09-07 native
-test successfully downloaded and unpacked the pinned GitHub source ZIP.
+The 2026-09-07 native test acquired the pinned GitHub source ZIP, then completed
+installation, startup and MCP attachment through the existing `./install.sh`
+entry. This was a guided test on commit `9599097`, not yet an unattended run of
+the start prompt or acceptance of later source revisions.
 The [Grok guide](docs/grok.md#install-from-the-repository) chooses the source,
 runtime and native registration steps; unpacking a ZIP alone does not install
 the service. Store login is separate from core installation.

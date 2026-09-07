@@ -14,9 +14,9 @@ default systemd/launchd management. Grok owns one native background execution
 of `install.py run`; the normal service owns its state and listener locks.
 Retain the exact execution and service process identities, inspect health before
 attaching, and stop only that installation before offline updates. Never start
-a service for every conversation. Native Grok acceptance of this new installer
-route stopped at Shell review on 2026-09-07; its local acceptance and the
-native attempt are described below.
+a service for every conversation. On 2026-09-07, the canonical `./install.sh`
+entry completed a native cloud installation, service start and MCP attachment
+on pinned source, following the earlier rejected Python-entry attempts below.
 
 ## Install from the repository
 
@@ -58,22 +58,24 @@ after review rejects an operation.
    settings unchanged. Scope cache and managed-Python directories per process
    when needed, and disclose those assignments in the reviewed command.
 4. **Install stopped, then run.** From that reviewed source directory, invoke
-   `python3 install.py install --manager external` with the explicit home,
+   `./install.sh install --manager external` with the explicit home,
    code root, short socket/browser-socket paths, provider and household. The
    [runtime example](runtime.md#externally-managed-hosts) shows all arguments.
    This installer openly executes `uv venv`, dependency sync, isolated Python
    checks/migration and the pinned recipe-pack download/import. All are part
    of the operation being reviewed; the entry point is not a way to conceal
-   blocked commands. A platform refusal stops the attempt. An automatic
+   blocked commands. Keep this maintained entry unchanged; it uses `bash` and
+   `python3` from PATH, so inspect their actual resolution and relevant Bash
+   startup/Python import overrides first. A platform refusal stops the attempt. An automatic
    recipe-pack failure may leave a usable core: inspect the reported state
    instead of blindly reinstalling.
 5. **Use the native background executor.** Submit
-   `python3 install.py run --home ACTUAL_HOME` from the same source directory
+   `./install.sh run --home ACTUAL_HOME` from the same source directory
    through normal Shell review and its background-execution facility. Record
    the returned execution ID and actual service PID/start identity. The
    launcher waits for its child; killing the launcher alone may leave that
    child running. Verify both before any recovery or task-owned stop. Use
-   `python3 install.py attach --home ACTUAL_HOME` once healthy, then create
+   `./install.sh attach --home ACTUAL_HOME` once healthy, then create
    exactly one native MCP registration from that returned configuration.
    Record its server ID. Reuse an existing exact matching registration;
    never call the global MCP restart tool for this installation.
@@ -94,11 +96,11 @@ isolated credentials or the same filesystem.
 The external-manager route has a local integration test with newly installed
 Python/dependencies, the 4,599-recipe pack, real SDK discovery of 26 tools,
 duplicate-run refusal, attachment while running, retained child ownership after
-launcher interruption, and interrupted-publication recovery. This is not yet
-a successful native Grok repository-URL installation, browser install, OAuth
-flow or live-store test. Keep the working installation while those gates remain
-open. The command-form workaround below is troubleshooting evidence, not an
-alternative complete installer.
+launcher interruption, and interrupted-publication recovery. The guided native
+Grok test below now also passed core installation, service/MCP and recipe reads.
+Browser installation, native skill installation, OAuth and live-store acceptance
+remain open. The command-form workaround below is extraction evidence, not an
+alternative complete installer or a guarantee for arbitrary executables.
 
 The native repository-URL attempt on 2026-09-07 used public commit
 `95990976384b0de1f6804ac1ebe39537c58533ef`. Grok reported successful download,
@@ -113,13 +115,33 @@ approval-request retry despite the instruction to stop after the first refusal;
 that also failed without a usable approval card. This is a test-procedure
 deviation, not evidence of a successful approval path.
 
-The result was captured from Grok's visible conversation, not independently
+That failed attempt was captured from Grok's visible conversation, not independently
 exported Shell telemetry. Grok reported only the downloaded ZIP and extracted
 source retained in the new durable root, with the new temporary root empty.
 No installation home, program environment, service, MCP record or skill was
 created, and the older synthetic installation was preserved. Acquisition and
-extraction therefore passed; fresh runtime installation remains blocked. Do not
-retry this operation with a wrapper or alternate command form after refusal.
+extraction therefore passed while runtime installation failed at that stage.
+
+The subsequent tests kept that source unchanged. Direct relative Python plus
+`install.py` also received the binding rejection. A separately reviewed test of
+the existing README entry `./install.sh` then succeeded through normal review,
+with all installer operations disclosed. Grok reported install exit zero,
+Python 3.12.12, 34 pinned packages including both MCP 2.1.1 distributions,
+complete installation metadata and 4,599 imported recipes. One native background
+`./install.sh run` execution started the new service; `./install.sh attach`
+provided the configuration for one new native MCP registration with 26 tools.
+Through that new MCP, status returned the intended test household/provider and
+`awaiting_login`; builtin recipe search and get succeeded. Both the old synthetic
+MCP and the new installation remained connected. The new Mathem configuration
+was an unauthenticated installer fixture; Oda was selected for later live testing.
+
+These results were read from Grok's visible conversation, without independently
+exported Shell telemetry. They apply to public commit
+`95990976384b0de1f6804ac1ebe39537c58533ef` and its 34-package requirements,
+not later source revisions with 35 packages. Native skill installation and
+unattended completion of the README start prompt were not tested. Use the
+maintained `./install.sh` entry for new attempts; do not turn a refusal into a
+series of wrappers, command rewrites or identical approval-request retries.
 
 ## Placement and dependencies
 
@@ -133,7 +155,7 @@ The common installer installs Python 3.12.12 with `uv` and syncs the matching
 release's `runtime-requirements.txt`. Verify both `mcp` and `mcp-types` are 2.1.1 and their
 actual imported modules reside in that virtual environment. The inspected
 image's system Python 3.13.5 and Node 20.19.2 are not this pinned runtime.
-For the planned Oda/MENY browser path, use `agent-browser@0.33.1` with a
+For the Oda/MENY npm installation path, use `agent-browser@0.33.1` with a
 task-local Node 24 or newer and the existing non-snap Chrome executable.
 Keep package installs and caches within the selected installation.
 
@@ -178,7 +200,7 @@ menu matched their pre-test values. The script also disabled subsequent bytecode
 writes and rejected optimized Python so its verification assertions would run.
 This demonstrates the reported extraction workaround, not an upstream fix.
 
-The fresh-environment follow-up remained blocked. Grok first substituted
+An earlier fresh-environment follow-up remained blocked. Grok first substituted
 `/usr/local/bin/uv` for the requested command form when creating the new venv.
 After read-only reconciliation, one explicitly authorized corrected attempt used
 `../../../usr/local/bin/uv` from the new runtime directory, verified to resolve
@@ -186,8 +208,9 @@ to the same executable. Grok reported the same executable-binding rejection
 for both calls, without an approval card. Only the empty new runtime directory
 was created; no new venv, dependency sync, service or MCP registration followed.
 The successful relative Python-script form therefore does not establish that
-every relative executable works, or that a complete fresh installation now
-passes. Preserve the working installation while this setup step is unresolved.
+every relative executable works. The later canonical installer result above
+establishes a separate successful path; it does not turn these refused calls
+into successful tests. Preserve the working installation when testing another.
 
 Until the upstream defect is fixed, support advises avoiding absolute interpreter
 paths, `python3 -`, `python3 -c`, `python3 -m` and heredocs into Python in Shell
@@ -254,7 +277,10 @@ archive. Installation of `agent-browser@0.33.1` was rejected by Grok's automatic
 review because it could not bind executable content to the review. Invoking
 the resolved package-manager script with an explicit working directory, as
 the rejection suggested, received the same refusal. No browser adapter was
-installed or exercised; the actual browser gate remains open.
+installed or exercised; the actual browser gate remains open. The earlier Node
+directory was no longer present at the 2026-09-07 follow-up inventory, while
+non-snap Chrome remained available. Recheck current prerequisites rather than
+assuming that a historical installation is still on disk.
 
 The explicit [test harness](../tests/grok_runtime_probe.py) exercises production
 Application, Unix/MCP and provider HTTP transport with synthetic external
