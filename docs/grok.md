@@ -199,6 +199,32 @@ journals. A successful core status read does not authenticate a provider.
 Use the [standalone provider OAuth flow](runtime.md) inside the cloud VM;
 do not copy another host's refresh credentials to create a second owner.
 
+Before starting timed OAuth, verify Python's browser handoff with a unique inert
+`about:blank#...` URL on the intended cloud display. Set `BROWSER` to the verified
+native adapter's absolute path and explicit session, profile and Chrome arguments,
+ending in `open %s &`; Python substitutes the URL argument and the trailing `&`
+selects its background launcher. Pass the same `DISPLAY` and
+`AGENT_BROWSER_SOCKET_DIR` as the service's browser. Use a clean process
+environment with an explicitly empty task `PATH` for this dispatch so Python
+does not discover an unrelated default browser. This is an explicit supported
+browser command, not a change to Shell review permissions.
+
+Require native URL read-back and inspection of the actual cloud window. An
+active adapter tab can still be behind another Chrome window: select that exact
+observed task tab through the native adapter before user takeover. Preserve the
+existing browser/session owners. Redirect launcher output to an exclusively
+created private `0600` log, since native browser output can contain the
+authorization URL; do not read authentication logs or paste URLs into chat.
+Start the timed login only when the user is ready to take over the cloud window.
+
+On 2026-09-07 this inert adapter handoff passed in a new Bot sharing the retained
+Oda installation. Grok reported the exact marker URL and unchanged daemon/Chrome
+PID/start identities; selecting the observed task tab then made that same marker
+visible in the original Bot's cloud window, independently inspected by the
+operator. Direct Chrome dispatch had not delivered the marker to the task tab.
+No reset, browser restart or OAuth was used. This verifies browser handoff only;
+authenticated Oda and unattended installation acceptance remain open.
+
 ## Cloud Shell command form
 
 On 2026-09-07, [Cursor support confirmed a known Shell pre-check defect](https://forum.cursor.com/t/grok-bot-0-44-0-on-macos-shell-executable-binding-rejection-persists-approval-card-never-appears/170819/5).
