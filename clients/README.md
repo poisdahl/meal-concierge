@@ -168,6 +168,10 @@ Read tool call.
 
 This Desktop result does not establish full menu/lifecycle acceptance,
 service-restart persistence or native service-manager/scheduler behavior.
-Codex's later attachment/preparation attempts timed out before model events;
-its full menu/attachment workflow remains unverified. These packages do not
+Earlier Codex attachment/preparation attempts timed out before model events;
+the later bounded Codex workflow is recorded below. These packages do not
 implement a second importer, normalizer, scheduler, sender or credential owner.
+
+On 2026-09-07, native Codex CLI 0.153.4 also passed original text/photo import, the bundled three-page PDF fallback, explicit draft saves, internal-only planning and saving of seven dated dinners for two, and fresh-client readback after a synthetic service restart. Saved recipe revisions, quantities, unknown measures, menu contents and managed image bytes were preserved. Cover upload used the host CLI in normal native approval mode; save and image retrieval used MCP. Recipe and image attribution remained separate, and the source's hostile instructions caused no observed provider writes or favorite changes.
+
+The photo's initial sandbox denial and the planner's initial six-eligible-recipe shortfall were retained and reconciled before the reviewed follow-ups. Codex JSONL does not expose individual builtin image-view or approval-decision events; native helper execution, transcript, business-tool results and managed image bytes are observed. Import prompts also repeated source and quantity safeguards, so these runs do not isolate the canonical skill’s prompt-injection defenses. These checks used synthetic fixtures and subprocess services, and do not establish external-provider recommendation quality, complete nutrition, native service managers, scheduler persistence or full Desktop lifecycle acceptance.
