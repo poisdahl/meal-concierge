@@ -160,3 +160,67 @@ def meny_recipe_input(observation: Any, recipe_id: str, *, fetched_at: str | Non
             "changes": "Base recipe text normalized from MENY page JSON-LD; no native scaling or product associations.",
         },
     }
+
+
+def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, deadline: float | None = None) -> dict[str, Any]:
+    """Bind one observed public Oda/Mathem recipe page to its exact search hit."""
+    from copy import deepcopy
+    from html import unescape
+    from urllib.parse import urlsplit
+    from recipes import source_ingredient
+    from recipe_import_sources import fetch_public_webpage, TIMEOUT
+    import time
+    from recipe_quantities import quantity_json, read_quantity
+
+    source = source_recipe["source"]
+    url = source.get("url")
+    parsed = urlsplit(url or "")
+    hosts = {"oda": {"oda.com", "www.oda.com"}, "mathem": {"mathem.se", "www.mathem.se"}}
+    locale = {"oda": "no", "mathem": "se"}.get(provider)
+    match = re.fullmatch(r"/" + str(locale) + r"/recipes/([1-9][0-9]*)-[A-Za-z0-9._~-]+/", parsed.path)
+    if (provider not in hosts or parsed.scheme != "https" or parsed.hostname not in hosts[provider]
+            or parsed.netloc != parsed.hostname or parsed.query or parsed.fragment or not match
+            or match[1] != str(source.get("external_id"))):
+        raise HouseholdError("retailer recipe URL must match its exact provider and numeric search identity")
+    if deadline is not None and time.monotonic() + TIMEOUT > deadline:
+        raise HouseholdError("retailer recipe detail search time budget is exhausted")
+    page = fetch_public_webpage(url)
+    rows = page.get("recipes") if isinstance(page, dict) else None
+    if not isinstance(page, dict) or page.get("requires_interpretation") or not isinstance(rows, list) or len(rows) != 1:
+        raise HouseholdError("retailer recipe page must contain one complete structured recipe")
+    candidate = deepcopy(rows[0].get("candidate"))
+    if not isinstance(candidate, dict) or candidate.get("source", {}).get("url") != url:
+        raise HouseholdError("retailer recipe page identity changed")
+    candidate["name"] = unescape(candidate["name"])
+    if candidate["name"] != unescape(source_recipe["name"]):
+        raise HouseholdError("retailer recipe title changed; obtain a fresh search reference")
+    # These exact /no/ and /se/ pages expose numeric recipeYield as portions,
+    # matching the displayed Porsjoner/Portioner selector. Other yield shapes
+    # stay unresolved rather than being guessed as servings.
+    yield_text = candidate.get("yield", {}).get("original_text")
+    if not isinstance(yield_text, str) or not re.fullmatch(r"[1-9][0-9]{0,2}", yield_text):
+        raise HouseholdError("retailer recipe portions are not in the verified page format")
+    evidence = {"basis": "source", "input": yield_text}
+    candidate["portions"] = int(yield_text)
+    candidate["portions_evidence"] = deepcopy(evidence)
+    candidate["yield"] = {"original_text": yield_text, "quantity": quantity_json(read_quantity(yield_text)),
+        "unit": "portioner" if provider == "mathem" else "porsjoner",
+        "evidence": {"quantity": deepcopy(evidence), "unit": deepcopy(evidence)}}
+    if provider == "mathem":
+        # Verified Swedish metric measures. Preserve wording and keep e.g.
+        # cloves/handfuls unresolved; a clove is not a whole garlic product.
+        aliases = {"st": "stk", "tsk": "ts", "msk": "ss", "krm": "ml"}
+        for index, ingredient in enumerate(candidate["ingredients"]):
+            raw = ingredient.get("original_text", "")
+            found = re.fullmatch(r"(.+?)\s+(st|tsk|msk|krm)\s+(.+)", raw)
+            if found:
+                candidate["ingredients"][index] = source_ingredient(raw, item=found[3], measure=found[1] + " " + aliases[found[2]])
+    candidate["source"].update(kind=provider, publisher=provider.upper(),
+        title=candidate["name"], external_id=source["external_id"], relationship="original")
+    candidate["source_provider"] = provider
+    candidate["rights"]["credit"] = f"Original recipe from {candidate['source']['publisher']}; retained for private household use."
+    candidate["external_snapshot"] = {"fetched_at": datetime.now(timezone.utc).isoformat(),
+        "content_hash": hashlib.sha256(json.dumps(candidate, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "source_revision_id": None, "permanent_url": None,
+        "changes": "Public structured recipe page; verified base portions and metric source measures, without native cart expansion."}
+    return candidate

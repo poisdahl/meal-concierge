@@ -26,8 +26,11 @@ Measured page/detail counts and elapsed time accompany the result.
 MENY's current search returns a bounded visible prefix and ignores `page`.
 Its short nonempty result establishes neither continuation nor exhaustion.
 Bounded context-derived queries can find further candidates; an unsupported
-continuation remains a search limitation. Oda/Mathem native recipe detail and
-pagination contracts remain unverified. This module does not invent them.
+continuation remains a search limitation. Oda/Mathem use verified MCP
+`page`/`size`/`hasMore` pagination and exact public recipe pages for details.
+Missing URLs, incomplete responses or unresolved details remain limitations;
+they do not establish exhaustion or eligibility for AI generation. Native
+recipe cart expansion remains unsupported.
 
 Disabled, empty, unsuitable, unavailable, timed-out, rate-limited and bounded
 search results survive even with zero candidates. Automatic AI eligibility

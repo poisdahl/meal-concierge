@@ -216,19 +216,27 @@ class RecipeOperations:
         source_recipe = snapshot["recipe"]
         self._require_recipe_provider(source_recipe)
         provider = recipe_source_provider(source_recipe)
-        if provider != "meny":
-            raise RecipeError("verified recipe details are currently supported only for MENY; this source remains readable")
+        if provider not in {"meny", "oda", "mathem"}:
+            raise RecipeError("verified recipe details require an exact supported retailer source")
         if not self.store.read()["profile"]["recipes"]["sources"].get(provider):
             raise RecipeError("the recipe source is disabled")
         cached = self.recipes.cached_discovery_transform(snapshot["discovery_ref"], "detail")
         if cached is not None:
             return {**cached, "cache": "exact_source_version"}
         deadline = min(deadline, time.monotonic() + 15) if deadline is not None else time.monotonic() + 15
-        with self._browser_operation(deadline):
-            state = self.store.read()
-            if any(state.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change")):
-                raise RecipeError("finish the pending provider operation before recipe details")
-            response = self.provider_client.call("recipe_detail", {"recipe_id": source_recipe["source"]["external_id"]}, deadline=deadline)
+        if provider in {"oda", "mathem"}:
+            from retailer_recipes import retail_web_recipe_input
+            try:
+                response = {"provider": provider, "recipe": retail_web_recipe_input(source_recipe, provider, deadline=deadline),
+                    "capabilities": {"recipe_detail": "public_structured_page", "native_portion_selection": False, "native_cart_expansion": False}}
+            except (RecipeImportSourceError, ValueError) as exc:
+                raise RecipeError("retailer public recipe details are unavailable") from exc
+        else:
+            with self._browser_operation(deadline):
+                state = self.store.read()
+                if any(state.get(key) for key in ("pending_checkout", "pending_cancellation", "order_change")):
+                    raise RecipeError("finish the pending provider operation before recipe details")
+                response = self.provider_client.call("recipe_detail", {"recipe_id": source_recipe["source"]["external_id"]}, deadline=deadline)
         if not isinstance(response, Mapping) or response.get("provider") != provider or not isinstance(response.get("recipe"), Mapping):
             raise RecipeError("recipe detail provider response is invalid")
         recipe = normalize_recipe(bind_recipe_source(response["recipe"], provider=provider))

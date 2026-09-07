@@ -766,11 +766,11 @@ without authorizing cross-provider use. Existing configured-provider mismatch
 protection remains: this feature does not add provider-switch machinery or alter
 original-provider order/email journals.
 
-Discovery action `detail` resolves an exact MENY discovery_ref through the
-existing authenticated browser adapter, validates its exact source identity and
-returns a new immutable normalized snapshot. Ordinary scaling/product matching
-uses its stated base quantities; native portion/product/cart shortcuts remain
-unsupported. Oda/Mathem recipe detail contracts are not available yet. Private
+Discovery action `detail` resolves an exact retailer discovery_ref through the
+existing MENY browser adapter or an unauthenticated Oda/Mathem public structured
+recipe page. It validates the source identity and returns a new immutable
+normalized snapshot. Ordinary scaling/product matching uses its stated base
+quantities; native portion/product/cart shortcuts remain unsupported. Private
 snapshots do not create bank entries or favorites. A direct menu may reference
 one with `{"discovery_ref": "...", "portions": 4}`.
 

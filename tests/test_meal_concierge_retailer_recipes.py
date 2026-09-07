@@ -277,3 +277,135 @@ class RetailerPaginationTests(unittest.TestCase):
                     self.assertEqual(next(x for x in discovery['sources'] if x['source']==provider)['status'],'search_limit')
                 client.rows=[]
                 self.assertTrue(app.handle(request)['plan']['discovery']['ai_fallback_eligible'])
+
+
+class RetailerPublicDetailTests(unittest.TestCase):
+    def test_native_numeric_search_ids_are_retained_without_coercing_invalid_ids(self):
+        from recipe_sources import provider_recipe_candidates
+        for provider in ("oda", "mathem"):
+            source = self.source(provider)
+            for value in (123, "123", True, False, 0, -1, 1.5, {}, 10 ** 300):
+                with self.subTest(provider=provider, value=value):
+                    rows = provider_recipe_candidates(provider, {"recipes": [
+                        {"id": value, "title": source["name"], "url": source["source"]["url"]}
+                    ]}, limit=1)
+                    self.assertEqual(len(rows), 1 if value in (123, "123") else 0)
+                    if rows:
+                        self.assertEqual(rows[0]["source"]["external_id"], "123")
+
+    def source(self, provider="mathem"):
+        host, locale = ("www.mathem.se", "se") if provider == "mathem" else ("oda.com", "no")
+        return {"name": "Synthetic dinner", "source": {"url": f"https://{host}/{locale}/recipes/123-fixture/", "external_id": "123"}}
+
+    def response(self, source, *, yield_text="4", ingredients=None):
+        from recipe_import_sources import _source_result
+        from recipe_import_readers import read_webpage
+        raw = {"@context": "https://schema.org/", "@type": "Recipe", "name": source["name"],
+            "recipeYield": yield_text, "recipeIngredient": ingredients or ["200 g ris", "1 msk olja", "2 st tomater"],
+            "recipeInstructions": ["Prepare this synthetic dinner."], "author": {"@type": "Person", "name": "Synthetic Author"}}
+        html = '<script type="application/ld+json">' + json.dumps(raw) + '</script>'
+        page_result = read_webpage(html, source_url=source["source"]["url"])
+        page_result["recipes"] = [_source_result(row, {"kind": "web", "url": source["source"]["url"]}) for row in page_result["recipes"]]
+        return page_result
+
+    def test_verified_portions_and_swedish_measures_keep_wording_and_exact_scale(self):
+        from retailer_recipes import retail_web_recipe_input
+        from recipes import normalize_recipe, bind_recipe_source, scale_recipe
+        source = self.source()
+        raw = ["200 g ris", "0,5 msk olja", "1 tsk salt", "2 krm peppar", "2 st tomater", "1 klyfta vitlök"]
+        with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=raw)) as fetch:
+            candidate = retail_web_recipe_input(source, "mathem")
+        fetch.assert_called_once_with(source["source"]["url"])
+        normalized = normalize_recipe(bind_recipe_source(candidate, provider="mathem"))
+        self.assertEqual(normalized["portions"], 4)
+        self.assertEqual(normalized["portions_evidence"]["input"], "4")
+        self.assertEqual([row["original_text"] for row in normalized["ingredients"]], raw)
+        self.assertIsNone(normalized["ingredients"][-1]["quantity"])
+        self.assertEqual(normalized["source"]["author"], "Synthetic Author")
+        scaled = scale_recipe(normalized, 2)
+        quantities = [item["quantity"] for item in scaled["shopping_requirements"]]
+        self.assertEqual((scaled["shopping_requirements"][1]["unit"], quantities[1]), ("ss", {"numerator": 1, "denominator": 4}))
+        self.assertEqual(normalized["source_provider"], "mathem")
+
+    def test_wrong_origin_identity_query_or_budget_never_fetches(self):
+        from copy import deepcopy
+        import time
+        from retailer_recipes import retail_web_recipe_input
+        source = self.source()
+        with mock.patch("recipe_import_sources.fetch_public_webpage") as fetch:
+            for changes in ({"url": "https://oda.com/no/recipes/123-fixture/"}, {"external_id": "999"},
+                            {"url": source["source"]["url"] + "?portions=8"}, {"url": "https://www.mathem.se@evil.example/se/recipes/123-fixture/"}):
+                altered = deepcopy(source); altered["source"].update(changes)
+                with self.subTest(changes=changes), self.assertRaises(HouseholdError):
+                    retail_web_recipe_input(altered, "mathem")
+            with self.assertRaisesRegex(HouseholdError, "budget"):
+                retail_web_recipe_input(source, "mathem", deadline=time.monotonic())
+        fetch.assert_not_called()
+
+    def test_ambiguous_changed_and_unknown_portions_are_not_materialized(self):
+        from copy import deepcopy
+        from retailer_recipes import retail_web_recipe_input
+        source = self.source()
+        valid = self.response(source)
+        wrong_title = deepcopy(valid); wrong_title["recipes"][0]["candidate"]["name"] = "Another recipe"
+        cases = [None, {"recipes": [], "requires_interpretation": True}, {**valid, "recipes": valid["recipes"] * 2},
+                 wrong_title, self.response(source, yield_text="2 loaves"), self.response(source, yield_text="0")]
+        for response in cases:
+            with self.subTest(response=response), mock.patch("recipe_import_sources.fetch_public_webpage", return_value=response), self.assertRaises(HouseholdError):
+                retail_web_recipe_input(source, "mathem")
+
+    def test_application_detail_is_bound_cached_and_does_not_save_a_personal_recipe(self):
+        import tempfile
+        from core import StateStore
+        from service import Application
+        from recipe_sources import provider_recipe_candidates
+        for provider in ("oda", "mathem"):
+            source = self.source(provider)
+            class Provider:
+                def probe(self, **kwargs):return {"protocol_version":"fixture","server":{"name":"synthetic"},"tool_count":0}
+                def call(self, *args, **kwargs):raise AssertionError("public details must not use provider credentials")
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                app = Application(StateStore(Path(directory), {"instance":"detail","household":"Detail test","provider":provider,"profile_overrides":{}}), Provider(), None)
+                with app.store.locked() as state:state["profile"]["recipes"]["sources"][provider] = True
+                rows = provider_recipe_candidates(provider, {"recipes":[{"id":123,"url":source["source"]["url"],"title":source["name"]}]}, limit=1)
+                old = app.recipes.persist_discovery(rows[0])
+                with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=["200 g ris"])) as fetch:
+                    detailed = app.handle({"operation":"recipes","action":"detail","discovery_ref":old["discovery_ref"]})
+                    replay = app.handle({"operation":"recipes","action":"detail","discovery_ref":old["discovery_ref"]})
+                self.assertEqual(fetch.call_count, 1)
+                self.assertEqual(detailed["discovery_ref"], replay["discovery_ref"])
+                self.assertNotEqual(old["discovery_ref"], detailed["discovery_ref"])
+                self.assertEqual(detailed["recipe"]["source"]["external_id"], "123")
+                self.assertEqual(detailed["recipe"]["source_provider"], provider)
+                self.assertEqual(detailed["recipe"]["portions"], 4)
+                self.assertEqual(app.recipes.search(), [])
+                self.assertEqual(app.recipes.resolve_discovery(old["discovery_ref"])["recipe"]["rights"]["storage"], "link_only")
+
+    def test_automatic_menu_resolves_native_search_hit_and_scales_once(self):
+        import tempfile
+        from core import StateStore
+        from service import Application
+        from product_planner import menu_requirements
+        for provider in ("oda", "mathem"):
+            source = self.source(provider)
+            class Provider:
+                def probe(self, **kwargs):return {"protocol_version":"fixture","server":{"name":"synthetic"},"tool_count":1}
+                def call(self, name, args, **kwargs):
+                    if name != "recipe_search":raise AssertionError(name)
+                    return {"recipes":[{"id":123,"title":source["name"],"url":source["source"]["url"]}],"hasMore":False}
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                app = Application(StateStore(Path(directory), {"instance":"menu-detail","household":"Synthetic","provider":provider}), Provider(), None)
+                with app.store.locked() as state:
+                    state["setup"]["status"] = "complete"
+                    state["profile"]["recipes"]["sources"] = {key:key==provider for key in state["profile"]["recipes"]["sources"]}
+                with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=["200 g ris"])) as fetch:
+                    plan = app.handle({"operation":"menu","action":"plan","planner_input":{
+                        "week":"2026-W37","dates":["2026-09-07"],"portions":2}})["plan"]
+                    self.assertEqual(plan["status"], "planned")
+                    menu = app.handle({"operation":"menu","action":"save","planner_ref":plan["save_ref"]})["menu"]
+                self.assertEqual(fetch.call_count, 1)
+                needs, unresolved = menu_requirements(menu)
+                self.assertFalse(unresolved)
+                self.assertEqual(len(needs), 1)
+                self.assertEqual(needs[0]["quantity"], {"numerator":100,"denominator":1})
+                self.assertEqual(app.recipes.search(), [])

@@ -28,8 +28,8 @@ Bounded refill must preserve this limitation rather than inventing pagination.
 | Provider | Detail evidence | Native portions, associations and bulk recipe cart | Fallback |
 |---|---|---|---|
 | MENY | Public page JSON-LD observed 2026-09-06; authenticated adapter acceptance pending | No integration contract established; adapter reports unsupported | Base ingredients, shared exact scaling and ordinary product matching through the integrated private boundary |
-| Oda | Authenticated MCP 1.1.0 discovery on 2026-09-07: recipe search metadata only; bounded recipe read was unavailable | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no detail or exact product-expansion preview tool is exposed | Link handoff; explicit product matching and journalled product deltas for an independently available eligible recipe |
-| Mathem | Authenticated MCP 1.1.0 discovery and two-result recipe search on 2026-09-07: IDs, titles, links and timing metadata; no ingredients, method or yield | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no detail or exact product-expansion preview tool is exposed | Link handoff; explicit product matching and journalled product deltas for an independently available eligible recipe |
+| Oda | Authenticated MCP 1.1.0 tool discovery; bounded recipe search was unavailable. Public recipe-page detail verified through Application on 2026-09-07 | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no exact product-expansion preview tool is exposed | Exact public page, shared scaling, product matching and journalled product deltas; unresolved details retain a source link |
+| Mathem | Authenticated MCP 1.1.0 search with integer IDs and exact links; two corresponding public recipe pages verified through Application on 2026-09-07 | `manipulate_cart` accepts `recipeId` and `fromRecipePortions`, but no exact product-expansion preview tool is exposed | Exact public page, shared scaling, product matching and journalled product deltas; unresolved details retain a source link |
 
 Both MCP discoveries returned 25 tools through the existing authenticated
 provider client and its ordinary provider lock. Native recipe addition is an
@@ -44,9 +44,30 @@ Oda/Mathem compact discovery consumes their observed `page` (1–50), `size`
 page size. Only explicit `hasMore: false` establishes query exhaustion; missing
 or malformed metadata, unrepresentable rows (including nullable recipe URLs),
 oversized pages, and the page-50 bound do not. These incomplete results cannot
-authorize automatic AI generation. This
-adds no detail contract and cannot make link-only results menu-ready. Automatic
+authorize automatic AI generation. Search metadata alone does not make a
+link-only result menu-ready; details must resolve successfully. Automatic
 selection retains its six-page, 80-detail and 30-second source-search budgets.
+
+Oda/Mathem details reuse the existing unauthenticated HTTPS reader with pinned
+public DNS, TLS verification, size/time limits and no redirects. No credentials,
+embedded links, images or contexts are fetched. The exact provider host, locale,
+numeric recipe ID in the URL and searched title must agree. One structured
+Recipe is required. Observed numeric `recipeYield` supplies base portions on
+these retailer pages; other shapes fail explicitly. Swedish `st`, `tsk`, `msk`
+and `krm` are interpreted as count, 5 ml, 15 ml and 1 ml respectively while
+preserving source wording. Cloves, handfuls and other unresolved amounts remain
+unknown; they are never guessed into whole-product counts.
+
+The observed pages include [Mathem 2713](https://www.mathem.se/se/recipes/2713-mari-bergman-pasta-allamatriciana/),
+[Mathem 6953](https://www.mathem.se/se/recipes/6953-samarbete-pasta-amatriciana/)
+and [Oda 5050](https://oda.com/no/recipes/5050-silje-feiring-kremet-pasta-med-sopp/).
+All expose four base portions. The Application read verified exact private
+source binding, scaling to two portions, replay from the same cached snapshot
+and zero personal saves. Mathem used links from a fresh authenticated search;
+Oda used a known public URL, not a successful authenticated search. This is
+public-page detail acceptance, not authenticated website or purchase acceptance.
+The Swedish measures agree with [Mathem's measuring-set specification](https://www.mathem.se/se/products/7170-gastromax-mattsats/).
+Tests retain only invented text with these observed shapes.
 
 The exact [MENY reference page](https://meny.no/oppskrifter/pasta/hjemmelaget-lasagne)
 returned one `application/ld+json` Recipe object with `recipeIngredient` and
@@ -56,7 +77,7 @@ invented recipe text in these observed shapes. No store recipe collection or
 private account/basket response is included. This public HTTP observation is
 not evidence of an authenticated browser read.
 
-Only the observed explicit person-count format supplies person servings.
+For MENY, only the observed explicit person-count format supplies person servings.
 Other yield text remains preserved with unresolved servings. Ingredient text
 uses the shared source parser: supported explicit measures become exact
 quantities; residual text stays unresolved. Base quantities are never adjusted

@@ -376,7 +376,10 @@ def provider_recipe_candidates(provider: str, value: Any, limit: int) -> list[di
         if not isinstance(row, Mapping):
             continue
         name = _text(row.get("name") or row.get("title"), maximum=300)
-        external_id = _text(row.get("recipe_id") or row.get("id"), maximum=300)
+        raw_id = row.get("recipe_id") or row.get("id")
+        if type(raw_id) is int and 0 < raw_id < 10 ** 300:
+            raw_id = str(raw_id)
+        external_id = _text(raw_id, maximum=300)
         url_value = row.get("recipe_url") or row.get("url")
         try:
             url = normalize_source_url(url_value)

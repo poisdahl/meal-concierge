@@ -261,10 +261,12 @@ use requires that provider; explain a mismatch without switching configuration.
 Do not falsely relabel originals as adapted. Private storage does not authorize
 public redistribution. Keep store text/images out of public packs and exports;
 private backups preserve them. The owner remains responsible for source terms.
-An existing full snapshot may be used without a personal save. For a MENY search
-snapshot, discovery action `detail` takes its exact discovery_ref and returns a
-new frozen normalized ref with verified website quantities. Oda/Mathem detail
-support remains unavailable until a verified reader exists; never invent it.
+An existing full snapshot may be used without a personal save. For a MENY, Oda
+or Mathem search snapshot, discovery action `detail` takes its exact
+discovery_ref and returns a new frozen normalized ref with verified website
+quantities. Oda/Mathem use public structured pages; MENY uses its existing
+browser adapter. Unresolved measures remain unresolved, and native recipe
+cart expansion is unavailable. Scale the stated base portions only once.
 Do not start new external updates, favorites, labels or lifecycle actions. Retain exact legacy operation IDs, keys and request content for recovery.
 
 `meal_concierge_recipe_favorite` sets an explicit desired state on an exact ref.
