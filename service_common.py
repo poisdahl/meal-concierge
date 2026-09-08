@@ -15,6 +15,7 @@ import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from oda_browser import delivery_signature as oda_delivery_signature
 from core import HouseholdError, cart_summary, validate_delivery_slot
+from recipe_quantities import quantity_text
 from recipes import RecipeError, evidence_inputs, normalize_source_url, validate_week
 
 MAX_REQUEST = 2 * 1024 * 1024
@@ -222,6 +223,14 @@ def menu_digest(menu: Mapping[str, Any]) -> str:
     import hashlib
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
+def format_portions(value: Any) -> str:
+    try:
+        return quantity_text(value)
+    except ValueError:
+        # Legacy schedules can contain free-text portion descriptions.
+        return str(value or "")
+
+
 def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None) -> str:
     escape = lambda value: html.escape(str(value or ""))
 
@@ -366,7 +375,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             if isinstance(item, Mapping):
                 day = escape(item.get("day"))
                 meal = escape(item.get("meal") or item.get("action"))
-                portions = escape(item.get("portions"))
+                portions = escape(format_portions(item.get("portions")))
                 suffix = f" ({portions} porsjoner)" if portions else ""
                 parts.append(f"<li><strong>{day}</strong>: {meal}{suffix}</li>")
         parts.append("</ul>")
@@ -379,8 +388,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         parts.append(f"<p>Oppbevaring/gjenoppvarming: {escape(str(guidance))}. Egnethet: {escape(str(batch.get('suitability', {})))}</p>")
         prepared = batch["prepared_portions"]
         consumed = batch["consumed_at_source"]
-        parts.append(f"<p><strong>Planlagt batch:</strong> {escape(str(prepared['numerator'])+'/'+str(prepared['denominator']))} porsjoner totalt, "
-                     f"{escape(str(consumed['numerator'])+'/'+str(consumed['denominator']))} ved kildemåltidet. Oppskriften nedenfor viser grunnporsjonene. "
+        parts.append(f"<p><strong>Planlagt batch:</strong> {escape(format_portions(prepared))} porsjoner totalt, "
+                     f"{escape(format_portions(consumed))} ved kildemåltidet. Oppskriften nedenfor viser grunnporsjonene. "
                      "Restemåltidene er planlagte avhengigheter, ikke bekreftet beholdning eller garanti for mattrygghet.</p>")
     for heading, recipes in (("Middager", menu.get("dishes")), ("Salater", menu.get("salads"))):
         if not isinstance(recipes, list) or not recipes:
@@ -389,7 +398,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         for recipe in recipes:
             if not isinstance(recipe, Mapping):
                 continue
-            portions_text = f"{recipe['portions']} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
+            portions_text = f"{format_portions(recipe['portions'])} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
             portion_evidence = recipe.get("portions_evidence") or {}
             if portion_evidence.get("basis") == "estimate":
                 if portion_evidence.get("acceptance"):
