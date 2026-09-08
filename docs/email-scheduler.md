@@ -5,6 +5,9 @@ A native scheduler owns its timer and invokes the existing service; it does
 not start another household daemon. Every email remains bound to its original
 provider, order, recipient and menu snapshot after a provider or menu change.
 
+See the [native acceptance matrix](scheduler-acceptance.md) for exact tested
+client versions, persistence/pause/timing evidence and sender limits.
+
 This is the Application, JSON CLI and native MCP contract. Native platform
 persistence, actual timer invocation and sender availability must be verified
 on the selected platform separately. Existing jobs without managed ownership
@@ -187,4 +190,7 @@ persistence. A sender on another host/container needs supported narrow asset
 transfer before it can claim inline-image support; client-local paths alone do
 not provide that access.
 
-Run the focused contract tests with `python tests/test_email_scheduler.py` from the product root, using the pinned test environment described in the [README](../README.md).
+Run the focused contract tests with
+`python integrations/meal-concierge/tests/test_email_scheduler.py` in the
+private repository, or `python tests/test_email_scheduler.py` in the exported
+product. The shared-code validation profile is `scripts/validate.py fleet`.
