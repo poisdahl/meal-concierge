@@ -132,8 +132,9 @@ been exercised. Local tests cover guarded Application preparation, final DOM
 drift and lost-response reconciliation. Native Mathem ordering, a recovery-assisted
 addition, free delivery confirmation after scoped UI preparation and cancellation
 are recorded in [acceptance](acceptance.md), separately from those local tests.
-Bank authorization, charge, refund and release remain unknown. Final
-published-release verification remains tracked in #50.
+Bank authorization, charge, refund and release remain unknown. Published-source
+installation, preserved data and final native reconnect are verified in that
+acceptance record.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths

@@ -29,7 +29,7 @@ provider outcome.
 
 | Feature | Served tools or normal path | Current evidence | Remaining boundary |
 |---|---|---|---|
-| Setup, status and continuity | `status`, `setup`, `profile`; installer, service/bridge restart | `test_installer.py`, `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`; 15 native Bob prerequisite conversations; normal Mathem external-manager install/upgrade and installed SDK checks below | Install/upgrade, dedicated authenticated profile and connected native Mathem setup-to-order are verified below; final published-source acceptance remains open |
+| Setup, status and continuity | `status`, `setup`, `profile`; installer, service/bridge restart | `test_installer.py`, `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`; 15 native Bob prerequisite conversations; normal Mathem external-manager install/upgrade and installed SDK checks below | Install/upgrade, dedicated authenticated profile and connected native Mathem setup-to-order are verified below; published-source installation and reconnect verified below |
 | Recipe search and details | `recipes`, `recipe_discovery` | `test_meal_concierge_recipes.py`, `test_meal_concierge_retailer_recipes.py`, `test_meal_concierge_recipe_selection.py`; native seven-day store scenarios below; authenticated MENY adapter search/detail and Oda/Mathem MCP search plus exact public details | Later Oda calls returned MCP internal error -32603; a repeat MENY search timed out rendering; no exact native bulk-cart preview exists |
 | Import and migration | `recipe_import`, `migration`; `import_recipes.py` | `test_recipe_import.py`, `test_meal_concierge_migration.py`; authenticated real Mealie 3.24.0 import and independent bank readback; prior scoped MC-07 extraction acceptance | New imports target builtin. RecipeSage source-account and further client/input acceptance remain unverified/deferred; fixture formats are documented separately |
 | Recipe writes, favorites and labels | `recipe_write`, `recipe_favorite`, `recipe_labels`, `recipe_lifecycle` | `test_meal_concierge_recipes.py`, `test_meal_concierge_private_recipes.py`, `test_meal_concierge_acceptance.py`; new builtin saves and exact original-operation recovery covered | External labels/lifecycle writes exist only for exact retained recovery, not new primary-library use |
@@ -130,7 +130,8 @@ write. This is transport and synthetic recovery evidence, not native shopping
 acceptance. A second isolated candidate, source digest
 `94b29cb9f2bd32c6d1a540bdb521143d8d1d12cca086f651c0ebf1afd09c6135`,
 passed fleet validation and verified all 143 deployed source files, unchanged
-state/database bytes and installed-client reconnect; purchase acceptance remains open.
+state/database bytes and installed-client reconnect. Purchase acceptance was still
+open at that preview stage; the later observed results are recorded below.
 
 The Mathem incomplete-order integration test uses seven dinners requiring
 14 eggs, rounded to three six-egg packages. After synthetic removal of one
@@ -210,7 +211,7 @@ future dates also normalized successfully, but no slot was selected. This was
 a direct Application/provider test, not the required connected model purchase
 conversation or proof of full browser/MCP account-identity binding.
 
-## Open provider acceptance
+## Provider acceptance and retained boundaries
 
 The authenticated recipe-read gate for #43 is now demonstrated and completes
 the remaining provider input to #41/#45. The native menu conversations and
@@ -218,11 +219,14 @@ seven-day cart fixtures above retain their synthetic provider scope; the new
 reads and the one-item cart probe do not turn them into real purchase acceptance. Provider availability
 failures remain explicit failures, not exhausted recipe sources.
 
-#50 remains open. The original native Mathem order and local notices below are
-observed effects. The first addition payment failed; one separately scoped operator-assisted
-recovery later produced the exact accepted addition, with both attempts retained. The free delivery change and cancellation are accepted as described below.
-Final integrated reviews and published-source installation verification remain
-open. Earlier cart/checkout reads and the unverified old reservation release are
+The #50 Mathem implementation, observed order follow-ups and published-source
+installation are verified within the recorded scope below. The first addition
+payment failed; one separately scoped operator-assisted recovery produced the
+exact accepted addition, with both attempts retained. Free delivery change and
+cancellation are accepted with their stated preparation and payment limits.
+The owner explicitly excluded README and client-install guides from this task;
+those files were preserved, and this matrix, reference and maintained skill
+record the current provider behavior. Earlier cart/checkout reads and the unverified old reservation release are
 retained as historical evidence; they are not repeated or upgraded into success.
 
 MC-08 remains complete in its recorded scope. The remaining cross-client
@@ -260,7 +264,8 @@ used candidate06, source digest
 Addition reconciliation used candidate09: public `a677466e` plus nine task-owned
 runtime overlays, with 143-file source digest
 `824175836e0977ab03b9ed283ae3dd6528b17f9e4cd225dfe667d5f29b567cc6`.
-These isolated candidate bytes have not yet been published as the final feature release.
+These were isolated validation candidates at the time of the conversations;
+the final published-source verification is recorded below.
 Bob retained its normal Oda gateway and the scoped CLI used the Mathem socket.
 
 The model applied the complete approved product plan once: 12 products and 17
@@ -385,3 +390,55 @@ absence acknowledged to the same scheduler binding. Unit sources, occurrence,
 notices and all other household state were preserved. An initial cleanup check
 stopped before mutation because systemd reported the symlink path instead of
 its resolved source; that failed observation remains recorded.
+
+
+## Published source and runtime verification — 2026-09-08
+
+Feature revision `b8cc15f3cbaa54fc86d14d1c921e69da6c423503` was published after
+independent correctness and adversarial FINAL APPROVE of the exact change and
+bounded candidate evidence. All 143 files downloaded from GitHub's revision
+archive matched the approved public checkout; source-manifest digest:
+`b54c51135578b112e799c51294093d0e89f42516ec26d491c84fd204f0e8a8b8`.
+The final image and dedicated Mathem service verified these same 143 files,
+both original state/database files, unchanged configuration and installed-client
+reconnect. The first upgrade precheck stopped before build or service mutation
+because successful cancellation had normally removed the menu's active order
+reference. Its continuation checked the retained cancellation confirmation and
+draft menu; no order effect was replayed.
+
+Bob's normal MCP/skill mount and Oda sidecar were then upgraded to this exact
+published release. Bob retained its Hermes image, normal Oda socket and trusted
+configuration. All 143 source files in both containers matched, both installed
+Oda and Mathem SDK connections discovered 27 tools and completed status, and Bob
+was healthy. All 1,577 existing Oda state/database/assets/metadata files were
+byte-identical after update. The dedicated Mathem service, shared browser and
+Signal container identities/start times were unchanged during this Bob upgrade.
+
+Bob's authorized stop returned exit1 without OOM; the deployment stopped before
+configuration replacement. The stopped identities, absence of pending work and
+database recovery journals, unchanged original Compose and exported source
+were independently checked before completing only the unrun replacement. The
+first deployment journal and its stop result remain preserved. This continuation
+did not replay a stop, order or payment and did not restore older household state.
+
+
+The retained unauthenticated Mathem installation completed a normal stopped
+`install.sh update` from the published image. Its actual 52 staged runtime/skill
+files matched the public archive. Configuration, household state and all 1,576
+recipe/database/assets/metadata files were unchanged, retaining the 4,599 recipe
+IDs and versions. The normal service ran and the installed SDK discovered all
+27 tools and completed status. The immediate post-stop ownership check failed;
+a later ordinary acquisition of the same locks verified natural release and
+unchanged data. No locks were removed and neither update nor service execution
+was repeated. Original failed-cleanup journals remain, alongside the separate
+verified completion. The task-only fixture container is stopped and retained.
+
+Finally, the same ordinary Hermes conversation used the newly installed public
+skill and MCP for four read-only calls: status, schedule, cart and the exact
+cancelled test order. The persisted results verified Mathem guarded checkout,
+disabled/removed scheduling, an empty cart with no delivery and the cancelled
+582.51 SEK order. The final model reply retained unknown bank outcomes and
+matched these results (CLI exit0; reply SHA256
+`4f7d38f988d52d8d0cb754a433c455f66214db60cdf152bb048f3b267a0c7156`).
+The owned temporary noVNC SSH forward was stopped; browser, proxy and VNC
+services were unchanged.
