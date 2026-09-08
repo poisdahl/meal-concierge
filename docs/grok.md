@@ -129,11 +129,16 @@ visible source URL and credit; do not replace missing details with â€œsee aboveâ
 Keep source failures, unknown prices and unfinished checkout explicit. This
 does not certify mobile layout, automatic splitting or another delivery surface.
 
-A native read-only routine retained its configuration across pause/resume and
-completed one scheduled run; its start was about 66 seconds after the calculated
-due time. An earlier occurrence had no observed run. Verify actual run history
-and keep unknown outcomes explicit; pause suppression and sleep/wake recovery
-are not established by those observations.
+Require an explicit result in the intended conversation and verify its actual
+menu reference and digest. A control with native start/final messages and one
+saved-menu read passed. Measure scheduling delay separately from work time;
+`Succeeded` alone does not establish delivery. Cursor support has documented
+[queue and report-delivery issues](https://forum.cursor.com/t/grok-bot-routines-dont-auto-run-on-schedule/170358/5).
+After a completed routine, [asking in chat can surface a held report](https://forum.cursor.com/t/grok-bot-routine-marks-succeeded-but-never-posts-a-chat-bubble/169841/6);
+do not repeat an uncertain operation. An app-closed control also had reported
+execution/read timestamps before reopening; its result was visible on reopening
+before any new chat message. Configuration survived pause/resume. Scheduler
+reliability, causal pause suppression and VM sleep/wake recovery remain unverified.
 
 Guided installation, original text/photo/PDF import, pooled seven-day planning
 and same-MCP reconnect after a controlled service restart have passed on the
