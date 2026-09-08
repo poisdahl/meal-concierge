@@ -27,7 +27,8 @@ Cancellation uses its own fresh exact-order review. Pass both its exact
 uses `cancel_reconcile` with that same confirmation ID. For a delivery change, begin
 the exact order edit with an empty cart, select an exact available free window,
 then prepare and confirm its zero-payable review. Goods and order total must
-remain unchanged. Unavailable windows and paid/refund-bearing changes stay manual. Weekly auto-checkout requires the same configured
+remain unchanged. This is the current implementation limit, not a proven store
+restriction. Unavailable windows and paid/refund-bearing changes stay manual. Weekly auto-checkout requires the same configured
 browser, standing/fresh policy, dietary permissions and amount/delivery guards.
 A missing or changed prerequisite stops the attempt. Confirm purchase only when
 its bound submit/reconcile returns `confirmed=true`; Mathem receipt reconciliation
@@ -519,7 +520,10 @@ unchanged goods/order total and zero additional payment. A provider-reported tex
 deadline is retained verbatim; do not invent an ISO date or year. Never promise
 that every item can be removed, replaced or refunded. Preserve an unconfirmed
 Mathem attempt and its payment page; neither an empty cart nor an unchanged
-original order authorizes restaging or another payment.
+original order authorizes restaging or another payment. A merchant-reported
+failure is distinct from unknown effect and from an explicit platform approval.
+The product has no verified automatic failed-addition payment recovery yet;
+retain the original attempt and do not use an external helper as a substitute.
 
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as

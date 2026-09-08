@@ -106,8 +106,9 @@ class FakeOda:
         if tool == "get_order":
             for order in self.orders:
                 if str(order.get("orderNumber") or order.get("order_number")) == str(arguments["order_number"]):
-                    return deepcopy(order)
-            return {"order_number": arguments["order_number"], "subtotal": 35.0, "delivery_date": self.order_delivery}
+                    # Current Oda MCP 1.1.0 requires currency in get_order.
+                    return {"currency": "NOK", **deepcopy(order)}
+            return {"order_number": arguments["order_number"], "currency": "NOK", "subtotal": 35.0, "delivery_date": self.order_delivery}
         if tool == "order_tracking":
             return {"order_id": arguments["order_number"], "status": self.tracking}
         if tool == "get_delivery_slots":
@@ -962,10 +963,10 @@ class CoreTestsBase:
             OdaBrowser._cart_expectation({**cart, "productQuantityCount": 2})
 
     def test_oda_order_product_count_is_exact_and_bounded(self):
-        self.assertEqual(OdaBrowser._order_product_count({"productQuantityCount": 26}), 26)
+        self.assertEqual(OdaBrowser._order_product_count({"products": [{"quantity": 26.0}]}), 26)
         for count in (None, True, 0, 1.5, "26", 1_000_001):
-            with self.subTest(count=count), self.assertRaisesRegex(HouseholdError, "product count is unavailable"):
-                OdaBrowser._order_product_count({"productQuantityCount": count})
+            with self.subTest(count=count), self.assertRaises(HouseholdError):
+                OdaBrowser._order_product_count({"products": [{"quantity": count}]})
 
     def test_checkout_product_identity_rejects_a_different_package_size(self):
         expected = [{"identity": product_identity("Karbonadedeig", "350 g", "Testmerke"), "quantity": 1}]
@@ -1051,10 +1052,13 @@ class CoreTestsBase:
                 self.assertFalse(meny_order_matches_checkout({**order, "deliverySlotDisplay": invalid_delivery}, summary))
 
     def test_oda_addition_reconcile_requires_exact_baseline_plus_additions(self):
-        before = {"grossAmount": 100.0, "deliveryDate": "2026-09-05", "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00", "products": [{"product": {"id": 10, "name": "Pasta"}, "quantity": 1, "totalGrossAmount": "100.00"}]}
-        after = {"grossAmount": 125.0, "deliveryDate": "2026-09-05", "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00", "products": before["products"] + [{"product": {"id": 20, "name": "Såpe"}, "quantity": 1, "totalGrossAmount": "25.00"}]}
+        before = {"currency": "NOK", "grossAmount": 100.0, "deliveryDate": "2026-09-05", "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00", "products": [{"product": {"id": 10, "name": "Pasta"}, "quantity": 1, "totalGrossAmount": "100.00"}]}
+        after = {"currency": "NOK", "grossAmount": 125.0, "deliveryDate": "2026-09-05", "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00", "products": before["products"] + [{"product": {"id": 20, "name": "Såpe"}, "quantity": 1, "totalGrossAmount": "25.00"}]}
         additions = {"total": 25.0, "items": [{"product_id": "20", "quantity": 1}]}
         self.assertTrue(oda_order_matches_addition(before, after, additions))
+        for currency in (None, "SEK"):
+            self.assertFalse(oda_order_matches_addition({**before, "currency": currency}, after, additions))
+            self.assertFalse(oda_order_matches_addition(before, {**after, "currency": currency}, additions))
         self.assertFalse(oda_order_matches_addition(before, {**after, "grossAmount": 124.0}, additions))
         self.assertFalse(oda_order_matches_addition(before, {**after, "deliveryDate": "2026-09-12", "deliverySlotDisplay": "Lør 12. sep 18:00 - 20:00"}, additions))
 
@@ -1321,6 +1325,7 @@ class CoreTestsBase:
             "delivery": {"display": "Hjemlevering mellom kl 07 og 13, 3. sep", "address": "Eksempelveien 1"},
         }
         order = {
+            "currency": "NOK",
             "grossAmount": 35.0,
             "deliveryDate": "2026-09-03",
             "deliverySlotDisplay": "Tor 3. sep 07:00 - 13:00",
@@ -1328,6 +1333,8 @@ class CoreTestsBase:
             "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}],
         }
         self.assertTrue(order_matches_checkout(order, summary))
+        for currency in (None, "SEK"):
+            self.assertFalse(order_matches_checkout({**order, "currency": currency}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliveryAddress": "Wrongveien 9"}, summary))
         self.assertFalse(order_matches_checkout({key: value for key, value in order.items() if key != "deliveryAddress"}, summary))
 
@@ -6741,11 +6748,11 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(self.store.read()["order_change"])
 
     def test_oda_addition_requires_date_and_slot_delivery_identity(self):
-        before = {
+        before = {"currency": "NOK",
             "grossAmount": 100.0,
             "products": [{"product": {"id": 10, "name": "Pasta"}, "quantity": 1, "totalGrossAmount": "100.00"}],
         }
-        after = {
+        after = {"currency": "NOK",
             "grossAmount": 135.0,
             "products": [
                 *before["products"],

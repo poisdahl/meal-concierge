@@ -2651,9 +2651,9 @@ class OrderOperations:
                 and authorized_delta is not None
                 and current_total == before_total + authorized_delta
             )
-            if self.provider == "mathem":
-                matched = (matched and change["before"]["order"].get("currency") == current["order"].get("currency") == "SEK"
-                           and actual_date_value == self._delivery_slot_date(change["requested_delivery"]["slot"]))
+            currency = "SEK" if self.provider == "mathem" else "NOK"
+            matched = (matched and change["before"]["order"].get("currency") == current["order"].get("currency") == currency
+                       and actual_date_value == self._delivery_slot_date(change["requested_delivery"]["slot"]))
             fulfillable = status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
         else:
             matched = oda_order_matches_addition(change["before"]["order"], current["order"], pending["summary"], provider=self.provider)

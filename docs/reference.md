@@ -1689,6 +1689,13 @@ Use `change` for explicit additional quantity deltas. Both actions accept an
 active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
 
+The [Oda/Mathem evidence matrix](oda-mathem-parity.md) distinguishes earlier
+assisted acceptance from ordinary flows still requiring demonstration. Mathem
+delivery edits currently require zero payable and unchanged order total as a
+local implementation limit, not an established store restriction. Do not retry
+a failed or uncertain addition payment through a separate helper and describe
+that as product recovery.
+
 For existing orders, read/select the exact order and call `orders change_begin`
 first. Oda/Mathem live modifiability and MENY's enabled order-change controls
 decide whether editing is possible; no fixed local cutoff overrides the store.

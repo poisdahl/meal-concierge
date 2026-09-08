@@ -259,6 +259,13 @@ cannot later restart: disabling/retiring that old owner remains mandatory.
 
 ## Updates, failures and recovery
 
+When an Oda or Mathem MCP or website change is found, check the corresponding
+interface at both providers and consider a shared fix first. Record each
+provider's dated source/observation and result, including unchanged or unavailable.
+Keep separate identities and provider-specific behavior where evidence requires
+it; do not infer matching behavior from shared schemas or automatically deploy
+the other provider. See the [current parity evidence](oda-mathem-parity.md).
+
 ```sh
 ./install.sh stop --home /private/household
 ./install.sh backup --home /private/household --backup /private/backups/manual-copy

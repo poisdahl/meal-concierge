@@ -78,6 +78,169 @@ class MathemDietaryDetailTests(unittest.TestCase):
         self.assertEqual(set(result), {'source_url'})
 
 
+class SharedRetailOrderCountTests(unittest.TestCase):
+    def test_current_order_shapes_use_product_quantities(self):
+        # Independent authenticated 2026-09-08 reads from both MCP 1.1.0
+        # servers omit productQuantityCount. These small synthetic examples
+        # test the observed shape, not live purchase or service parity.
+        from oda_browser import OdaBrowser
+        samples = [(OdaBrowser, "NOK", [2.0, 1.0], 3),
+                   (MathemBrowser, "SEK", [1.0, 3.0], 4)]
+        for browser, currency, quantities, expected in samples:
+            order = {"currency": currency, "products": [{"quantity": q} for q in quantities]}
+            with self.subTest(provider=browser.checkout_provider):
+                self.assertEqual(browser._order_product_count(order), expected)
+                self.assertEqual(browser._order_product_count({**order, "productQuantityCount": expected}), expected)
+                for count in (True, expected + 1, str(expected)):
+                    with self.assertRaises(HouseholdError):
+                        browser._order_product_count({**order, "productQuantityCount": count})
+                for quantity in (True, 0, -1, 1.5, float("inf"), float("nan"), "2"):
+                    with self.assertRaises(HouseholdError):
+                        browser._order_product_count({"products": [{"quantity": quantity}]})
+                with self.assertRaises(HouseholdError):
+                    browser._order_product_count({"products": []})
+
+
+class SharedRetailReconciliationTests(unittest.TestCase):
+    def test_delivery_reconciliation_binds_full_date_and_currency(self):
+        from contextlib import contextmanager
+        from order_operations import OrderOperations
+        class Store:
+            def __init__(self, pending): self.state = {"pending_checkout": deepcopy(pending)}
+            @contextmanager
+            def locked(self): yield self.state
+        class Probe(OrderOperations):
+            def _orders(self, request): return deepcopy(self.current)
+            def _record_order_snapshot(self, *args): pass
+            def _store_protected_result(self, *args, **kwargs): pass
+        # Separate shapes/amounts/dates from each provider; synthetic adverse
+        # outcomes never interrupt a real payment or change a retailer order.
+        for provider, currency, day, display, total in [
+            ("oda", "NOK", "2026-09-12", "Hjemlevering mellom kl 09 og 12, 12. sep", 948.05),
+            ("mathem", "SEK", "2026-09-10", "Tor 10. sep 14:00 - 16:00", 582.51),
+        ]:
+            before = {"orderNumber": "synthetic-order", "currency": currency, "grossAmount": total,
+                      "deliveryDate": "2026-09-13", "deliverySlotDisplay": "13. sep 14:00 - 16:00",
+                      "deliveryAddressId": 7, "products": [{"product": {"id": 10}, "quantity": 2}]}
+            requested = {"display": display, "slot": {"slot_ref": provider + ":" + day + ":77",
+                         "provider_slot_id": 77, "start_at": day + ("T07:00:00Z" if provider == "oda" else "T12:00:00Z"),
+                         "end_at": day + ("T10:00:00Z" if provider == "oda" else "T14:00:00Z"), "price_ore": 0,
+                         "price_kind": "exact", "selected": True}}
+            pending = {"confirmation_id": "synthetic-confirmation", "status": "uncertain",
+                       "summary": {"items": [], "total": 0},
+                       "order_change": {"order_id": "synthetic-order", "before": {"order": before},
+                                        "requested_delivery": requested, "binding": {"receipt_address": "Synthetic"}}}
+            for drift in ({}, {"currency": "SEK" if provider == "oda" else "NOK"},
+                          {"currency": None}, {"deliveryDate": day.replace("2026", "2027")}):
+                with self.subTest(provider=provider, drift=drift):
+                    app = Probe(); app.provider = provider; app.store = Store(pending)
+                    app.browser = mock.Mock()
+                    app.current = {"order": {**before, "deliveryDate": day, "deliverySlotDisplay": display, **drift},
+                                   "tracking": {"order_id": "synthetic-order", "status": "paid_and_modifiable"}}
+                    result = app._order_change_reconcile(pending)
+                    self.assertEqual(result["confirmed"], not drift)
+                    self.assertFalse(result["retry_allowed"])
+                    self.assertEqual(app.store.state["pending_checkout"] is None, not drift)
+                    if drift: app.browser.read_order_binding.assert_not_called()
+
+
+
+class OdaPreparedDeliveryTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
+    def test_confirmation_does_not_reselect_and_rechecks_delivery_card_after_callback(self):
+        from oda_browser import OdaBrowser, _oda_delivery_change_surface_script, CHECKOUT_URL
+        from core import CheckoutPreconditionError
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser._checkout_deadline = None
+        browser._open_order = mock.Mock(side_effect=AssertionError('confirm must not navigate'))
+        current_page = None
+        def invoke(action, *args, **kwargs):
+            nonlocal current_page
+            self.assertEqual(action, 'close')  # Operation entry clears the page.
+            current_page = None
+        def open_review(url):
+            nonlocal current_page
+            self.assertEqual(url, CHECKOUT_URL + '?orderNumber=123456')
+            self.assertIsNone(current_page)
+            current_page = url
+        browser._open = mock.Mock(side_effect=open_review)
+        browser._settle = mock.Mock()
+        browser._invoke = mock.Mock(side_effect=invoke)
+        browser._expand_checkout_amount_summary = mock.Mock()
+        amounts = {'product_subtotal': 0, 'delivery_price': 19, 'discounts': None,
+                   'deposits': None, 'bags': None, 'other_fees': None, 'provider_total': 19}
+        browser._read_checkout_amounts = mock.Mock(return_value=amounts)
+        order = {'orderNumber': '123456', 'currency': 'NOK', 'grossAmount': '948.05',
+                 'deliverySlotDisplay': 'Hjemlevering mellom kl 14 og 16, 13. sep',
+                 'products': [{'quantity': 2}]}
+        delivery = {'slot_id': 77, 'display': 'Hjemlevering mellom kl 09 og 12, 12. sep'}
+        # Synthetic Oda DOM exercises control flow and guards. It is not a
+        # claim about the currently logged-out account's live payment layout.
+        harness = r"""
+const {script,change}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+class E {
+ constructor(tag,text='',children=[]){this.tag=tag;this.text=text;this.children=children;for(const c of children)c.parentElement=this;}
+ get innerText(){return this.text||this.children.map(c=>c.innerText).join('\n');}
+ getBoundingClientRect(){return {width:100,height:20};}
+ getAttribute(){return null;}
+ contains(n){return this===n||this.children.some(c=>c.contains(n));}
+ matches(s){return s==='*'||s===this.tag;}
+ querySelectorAll(s){return this.children.flatMap(c=>[...(s.split(',').some(x=>c.matches(x))?[c]:[]),...c.querySelectorAll(s)]);}
+ querySelector(s){return this.querySelectorAll(s)[0]||null;}
+ closest(s){return s.split(',').some(x=>this.matches(x))?this:this.parentElement?.closest(s)||null;}
+ click(){this.clicks=(this.clicks||0)+1;}
+}
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={href:'https://oda.com/no/checkout/confirm/?orderNumber='+(change==='order'?'999999':'123456')};
+const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00')]);
+const rows=[['2 varer','0,00 kr'],['Delsum','0,00 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','19,00 kr']];
+const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
+const pay=new E('button','Bekreft og betal 19,00 kr');pay.disabled=change==='disabled';
+global.document=new E('document','',[new E('body','',[delivery,new E('p',change==='card'?'•••• 5678':'•••• 1234'),summary,pay])]);document.body=document.children[0];
+if(change==='login'){const old=document.querySelector.bind(document);document.querySelector=s=>s==='input[type="password"]'?{}:old(s);}
+const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
+"""
+        def evaluate(script, change=None):
+            result = subprocess.run([shutil.which('node'), '-e', harness],
+                input=json.dumps({'script': script, 'change': change}), capture_output=True, text=True, check=True, timeout=10)
+            return json.loads(result.stdout)
+        surface = evaluate(_oda_delivery_change_surface_script(CHECKOUT_URL + '?orderNumber=123456'))['result']
+        review = browser._delivery_change_review('123456', order, delivery, surface)
+        # Real state serialization reorders dict keys. Values still match.
+        review = json.loads(json.dumps(review, sort_keys=True))
+        for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login'):
+            with self.subTest(drift=drift):
+                after_callback = False
+                calls = []
+                def before_click():
+                    nonlocal after_callback
+                    after_callback = True
+                def evaluate_current(script):
+                    self.assertEqual(current_page, CHECKOUT_URL + '?orderNumber=123456')
+                    result = evaluate(script, drift if after_callback else None)
+                    calls.append(result)
+                    return result['result']
+                browser._eval = evaluate_current
+                if drift:
+                    with self.assertRaises(CheckoutPreconditionError):
+                        browser.submit_delivery_change('123456', order, delivery, review, before_click)
+                else:
+                    browser.submit_delivery_change('123456', order, delivery, review, before_click)
+                self.assertEqual(sum(call['clicks'] for call in calls), 0 if drift else 1)
+                self.assertTrue(after_callback)
+                browser._open_order.assert_not_called()
+                browser._open.assert_called_with(CHECKOUT_URL + '?orderNumber=123456')
+        browser._eval = mock.Mock(return_value={'action': 'wait'})
+        callback = mock.Mock()
+        with self.assertRaises(CheckoutPreconditionError):
+            browser.submit_delivery_change('123456', order, delivery, review, callback)
+        callback.assert_not_called()
+        browser._eval = mock.Mock(side_effect=[surface, HouseholdError('lost response after final eval')])
+        with self.assertRaises(HouseholdError) as lost:
+            browser.submit_delivery_change('123456', order, delivery, review)
+        self.assertNotIsInstance(lost.exception, CheckoutPreconditionError)
+
+
 class MathemOrderIdentityTests(unittest.TestCase):
     def test_swedish_existing_order_addition_requires_exact_date_slot_goods_and_total(self):
         from service_common import oda_order_matches_addition

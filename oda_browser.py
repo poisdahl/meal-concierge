@@ -490,6 +490,25 @@ def clear_cancellation_cache(profile: Path | str) -> None:
                 os.close(profile_fd)
 
 
+def _oda_delivery_change_surface_script(expected_url: str) -> str:
+    return r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
+ const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
+ const controls=[...document.querySelectorAll('button,a,[role="radio"]')].filter(enabled);
+ const final=controls.filter(x=>/^(Bekreft og betal|Confirm and pay)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
+ if(location.href!==URL||final.length!==1||document.querySelector('input[type="password"]'))return JSON.stringify({action:'wait'});
+ {
+   const money=[...norm(final[0].innerText||final[0].getAttribute('aria-label')||'').matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(m=>Number(m[1].replace(/[ .]/g,''))*100+Number(m[2]));
+   const roots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText)==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean).map(x=>norm(x.innerText));
+   const text=norm(document.body?.innerText||''),payment=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/i);
+   return JSON.stringify({action:'ready',amounts:money,delivery_roots:roots,payment_display:payment?`•••• ${payment[1]}`:null,submit_controls:final.length});
+ }
+})()
+""".replace("URL", json.dumps(expected_url))
+
+
 class OdaBrowser:
     checkout_provider = "oda"
     checkout_url = CHECKOUT_URL
@@ -913,13 +932,7 @@ class OdaBrowser:
  const signature=text=>{const value=norm(text).toLocaleLowerCase('nb-NO'),d=value.match(/\b(\d{1,2})\.?\s*(jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\b/i),t=value.match(/\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|og|til)\s*(\d{1,2})(?::(\d{2}))?\b/i);return d&&t?[Number(t[1]),Number(t[2]||0),Number(t[3]),Number(t[4]||0),Number(d[1]),months[d[2]]]:null};
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
  const controls=[...document.querySelectorAll('button,a,[role="radio"]')].filter(enabled);
- const final=controls.filter(x=>/^(Bekreft og betal|Confirm and pay)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
- if(location.href===URL&&final.length===1){
-   const money=[...norm(final[0].innerText||final[0].getAttribute('aria-label')||'').matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(m=>Number(m[1].replace(/[ .]/g,''))*100+Number(m[2]));
-   const roots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText)==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean).map(x=>norm(x.innerText));
-   const text=norm(document.body?.innerText||''),payment=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/i);
-   return JSON.stringify({action:'ready',amounts:money,delivery_roots:roots,payment_display:payment?`•••• ${payment[1]}`:null,submit_controls:final.length});
- }
+ const review=JSON.parse(REVIEW);if(review.action==='ready')return JSON.stringify(review);
  const slots=controls.filter(x=>{const found=signature(x.innerText||x.getAttribute('aria-label')||'');return found&&JSON.stringify(found)===JSON.stringify(wanted)});
  if(!SELECTED){if(slots.length!==1)return JSON.stringify({action:'wait'});slots[0].setAttribute('data-oda-household-action','delivery-change-slot');return JSON.stringify({action:'slot'});}
  const next=controls.filter(x=>/^(Fortsett|Bekreft(?: levering)?|Gå til betaling)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
@@ -927,27 +940,10 @@ class OdaBrowser:
  next[0].setAttribute('data-oda-household-action','delivery-change-next');
  return JSON.stringify({action:'next'});
 })()
-""".replace("SIGNATURE", json.dumps(signature_value)).replace("URL", json.dumps(expected_url)).replace("SELECTED", "true" if selected else "false"))
+""".replace("REVIEW", _oda_delivery_change_surface_script(expected_url).strip()).replace("SIGNATURE", json.dumps(signature_value)).replace("URL", json.dumps(expected_url)).replace("SELECTED", "true" if selected else "false"))
                 action = surface.get("action")
                 if action == "ready":
-                    amounts = surface.get("amounts")
-                    roots = surface.get("delivery_roots")
-                    payment_display = str(surface.get("payment_display") or "")
-                    if not isinstance(amounts, list) or len(amounts) != 1 or not checkout_delivery_matches(target, roots) or re.fullmatch(r"•••• \d{4}", payment_display) is None or surface.get("submit_controls") != 1:
-                        raise HouseholdError("Oda delivery change review does not match the requested slot")
-                    self._expand_checkout_amount_summary()
-                    checkout_amounts = self._read_checkout_amounts(
-                        amounts[0], expected_product_count,
-                    )
-                    summary = {
-                        "items": [],
-                        "count": 0,
-                        "total": amounts[0] / 100,
-                        "delivery": {"slot_id": delivery.get("slot_id"), "display": target},
-                        "payment": payment_display,
-                        "amounts": checkout_amounts,
-                    }
-                    return {"page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"]}
+                    return self._delivery_change_review(order_id, order, delivery, surface)
                 if action == "slot":
                     if "slot" in dispatched:
                         raise HouseholdError("Oda delivery slot selection did not advance")
@@ -962,10 +958,45 @@ class OdaBrowser:
                 self._settle(0.5)
             raise HouseholdError("Oda delivery change navigation timed out")
 
+    def _delivery_change_review(self, order_id, order, delivery, surface):
+        expected_order = self._order_expectation(order_id, order)
+        expected_product_count = self._order_product_count(order)
+        target = str(delivery.get("display") or "")
+        if surface.get("action") != "ready":
+            raise HouseholdError("Oda prepared delivery review is unavailable; prepare it again")
+        amounts = surface.get("amounts")
+        roots = surface.get("delivery_roots")
+        payment_display = str(surface.get("payment_display") or "")
+        if not isinstance(amounts, list) or len(amounts) != 1 or not checkout_delivery_matches(target, roots) or re.fullmatch(r"•••• \d{4}", payment_display) is None or surface.get("submit_controls") != 1:
+            raise HouseholdError("Oda delivery change review does not match the requested slot")
+        self._expand_checkout_amount_summary()
+        checkout_amounts = self._read_checkout_amounts(
+            amounts[0], expected_product_count,
+        )
+        summary = {
+            "items": [],
+            "count": 0,
+            "total": amounts[0] / 100,
+            "delivery": {"slot_id": delivery.get("slot_id"), "display": target},
+            "payment": payment_display,
+            "amounts": checkout_amounts,
+        }
+        return {"page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"], "surface": surface}
+
     def submit_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
             try:
-                current = self.review_delivery_change(order_id, order, delivery)
+                expected_url = f"{CHECKOUT_URL}?orderNumber={order_id}"
+                surface_script = _oda_delivery_change_surface_script(expected_url)
+                # Each operation starts a fresh browser process. Reopen only
+                # the retained review; never repeat order-menu or slot actions.
+                self._open(expected_url)
+                for _ in range(20):
+                    surface = self._eval(surface_script)
+                    if surface.get("action") == "ready":
+                        break
+                    self._settle(0.25)
+                current = self._delivery_change_review(order_id, order, delivery, surface)
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
@@ -976,6 +1007,7 @@ class OdaBrowser:
                 before_click,
                 expected_product_count=self._order_product_count(order),
                 expected_amounts=review["summary"].get("amounts"),
+                review_surface=(surface_script, review["surface"]),
             )
 
     def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None) -> None:
@@ -1006,6 +1038,7 @@ class OdaBrowser:
         *,
         expected_product_count: int,
         expected_amounts: Any,
+        review_surface: tuple[str, Mapping[str, Any]] | None = None,
     ) -> None:
         try:
             self._require_checkout_time(FINAL_CLICK_MARGIN)
@@ -1030,6 +1063,15 @@ class OdaBrowser:
             expected_amounts=amounts_minor,
             expected_url=expected_url,
         )
+        if review_surface is not None:
+            surface_script, expected_surface = review_surface
+            # The review and amount checks run in the same browser turn as the
+            # only click, after before_click's fresh provider and expiry checks.
+            script = ("(() => {const actual=JSON.parse(" + surface_script.strip()
+                      + "),expected=" + json.dumps(expected_surface, ensure_ascii=False)
+                      + ";if(Object.keys(actual).length!==Object.keys(expected).length||"
+                      + "Object.keys(expected).some(k=>JSON.stringify(actual[k])!==JSON.stringify(expected[k])))"
+                      + "return JSON.stringify({clicked:false});return " + script.strip() + ";})()")
         if self._eval(script) != {"clicked": True}:
             raise CheckoutPreconditionError("Oda checkout button changed before click")
 
@@ -1306,16 +1348,19 @@ class OdaBrowser:
 
     @staticmethod
     def _order_product_count(order: Mapping[str, Any]) -> int:
-        count = order.get("productQuantityCount")
-        if (
-            isinstance(count, bool)
-            or not isinstance(count, (int, float))
-            or not math.isfinite(float(count))
-            or not float(count).is_integer()
-            or not 0 < int(count) <= 1_000_000
-        ):
-            raise HouseholdError("Oda order product count is unavailable")
-        return int(count)
+        products = order.get("products")
+        if not isinstance(products, list) or not products:
+            raise HouseholdError("Retail original order products are unavailable")
+        quantities = [item.get("quantity") if isinstance(item, Mapping) else None for item in products]
+        if any(isinstance(q, bool) or not isinstance(q, (int, float)) or not math.isfinite(q) or q != int(q) or not 0 < q <= 1000000 for q in quantities):
+            raise HouseholdError("Retail original order quantities are unavailable")
+        count = sum(int(q) for q in quantities)
+        if count > 1_000_000:
+            raise HouseholdError("Retail original order product count is unavailable")
+        supplied = order.get("productQuantityCount", count)
+        if isinstance(supplied, bool) or supplied != count:
+            raise HouseholdError("Retail original order product count changed")
+        return count
 
     @staticmethod
     def _cart_expectation(cart: Mapping[str, Any]) -> dict[str, Any]:
@@ -1769,19 +1814,6 @@ class MathemBrowser(OdaBrowser):
                 return binding
             self._settle(0.25)
         raise HouseholdError("Mathem browser and original order account do not match")
-
-    @staticmethod
-    def _order_product_count(order):
-        products = order.get("products")
-        if not isinstance(products, list) or not products:
-            raise HouseholdError("Mathem original order products are unavailable")
-        quantities = [item.get("quantity") if isinstance(item, Mapping) else None for item in products]
-        if any(isinstance(q, bool) or not isinstance(q, (int, float)) or not math.isfinite(q) or q != int(q) or not 0 < q <= 1000000 for q in quantities):
-            raise HouseholdError("Mathem original order quantities are unavailable")
-        count = sum(int(q) for q in quantities)
-        if count > 1_000_000:
-            raise HouseholdError("Mathem original order product count is unavailable")
-        return count
 
     def _addition_expectation(self, cart, order_id, order, binding):
         self._order_url(order_id)

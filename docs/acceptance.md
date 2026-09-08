@@ -1,5 +1,12 @@
 # Acceptance matrix
 
+The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
+recovery-assisted addition and UI-prepared delivery results below do not
+demonstrate the complete ordinary product flows. The [current Oda/Mathem
+matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
+fixes and the still-open native/payment/deployment criteria. Bank reconciliation
+is outside this acceptance.
+
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
 **82e64b8** on **2026-09-07**. A shared

@@ -499,7 +499,7 @@ def money_cents(value: Any) -> int | None:
     return int(round(scaled))
 
 def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any], *, provider: str = "oda") -> bool:
-    if provider == "mathem" and order.get("currency") != "SEK":
+    if order.get("currency") != ("SEK" if provider == "mathem" else "NOK"):
         return False
     products = order.get("products")
     if not isinstance(products, list):
@@ -736,7 +736,8 @@ def oda_order_address_identity(order: Mapping[str, Any]) -> str | None:
     return None
 
 def oda_order_matches_addition(before: Mapping[str, Any], after: Mapping[str, Any], additions: Mapping[str, Any], *, provider: str = "oda") -> bool:
-    if provider == "mathem" and (before.get("currency") != "SEK" or after.get("currency") != "SEK"):
+    currency = "SEK" if provider == "mathem" else "NOK"
+    if before.get("currency") != currency or after.get("currency") != currency:
         return False
     expected = oda_order_quantities(before)
     observed = oda_order_quantities(after)
