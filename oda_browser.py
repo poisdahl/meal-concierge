@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import calendar
 import hashlib
 import json
@@ -18,7 +20,7 @@ from typing import Any, Callable, Mapping
 import unicodedata
 from urllib.parse import quote
 
-from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary
+from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, validate_delivery_slot
 
 
 class OdaCheckoutMismatchError(HouseholdError):
@@ -45,14 +47,15 @@ ODA_CHECKOUT_AMOUNT_LABELS = {
 }
 MATHEM_CHECKOUT_AMOUNT_LABELS = {
     "discounted_subtotal": "Delsumma",
+    "discounts": "Du sparar",
     "bags": "Lådor",
     "delivery_price": "Leverans",
     "delivery_discount": "Gratis leverans",
     "other_fee": "Avgift för liten varukorg",
     "provider_total": "Totalt inkl. moms",
 }
-# Only the observed delivery credit is accepted for Mathem. An additional
-# product discount/deposit row must be verified before it can be submitted.
+# Observed product discounts and delivery credit are separate rows. Other
+# discounts or deposit rows still require their own verified provider contract.
 MATHEM_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vara|(?:0|[2-9]|[1-9]\d{1,6}) varor)")
 ODA_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:0|[1-9]\d{0,6}) varer")
 ODA_CHECKOUT_AMOUNT_KEYS = (
@@ -209,6 +212,7 @@ def _oda_checkout_amount_script(
    bags:states.bags.value,
    other_fees:states.other_fee.state==='absent'?null:{[amountLabels.other_fee]:states.other_fee.value},
    provider_total:states.provider_total.value,
+   ...(MATHEM_BREAKDOWN?{discount_breakdown:{product_discount:states.discounts.value,delivery_discount:states.delivery_discount.value}}:{}),
  };
  const optionalValid=[states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
  const signsValid=required.every(row=>row.value>=0)&&[states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
@@ -238,6 +242,7 @@ def _oda_checkout_amount_script(
         .replace("CURRENCY_CODE", "SEK" if provider == "mathem" else "NOK")
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
+        .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
         .replace(
             "EXPECTED_AMOUNTS",
             json.dumps(expected_amounts, ensure_ascii=False, separators=(",", ":")),
@@ -271,11 +276,11 @@ def _mathem_checkout_account_script(address_id: Any) -> str:
 """.replace("ADDRESS_ID", str(address_id))
 
 
-def _mathem_checkout_payment_script() -> str:
+def _mathem_checkout_payment_script(expected_url: str = "https://www.mathem.se/se/checkout/confirm/") -> str:
     """Read the selected saved-card identity from its own visible radio labels."""
     return r"""
 (() => {
- if(location.href!=='https://www.mathem.se/se/checkout/confirm/')return JSON.stringify({verified:false});
+ if(location.href!==EXPECTED_URL)return JSON.stringify({verified:false});
  const visible=e=>{const style=getComputedStyle(e),r=e.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&r.width>0&&r.height>0;};
  const selected=[...document.querySelectorAll('input[type="radio"]')].filter(e=>e.checked&&!e.disabled);
  if(selected.length!==1)return JSON.stringify({verified:false});
@@ -286,7 +291,48 @@ def _mathem_checkout_payment_script() -> str:
  if(cards.length!==1||texts.some(text=>/(?:\d[ -]?){12,19}/.test(text)))return JSON.stringify({verified:false});
  return JSON.stringify({verified:true,payment_kind:'saved_card',payment_display:'•••• '+cards[0]});
 })()
-"""
+""".replace("EXPECTED_URL", json.dumps(expected_url))
+
+
+def _mathem_addition_amount_script(expected: Mapping[str, Any], *, submit: bool = False) -> str:
+    """Observed Swedish existing-order overview; charge only the reviewed delta.
+
+    These four rows report the original order, added goods, amount due now and
+    combined order. They do not supply the new-order fee/discount breakdown.
+    """
+    return r"""
+(() => {
+ const expected=EXPECTED;
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ const failed=()=>JSON.stringify(SUBMIT?{clicked:false}:{amounts_valid:false});
+ if(location.href!==expected.checkout_url||document.querySelector('input[type="password"]'))return failed();
+ const money='(\\d+(?:[ .]\\d{3})*),(\\d{2})\\s*(?:kr|SEK)';
+ const values={},nodes=[...document.querySelectorAll('*')].filter(visible);
+ const specs=[['original','Ursprunglig beställning',true],['added','Varor tillagda i efterhand',true],['payable','Att betala nu',false],['combined','Totalsumma för beställning',true]].filter(([key])=>!expected.delivery_change||key!=='added');
+ if(expected.delivery_change&&(expected.total_minor!==0||expected.product_count!==0||nodes.some(e=>norm(e.innerText)==='Varor tillagda i efterhand')))return failed();
+ for(const [key,label,counted] of specs){
+  const labels=nodes.filter(e=>norm(e.innerText)===label).filter(e=>![...e.children].some(c=>visible(c)&&norm(c.innerText)===label));
+  if(labels.length!==1)return failed();
+  const pattern=new RegExp('^'+label+' '+(counted?'([1-9]\\d*) (vara|varor) ':'')+money+'$','i');
+  let row=labels[0].parentElement,match=null;
+  while(row&&row!==document.body){match=norm(row.innerText).match(pattern);if(match)break;row=row.parentElement;}
+  if(!match)return failed();
+  const offset=counted?3:1,minor=Number(match[offset].replace(/[ .]/g,''))*100+Number(match[offset+1]);
+  if(!Number.isSafeInteger(minor)||minor<0)return failed();
+  values[key+'_minor']=minor;
+  if(counted){const count=Number(match[1]);if(!Number.isSafeInteger(count)||count>1000000||(count===1)!==(match[2]==='vara'))return failed();values[key+'_count']=count;}
+ }
+ const wanted={original_minor:expected.original_minor,original_count:expected.original_count,...(expected.delivery_change?{}:{added_minor:expected.total_minor,added_count:expected.product_count}),payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
+ if(Object.keys(wanted).some(key=>values[key]!==wanted[key]))return failed();
+ const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s/.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
+ if(controls.length!==1)return failed();
+ const pay=norm(controls[0].innerText||controls[0].getAttribute('aria-label')||'').match(new RegExp('^Bekräfta och betala '+money+'$','i'));
+ if(!pay||Number(pay[1].replace(/[ .]/g,''))*100+Number(pay[2])!==values.payable_minor)return failed();
+ if(SUBMIT){controls[0].click();return JSON.stringify({clicked:true});}
+ return JSON.stringify({amounts_valid:true,order_amounts:values});
+})()
+""".replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False)).replace("SUBMIT", "true" if submit else "false")
 
 def _mathem_receipt_address_script(order_id: str, address: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None or not address.strip():
@@ -396,18 +442,23 @@ def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda
     return isinstance(roots, list) and len(roots) == 1 and isinstance(roots[0], str) and delivery_signature(expected, provider=provider) is not None and delivery_signature(expected, provider=provider) == delivery_signature(roots[0], provider=provider)
 
 
-def cancellation_delivery_matches(expected: str, lines: Any) -> bool:
-    signature = delivery_signature(expected)
-    return signature is not None and isinstance(lines, list) and len(lines) == 1 and isinstance(lines[0], str) and delivery_signature(lines[0]) == signature
+def cancellation_delivery_matches(expected: str, lines: Any, *, provider: str = "oda") -> bool:
+    signature = delivery_signature(expected, provider=provider)
+    return signature is not None and isinstance(lines, list) and len(lines) == 1 and isinstance(lines[0], str) and delivery_signature(lines[0], provider=provider) == signature
 
 
-def cancellation_total_matches(expected_minor: int, rows: Any) -> bool:
+def cancellation_total_matches(expected_minor: int, rows: Any, *, provider: str = "oda") -> bool:
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], str):
         return False
     normalized = " ".join(unicodedata.normalize("NFC", rows[0]).split())
+    if provider not in {"oda", "mathem"}:
+        return False
+    currency, other_currency = ("SEK", "NOK") if provider == "mathem" else ("NOK", "SEK")
+    if re.search(rf"\b{other_currency}\b", normalized, re.IGNORECASE):
+        return False
     patterns = (
-        r"\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b",
-        r"\b(?:kr|NOK)[,\s]*(\d+(?:[ .]\d{3})*),(\d{2})\b",
+        rf"\b(\d+(?:[ .]\d{{3}})*),(\d{{2}})\s*(?:kr|{currency})\b",
+        rf"\b(?:kr|{currency})[,\s]*(\d+(?:[ .]\d{{3}})*),(\d{{2}})\b",
     )
     values = []
     for pattern in patterns:
@@ -581,7 +632,8 @@ class OdaBrowser:
         if not isinstance(amount_result, Mapping) or set(amount_result) != {"amounts", "amounts_valid"} or amount_result["amounts_valid"] is not True:
             raise OdaCheckoutMismatchError("Oda checkout amount summary changed")
         raw_amounts = amount_result["amounts"]
-        if not isinstance(raw_amounts, Mapping) or set(raw_amounts) != set(ODA_CHECKOUT_AMOUNT_KEYS):
+        keys = set(ODA_CHECKOUT_AMOUNT_KEYS) | ({"discount_breakdown"} if self.checkout_provider == "mathem" else set())
+        if not isinstance(raw_amounts, Mapping) or set(raw_amounts) != keys:
             raise HouseholdError("Oda checkout amounts changed")
         amounts: dict[str, Any] = {}
         for key in ODA_CHECKOUT_AMOUNT_KEYS:
@@ -599,6 +651,16 @@ class OdaBrowser:
         normalized_minor = _oda_checkout_amounts_minor(amounts, provider=self.checkout_provider)
         if normalized_minor["provider_total"] != expected_total:
             raise HouseholdError("Oda checkout amounts changed")
+        if self.checkout_provider == "mathem":
+            breakdown = raw_amounts["discount_breakdown"]
+            if (
+                not isinstance(breakdown, Mapping)
+                or set(breakdown) != {"product_discount", "delivery_discount"}
+                or any(value is not None and (type(value) is not int or value > 0) for value in breakdown.values())
+                or sum(value or 0 for value in breakdown.values()) != (normalized_minor["discounts"] or 0)
+            ):
+                raise HouseholdError("Mathem checkout discount rows changed")
+            amounts["discount_breakdown"] = {key: value / 100 if value is not None else None for key, value in breakdown.items()}
         return amounts
 
     def _navigate_to_checkout(self, order_id: str | None = None) -> None:
@@ -1399,7 +1461,7 @@ class MathemBrowser(OdaBrowser):
 
     Uses the same native browser transport and deadline as Oda. Account identity
     is bound to the selected MCP address reference before each fresh review.
-    Existing-order edits/cancellations have a separate, as-yet unverified UI.
+    Existing-order additions and cancellation bind the original receipt account.
     """
     checkout_provider = "mathem"
     checkout_url = "https://www.mathem.se/se/checkout/confirm/"
@@ -1440,31 +1502,60 @@ class MathemBrowser(OdaBrowser):
         else:
             raise HouseholdError("Log the dedicated Mathem browser into the same account and selected address as Mathem OAuth")
         self._navigate_to_checkout()
-        expand = r"""
+        result = self._review_mathem_surface(expected)
+        result["account_reference_digest"] = hashlib.sha256(str(reference).encode()).hexdigest()
+        result["amounts"] = self._read_checkout_amounts(expected["total_minor"], expected["product_count"])
+        result["discount_breakdown"] = result["amounts"].pop("discount_breakdown")
+        return result
+
+    def _review_mathem_surface(self, expected):
+        expanded = set()
+        for _ in range(20):
+            expansion = self._eval(self._checkout_expand_script(expected, expanded))
+            if expansion.get("blocked"):
+                raise HouseholdError("Mathem checkout expansion controls changed")
+            if expansion.get("ready") is True:
+                break
+            expanded.update(expansion.get("clicked", []))
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Mathem checkout cannot be expanded for review")
+        for attempt in range(20):
+            surface = self._eval(self._checkout_surface_script(expected))
+            try:
+                result = self._checked_surface(expected, surface)
+            except HouseholdError:
+                if attempt == 19:
+                    raise
+            else:
+                break
+            self._settle(0.25)
+        return result
+
+    def _checkout_expand_script(self, expected, expanded):
+        return r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
- if(location.href!==URL)return JSON.stringify({ready:false});
+ if(location.href!==URL)return JSON.stringify({blocked:true});
+ const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(e=>[...e.labels].some(label=>norm(label.textContent)==='Antal'));
+ const texts=[...document.querySelectorAll('*')].filter(visible).map(e=>norm(e.innerText));
+ const subtotal=SUMMARY_LABELS.every(label=>texts.includes(label));
+ if(inputs.length===LINE_COUNT&&subtotal)return JSON.stringify({ready:true});
+ const already=ALREADY_EXPANDED;
  const buttons=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true');
- for(const label of ['Visa varor','Visa sammanfattning']){
-  const found=buttons.filter(e=>norm(e.innerText||e.getAttribute('aria-label')||'')===label);
-  if(found.length>1)return JSON.stringify({ready:false});
-  if(found.length===1)found[0].click();
+ const matches=['Visa varor','Visa sammanfattning'].map(label=>({label,found:buttons.filter(e=>norm(e.innerText||e.getAttribute('aria-label')||'')===label)}));
+ if(matches.some(entry=>entry.found.length>1))return JSON.stringify({blocked:true});
+ const clicked=[];
+ for(const {label,found} of matches){
+  if(found.length===1&&!already.includes(label)){found[0].click();clicked.push(label);}
  }
- return JSON.stringify({ready:true});
+ return JSON.stringify({ready:false,clicked});
 })()
-""".replace("URL", json.dumps(self.checkout_url))
-        if self._eval(expand) != {"ready": True}:
-            raise HouseholdError("Mathem checkout cannot be expanded for review")
-        for _ in range(20):
-            surface = self._eval(self._checkout_surface_script(expected))
-            if len(surface.get("items", [])) == len(expected["lines"]):
-                break
-            self._settle(0.25)
-        result = self._checked_surface(expected, surface)
-        result["account_reference_digest"] = hashlib.sha256(str(reference).encode()).hexdigest()
-        result["amounts"] = self._read_checkout_amounts(expected["total_minor"], expected["product_count"])
-        return result
+""".replace("URL", json.dumps(expected.get("checkout_url", self.checkout_url))).replace("LINE_COUNT", str(len(expected["lines"]))).replace("ALREADY_EXPANDED", json.dumps(sorted(expanded))).replace("SUMMARY_LABELS", json.dumps(
+            (["Ursprunglig beställning", "Att betala nu", "Totalsumma för beställning"]
+             + ([] if expected.get("delivery_change") else ["Varor tillagda i efterhand"]))
+            if expected.get("order_id") else ["Delsumma"]))
 
     def _checkout_surface_script(self, expected):
         return r"""
@@ -1482,12 +1573,12 @@ class MathemBrowser(OdaBrowser):
  const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|SEK)$/i.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
  return JSON.stringify({url:location.href,authenticated:!document.querySelector('input[type="password"]'),available:!/inte tillgänglig|slut i lager|unavailable/i.test(text),items,delivery_roots:delivery.map(e=>norm(e.innerText)),address_matches,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:controls.length});
 })()
-""".replace("PAYMENT", _mathem_checkout_payment_script().strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False))
+""".replace("PAYMENT", _mathem_checkout_payment_script(expected.get("checkout_url", self.checkout_url)).strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False))
 
     @staticmethod
     def _checked_surface(expected, surface):
         required = {"url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls"}
-        if not isinstance(surface, Mapping) or set(surface) != required or surface["url"] != MathemBrowser.checkout_url:
+        if not isinstance(surface, Mapping) or set(surface) != required or surface["url"] != expected.get("checkout_url", MathemBrowser.checkout_url):
             raise HouseholdError("Mathem checkout page changed")
         if not all(surface[key] is True for key in ("authenticated", "available", "address_matches")):
             raise OdaCheckoutMismatchError("Mathem account, address or availability does not match the reviewed cart")
@@ -1497,9 +1588,8 @@ class MathemBrowser(OdaBrowser):
             raise HouseholdError("Mathem checkout requires one selected saved card and one payment control")
         return dict(surface)
 
-    def _navigate_to_checkout(self, order_id=None):
-        if order_id is not None:
-            raise HouseholdError("Mathem existing-order checkout is not implemented")
+    def _navigate_to_checkout(self, order_id=None, *, expected=None):
+        target_url = expected["checkout_url"] if order_id is not None else self.checkout_url
         # Navigation effects are dispatched once per observed route/control. A
         # lost response stops the operation; subsequent review starts afresh.
         try:
@@ -1514,9 +1604,11 @@ class MathemBrowser(OdaBrowser):
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
- const routes=['https://www.mathem.se/se/','https://www.mathem.se/se/cart/','https://www.mathem.se/se/checkout/','https://www.mathem.se/se/checkout/recommendations/','https://www.mathem.se/se/checkout/confirm/'];
+ const routes=['https://www.mathem.se/se/','https://www.mathem.se/se/cart/','https://www.mathem.se/se/checkout/','https://www.mathem.se/se/checkout/recommendations/','https://www.mathem.se/se/checkout/confirm/','https://www.mathem.se/se/checkout/modify/',TARGET_URL];
  if(!routes.includes(location.href)||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
- if(location.href===routes[4])return JSON.stringify({action:'ready'});
+ if(location.href===TARGET_URL)return JSON.stringify({action:'ready'});
+ if(location.href===routes[4])return JSON.stringify({action:'blocked'});
+ if(location.href===routes[5])return JSON.stringify({action:'modify'});
  document.querySelectorAll('[data-mathem-checkout-next]').forEach(e=>e.removeAttribute('data-mathem-checkout-next'));
  const controls=[...document.querySelectorAll('a,button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true');
  const full=controls.filter(e=>e.tagName==='A'&&norm(e.innerText)==='Fortsätt till varukorgen'&&e.href===routes[1]);
@@ -1527,17 +1619,63 @@ class MathemBrowser(OdaBrowser):
  matches[0].setAttribute('data-mathem-checkout-next','true');
  return JSON.stringify({action:location.href+(full.length?'#full':'#continue')});
 })()
-""")
+""".replace("TARGET_URL", json.dumps(target_url)))
             action = state.get("action")
             if action == "ready":
                 return
             if action == "blocked":
                 raise HouseholdError("Mathem checkout navigation needs user attention")
+            if action == "modify":
+                if action not in dispatched:
+                    dispatched.add(action)
+                    self._choose_checkout_destination(expected if order_id else None)
+                self._settle(0.5)
+                continue
             if action != "wait" and action not in dispatched:
                 dispatched.add(action)
                 self._invoke("click", '[data-mathem-checkout-next="true"]')
             self._settle(0.5)
         raise HouseholdError("Mathem checkout navigation did not finish")
+
+    def _choose_checkout_destination(self, expected):
+        # Mathem defaults to the existing order. A new checkout must explicitly
+        # choose the new-order radio; an addition binds its exact existing order.
+        selected_once = False
+        for _ in range(20):
+            choice = self._eval(r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ if(location.href!=='https://www.mathem.se/se/checkout/modify/'||document.querySelector('input[type="password"]'))return JSON.stringify({blocked:true});
+ document.querySelectorAll('[data-mathem-destination],[data-mathem-destination-next]').forEach(e=>{e.removeAttribute('data-mathem-destination');e.removeAttribute('data-mathem-destination-next');});
+ const radios=[...document.querySelectorAll('input[type="radio"]')].filter(e=>!e.disabled&&[...e.labels].some(visible));
+ const rows=radios.map(e=>({element:e,text:norm([...e.labels].filter(visible).map(l=>l.innerText).join(' '))}));
+ const wanted=rows.filter(r=>EXISTING?r.text.startsWith('Lägg till i din nuvarande beställning '):r.text==='Skapa en ny beställning Du väljer leveranstid i nästa steg.');
+ const next=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)==='Fortsätt till betalning');
+ if(wanted.length!==1||next.length!==1)return JSON.stringify({waiting:true});
+ wanted[0].element.setAttribute('data-mathem-destination','true');next[0].setAttribute('data-mathem-destination-next','true');
+ return JSON.stringify({text:wanted[0].text,checked:wanted[0].element.checked,selected_count:radios.filter(e=>e.checked).length});
+})()
+""".replace("EXISTING", "true" if expected else "false"))
+            if choice.get("blocked"):
+                raise HouseholdError("Mathem checkout destination changed")
+            if choice.get("waiting"):
+                self._settle(0.25)
+                continue
+            if expected:
+                text = choice.get("text", "")
+                if (re.search(r"(?<![A-Za-z0-9._:-])" + re.escape(expected["order_id"]) + r"(?![A-Za-z0-9._:-])", text) is None
+                    or not checkout_delivery_matches(expected["delivery_text"], [text], provider="mathem")
+                    or unicodedata.normalize("NFC", " ".join(expected["delivery_address"].split())).casefold() not in text.casefold()):
+                    raise HouseholdError("Mathem existing checkout destination does not match the original order")
+            if choice.get("checked") is True and choice.get("selected_count") == 1:
+                self._invoke("click", '[data-mathem-destination-next="true"]')
+                return
+            if not selected_once:
+                selected_once = True
+                self._invoke("click", '[data-mathem-destination="true"]')
+            self._settle(0.25)
+        raise HouseholdError("Mathem checkout destination could not be selected")
 
     def _submit_checkout(self, cart, review, before_click=None):
         try:
@@ -1556,9 +1694,14 @@ class MathemBrowser(OdaBrowser):
             # The final browser turn also binds items, delivery and the selected
             # card. The callback's MCP checks cannot leave those UI fields stale.
             surface_script = self._checkout_surface_script(expected).strip()
+            expected_amounts = _oda_checkout_amounts_minor(review["amounts"], provider="mathem")
+            expected_amounts["discount_breakdown"] = {
+                key: round(review["discount_breakdown"][key] * 100) if review["discount_breakdown"][key] is not None else None
+                for key in ("product_discount", "delivery_discount")
+            }
             amount_script = _oda_checkout_amount_script(expected["total_minor"],
                 expected_product_count=expected["product_count"], provider="mathem",
-                expected_amounts=_oda_checkout_amounts_minor(review["amounts"], provider="mathem"),
+                expected_amounts=expected_amounts,
                 expected_url=self.checkout_url).strip()
             wanted = {key: review[key] for key in ("url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls")}
             script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + amount_script + ";})()"
@@ -1579,11 +1722,388 @@ class MathemBrowser(OdaBrowser):
                 self._settle(0.25)
         return False
 
-    def review_order_change(self, *args, **kwargs):
-        raise HouseholdError("Mathem order changes require the store website")
+    def _read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
+        """Bind the exact receipt to an OAuth address without selecting that address.
 
-    def review_cancellation(self, *args, **kwargs):
-        raise HouseholdError("Mathem cancellation requires the store website")
+        The caller owns the browser operation. Recovery retains the original
+        address reference even if another address is now selected for shopping.
+        """
+        if order.get("currency") != "SEK":
+            raise HouseholdError("Mathem order currency is not SEK")
+        if str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "") != order_id:
+            raise HouseholdError("Mathem order identity changed")
+        response = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
+        rows = response.get("result") if isinstance(response, Mapping) else None
+        if not isinstance(rows, list) or not rows:
+            raise HouseholdError("Mathem order account addresses are unavailable")
+        candidates = []
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("address"), str) or not row["address"].strip():
+                raise HouseholdError("Mathem order account address is incomplete")
+            reference = row.get("id")
+            account_script = _mathem_checkout_account_script(reference)
+            binding = {"account_reference_digest": hashlib.sha256(str(reference).encode()).hexdigest(),
+                       "receipt_address": " ".join(unicodedata.normalize("NFC", row["address"]).split())}
+            if expected_binding is None or binding == expected_binding:
+                candidates.append((binding, account_script))
+        if not candidates or expected_binding is not None and len(candidates) != 1:
+            raise HouseholdError("Mathem original order account binding is unavailable")
+        scripts = [_mathem_receipt_address_script(order_id, binding["receipt_address"]) for binding, _ in candidates]
+        self._open("https://www.mathem.se/se/account/orders/" + quote(order_id, safe="") + "/")
+        for _ in range(20):
+            matched = [candidate for candidate, script in zip(candidates, scripts, strict=True)
+                       if self._eval(script) == {"address_verified": True}]
+            if len(matched) > 1:
+                raise HouseholdError("Mathem order receipt address is ambiguous")
+            if matched:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Mathem order receipt address cannot be verified")
+        binding, account_script = matched[0]
+        self._open("https://www.mathem.se/se/account/delivery/")
+        for _ in range(20):
+            if self._eval(account_script) == {"account_matches": True}:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HouseholdError("Mathem order binding deadline reached")
+                return binding
+            self._settle(0.25)
+        raise HouseholdError("Mathem browser and original order account do not match")
+
+    @staticmethod
+    def _order_product_count(order):
+        products = order.get("products")
+        if not isinstance(products, list) or not products:
+            raise HouseholdError("Mathem original order products are unavailable")
+        quantities = [item.get("quantity") if isinstance(item, Mapping) else None for item in products]
+        if any(isinstance(q, bool) or not isinstance(q, (int, float)) or not math.isfinite(q) or q != int(q) or not 0 < q <= 1000000 for q in quantities):
+            raise HouseholdError("Mathem original order quantities are unavailable")
+        count = sum(int(q) for q in quantities)
+        if count > 1_000_000:
+            raise HouseholdError("Mathem original order product count is unavailable")
+        return count
+
+    def _addition_expectation(self, cart, order_id, order, binding):
+        self._order_url(order_id)
+        original = self._order_expectation(order_id, order)
+        original_count = self._order_product_count(order)
+        # An addition cart has no new delivery reservation. It inherits the
+        # independently verified original receipt address and delivery window.
+        bound = {**cart, "deliverySlot": {"name": original["delivery_text"]}, "deliveryAddress": binding["receipt_address"]}
+        expected = self._cart_expectation(bound)
+        expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
+                        original_minor=original["total_minor"], original_count=original_count)
+        if order.get("currency") != "SEK" or delivery_signature(expected["delivery_text"], provider="mathem") is None:
+            raise HouseholdError("Mathem original order currency or delivery is unavailable")
+        return expected
+
+    def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
+        with self._checkout_operation(deadline):
+            binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
+            expected = self._addition_expectation(cart, order_id, order, binding)
+            self._navigate_to_checkout(order_id, expected=expected)
+            result = self._review_mathem_surface(expected)
+            amounts = self._eval(_mathem_addition_amount_script(expected))
+            if amounts.get("amounts_valid") is not True:
+                raise HouseholdError("Mathem original, added and combined order amounts do not match")
+            result.update(binding=binding, account_reference_digest=binding["account_reference_digest"],
+                          order_amounts=amounts["order_amounts"])
+            result["amounts"] = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
+            result["amounts"].update(product_subtotal=expected["total_minor"] / 100, provider_total=expected["total_minor"] / 100)
+            return result
+
+    def submit_order_change(self, cart, order_id, order, review, before_click=None, *, deadline=None):
+        with self._checkout_operation(deadline):
+            try:
+                current = self.review_order_change(cart, order_id, order,
+                    deadline=self._checkout_deadline, expected_binding=review["binding"])
+                if current != dict(review):
+                    raise HouseholdError("Mathem addition changed after confirmation")
+                expected = self._addition_expectation(cart, order_id, order, review["binding"])
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                if before_click:
+                    before_click()
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                surface_script = self._checkout_surface_script(expected).strip()
+                wanted = {key: review[key] for key in ("url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls")}
+                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _mathem_addition_amount_script(expected, submit=True).strip() + ";})()"
+            except HouseholdError as exc:
+                raise CheckoutPreconditionError(str(exc)) from exc
+            # Transport failure here may follow the click. Leave it uncertain.
+            if self._eval(script) != {"clicked": True}:
+                raise CheckoutPreconditionError("Mathem addition changed before the final click")
+
+    def _navigate_delivery_change(self, order_id, expected, slot):
+        # The existing-order route can already retain the selected review. Open
+        # its exact URL first; never use the new-order cart destination.
+        self._open(expected["checkout_url"])
+        for _ in range(20):
+            surface = self._eval(self._checkout_surface_script(expected))
+            if checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider="mathem"):
+                return
+            self._settle(0.25)
+        self._open("https://www.mathem.se/se/")
+        menu_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!=='https://www.mathem.se/se/')return JSON.stringify({opened:false});
+const links=[...document.querySelectorAll('a')].filter(vis).filter(e=>e.href===ORDER_URL);if(links.length!==1)return JSON.stringify({opened:false});
+const card=links[0].closest('article');if(!card)return JSON.stringify({opened:false});
+const buttons=[...card.querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&norm(e.innerText||e.getAttribute('aria-label'))==='Visa möjliga åtgärder'&&e.getAttribute('aria-haspopup')==='menu'&&e.getAttribute('aria-expanded')==='false');
+if(buttons.length!==1)return JSON.stringify({opened:false});buttons[0].setAttribute('data-mathem-delivery-menu','');return JSON.stringify({opened:true});
+})()""".replace("ORDER_URL", json.dumps(self._order_url(order_id)))
+        for _ in range(20):
+            if self._eval(menu_script) == {"opened": True}:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Mathem does not expose delivery changes for this order")
+        self._invoke("click", "[data-mathem-delivery-menu]")
+        entry_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!=='https://www.mathem.se/se/')return JSON.stringify({bound:false});
+const menus=[...document.querySelectorAll('[role="menu"]')].filter(vis);if(menus.length!==1)return JSON.stringify({bound:false});
+const links=[...menus[0].querySelectorAll('a[role="menuitem"]')].filter(vis).filter(e=>norm(e.innerText)==='Ändra leveranstid');if(links.length!==1)return JSON.stringify({bound:false});
+const u=new URL(links[0].href);if(u.origin!=='https://www.mathem.se'||u.pathname!=='/se/checkout/confirm/'||u.hash||u.username||u.password||u.searchParams.get('orderNumber')!==ORDER_ID||JSON.stringify([...u.searchParams.keys()].sort())!==JSON.stringify(['modal','modal-id','modal-screen','orderNumber']))return JSON.stringify({bound:false});
+links[0].setAttribute('data-mathem-delivery-entry','');return JSON.stringify({bound:true,url:u.href});
+})()""".replace("ORDER_ID", json.dumps(order_id))
+        for _ in range(20):
+            entry = self._eval(entry_script)
+            if entry.get("bound"):
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Mathem delivery-change destination cannot be bound to this order")
+        self._invoke("click", "[data-mathem-delivery-entry]")
+        start = datetime.fromisoformat(slot["start_at"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Stockholm"))
+        end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Stockholm"))
+        today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
+        if start.date() < today or (start.date() - today).days > 31 or start.minute or end.minute:
+            raise HouseholdError("Mathem delivery date cannot be identified in the visible calendar")
+        if start.date() == today:
+            header = "i dag"
+        elif (start.date() - today).days == 1:
+            header = "i morgon"
+        else:
+            weekdays = ("mån", "tis", "ons", "tors", "fre", "lör", "sön")
+            months = ("jan", "feb", "mars", "apr", "maj", "juni", "juli", "aug", "sep", "okt", "nov", "dec")
+            header = f"{weekdays[start.weekday()]} {start.day} {months[start.month - 1]}."
+        slot_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!==EXPECTED_URL)return JSON.stringify({ready:false});
+const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(vis);if(dialogs.length!==1)return JSON.stringify({ready:false});const d=dialogs[0];
+if(![...d.querySelectorAll('h1,h2,h3,h4')].some(e=>norm(e.innerText)==='Ändra leveranstid'))return JSON.stringify({ready:false});
+const tables=[...d.querySelectorAll('table')].filter(vis);if(tables.length!==1)return JSON.stringify({ready:false});const table=tables[0];
+const headers=[...table.querySelectorAll('th')];const wanted=headers.filter(e=>norm(e.innerText)===HEADER);if(wanted.length!==1)return JSON.stringify({ready:false});
+const index=wanted[0].cellIndex;const rows=[...table.querySelectorAll('tr')].filter(r=>r.cells.length>index&&norm(r.cells[0].innerText)===TIME_ROW);if(rows.length!==1)return JSON.stringify({ready:false});
+const buttons=[...rows[0].cells[index].querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)==='0 kr');if(buttons.length!==1)return JSON.stringify({ready:false});
+buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({ready:true});
+})()""".replace("EXPECTED_URL", json.dumps(entry["url"])).replace("HEADER", json.dumps(header)).replace("TIME_ROW", json.dumps(f"{start.hour:02d} - {end.hour:02d}"))
+        for _ in range(20):
+            if self._eval(slot_script) == {"ready": True}:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Mathem does not expose that exact free delivery window in the visible calendar")
+        self._invoke("click", "[data-mathem-delivery-slot]")
+        # No repeated selection when a response is lost or the page fails to
+        # advance. The caller must inspect the original selection before retry.
+        for _ in range(30):
+            if self._eval("JSON.stringify({ready:location.href===" + json.dumps(expected["checkout_url"]) + "&&!document.querySelector('[role=dialog]')})") == {"ready": True}:
+                return
+            self._settle(0.25)
+        raise HouseholdError("Mathem delivery selection has not reached review; inspect it before selecting again")
+
+    def _delivery_change_expectation(self, order_id, order, delivery, binding):
+        slot = validate_delivery_slot(delivery.get("slot"))
+        if slot["price_kind"] != "exact" or slot["price_ore"] != 0 or slot["provider_slot_id"] != delivery.get("slot_id"):
+            raise HouseholdError("Mathem automated delivery changes currently require an exact free window")
+        original = self._order_expectation(order_id, order)
+        count = self._order_product_count(order)
+        if order.get("currency") != "SEK" or delivery_signature(str(delivery.get("display") or ""), provider="mathem") is None:
+            raise HouseholdError("Mathem original order currency or requested delivery is unavailable")
+        return {"order_id": order_id, "checkout_url": self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
+                "lines": [], "product_count": 0, "total_minor": 0, "total_text": "0,00",
+                "original_minor": original["total_minor"], "original_count": count, "delivery_change": True,
+                "delivery_text": delivery["display"], "delivery_address": binding["receipt_address"]}
+
+    def review_delivery_change(self, order_id, order, delivery, *, deadline=None, expected_binding=None):
+        with self._checkout_operation(deadline):
+            binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
+            expected = self._delivery_change_expectation(order_id, order, delivery, binding)
+            self._navigate_delivery_change(order_id, expected, delivery["slot"])
+            return self._read_delivery_change_review(order_id, delivery, binding, expected)
+
+    def _read_delivery_change_review(self, order_id, delivery, binding, expected):
+        result = self._review_mathem_surface(expected)
+        amounts = self._eval(_mathem_addition_amount_script(expected))
+        if amounts.get("amounts_valid") is not True:
+            raise HouseholdError("Mathem delivery change must retain original goods and total with zero payable")
+        result.update(binding=binding, account_reference_digest=binding["account_reference_digest"],
+                      target_order_id=order_id, order_amounts=amounts["order_amounts"])
+        result["amounts"] = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
+        result["amounts"]["provider_total"] = 0.0
+        result["summary"] = {"items": [], "count": 0, "total": 0.0,
+                             "delivery": {"slot_id": delivery["slot_id"], "display": delivery["display"], "address": binding["receipt_address"]},
+                             "payment": result["payment_display"], "order_amounts": amounts["order_amounts"]}
+        return result
+
+    def submit_delivery_change(self, order_id, order, delivery, review, before_click=None, *, deadline=None):
+        with self._checkout_operation(deadline):
+            try:
+                binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=review["binding"])
+                expected = self._delivery_change_expectation(order_id, order, delivery, binding)
+                # Confirmation only rereads the prepared route. It never selects
+                # another slot or replays a potentially uncertain reservation.
+                self._open(expected["checkout_url"])
+                current = self._read_delivery_change_review(order_id, delivery, binding, expected)
+                if current != dict(review):
+                    raise HouseholdError("Mathem delivery change changed after confirmation")
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                if before_click:
+                    before_click()
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                surface_script = self._checkout_surface_script(expected).strip()
+                wanted = {key: review[key] for key in ("url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls")}
+                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _mathem_addition_amount_script(expected, submit=True).strip() + ";})()"
+            except HouseholdError as exc:
+                raise CheckoutPreconditionError(str(exc)) from exc
+            if self._eval(script) != {"clicked": True}:
+                raise CheckoutPreconditionError("Mathem delivery changed before the final click")
+
+
+    def read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
+        with self._checkout_operation(deadline):
+            return self._read_order_binding(order_id, order, deadline=deadline, expected_binding=expected_binding)
+
+    @staticmethod
+    def _order_url(order_id):
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None:
+            raise HouseholdError("invalid Mathem order identity")
+        return "https://www.mathem.se/se/account/orders/" + quote(order_id, safe="") + "/"
+
+    def _cancellation_receipt_script(self, order_id, binding):
+        return r"""
+(() => {
+ const receipt=JSON.parse(RECEIPT);
+ if(receipt.address_verified!==true)return JSON.stringify({available:false});
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ const main=[...document.querySelectorAll('main')].filter(visible)[0];
+ const lines=(main.innerText||'').split(/\n+/).map(norm).filter(Boolean);
+ const labels=[...main.querySelectorAll('*')].filter(visible).filter(e=>norm(e.innerText)==='Totalt inkl. moms').filter(e=>![...e.children].some(c=>visible(c)&&norm(c.innerText)==='Totalt inkl. moms'));
+ const money=/\b\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|SEK)\b/i;
+ const totals=labels.map(e=>{let row=e.parentElement;while(row&&row!==main){if(money.test(norm(row.innerText)))return norm(row.innerText);row=row.parentElement;}return null;}).filter(Boolean);
+ const buttons=[...main.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)==='Avbryt beställningen'&&e.getAttribute('aria-haspopup')==='dialog');
+ return JSON.stringify({available:buttons.length===1,delivery_lines:lines.filter(t=>/\b\d{1,2}(?::\d{2})?\s*(?:-|–|och|till)\s*\d{1,2}(?::\d{2})?\b/i.test(t)),total_rows:totals,deadline_text:lines.filter(t=>/^Du kan avboka din beställning när som helst före /i.test(t)),addition_deadline_text:lines.filter(t=>/^Du har till och med .+ att lägga till varor i din leverans\./i.test(t))});
+})()
+""".replace("RECEIPT", _mathem_receipt_address_script(order_id, binding["receipt_address"]).strip())
+
+    def order_followup(self, order_id, order, *, deadline=None):
+        """Read current correction limits from the exact bound receipt, no clicks."""
+        with self._checkout_operation(deadline):
+            binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline)
+            expected = self._order_expectation(order_id, order)
+            self._open(self._order_url(order_id))
+            for _ in range(20):
+                receipt = self._eval(self._cancellation_receipt_script(order_id, binding))
+                if (cancellation_delivery_matches(expected["delivery_text"], receipt.get("delivery_lines"), provider="mathem")
+                    and cancellation_total_matches(expected["total_minor"], receipt.get("total_rows"), provider="mathem")):
+                    additions = receipt.get("addition_deadline_text", [])
+                    cancellations = receipt.get("deadline_text", [])
+                    return {"deadline_text": additions[0] if len(additions) == 1 else None,
+                            "cancellation_deadline_text": cancellations[0] if len(cancellations) == 1 else None,
+                            "cancellation_available": receipt.get("available") is True}
+                self._settle(0.25)
+            raise HouseholdError("Mathem current correction limits could not be verified")
+
+    def _review_mathem_cancellation(self, order_id, order, *, expected_binding=None):
+        binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
+        expected = self._order_expectation(order_id, order)
+        self._open(self._order_url(order_id))
+        script = self._cancellation_receipt_script(order_id, binding)
+        for _ in range(20):
+            receipt = self._eval(script)
+            if receipt.get("available") is True:
+                break
+            self._settle(0.25)
+        if (receipt.get("available") is not True
+                or not cancellation_delivery_matches(expected["delivery_text"], receipt.get("delivery_lines"), provider="mathem")
+                or not cancellation_total_matches(expected["total_minor"], receipt.get("total_rows"), provider="mathem")):
+            return {"available": False, "reason": "Mathem does not expose cancellation for this verified order"}
+        # The observed opener explicitly declares a dialog. Never treat an
+        # arbitrary cancel-labelled button as a non-final review control.
+        opened = self._eval(r"""
+(() => {
+ const receipt=JSON.parse(RECEIPT);if(JSON.stringify(receipt)!==JSON.stringify(EXPECTED))return JSON.stringify({opened:false});
+ const buttons=[...document.querySelectorAll('main button')].filter(e=>e.innerText.trim()==='Avbryt beställningen'&&e.getAttribute('aria-haspopup')==='dialog'&&e.getAttribute('aria-expanded')==='false'&&!e.disabled);
+ if(buttons.length!==1)return JSON.stringify({opened:false});buttons[0].click();return JSON.stringify({opened:true});
+})()
+""".replace("RECEIPT", script.strip()).replace("EXPECTED", json.dumps(receipt, ensure_ascii=False)))
+        if opened != {"opened": True}:
+            raise HouseholdError("Mathem cancellation review control changed")
+        for _ in range(20):
+            dialog = self._eval(self._cancellation_dialog_script())
+            if dialog.get("available") is True:
+                return {"available": True, "binding": binding, "receipt": receipt, "consequence": dialog["consequence"]}
+            self._settle(0.25)
+        raise HouseholdError("Mathem cancellation dialog did not finish loading")
+
+    @staticmethod
+    def _cancellation_dialog_script(action=None):
+        return r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
+ if(dialogs.length!==1)return JSON.stringify({available:false});const d=dialogs[0];
+ const buttons=[...d.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true');
+ const final=buttons.filter(e=>norm(e.innerText)==='Avboka min beställning');
+ const dismiss=buttons.filter(e=>norm(e.innerText)==='Nej, avboka inte');
+ const consequence=norm(d.innerText);
+ if(final.length!==1||dismiss.length!==1||final[0]===dismiss[0]||consequence!=='Är du säker på att du vill avbryta din beställning? Du kan inte ångra detta Nej, avboka inte Avboka min beställning')return JSON.stringify({available:false});
+ if(ACTION==='submit'){final[0].click();return JSON.stringify({clicked:true});}
+ if(ACTION==='dismiss'){dismiss[0].click();return JSON.stringify({dismissed:true});}
+ return JSON.stringify({available:true,consequence});
+})()
+""".replace("ACTION", json.dumps(action))
+
+    def review_cancellation(self, order_id, order, *, deadline=None):
+        with self._checkout_operation(deadline):
+            review = self._review_mathem_cancellation(order_id, order)
+            if review.get("available") is True:
+                if self._eval(self._cancellation_dialog_script("dismiss")) != {"dismissed": True}:
+                    raise HouseholdError("Mathem cancellation review could not be dismissed")
+            return review
+
+    def submit_cancellation(self, order_id, order, review, before_click=None, *, deadline=None):
+        final_dispatched = False
+        try:
+            with self._checkout_operation(deadline):
+                current = self._review_mathem_cancellation(order_id, order, expected_binding=review.get("binding"))
+                if current != dict(review):
+                    raise HouseholdError("Mathem cancellation changed after confirmation")
+                # Fresh provider state and the original account binding precede
+                # the last expiry check. A timeout after dispatch is uncertain.
+                fresh = self.provider_client.call("get_order", {"order_number": order_id}, deadline=self._checkout_deadline)
+                tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=self._checkout_deadline)
+                tracked_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
+                if fresh != dict(order) or tracked_id != order_id or tracking.get("status") != "paid_and_modifiable":
+                    raise HouseholdError("Mathem order changed before cancellation")
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                if before_click:
+                    before_click()
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                # StateStore sorts object keys. Compare the receipt fields,
+                # retaining exact array/text equality, rather than key order.
+                script = "(() => {const receipt=JSON.parse(" + self._cancellation_receipt_script(order_id, review["binding"]).strip() + ");const expected=" + json.dumps(review["receipt"], ensure_ascii=False) + ";if(Object.keys(receipt).length!==Object.keys(expected).length||Object.keys(expected).some(k=>JSON.stringify(receipt[k])!==JSON.stringify(expected[k])))return JSON.stringify({clicked:false});return " + self._cancellation_dialog_script("submit").strip() + ";})()"
+                final_dispatched = True
+                if self._eval(script) != {"clicked": True}:
+                    final_dispatched = False
+                    raise HouseholdError("Mathem cancellation changed before the final click")
+        except HouseholdError as exc:
+            if not final_dispatched:
+                raise CancellationPreconditionError(str(exc)) from exc
+            raise
 
 
 if __name__ == "__main__":

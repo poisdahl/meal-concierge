@@ -51,20 +51,21 @@ unresolved requirements when no compatible approved product exists. Existing
 candidate authority, pantry decisions and partial-order scope still apply.
 Required goods are never silently omitted.
 
-Oda's exact numeric product route resolves only to the same product's canonical
+Oda's and Mathem's exact numeric product routes resolve only to the same product's canonical
 public URL. The anonymous reader retains the visible ingredient/allergen rows,
 source URL and missing-information limits. This path was checked against the
-public [Oda product detail](https://oda.com/no/products/40887-r-gulrotsuppe/).
+public [Oda product detail](https://oda.com/no/products/40887-r-gulrotsuppe/)
+and [Mathem product detail](https://www.mathem.se/se/products/4694-barilla-pasta-fusilli/).
 No account, cart or payment effect is involved. Search-provided literal fields
 are retained too. Missing/unavailable detail is unknown; a product name or an
 absent term is not proof of allergen absence. Negated/ambiguous statements do
 not become positive conflicts. Explicit retailer free-from labels are reported
 as compatible labels, not universal safety certification.
 
-MENY and Mathem detail collection beyond their current search fields remains
-unverified and therefore unknown. Mathem's protected checkout and full dietary
-integration remain [issue #50](https://github.com/poisdahl/meal-concierge/issues/50).
-This change does not enable automatic Mathem payment or editing.
+MENY detail collection beyond its current search fields remains unverified and
+therefore unknown. Mathem uses the same final-product assessment and exact
+substitution permission rules. Its native protected checkout and dietary
+acceptance remain [issue #50](https://github.com/poisdahl/meal-concierge/issues/50).
 
 ## The existing final confirmation
 
@@ -98,6 +99,12 @@ authority is insufficient. These entries cover uncertainty only; the existing
 purchase policy, schedule ceiling, delivery constraints and platform payment
 approval remain required.
 
+Explicitly keeping an incomplete cart preserves its missing required packages
+in the final checkout summary, reconciled result and any result notice. Counts
+describe packages; they do not infer how many meals the remaining goods cover.
+Automatic occurrences stop while required menu packages are missing. Review
+the incomplete cart for an interactive checkout or restore the missing goods.
+
 For a covered automatic attempt, `submit`, `auto` or the bound `confirm` returns
 one frozen notice with `dispatch=true` before any payment dispatch. Use the
 existing authorized native household messaging route to send its frozen concise
@@ -120,8 +127,12 @@ An uncertain result notice keeps the purchase result and cannot cause another
 payment. Replay retrieves the same result/notice. Oda correction messages offer
 additions only for a currently modifiable order; MENY editing requires current
 provider review and can require another checkout and Vipps approval. Mathem
-changes remain manual. A provider `modificationDeadline` is shown only when it
-is an explicit timezone-aware timestamp; otherwise the deadline is unknown.
+additions use the bound original order and protected checkout. Cancellation
+requires a fresh available review; moving delivery requires an available free
+window, unchanged goods/order total and zero additional payment. A provider
+`modificationDeadline` is shown only when it is an explicit timezone-aware
+timestamp. Mathem's observed textual deadline is reported separately without
+inventing a year or ISO timestamp; absent evidence remains unknown.
 No message promises universal removal, replacement or refund.
 
 ## Validation scope

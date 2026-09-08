@@ -67,8 +67,8 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 | Read, change and active-menu sync cart | MCP | MCP | Logged-in browser |
 | Product favorites, recurring items and menus | Local | Local | Local |
 | Delivery selection / read and track orders | Yes | MCP | Yes |
-| Add goods / move or cancel an existing order | Yes | Manual on Mathem | Yes |
-| Protected checkout | Fresh or standing authorization, reconcile | Manual on Mathem | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
+| Add goods / move or cancel an existing order | Yes | Guarded additions/cancellation and available free-window changes; paid/refund-bearing changes remain manual | Yes |
+| Protected checkout | Fresh or standing authorization, reconcile | Guarded saved card with dedicated browser; otherwise manual | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
 
 Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
 provider OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`
@@ -94,28 +94,46 @@ must match the authenticated browser account before each review. The checkout
 must match every product/quantity, selected delivery, address, saved card and
 exact SEK fee row. The final browser turn checks those visible values again;
 the native callback rechecks cart/delivery and the authorization before dispatch.
-The observed `Gratis leverans` credit offsets gross delivery while the selected
-slot reports its net price. Other unverified discounts/deposits stop checkout.
+The observed `Du sparar` row reduces the product subtotal. The separate
+`Gratis leverans` credit offsets gross delivery while the selected slot reports
+its net price. Review preserves both in `discount_breakdown`; the final browser
+check binds their allocation as well as the aggregate discount and total.
+Other unverified discounts/deposits stop checkout.
 
-Without browser prerequisites, `prepare` returns `manual_checkout_required`,
+When no checkout browser is configured, `prepare` returns `manual_checkout_required`,
 the SEK cart summary and store URL, without creating a payment attempt. Recipe,
 cart and draft/cart_ready operations remain available. Enabling scheduled
 checkout requires its existing amount/delivery/confirmation/dietary gates plus
 the configured, authenticated browser; installation does not log it in.
-Existing-order change/cancellation remains a manual website operation.
+Missing login, account binding or a selected saved card in a configured browser
+stops checkout until those prerequisites are resolved.
+Existing-order additions begin with the exact modifiable order and independently
+bound receipt account/address. The staged cart inherits that order's delivery;
+it must not create a new delivery reservation or fall back to a new order.
+The review binds original/added/combined quantities and SEK amounts. It reports
+unavailable fee components as unknown instead of using new-order fee rules.
+Cancellation separately verifies the same order, receipt, current modifiability
+and Swedish confirmation dialog. Available free delivery changes use the bound
+original-order checkout, with unchanged goods and order total and zero payable.
+Paid or refund-dependent changes and unavailable dates require manual handling.
+Native outcomes and remaining gates are recorded in [acceptance](acceptance.md).
 
 Mathem MCP receipts omit the address. Reconciliation therefore reads the exact
-order URL, its visible order reference and receipt address, then matches MCP
+order URL only after a potentially accepted result, verifies its visible order
+reference and receipt address, and matches MCP
 currency, products, total, delivery window and fulfillable tracking state. A
 missing or unreadable receipt keeps the attempt uncertain and never authorizes
-another payment. Repeated confirmation/reconciliation uses the original journal.
+another payment. While unpaid, reconciliation leaves the payment/challenge
+page in place. Repeated confirmation/reconciliation uses the original journal.
 
 Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
 amount/account/card helper reads and read-only receipt address verification have
 been exercised. Local tests cover guarded Application preparation, final DOM
-drift and lost-response reconciliation. Complete native model checkout/payment,
-order-change and cancellation acceptance remains tracked in #50; these local
-checks do not establish a completed customer purchase.
+drift and lost-response reconciliation. Native Mathem ordering, a recovery-assisted
+addition, free delivery confirmation after scoped UI preparation and cancellation
+are recorded in [acceptance](acceptance.md), separately from those local tests.
+Bank authorization, charge, refund and release remain unknown. Final
+published-release verification remains tracked in #50.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths
@@ -231,11 +249,15 @@ explicitly approved, exactly priced candidates observed in those bounded
 provider searches—never the cheapest item in the store. It excludes delivery,
 bags, cart-level fees and checkout drift. Selection ranks exact payable amount,
 then the rational per-requirement excess score, package count and stable product
-refs. The complete canonical result and `product_plan_digest` are carried by the
-caller; display fields and timestamps do not grant freshness or apply authority.
+refs. Prepare returns the canonical result, `product_plan_digest` and compact
+`apply_arguments` containing the exact preparation inputs and reviewed digest.
+Display fields and timestamps do not grant freshness or apply authority.
 
-Apply needs that complete unchanged result and digest plus a clear current user
-request to change the cart. It repeats the same provider searches and ranking,
+Apply accepts the unchanged `apply_arguments` plus `cart_change_requested=true`
+for a clear current user request, or the complete unchanged result and digest.
+The compact route regenerates the plan and requires the same reviewed digest;
+it needs no copied observation payload, saved cache or file path.
+It repeats the same provider searches and ranking,
 stops without a cart write on menu, candidate, package, availability, offer or
 price drift, and otherwise hands the exact whole-package quantities to the
 existing guarded, restart-safe cart sync. A verified exact product-line amount
@@ -1667,12 +1689,12 @@ active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
 
 For existing orders, read/select the exact order and call `orders change_begin`
-first. Oda's live modifiability status and MENY's enabled order-change controls
+first. Oda/Mathem live modifiability and MENY's enabled order-change controls
 decide whether editing is possible; no fixed local cutoff overrides the store.
-Oda ensure includes quantities on the original order as well as staged additions.
+Oda/Mathem ensure includes quantities on the original order as well as staged additions.
 An already satisfied request can close the empty edit with `change_abort`.
 
-A nonempty Oda cart returns `cart_confirmation_required` with `cart_digest`.
+A nonempty Oda/Mathem cart returns `cart_confirmation_required` with `cart_digest`.
 The unchanged digest may be supplied to `change_begin` only when all those
 items are authorized for the selected order. Goods are never cleared to start
 an edit. Checkout binds and confirms the resulting addition to the same order;
@@ -1689,7 +1711,7 @@ restart. `cart reconcile_change` only reads and closes the journal when the exac
 expected quantities are observed; it never sends the delta again. A native MENY
 stop proven to precede every click can close after reading the preserved cart;
 a partial batch still requires the exact result of its earlier clicks. Workflow status
-surfaces this recovery step. A changed Oda addition cart must be reviewed and
+surfaces this recovery step. A changed Oda/Mathem addition cart must be reviewed and
 rebound; `orders change_abort(retain_cart=true)` preserves its goods.
 
 ### Plan with available ingredients

@@ -214,6 +214,11 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
     if provider == "mathem":
         text = re.sub(r"\bst\b", "stk", text, flags=re.IGNORECASE)
     parsed = _strict_package(text)
+    if provider == "mathem" and parsed is None:
+        # Verified Swedish produce labels include origin before a fixed mass.
+        origin_mass = re.fullmatch(rf"(?:Sverige|Spanien), ({_NUMBER}) (kg|g)", text)
+        if origin_mass is not None:
+            parsed = _canonical_quantity(origin_mass[1], origin_mass[2])
     if provider == "meny" and parsed is None:
         candidate = text
         if candidate.startswith("Økologisk "):

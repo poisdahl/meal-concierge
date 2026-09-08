@@ -19,12 +19,24 @@ verifies the same selected account/address, products, delivery, final fee rows
 and selected saved card before preparing or submitting. Use the returned
 confirmation policy and exact confirmation/idempotency key. If prepare returns
 `manual_checkout_required`, show its summary and store URL; never treat that
-handoff as a submitted order. Existing-order changes and cancellation still
-require Mathem's website. Weekly auto-checkout requires the same configured
+handoff as a submitted order. For additions, use `orders change_begin` on the
+exact modifiable order before staging goods. Checkout inherits its receipt
+address/delivery and reviews the original, added and combined amounts in SEK.
+Cancellation uses its own fresh exact-order review. Pass both its exact
+`order_id` and `confirmation_id` to `orders cancel_confirm`; an uncertain result
+uses `cancel_reconcile` with that same confirmation ID. For a delivery change, begin
+the exact order edit with an empty cart, select an exact available free window,
+then prepare and confirm its zero-payable review. Goods and order total must
+remain unchanged. Unavailable windows and paid/refund-bearing changes stay manual. Weekly auto-checkout requires the same configured
 browser, standing/fresh policy, dietary permissions and amount/delivery guards.
 A missing or changed prerequisite stops the attempt. Confirm purchase only when
 its bound submit/reconcile returns `confirmed=true`; Mathem receipt reconciliation
 also checks the exact order's address in the browser because MCP omits it.
+`confirmed` establishes the matched accepted order. Report `payment` separately:
+merchant tracking status alone does not establish bank authorization or a settled
+charge. Unknown remains unknown on replay. A confirmed cancellation likewise
+does not establish release of a card reservation or a refund; show the returned
+`payment_resolution` limits.
 
 Start with saved preferences and `status.workflow.next_action` when resuming
 work. It describes unfinished work, not new authorization. Answer a simple read
@@ -443,8 +455,10 @@ the selected save handoff and original non-price reasons. It never claims global
 cheapest or locks prices. Later prepare may take `previous_product_plan` to show
 observation drift. Comparison and candidate approval do not authorize cart edits.
 
-Apply only for an authorized cart update: send the complete unchanged product
-plan/digest and `cart_change_requested=true`. Drift requires a new review;
+Apply only for an authorized cart update: send the returned compact
+`apply_arguments` unchanged and add `cart_change_requested=true`. The complete
+unchanged product plan/digest also remains supported. The compact route
+regenerates the exact plan and requires the reviewed digest. Drift requires a new review;
 never silently substitute another plan. All-at-home completion is possible only
 after any existing cart contents have been surfaced for explicit reconciliation.
 
@@ -470,8 +484,8 @@ Never route “favorite this recipe” to the product tool.
 ## Delivery, checkout and email
 
 
-Dietary checkout uses the actual final product IDs and Oda's exact public product
-information reader where available. Missing MENY/Mathem detail remains unknown.
+Dietary checkout uses the actual final product IDs and the exact public Oda or
+Mathem product information reader where available. Missing detail remains unknown.
 Show affected items, source information, allergy/sensitivity unknowns and material
 preference deviations in the ordinary final summary before its existing
 confirmation. Offer alternatives for exclusions. Unknown allergy/exclusion
@@ -498,9 +512,14 @@ Only confirmed reconciliation establishes purchase success. Send and acknowledge
 its returned result notice too; failed result messaging must never repeat payment.
 Recovery returns dispatch=false for already claimed notices. Keep the actual
 supported correction options and verified deadline; unknown deadlines/edits stay
-unknown. Oda additions require a currently modifiable order, MENY editing can
-require new checkout/Vipps, and Mathem order corrections remain manual. Never promise that every
-item can be removed, replaced or refunded.
+unknown. Oda and Mathem additions require a currently modifiable order; MENY
+editing can require new checkout/Vipps. Mathem cancellation requires a fresh
+review. Moving delivery requires a fresh available free-window review with
+unchanged goods/order total and zero additional payment. A provider-reported textual
+deadline is retained verbatim; do not invent an ISO date or year. Never promise
+that every item can be removed, replaced or refunded. Preserve an unconfirmed
+Mathem attempt and its payment page; neither an empty cart nor an unchanged
+original order authorizes restaging or another payment.
 
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as

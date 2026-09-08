@@ -40,6 +40,78 @@ SLOTS = {'deliveryDate': '2026-09-12', 'slots': [{
 
 
 
+class MathemDietaryDetailTests(unittest.TestCase):
+    # Visible row labels from Mathem's public product 4694, 2026-09-07.
+    HTML = ('<div>Ingredienser</div><div>PASTA AV DURUMVETE.</div>'
+            '<div>Allergener</div><div>Spannmål som innehåller gluten</div>'
+            '<div>Kan innehålla spår av</div><div>Sojabönor, Senap</div>'
+            '<div>Tillverkningsland</div><div>Italien</div>').encode()
+
+    def test_exact_mathem_detail_and_provider_redirect_binding(self):
+        response = mock.Mock(status=301)
+        connection = mock.Mock(); connection.getresponse.return_value = response
+        with tempfile.TemporaryDirectory() as root:
+            client = RetailMcpClient(root, provider='mathem')
+            for location, accepted in [
+                ('/se/products/4694-barilla-pasta-fusilli/', True),
+                ('https://oda.com/no/products/4694-pasta/', False),
+                ('/se/products/5627-pasta/', False),
+                ('/se/products/4694-pasta/?unbound=1', False),
+            ]:
+                response.getheader.return_value = location
+                with self.subTest(location=location), mock.patch('recipe_import_sources._PinnedConnection', return_value=connection) as connect, mock.patch('recipe_import_sources._get_bytes', return_value=(self.HTML, 'text/html')) as fetch:
+                    result = client.product_dietary_evidence('4694')
+                    connect.assert_called_once_with('www.mathem.se', 443, tls=True, public_only=True)
+                    if accepted:
+                        self.assertEqual(result['ingredients'], 'PASTA AV DURUMVETE.')
+                        self.assertEqual(result['allergens'], 'Spannmål som innehåller gluten')
+                        self.assertEqual(result['may_contain'], 'Sojabönor, Senap')
+                        self.assertEqual(result['source_url'], 'https://www.mathem.se' + location)
+                        fetch.assert_called_once()
+                    else:
+                        self.assertIn('unavailable', result); fetch.assert_not_called()
+
+    def test_missing_duplicate_and_script_rows_do_not_become_evidence(self):
+        from dietary_assessment import parse_retail_product_page
+        raw = b'<script>Allergener\nmilk</script><div>Ingredienser</div><div>x</div><div>Ingredienser</div><div>y</div>'
+        result = parse_retail_product_page(raw, 'https://www.mathem.se/se/products/4694/', provider='mathem')
+        self.assertEqual(set(result), {'source_url'})
+
+
+class MathemOrderIdentityTests(unittest.TestCase):
+    def test_swedish_existing_order_addition_requires_exact_date_slot_goods_and_total(self):
+        from service_common import oda_order_matches_addition
+        before = {"currency": "SEK", "deliveryDate": "2026-05-09", "deliverySlotDisplay": "9 maj 14–16",
+                  "grossAmount": "121.95", "products": [
+                      {"product": {"id": 4694, "name": "Pasta"}, "quantity": 1, "totalGrossAmount": "15.95"}]}
+        after = deepcopy(before)
+        after.update(grossAmount="137.90", products=[
+            {"product": {"id": 4694, "name": "Pasta"}, "quantity": 2, "totalGrossAmount": "31.90"}])
+        additions = {"items": [{"product_id": "4694", "quantity": 1}], "total": "15.95"}
+        self.assertTrue(oda_order_matches_addition(before, after, additions, provider="mathem"))
+        self.assertFalse(oda_order_matches_addition(before, after, additions))
+        for key, value in [("currency", "NOK"), ("currency", None), ("deliveryDate", "2026-05-10"), ("deliverySlotDisplay", "9 maj 16–18"),
+                           ("grossAmount", "137.91"), ("products", before["products"])]:
+            changed = {**after, key: value}
+            with self.subTest(drift=key):
+                self.assertFalse(oda_order_matches_addition(before, changed, additions, provider="mathem"))
+        self.assertFalse(oda_order_matches_addition(before, before, additions, provider="mathem"))
+        for currency in (None, "NOK"):
+            self.assertFalse(oda_order_matches_addition({**before, "currency": currency}, after, additions, provider="mathem"))
+
+    def test_cancellation_swedish_delivery_and_currency_are_provider_bound(self):
+        from oda_browser import cancellation_delivery_matches, cancellation_total_matches
+        self.assertTrue(cancellation_delivery_matches("9 december 14–16", ["9 dec 14:00 till 16:00"], provider="mathem"))
+        self.assertFalse(cancellation_delivery_matches("9 december 14–16", ["9 dec 14:00 till 16:00"]))
+        self.assertFalse(cancellation_delivery_matches("9 december 14–16", ["9 dec 14–16", "10 dec 14–16"], provider="mathem"))
+        self.assertTrue(cancellation_total_matches(12195, ["Totalt inkl. moms 121,95 SEK"], provider="mathem"))
+        for row in ["Totalt 121,95 NOK", "Totalt 121,95 kr NOK", "Totalt 121,94 SEK", "Totalt 121,95 SEK Avgift 10,00 SEK"]:
+            with self.subTest(row=row):
+                self.assertFalse(cancellation_total_matches(12195, [row], provider="mathem"))
+        self.assertFalse(cancellation_total_matches(12195, ["Totalt 121,95 SEK"]))
+        self.assertTrue(cancellation_total_matches(12195, ["Totalt 121,95 NOK"]))
+
+
 class MathemCheckoutAmountTests(unittest.TestCase):
     # Redacted rows observed in Mathem's authenticated checkout on 2026-09-07.
     ROWS = [
@@ -83,6 +155,42 @@ class MathemCheckoutAmountTests(unittest.TestCase):
         self.assertEqual(delivery_signature("1 december, 09 till 12", provider="mathem"), (9, 0, 12, 0, 1, "dec"))
         self.assertIsNone(delivery_signature("31 februari, 09–12", provider="mathem"))
         self.assertIsNone(delivery_signature("1 mai, 09–12", provider="mathem"))
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes delayed checkout expansion")
+    def test_checkout_expansion_waits_for_visible_sections_and_never_reclicks(self):
+        browser = MathemBrowser.__new__(MathemBrowser)
+        scripts = {"fresh": browser._checkout_expand_script({"lines": [{}]}, set()),
+                   "dispatched": browser._checkout_expand_script({"lines": [{}]}, {"Visa varor", "Visa sammanfattning"})}
+        harness = r"""
+const scripts=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location={href:'https://www.mathem.se/se/checkout/confirm/'};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+let clicks=0;
+const node=text=>({innerText:text,textContent:text,labels:[{textContent:'Antal'}],disabled:false,getAttribute:()=>null,getBoundingClientRect:()=>({width:50,height:20}),click:()=>{clicks++;}});
+let inputs=[],buttons=[],subtotal=[];
+global.document={querySelectorAll:s=>s==='input[type="number"]'?inputs:s==='button'?buttons:subtotal};
+const read=script=>({result:JSON.parse(eval(script)),clicks});
+const output=[read(scripts.fresh)];
+buttons=[node('Visa varor'),node('Visa sammanfattning')];output.push(read(scripts.fresh));
+output.push(read(scripts.dispatched));
+inputs=[node('')];subtotal=[node('Delsumma')];buttons=[];output.push(read(scripts.dispatched));
+output.push(read(scripts.fresh));
+inputs=[];subtotal=[];buttons=[node('Visa varor'),node('Visa varor'),node('Visa sammanfattning')];output.push(read(scripts.fresh));
+location.href='https://www.mathem.se/se/cart/';output.push(read(scripts.fresh));
+process.stdout.write(JSON.stringify(output));
+"""
+        run = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps(scripts),
+                             text=True, capture_output=True, check=True, timeout=10)
+        rows = json.loads(run.stdout)
+        self.assertEqual(rows, [
+            {'result': {'ready': False, 'clicked': []}, 'clicks': 0},
+            {'result': {'ready': False, 'clicked': ['Visa varor', 'Visa sammanfattning']}, 'clicks': 2},
+            {'result': {'ready': False, 'clicked': []}, 'clicks': 2},
+            {'result': {'ready': True}, 'clicks': 2},
+            {'result': {'ready': True}, 'clicks': 2},
+            {'result': {'blocked': True}, 'clicks': 2},
+            {'result': {'blocked': True}, 'clicks': 2},
+        ])
 
     @unittest.skipUnless(shutil.which("node"), "Node is required to execute the payment check")
     def test_payment_binding_requires_selected_visible_saved_card(self):
@@ -165,14 +273,39 @@ process.stdout.write(JSON.stringify(result));
         cases.extend([
             {"name": "duplicate_total", "rows": self.ROWS + [self.ROWS[-1]], "valid": False},
             {"name": "unknown_fee", "rows": self.ROWS + [["Ny avgift", "1,00 kr"]], "valid": False},
-            {"name": "unverified_product_discount", "rows": self.ROWS + [["Du sparar", "−1,00 kr"]], "valid": False},
+            {"name": "unreconciled_product_discount", "rows": self.ROWS + [["Du sparar", "−1,00 kr"]], "valid": False},
         ])
-        read_script = _oda_checkout_amount_script(12195, expected_product_count=1, provider="mathem")
         amounts = {"product_subtotal": 1595, "delivery_price": 5900, "discounts": -5900,
                    "deposits": None, "bags": 700,
-                   "other_fees": {"Avgift för liten varukorg": 9900}, "provider_total": 12195}
-        click_script = _oda_checkout_amount_script(12195, expected_product_count=1, provider="mathem",
-            expected_amounts=amounts, expected_url="https://www.mathem.se/se/checkout/confirm/")
+                   "other_fees": {"Avgift för liten varukorg": 9900}, "provider_total": 12195,
+                   "discount_breakdown": {"product_discount": None, "delivery_discount": -5900}}
+        # Authenticated read-only observation on 2026-09-08; no inferred fees.
+        discounted_rows = [["17 varor", "482,52 kr"], ["Du sparar", "−24,51 kr"],
+            ["Delsumma", "458,01 kr"], ["Avgift för liten varukorg", "99,00 kr"],
+            ["Lådor", "7,00 kr"], ["Leverans", "79,00 kr"],
+            ["Gratis leverans", "−79,00 kr"], ["Totalt inkl. moms", "564,01 kr"]]
+        discounted_amounts = {**amounts, "product_subtotal": 48252, "delivery_price": 7900,
+                              "discounts": -10351, "provider_total": 56401,
+                              "discount_breakdown": {"product_discount": -2451, "delivery_discount": -7900}}
+        for change in (None, "discount", "subtotal", "duplicate", "unknown", "reallocated"):
+            rows = deepcopy(discounted_rows)
+            if change == "discount": rows[1][1] = "−24,50 kr"
+            if change == "subtotal": rows[2][1] = "482,52 kr"
+            if change == "duplicate": rows.append(rows[1])
+            if change == "unknown": rows.append(["Rabattkod", "−1,00 kr"])
+            if change == "reallocated":
+                rows[1][1] = "−103,51 kr"
+                rows[2][1] = "379,01 kr"
+                rows = [row for row in rows if row[0] != "Gratis leverans"]
+            cases.append({"name": f"observed_product_discount_{change}", "rows": rows,
+                "valid": change in {None, "reallocated"}, "click_valid": change is None,
+                "total": 56401, "count": 17, "amounts": discounted_amounts})
+        for case in cases:
+            total = case.get("total", 12195)
+            count = case.get("count", 1)
+            case["read"] = _oda_checkout_amount_script(total, expected_product_count=count, provider="mathem")
+            case["click"] = _oda_checkout_amount_script(total, expected_product_count=count, provider="mathem",
+                expected_amounts=case.get("amounts", amounts), expected_url="https://www.mathem.se/se/checkout/confirm/")
         harness = r"""
 const payload=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 class Element {
@@ -189,25 +322,31 @@ global.location={href:'https://www.mathem.se/se/checkout/confirm/'};
 const output=[];
 for(const test of payload.cases){
  const summary=new Element('section','',test.rows.map(([label,amount])=>new Element('div','',[new Element('span',label),new Element('span',amount)])));
- const button=new Element('button','Bekräfta och betala 121,95 kr');
+ const button=new Element('button','Bekräfta och betala '+((test.total||12195)/100).toFixed(2).replace('.',',')+' kr');
  global.document=new Element('document','',[summary,button]);
- const read=JSON.parse(eval(payload.read));
- const submit=JSON.parse(eval(payload.click));
+ const read=JSON.parse(eval(test.read));
+ const submit=JSON.parse(eval(test.click));
  output.push({name:test.name,valid:read.amounts_valid,clicked:submit.clicked,clicks:button.clicks||0,amounts:read.amounts});
 }
 process.stdout.write(JSON.stringify(output));
 """
         completed = subprocess.run([shutil.which("node"), "-e", harness],
-            input=json.dumps({"cases": cases, "read": read_script, "click": click_script}),
+            input=json.dumps({"cases": cases}),
             capture_output=True, text=True, timeout=10, check=True)
         observed = json.loads(completed.stdout)
         self.assertEqual(len(observed), len(cases))
         for expected, actual in zip(cases, observed):
             with self.subTest(case=expected["name"]):
                 self.assertEqual(actual["valid"], expected["valid"])
-                self.assertEqual(actual["clicked"], expected["valid"])
-                self.assertEqual(actual["clicks"], int(expected["valid"]))
+                self.assertEqual(actual["clicked"], expected.get("click_valid", expected["valid"]))
+                self.assertEqual(actual["clicks"], int(expected.get("click_valid", expected["valid"])))
         self.assertEqual(observed[0]["amounts"], amounts)
+        self.assertEqual(observed[-6]["amounts"], discounted_amounts)
+        native = MathemBrowser.__new__(MathemBrowser)
+        native._eval = mock.Mock(return_value={"amounts": observed[-6]["amounts"], "amounts_valid": True})
+        converted = native._read_checkout_amounts(56401, 17)
+        self.assertEqual(converted["discount_breakdown"], {"product_discount": -24.51, "delivery_discount": -79.0})
+        self.assertEqual(converted["discounts"], -103.51)
 
 class MathemShop(existing.FakeOda):
     def __init__(self):
@@ -340,10 +479,12 @@ class MathemFlowTests(unittest.TestCase):
 
     def test_protected_actions_never_use_oda_browser_or_create_attempts(self):
         before = self.store.read()
-        for operation, actions in [('checkout', ['confirm', 'submit', 'reconcile']), ('orders', ['change_begin', 'change_abort', 'cancel_prepare', 'cancel_submit', 'cancel_confirm', 'cancel_reconcile'])]:
+        for operation, actions in [('checkout', ['confirm', 'submit', 'reconcile']), ('orders', ['change_begin', 'cancel_prepare', 'cancel_submit', 'cancel_confirm', 'cancel_reconcile'])]:
             for action in actions:
                 with self.subTest(operation=operation, action=action), self.assertRaisesRegex(HouseholdError, 'Mathem'):
                     self.app.handle({'operation': operation, 'action': action, 'order_id': '1', 'idempotency_key': 'test'})
+        with self.assertRaisesRegex(HouseholdError, 'no matching order change'):
+            self.app.handle({'operation': 'orders', 'action': 'change_abort', 'order_id': '1'})
         self.assertEqual(self.store.read(), before)
         self.assertEqual(self.shop.calls, [])
         with self.assertRaisesRegex(HouseholdError, 'maximum total'):
@@ -414,6 +555,74 @@ class MathemFlowTests(unittest.TestCase):
 
 
 class MathemTransportTests(unittest.TestCase):
+    def test_swedish_oil_query_preserves_bounds_and_rejects_wrong_response(self):
+        arguments = {'queries': ['rapsolje'], 'page': 1, 'size': 5}
+        response = normalize_retail_product_search(
+            {'result': [{'query': 'rapsolja', 'products': [], 'hasMore': False}]}, provider='mathem')
+        client = RetailMcpClient(self.__class__.__name__, provider='mathem')
+        with mock.patch('retail_mcp.time.monotonic', return_value=100), mock.patch.object(client, '_run', return_value=deepcopy(response)) as run:
+            result = client.call('product_search', arguments, deadline=112)
+            run.assert_called_once_with('product_search', {'queries': ['rapsolja'], 'page': 1, 'size': 5}, 12)
+        self.assertEqual(arguments, {'queries': ['rapsolje'], 'page': 1, 'size': 5})
+        self.assertEqual(result['query'], 'rapsolje')
+        self.assertEqual(result['scope']['provider_query'], 'rapsolja')
+        for wrong in ('rapsolje', 'olje', None):
+            with self.subTest(query=wrong), mock.patch.object(client, '_run', return_value={**response, 'query': wrong}) as run:
+                with self.assertRaisesRegex(HouseholdError, 'query changed'):
+                    client.call('product_search', arguments)
+                self.assertEqual(run.call_count, 1)
+        for provider, queries in [('oda', ['rapsolje']), ('mathem', ['olivolja']), ('mathem', ['rapsolje', 'salt'])]:
+            client = RetailMcpClient(self.__class__.__name__, provider=provider)
+            with self.subTest(provider=provider, queries=queries), mock.patch.object(client, '_run', return_value=deepcopy(response)) as run:
+                result = client.call('product_search', {'queries': queries, 'size': 5})
+                run.assert_called_once_with('product_search', {'queries': queries, 'size': 5}, 90.0)
+                self.assertNotIn('provider_query', result['scope'])
+
+    def test_observed_mathem_packages_reach_plan_without_inventing_payable(self):
+        from product_planner import build_product_plan, menu_requirements
+        for label, grams in [('Sverige, 500 g', 500), ('Sverige, 2 kg', 2000), ('Spanien, 250 g', 250)]:
+            with self.subTest(label=label):
+                self.assertEqual(parse_package(label, provider='mathem'), {
+                    'quantity': {'numerator': grams, 'denominator': 1}, 'unit': 'g', 'item_count': 1})
+                self.assertIsNone(parse_package(label, provider='oda'))
+        for label in ['Sverige, ca 500 g', 'Sverige, 500 g/kg', 'Sverige, 500 g extra', 'Okänd, 500 g', 'Spanien, 250 ml', 'Sverige, 2 st', 'Sverige, 0 g']:
+            self.assertIsNone(parse_package(label, provider='mathem'), label)
+        menu = {'dishes': [{'shopping_requirements': [
+            {'item': 'rapsolje', 'quantity': 20, 'unit': 'ml', 'scalable': True},
+            {'item': 'morot', 'quantity': 400, 'unit': 'g', 'scalable': True}]}], 'salads': []}
+        requirements, unresolved = menu_requirements(menu)
+        self.assertEqual(unresolved, [])
+        raw_products = {
+            'rapsolja': {'id': 10008, 'name': 'Rapsolja', 'description': '1 l', 'price': '24.95', 'availability': True},
+            'morot': {'id': 7664, 'name': 'Morötter', 'description': 'Sverige, 500 g', 'price': '12.95', 'availability': True},
+        }
+        def search(tool, arguments, timeout):
+            self.assertEqual(tool, 'product_search')
+            query = arguments['queries'][0]
+            result = normalize_retail_product_search({'result': [{'query': query, 'products': [raw_products[query]], 'hasMore': False}]}, provider='mathem')
+            result['scope']['requested_size'] = arguments['size']
+            return result
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp) / 'state', {**existing.CONFIG, 'provider': 'mathem'})
+            client = RetailMcpClient(temp, provider='mathem')
+            app = Application(store, client, None)
+            with mock.patch.object(client, '_run', side_effect=search) as run:
+                observations = app._product_observations(menu, deadline=None)
+                self.assertEqual(run.call_count, 2)
+            approvals = [{'requirement_id': r['requirement_id'], 'candidate_refs': [10008 if r['identity'] == 'rapsolje' else 7664]} for r in requirements]
+            common = dict(provider='mathem', binding={}, menu=menu, observations=observations, candidate_approvals=approvals, budget_ore=70000)
+            self.assertEqual(build_product_plan(**common)['status'], 'needs_input')
+            plan = build_product_plan(**common, price_mode='estimate')
+            self.assertEqual(plan['status'], 'prepared', plan['unresolved_requirements'])
+            self.assertEqual(plan['cost_status'], 'merchandise_estimate_only')
+            self.assertEqual(plan['budget_status'], 'unverified')
+            self.assertEqual(plan['totals']['merchandise_ore'], 3790)
+            self.assertIsNone(plan['totals']['total_payable_ore'])
+            self.assertIsNone(plan['totals']['mandatory_deposit_ore'])
+            oil = next(r for r in plan['requirements'] if r['identity'] == 'rapsolje')
+            self.assertEqual(oil['observation']['query'], 'rapsolje')
+            self.assertEqual(oil['observation']['scope']['provider_query'], 'rapsolja')
+
     def test_oauth_endpoint_storage_and_result_use_mathem_identity(self):
         captured = {}
         supported_tools = set(REQUIRED_TOOLS)
@@ -519,6 +728,59 @@ else:
             self.assertEqual(app.browser.profile, root / 'private/browser/profile')
 
 
+class CompactProductApplyTests(unittest.TestCase):
+    def setUp(self):
+        from test_meal_concierge_products import ProductRuntimeTests
+        fixture = ProductRuntimeTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        self.app, self.store, self.shop = fixture.app, fixture.store, fixture.provider
+        plan = fixture.prepare(approve=True)
+        self.arguments = {'operation': 'products', 'action': 'apply', 'menu_ref': fixture.menu_ref,
+            'candidate_approvals': self.app._plan_approvals(plan), 'ingredient_decisions': plan['ingredient_decisions'],
+            'budget_ore': plan['budget_ore'], 'price_mode': plan['price_mode'],
+            'product_plan_digest': plan['product_plan_digest'], 'cart_change_requested': True}
+
+    def test_compact_inputs_and_fresh_or_final_price_drift_cannot_write(self):
+        before = len(self.shop.calls)
+        self.assertFalse(self.app.handle({**self.arguments, 'cart_change_requested': False})['applied'])
+        for value in (None, 'bad'):
+            with self.assertRaises(HouseholdError):
+                self.app.handle({**self.arguments, 'product_plan_digest': value})
+        self.assertEqual(len(self.shop.calls), before)
+        with self.assertRaises(HouseholdError):
+            self.app.handle({**self.arguments, 'menu_ref': {**self.arguments['menu_ref'], 'digest': 'b' * 64}})
+        for change in ({'candidate_approvals': []}, {'budget_ore': 1}, {'price_mode': 'estimate'}):
+            with self.subTest(change=change):
+                self.assertFalse(self.app.handle({**self.arguments, **change})['applied'])
+        for prices in ([1000, 900], [1000, 1000, 900]):
+            self.shop.search_prices, self.shop.search_count = prices, 1
+            self.assertFalse(self.app.handle(self.arguments)['applied'])
+        self.assertNotIn('manipulate_cart', [name for name, _ in self.shop.calls])
+
+    def test_compact_apply_restart_and_lost_cart_response_preserve_single_write(self):
+        original = self.shop.call
+        def lost_response(tool, arguments, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == 'manipulate_cart':
+                raise HouseholdError('synthetic lost cart response after effect')
+            return result
+        self.shop.call = lost_response
+        self.app.handle(self.arguments)
+        restarted = Application(StateStore(self.store.path.parent, {
+            'instance': 'test', 'household': 'Test', 'profile_overrides': {}}), self.shop, object())
+        result = restarted.handle(self.arguments)
+        self.assertTrue(result['cart_reconciliation_required'])
+        kept = restarted.handle({'operation': 'cart', 'action': 'reconcile',
+            'menu_ref': self.arguments['menu_ref'], 'cart_digest': result['cart_plan']['cart_digest'],
+            'decision': 'keep_current'})
+        self.assertTrue(kept['reconciled'])
+        result = restarted.handle(self.arguments)
+        self.assertTrue(result['applied'])
+        self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
+        self.assertEqual(self.shop.cart['items'][0]['quantity'], 1)
+
+
 class MathemGuardedCheckoutTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mc50-')
@@ -540,8 +802,13 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.store = StateStore(self.root / 'state', {**existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'})
         self.browser = existing.FakeBrowser()
         self.browser.oda = self.shop
+        self.browser.order_followup = mock.Mock(return_value={
+            'deadline_text': 'Du har till och med 23:59 på 12. september att lägga till varor i din leverans.',
+            'cancellation_deadline_text': 'Du kan avboka din beställning när som helst före lördag 12 september kl. 23:59',
+            'cancellation_available': True})
         self.browser.receipt_address_matches = lambda order_id, address, **kw: order_id == "123456" and address == "Exempelvägen 1"
-        self.browser.review_checkout = lambda cart, **kw: {'payment_display': '•••• 1234', 'amounts': deepcopy(self.amounts)}
+        self.discount_breakdown = {'product_discount': None, 'delivery_discount': -59.0}
+        self.browser.review_checkout = lambda cart, **kw: {'payment_display': '•••• 1234', 'amounts': deepcopy(self.amounts), 'discount_breakdown': deepcopy(self.discount_breakdown)}
         self.app = Application(self.store, self.shop, self.browser)
         self.app.handle({'operation': 'setup', 'action': 'apply', 'keep_current': True})
 
@@ -559,6 +826,590 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.store.read()['pending_checkout']['status'], 'awaiting_confirmation')
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    def test_existing_order_binding_keeps_original_address_and_rejects_identity_drift(self):
+        import hashlib
+        import time
+        native = MathemBrowser.__new__(MathemBrowser)
+        original = {'id': 123, 'address': 'Exempelvägen 1', 'isSelected': False}
+        other = {'id': 456, 'address': 'Annan väg 2', 'isSelected': True}
+        native.provider_client = mock.Mock()
+        native.provider_client.call.return_value = {'result': [original, other]}
+        native._open = mock.Mock()
+        native._settle = mock.Mock()
+        expected = {'account_reference_digest': hashlib.sha256(b'123').hexdigest(),
+                    'receipt_address': 'Exempelvägen 1'}
+        deadline = time.monotonic() + 60
+        native._eval = mock.Mock(side_effect=[{'address_verified': True}, {'address_verified': False}, {'account_matches': True}])
+        bound = native._read_order_binding('123456', self.order(), deadline=deadline)
+        self.assertEqual(bound, expected)
+        native.provider_client.call.assert_called_once_with('get_delivery_addresses', {}, deadline=deadline)
+        native._eval = mock.Mock(side_effect=[{'address_verified': True}, {'account_matches': True}])
+        self.assertEqual(native._read_order_binding('123456', self.order(), deadline=deadline,
+                         expected_binding=bound), expected)
+        self.assertEqual(native._open.call_args_list[-2:], [
+            mock.call('https://www.mathem.se/se/account/orders/123456/'),
+            mock.call('https://www.mathem.se/se/account/delivery/')])
+        # Same postal address does not replace the frozen OAuth reference.
+        native.provider_client.call.return_value = {'result': [{**original, 'id': 789}]}
+        native._eval.reset_mock()
+        with self.assertRaisesRegex(HouseholdError, 'original order account binding'):
+            native._read_order_binding('123456', self.order(), deadline=deadline, expected_binding=bound)
+        native._eval.assert_not_called()
+        native.provider_client.call.return_value = {'result': [original]}
+        for observations, message in (([{'address_verified': False}] * 20, 'receipt address'),
+                ([{'address_verified': True}] + [{'account_matches': False}] * 20, 'original order account')):
+            native._eval = mock.Mock(side_effect=observations)
+            with self.assertRaisesRegex(HouseholdError, message):
+                native._read_order_binding('123456', self.order(), deadline=deadline, expected_binding=bound)
+        for delta in ({'currency': 'NOK'}, {'orderNumber': 'different'}):
+            native.provider_client.call.reset_mock()
+            with self.assertRaises(HouseholdError):
+                native._read_order_binding('123456', {**self.order(), **delta}, deadline=deadline)
+            native.provider_client.call.assert_not_called()
+        native.provider_client.call.return_value = {'result': [original, original]}
+        native._eval = mock.Mock(return_value={'address_verified': True})
+        with self.assertRaisesRegex(HouseholdError, 'ambiguous'):
+            native._read_order_binding('123456', self.order(), deadline=deadline)
+        native.provider_client.call.return_value = {'result': [original]}
+        native._eval = mock.Mock(side_effect=[{'address_verified': True}, {'account_matches': True}])
+        with mock.patch('oda_browser.time.monotonic', return_value=deadline):
+            with self.assertRaisesRegex(HouseholdError, 'deadline'):
+                native._read_order_binding('123456', self.order(), deadline=deadline, expected_binding=bound)
+
+    def test_free_delivery_keeps_product_discount_separate_in_protected_review(self):
+        self.shop.cart['items'][0]['totalGrossAmount'] = 16.95
+        self.amounts.update(product_subtotal=16.95, discounts=-60.0)
+        self.discount_breakdown['product_discount'] = -1.0
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertEqual(prepared['summary']['amounts'], self.amounts)
+        self.assertEqual(prepared['summary']['discount_breakdown'], self.discount_breakdown)
+        self.assertEqual(prepared['summary']['delivery']['slot']['price_ore'], 0)
+        self.assertEqual(prepared['summary']['total'], 121.95)
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        # Equal aggregate discounts cannot establish a delivery credit.
+        self.discount_breakdown.update(product_discount=-60.0, delivery_discount=None)
+        with self.assertRaisesRegex(HouseholdError, 'delivery price disagrees'):
+            self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    def test_shared_order_reads_and_nested_cancellation_keep_original_deadline(self):
+        import time
+        deadline = time.monotonic() + 60
+        self.shop.orders.append(self.order())
+        original = self.shop.call
+        deadlines = []
+        def provider(tool, arguments, **kwargs):
+            deadlines.append((tool, kwargs.get('deadline')))
+            return original(tool, arguments, **kwargs)
+        self.shop.call = provider
+        self.app._orders({'action': 'get', 'order_id': '123456', '_deadline': deadline})
+        self.app._orders({'action': 'list', '_deadline': deadline})
+        self.assertEqual(deadlines, [('get_order', deadline), ('order_tracking', deadline), ('get_orders', deadline)])
+        # Retain Oda's shared deadline path alongside Mathem's binding checks.
+        self.shop.orders[0]['currency'] = 'NOK'
+        store = StateStore(self.root / 'oda-deadline', {**existing.CONFIG, 'confirmation_policy': 'standing'})
+        oda = Application(store, self.shop, self.browser)
+        deadlines.clear()
+        result = oda._orders({'action': 'cancel_submit', 'order_id': '123456',
+            'idempotency_key': 'synthetic-deadline', '_deadline': deadline})
+        self.assertTrue(result['cancelled'])
+        self.assertTrue(deadlines)
+        self.assertTrue(all(value == deadline for _, value in deadlines))
+        self.assertEqual(self.browser.cancellation_review_deadlines, [deadline])
+        self.assertEqual(self.browser.cancellation_submit_deadlines, [deadline])
+
+    def test_mathem_cancellation_lost_response_reconciles_original_binding_once(self):
+        self.shop.orders.append(self.order())
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.review_cancellation = lambda *args, **kw: {
+            'available': True, 'binding': deepcopy(binding), 'consequence': 'Cannot be undone'}
+        self.browser.read_order_binding = mock.Mock(return_value=deepcopy(binding))
+        original = self.browser.submit_cancellation
+        def lost_response(*args, **kwargs):
+            original(*args, **kwargs)
+            raise HouseholdError('synthetic lost response after cancellation')
+        self.browser.submit_cancellation = lost_response
+        request = {'action': 'cancel_submit', 'order_id': '123456', 'idempotency_key': 'cancel-own-order'}
+        with self.assertRaises(HouseholdError):
+            self.app._orders(request)
+        self.assertEqual(self.store.read()['pending_cancellation']['status'], 'uncertain')
+        self.assertEqual(self.browser.cancel_clicks, 1)
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        # Another shopping address never substitutes for the frozen receipt.
+        self.shop.cart['deliveryAddress'] = 'Annan adress 2'
+        self.browser.read_order_binding.side_effect = HouseholdError('original account unavailable')
+        with self.assertRaises(HouseholdError):
+            restarted._orders(request)
+        self.assertEqual(self.store.read()['pending_cancellation']['status'], 'uncertain')
+        self.browser.read_order_binding.side_effect = None
+        result = restarted._orders(request)
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(result['payment_resolution'], {'authorization_release': 'unknown', 'refund': 'unknown'})
+        self.assertTrue(restarted._orders(request)['idempotent'])
+        self.assertEqual(self.browser.cancel_clicks, 1)
+        self.assertEqual(self.browser.read_order_binding.call_args.kwargs['expected_binding'], binding)
+
+    def test_mathem_begin_ensure_and_retain_abort_preserve_order_and_cart(self):
+        self.shop.orders.append(self.order())
+        original_order = deepcopy(self.shop.orders)
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        begun = self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.assertTrue(begun['editing'])
+        self.assertEqual(begun['provider'], 'mathem')
+        self.assertEqual(self.store.read()['order_change']['binding'], binding)
+        self.app._cart({'action': 'ensure', 'requirements': [{'product_id': 4694, 'product_name': 'Pasta Fusilli', 'quantity': 1}]})
+        self.assertNotIn('manipulate_cart', [name for name, _ in self.shop.calls])
+        self.shop.fail_after_write = True
+        with self.assertRaises(HouseholdError):
+            self.app._cart({'action': 'ensure', 'requirements': [{'product_id': 4694, 'product_name': 'Pasta Fusilli', 'quantity': 2}]})
+        with self.assertRaisesRegex(HouseholdError, 'reconcile_change'):
+            self.app._orders({'action': 'change_abort', 'order_id': '123456', 'retain_cart': True})
+        self.app._cart({'action': 'reconcile_change'})
+        self.assertEqual(self.store.read()['order_change']['expected_cart_quantities'], {'4694': 1})
+        with self.assertRaisesRegex(HouseholdError, 'retain_cart'):
+            self.app._orders({'action': 'change_abort', 'order_id': '123456'})
+        self.assertTrue(self.app._orders({'action': 'change_abort', 'order_id': '123456', 'retain_cart': True})['cart_retained'])
+        staged = deepcopy(self.shop.cart)
+        review = self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.assertTrue(review['cart_confirmation_required'])
+        self.assertIsNone(self.store.read()['order_change'])
+        self.app._orders({'action': 'change_begin', 'order_id': '123456', 'cart_digest': review['cart_digest']})
+        self.assertEqual(self.store.read()['order_change']['starting_cart_quantities'], {'4694': 1})
+        self.assertEqual(self.shop.orders, original_order)
+        self.assertEqual(self.shop.cart, staged)
+        self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
+
+    def test_mathem_addition_without_cart_slot_recovers_one_dispatch(self):
+        self.shop.orders.append(self.order())
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.app._cart({'action': 'change', 'operations': [{'productId': 4904, 'quantity': 1}]})
+        amounts = {key: None for key in self.amounts}
+        amounts.update(product_subtotal=29.9, provider_total=29.9)
+        self.browser.review_order_change = mock.Mock(return_value={
+            'payment_display': '•••• 1234', 'binding': binding, 'amounts': amounts,
+            'order_amounts': {'original_minor': 12195, 'added_minor': 2990, 'payable_minor': 2990,
+                             'combined_minor': 15185, 'original_count': 1, 'added_count': 1, 'combined_count': 2}})
+        original = self.browser.submit_order_change
+        def lost_response(*args, **kwargs):
+            original(*args, **kwargs)
+            raise HouseholdError('synthetic lost addition response after effect')
+        self.browser.submit_order_change = lost_response
+        self.browser.submit_checkout = mock.Mock(side_effect=AssertionError('must not create a new order'))
+        prepared = self.app._checkout_prepare()
+        self.assertEqual(prepared['summary']['delivery']['selection_origin'], 'existing_order')
+        self.assertEqual(prepared['summary']['delivery']['address'], binding['receipt_address'])
+        self.assertEqual(prepared['summary']['total'], 29.9)
+        self.assertEqual(prepared['summary']['order_amounts']['combined_minor'], 15185)
+        self.assertIsNone(self.store.read()['pending_checkout']['cart']['delivery'])
+        request = {'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'existing-addition'}
+        with self.assertRaises(HouseholdError):
+            self.app.handle(request)
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(len(self.shop.orders), 1)
+        self.assertEqual(self.store.read()['pending_checkout']['status'], 'uncertain')
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        self.shop.tracking = 'unpaid_order_change'
+        self.browser.read_order_binding.reset_mock()
+        waiting = restarted.handle(request)
+        self.assertFalse(waiting['confirmed'])
+        self.assertEqual(waiting['tracking_status'], 'unpaid_order_change')
+        self.assertFalse(waiting['retry_allowed'])
+        self.browser.read_order_binding.assert_not_called()
+        self.shop.tracking = 'paid_and_modifiable'
+        self.browser.read_order_binding.side_effect = HouseholdError('original account unavailable')
+        with self.assertRaises(HouseholdError): restarted.handle(request)
+        self.assertEqual(self.store.read()['pending_checkout']['status'], 'uncertain')
+        self.browser.read_order_binding.side_effect = None
+        result = restarted.handle(request)
+        self.assertTrue(result['confirmed'])
+        self.assertTrue(result['changed_existing_order'])
+        self.assertTrue(restarted.handle(request)['idempotent'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertNotIn('select_delivery_slot', [name for name, _ in self.shop.calls])
+
+    def test_mathem_delivery_change_lost_response_retains_exact_order_and_year(self):
+        before = self.order()
+        before.update(deliveryDate='2026-09-13', deliverySlotDisplay='Sön 13. sep 09:00 - 12:00')
+        self.shop.orders.append(before)
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        original_review = self.browser.review_delivery_change
+        self.browser.review_delivery_change = lambda *a, expected_binding=None, **kw: original_review(*a, **kw)
+        self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        selected = self.app._delivery({'action': 'select', 'slot_ref': 'mathem:2026-09-12:77'})
+        self.assertEqual(selected['staged_for_order'], '123456')
+        prepared = self.app._checkout_prepare()
+        self.assertEqual(prepared['summary']['total'], 0)
+        original_submit = self.browser.submit_delivery_change
+        def lost(*a, **kw):
+            original_submit(*a, **kw)
+            raise HouseholdError('lost response after the one delivery confirmation')
+        self.browser.submit_delivery_change = lost
+        self.browser.submit_checkout = mock.Mock(side_effect=AssertionError('no new order'))
+        request = {'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'one-delivery-change'}
+        with self.assertRaises(HouseholdError): self.app.handle(request)
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        self.browser.read_order_binding.reset_mock()
+        for drift in ({'deliveryDate': '2027-09-12'}, {'grossAmount': 122.95}, {'currency': 'NOK'},
+                      {'products': [{**before['products'][0], 'quantity': 2}]}):
+            current = deepcopy(self.shop.orders[0]); self.shop.orders[0].update(drift)
+            result = restarted.handle(request)
+            self.assertFalse(result['confirmed'])
+            self.assertFalse(result['retry_allowed'])
+            self.browser.read_order_binding.assert_not_called()
+            self.shop.orders[0] = current
+        self.browser.read_order_binding.side_effect = HouseholdError('original receipt account unavailable')
+        with self.assertRaises(HouseholdError): restarted.handle(request)
+        self.browser.read_order_binding.side_effect = None
+        self.assertTrue(restarted.handle(request)['confirmed'])
+        self.assertTrue(restarted.handle(request)['idempotent'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(len(self.shop.orders), 1)
+        self.assertEqual([name for name, _ in self.shop.calls].count('select_delivery_slot'), 1)
+
+    def test_mathem_cancellation_last_expiry_check_and_unknown_click_are_distinct(self):
+        from core import CancellationPreconditionError
+        import time
+        native = MathemBrowser.__new__(MathemBrowser)
+        native._checkout_deadline = None
+        native._invoke = mock.Mock(return_value={})
+        native.provider_client = self.shop
+        self.shop.orders.append(self.order())
+        review = {'available': True, 'binding': {'receipt_address': 'Exempelvägen 1'}, 'receipt': {}}
+        native._review_mathem_cancellation = mock.Mock(return_value=review)
+        native._eval = mock.Mock(side_effect=HouseholdError('lost final response'))
+        callback = mock.Mock(side_effect=CancellationPreconditionError('expired during last provider reads'))
+        with self.assertRaises(CancellationPreconditionError):
+            native.submit_cancellation('123456', self.order(), review, callback, deadline=time.monotonic()+60)
+        callback.assert_called_once()
+        native._eval.assert_not_called()
+        with self.assertRaises(HouseholdError) as raised:
+            native.submit_cancellation('123456', self.order(), review, deadline=time.monotonic()+60)
+        self.assertNotIsInstance(raised.exception, CancellationPreconditionError)
+        native._eval.assert_called_once()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node executes the persisted cancellation final guard')
+    def test_cancellation_final_receipt_survives_sorted_state_but_rejects_drift(self):
+        from core import CancellationPreconditionError
+        native = MathemBrowser.__new__(MathemBrowser)
+        native._checkout_deadline = None
+        native._invoke = mock.Mock()
+        native.provider_client = self.shop
+        self.shop.orders.append(self.order())
+        receipt = {'available': True, 'delivery_lines': ['Lör 12. sep 09:00 - 12:00'],
+                   'total_rows': ['Totalt inkl. moms 121,95 kr'], 'deadline_text': ['Före imorgon 23:59'],
+                   'addition_deadline_text': ['Lägg till före imorgon 23:59']}
+        review = {'available': True, 'binding': {'receipt_address': 'Exempelvägen 1'},
+                  'receipt': receipt, 'consequence': 'Cannot be undone'}
+        self.browser.review_cancellation = mock.Mock(return_value=deepcopy(review))
+        self.app._orders({'action': 'cancel_prepare', 'order_id': '123456'})
+        persisted = self.store.read()['pending_cancellation']['browser']
+        self.assertEqual(persisted, review)
+        self.assertNotEqual(list(persisted['receipt']), list(receipt))
+        native._review_mathem_cancellation = mock.Mock(return_value=deepcopy(review))
+        native._cancellation_dialog_script = lambda action: "(() => {clicks++;return JSON.stringify({clicked:true});})()"
+        for drift in (None, {'total_rows': ['Totalt inkl. moms 121,96 kr']},
+                      {'delivery_lines': ['Lör 12. sep 10:00 - 12:00']}, {'deadline_text': []}, {'unexpected': True}):
+            actual = {**receipt, **(drift or {})}
+            native._cancellation_receipt_script = lambda *a: 'JSON.stringify(' + json.dumps(actual) + ')'
+            observed = []
+            def evaluate(script):
+                harness = "let clicks=0;const result=JSON.parse(eval(require('node:fs').readFileSync(0,'utf8')));process.stdout.write(JSON.stringify({result,clicks}));"
+                run = subprocess.run([shutil.which('node'), '-e', harness], input=script, capture_output=True,
+                                     text=True, check=True, timeout=10)
+                value = json.loads(run.stdout); observed.append(value); return value['result']
+            native._eval = evaluate
+            if drift is None:
+                native.submit_cancellation('123456', self.order(), persisted)
+            else:
+                with self.assertRaises(CancellationPreconditionError): native.submit_cancellation('123456', self.order(), persisted)
+            self.assertEqual(observed[-1]['clicks'], 1 if drift is None else 0)
+
+    def _automatic_dietary_fixture(self):
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
+            'rules': [{'kind': 'allergy', 'term': 'sesam'}],
+            'uncertainty_permissions': [{'kind': 'allergy', 'term': 'sesam', 'product_ref': '4694',
+                'condition': 'unknown', 'accepted': True, 'notify': True}]}}})
+        from dietary_assessment import parse_retail_product_page
+        self.shop.product_dietary_evidence = lambda ref, **kw: parse_retail_product_page(
+            MathemDietaryDetailTests.HTML, f'https://www.mathem.se/se/products/{ref}-pasta/', provider='mathem')
+        self.app.handle({'operation': 'schedule', 'action': 'update', 'changes': {
+            'enabled': True, 'maximum_total': 150, 'auto_checkout': True,
+            'delivery': {'weekday': 'Saturday', 'strategy': 'keep_selected'}}})
+        self.app.handle({'operation': 'schedule', 'action': 'set_cron_job', 'cron_job_id': 'synthetic-mathem-weekly'})
+
+    @mock.patch.object(Application, '_now', return_value=datetime(2026, 9, 10, 13, 5, tzinfo=timezone.utc))
+    def test_expired_undispatched_interactive_review_allows_fresh_auto_review(self, _clock):
+        self._automatic_dietary_fixture()
+        old = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        request = {'operation': 'checkout', 'action': 'auto', 'occurrence': '2026-W37'}
+        pending = self.store.read()['pending_checkout']
+        # Neither a live interactive review, unknown expiry nor a possibly
+        # dispatched checkout can be discarded by an automatic occurrence.
+        for status, expiry in [('awaiting_confirmation', pending['expires_at']),
+                               ('awaiting_confirmation', 'unknown'),
+                               ('uncertain', '2026-09-10T13:04:00+00:00')]:
+            with self.subTest(status=status, expiry=expiry):
+                with self.store.locked() as state:
+                    state['pending_checkout'] = {**deepcopy(pending), 'status': status, 'expires_at': expiry}
+                before = self.store.read()['pending_checkout']
+                with self.assertRaises(HouseholdError):
+                    self.app.handle(request)
+                self.assertEqual(self.store.read()['pending_checkout'], before)
+                self.assertEqual(self.browser.checkout_clicks, 0)
+        with self.store.locked() as state:
+            state['pending_checkout'] = {**deepcopy(pending), 'expires_at': '2026-09-10T13:04:00+00:00'}
+        fresh = self.app.handle(request)
+        current = self.store.read()['pending_checkout']
+        self.assertNotEqual(current['confirmation_id'], old['confirmation_id'])
+        self.assertTrue(current['automatic_checkout'])
+        self.assertEqual(current['occurrence'], '2026-W37')
+        self.assertTrue(fresh['notification_required'])
+        self.assertTrue(fresh['notice']['dispatch'])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.shop.orders, [])
+
+    @mock.patch.object(Application, '_now', return_value=datetime(2026, 9, 10, 13, 5, tzinfo=timezone.utc))
+    def test_mathem_auto_notice_lost_payment_and_result_replay(self, _clock):
+        import hashlib
+        self._automatic_dietary_fixture()
+        request = {'operation': 'checkout', 'action': 'auto', 'occurrence': '2026-W37'}
+        before = self.app.handle(request)
+        notice = before['notice']
+        self.assertTrue(before['notification_required']); self.assertTrue(notice['dispatch'])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertIn('4694', notice['payload']['message'])
+        inbox = self.root / 'local-notice.txt'
+        payload = notice['payload']['message'].encode()
+        inbox.write_bytes(payload); self.assertEqual(inbox.read_bytes(), payload)
+        receipt = 'synthetic-local:' + hashlib.sha256(inbox.read_bytes()).hexdigest()
+        self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': notice['notice_token'],
+                         'send_outcome': 'sent', 'sender_receipt': receipt})
+        def lost(cart, review, before_click, **kwargs):
+            before_click(); self.browser.checkout_clicks += 1
+            self.shop.orders.append(self.order())
+            raise HouseholdError('synthetic Mathem accepted with response lost')
+        self.browser.submit_checkout = lost
+        with self.assertRaisesRegex(HouseholdError, 'response lost'):
+            self.app.handle(request)
+        pending = self.store.read()['pending_checkout']
+        self.assertEqual(pending['status'], 'uncertain')
+        self.app = Application(StateStore(self.root / 'state', self.store.config), self.shop, self.browser)
+        result = self.app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': pending['confirmation_id']})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(result['payment'], {'provider_status': 'paid_and_modifiable', 'source': 'order_tracking',
+                                           'authorization': 'unknown', 'charge': 'unknown'})
+        after = result['notice']
+        self.assertEqual(after['phase'], 'after_reconciliation')
+        options = after['payload']['correction_options']
+        self.assertEqual(options['edit_availability'], 'additions_only')
+        self.assertIsNone(options['deadline'])
+        self.assertEqual(options['deadline_status'], 'provider_reported_text')
+        self.assertIn('12. september', options['deadline_text'])
+        self.assertIn(options['deadline_text'], after['payload']['message'])
+        self.assertIn('removal, replacement, refund and payment release are not promised', options['message'].casefold())
+        self.assertIn('zero additional payment', options['message'])
+        self.browser.order_followup.assert_called_once()
+        self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': after['notice_token'],
+                         'send_outcome': 'unknown', 'sender_receipt': 'synthetic-result-ack-lost'})
+        replay = self.app.handle(request)
+        self.assertTrue(replay['confirmed']); self.assertEqual(replay['payment'], result['payment'])
+        self.assertEqual(replay['notice']['notice_token'], after['notice_token'])
+        self.assertEqual(replay['notice']['payload'], after['payload'])
+        self.browser.order_followup.assert_called_once()
+        self.assertFalse(replay['notice']['dispatch']); self.assertFalse(replay['notice']['delivered'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(len(self.shop.orders), 1)
+
+    @mock.patch.object(Application, '_now', return_value=datetime(2026, 9, 10, 13, 5, tzinfo=timezone.utc))
+    def test_mathem_auto_blocks_unverified_notice_and_changed_final_evidence(self, _clock):
+        self._automatic_dietary_fixture()
+        request = {'operation': 'checkout', 'action': 'auto', 'occurrence': '2026-W37'}
+        notice = self.app.handle(request)['notice']
+        for outcome in ('not_sent', 'unknown'):
+            self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': notice['notice_token'],
+                             'send_outcome': outcome, 'sender_receipt': 'synthetic:' + outcome})
+            stopped = self.app.handle(request)
+            self.assertFalse(stopped['notice']['dispatch']); self.assertFalse(stopped['notice']['delivered'])
+            self.assertEqual(self.browser.checkout_clicks, 0)
+        self.shop.product_dietary_evidence = lambda ref, **kw: {
+            'source_url': f'https://www.mathem.se/se/products/{ref}-pasta/', 'allergens': 'Sesam'}
+        changed = self.app.handle(request)
+        self.assertTrue(changed['reprepared'])
+        finding = changed['summary']['dietary_assessment']['findings'][0]
+        self.assertEqual((finding['product_ref'], finding['condition']), ('4694', 'conflict'))
+        self.assertTrue(self.app.handle(request)['dietary_review_required'])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    def test_swedish_final_detail_preserves_dietary_categories(self):
+        from dietary_assessment import parse_retail_product_page
+        self.shop.product_dietary_evidence = lambda ref, **kw: parse_retail_product_page(
+            MathemDietaryDetailTests.HTML, f'https://www.mathem.se/se/products/{ref}-pasta/', provider='mathem')
+        cases = [
+            ({'rules': [{'kind': 'preference', 'term': 'durumvete'}]}, 'preference', 'preference_deviation', False),
+            ({'allergies_or_sensitivities': ['sesam']}, 'allergy_or_sensitivity', 'unknown', False),
+            ({'rules': [{'kind': 'allergy', 'term': 'sesam'}]}, 'allergy', 'unknown', False),
+            ({'rules': [{'kind': 'allergy', 'term': 'durumvete'}]}, 'allergy', 'conflict', True),
+        ]
+        for diet, kind, condition, blocked in cases:
+            with self.subTest(kind=kind, condition=condition):
+                self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {
+                    'diet': {'rules': [], 'allergies_or_sensitivities': [], 'uncertainty_permissions': [], **diet}}})
+                prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+                finding, = prepared['summary']['dietary_assessment']['findings']
+                self.assertEqual((finding['kind'], finding['condition'], finding['blocked']), (kind, condition, blocked))
+                self.assertEqual(finding['product_ref'], '4694')
+                self.assertEqual(finding['evidence']['source_url'], 'https://www.mathem.se/se/products/4694-pasta/')
+                self.assertTrue(self.app.handle({'operation': 'checkout', 'action': 'confirm',
+                    'confirmation_id': prepared['confirmation_id']})['dietary_review_required'])
+                self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch.object(Application, '_household_today', return_value=datetime(2026, 9, 10).date())
+    @mock.patch.object(Application, '_now', return_value=datetime(2026, 9, 10, 13, 5, tzinfo=timezone.utc))
+    def test_whole_week_shortfall_stays_visible_after_explicit_keep_current(self, _clock, _today):
+        from test_meal_concierge_planner import recipe
+        from product_planner import menu_requirements
+        refs = []
+        for index in range(7):
+            value = recipe('Synthetic egg dinner ' + str(index), 'egg-week-' + str(index))
+            value['ingredients'] = [{'item': 'ägg', 'quantity': 2, 'unit': 'stk', 'raw': '2 stk ägg', 'scalable': True}]
+            saved = self.app.handle({'operation': 'recipes', 'action': 'save', 'recipe': value,
+                                    'idempotency_key': 'egg-week-' + str(index)})['recipe']
+            refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
+            'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+        plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+            'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)], 'portions': 2, 'candidates': refs}})['plan']
+        menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref']})['menu']
+        self.assertEqual(len(menu['slots']), 7)
+        menu_ref = {k: menu[k] for k in ('menu_id', 'revision', 'digest')}
+        requirement, = menu_requirements(menu)[0]
+        self.assertEqual(requirement['quantity'], {'numerator': 14, 'denominator': 1})
+        self.shop.cart = {'items': [], 'subtotal': 0, 'deliveryAddress': 'Exempelvägen 1',
+                          'delivery': {'slot_id': 77, 'display': 'Hemleverans mellan 09 och 12, 12. sep'}}
+        original = self.shop.call
+        def provider(tool, arguments, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == 'product_search':
+                result['scope']['requested_size'] = arguments['size']
+            return result
+        self.shop.call = provider
+        prepared_products = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': menu_ref,
+            'candidate_approvals': [{'requirement_id': requirement['requirement_id'], 'candidate_refs': [10]}],
+            'price_mode': 'estimate'})
+        products = prepared_products['product_plan']
+        self.assertEqual(products['totals']['package_count'], 3)
+        arguments = prepared_products['apply_arguments']
+        self.assertNotIn('product_plan', arguments)
+        self.assertLess(len(json.dumps(arguments)), 2000)
+        for invalid in (None, 'not-a-digest'):
+            with self.subTest(invalid=invalid), self.assertRaises(HouseholdError):
+                self.app.handle({'operation': 'products', **arguments,
+                    'product_plan_digest': invalid, 'cart_change_requested': True})
+        changed = self.app.handle({'operation': 'products', **arguments,
+            'product_plan_digest': '0' * 64, 'cart_change_requested': True})
+        self.assertFalse(changed['applied'])
+        self.assertEqual(cart_summary(self.shop.cart)['items'], [])
+        applied = self.app.handle({'operation': 'products', **arguments, 'cart_change_requested': True})
+        self.assertTrue(applied['applied'])
+        self.shop.cart['items'][0]['quantity'] = 2  # Synthetic external removal of one six-egg package.
+        self.shop.cart['subtotal'] = 59.8
+        stopped = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertTrue(stopped['cart_reconciliation_required'])
+        missing, = [row for row in stopped['cart_plan']['items'] if row['missing_quantity']]
+        self.assertEqual((missing['product_id'], missing['required_quantity'], missing['live_quantity'], missing['missing_quantity']), ('10', 3, 2, 1))
+        kept = self.app.handle({'operation': 'cart', 'action': 'reconcile', 'menu_ref': menu_ref,
+            'decision': 'keep_current', 'cart_digest': stopped['cart_plan']['cart_digest'], 'accept_missing_product_ids': ['10']})
+        self.assertTrue(kept['reconciled'])
+        self.browser.review_checkout = lambda cart, **kw: {'payment_display': '•••• 1234'}
+        self.app.handle({'operation': 'schedule', 'action': 'update', 'changes': {
+            'enabled': True, 'maximum_total': 150, 'auto_checkout': True,
+            'delivery': {'weekday': 'Saturday', 'strategy': 'keep_selected'}}})
+        self.app.handle({'operation': 'schedule', 'action': 'set_cron_job', 'cron_job_id': 'synthetic-egg-week'})
+        automatic = self.app.handle({'operation': 'checkout', 'action': 'auto', 'occurrence': '2026-W37'})
+        self.assertFalse(automatic['completed'])
+        self.assertIn('required menu products are missing', automatic['reason'])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        with mock.patch.object(self.app, 'browser', None):
+            manual = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertTrue(manual['manual_checkout_required'])
+        self.assertEqual(manual['summary']['menu_shortfall'], automatic['summary']['menu_shortfall'])
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
+            'rules': [{'kind': 'preference', 'term': 'organic'}], 'uncertainty_permissions': [
+                {'kind': 'preference', 'term': 'organic', 'product_ref': '10', 'condition': 'unknown',
+                 'accepted': True, 'notify': True}]}}})
+        self.shop.product_dietary_evidence = lambda *a, **kw: {'unavailable': 'synthetic'}
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertEqual(prepared['summary']['menu_shortfall'], [{'product_id': '10', 'name': 'Ägg',
+            'required_quantity': 3, 'live_quantity': 2, 'missing_quantity': 1}])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        confirm = {'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']}
+        notice = self.app.handle(confirm)['notice']
+        self.assertIn('1 missing', notice['payload']['message'])
+        inbox = self.root / 'shortfall-notice.txt'
+        inbox.write_text(notice['payload']['message'])
+        self.assertEqual(inbox.read_text(), notice['payload']['message'])
+        self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': notice['notice_token'],
+            'send_outcome': 'sent', 'sender_receipt': 'synthetic local inbox bytes verified'})
+        def dispatch(cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.checkout_clicks += 1
+            self.shop.orders.append({**self.order(), 'grossAmount': 59.8,
+                'products': [{'product': {'id': 10, 'name': 'Ägg'}, 'quantity': 2, 'totalGrossAmount': 59.8}]})
+            raise HouseholdError('synthetic lost shortfall payment response')
+        self.browser.submit_checkout = dispatch
+        with self.assertRaisesRegex(HouseholdError, 'lost shortfall'):
+            self.app.handle(confirm)
+        result = self.app.handle({**confirm, 'action': 'reconcile'})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(result['menu_shortfall'], prepared['summary']['menu_shortfall'])
+        self.assertEqual(result['notice']['payload']['menu_shortfall'], result['menu_shortfall'])
+        self.assertIn('1 missing', result['notice']['payload']['message'])
+        restarted = Application(StateStore(self.root / 'state', self.store.config), self.shop, self.browser)
+        replay = restarted.handle(confirm)
+        self.assertEqual(replay['menu_shortfall'], result['menu_shortfall'])
+        self.assertEqual(replay['notice']['payload'], result['notice']['payload'])
+        self.assertFalse(replay['notice']['dispatch'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+
+    def test_final_mathem_product_conflict_and_substitution_scope(self):
+        from dietary_assessment import parse_retail_product_page
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {
+            'diet': {'rules': [{'kind': 'never_buy', 'term': 'durumvete'}]}}})
+        self.shop.product_dietary_evidence = lambda reference, **kw: parse_retail_product_page(
+            MathemDietaryDetailTests.HTML, f'https://www.mathem.se/se/products/{reference}-pasta/', provider='mathem')
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        finding = prepared['summary']['dietary_assessment']['findings'][0]
+        self.assertEqual((finding['product_ref'], finding['condition']), ('4694', 'conflict'))
+        blocked = self.app.handle({'operation': 'checkout', 'action': 'confirm',
+            'confirmation_id': prepared['confirmation_id'], 'dietary_review': [finding['finding_id']]})
+        self.assertTrue(blocked['dietary_review_required']); self.assertEqual(self.browser.checkout_clicks, 0)
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
+            'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
+                {'kind': 'preference', 'term': 'sugar', 'product_ref': '4694', 'condition': 'unknown', 'accepted': True, 'notify': True}]}}})
+        self.shop.product_dietary_evidence = lambda reference, **kw: {'unavailable': 'synthetic_detail_unavailable'}
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        notice = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})['notice']
+        self.assertEqual(notice['phase'], 'before_dispatch')
+        self.assertIn('4694', notice['payload']['message'])
+        self.shop.cart['items'][0]['product']['id'] = 5627
+        self.shop.cart['items'][0]['product']['name'] = 'Pasta Fusilli Glutenfri'
+        changed = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        finding = changed['summary']['dietary_assessment']['findings'][0]
+        self.assertEqual((finding['product_ref'], finding['condition']), ('5627', 'unknown'))
+        stopped = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': changed['confirmation_id']})
+        self.assertTrue(stopped['dietary_review_required']); self.assertEqual(self.browser.checkout_clicks, 0)
+
     def test_lost_payment_response_reconciles_once(self):
         prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
         def dispatch(cart, review, before_click, **kwargs):
@@ -571,10 +1422,56 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, 'lost response'):
             self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
         self.assertEqual(self.store.read()['pending_checkout']['status'], 'uncertain')
+        self.shop.tracking = 'unpaid'
+        original_reader = self.browser.receipt_address_matches
+        with mock.patch.object(self.browser, 'receipt_address_matches') as receipt:
+            waiting = self.app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
+            self.assertFalse(waiting['confirmed'])
+            self.assertFalse(waiting['retry_allowed'])
+            self.assertEqual(waiting['tracking_status'], 'unpaid')
+            self.assertEqual(waiting['payment']['charge'], 'unknown')
+            receipt.assert_not_called()
+        self.browser.receipt_address_matches = original_reader
+        self.shop.tracking = 'paid_and_modifiable'
+        self.shop.orders[0]['grossAmount'] = 121.96
+        with mock.patch.object(self.browser, 'receipt_address_matches') as receipt:
+            unrelated = self.app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
+            self.assertFalse(unrelated['confirmed'])
+            receipt.assert_not_called()
+        self.shop.orders[0]['grossAmount'] = 121.95
         result = self.app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
         self.assertTrue(result['confirmed'])
         again = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
         self.assertTrue(again['confirmed'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(again['payment'], result['payment'])
+        self.assertEqual(result['payment'], {'provider_status': 'paid_and_modifiable',
+            'source': 'order_tracking', 'authorization': 'unknown', 'charge': 'unknown'})
+
+    def test_lost_submit_survives_restart_expiry_and_delayed_receipt(self):
+        def dispatch(cart, review, before_click, **kwargs):
+            before_click(); self.browser.checkout_clicks += 1
+            raise HouseholdError('synthetic lost final response')
+        self.browser.submit_checkout = dispatch
+        with self.assertRaisesRegex(HouseholdError, 'lost final response'):
+            self.app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'mathem-delayed'})
+        pending = self.store.read()['pending_checkout']
+        self.app = Application(StateStore(self.root / 'state', {**existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        from datetime import timedelta
+        after_expiry = datetime.fromisoformat(pending['expires_at']) + timedelta(hours=1)
+        with mock.patch.object(self.app, '_now', return_value=after_expiry):
+            unresolved = self.app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'mathem-delayed'})
+            self.assertFalse(unresolved['confirmed']); self.assertFalse(unresolved['retry_allowed'])
+            self.assertEqual(self.store.read()['pending_checkout']['status'], 'uncertain')
+            self.shop.orders.append(self.order())
+            self.browser.receipt_address_matches = lambda *a, **kw: False
+            unresolved = self.app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'mathem-delayed'})
+            self.assertFalse(unresolved['confirmed']); self.assertFalse(unresolved['retry_allowed'])
+            self.browser.receipt_address_matches = lambda *a, **kw: True
+            recovered = self.app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'mathem-delayed'})
+            self.assertTrue(recovered['confirmed'])
+            repeated = self.app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'mathem-delayed'})
+            self.assertEqual(repeated['payment'], recovered['payment'])
         self.assertEqual(self.browser.checkout_clicks, 1)
 
     def test_changed_cart_inside_browser_review_stops_final_dispatch(self):
@@ -588,6 +1485,36 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
             self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
         self.assertEqual(self.browser.checkout_clicks, 0)
         self.assertIsNone(self.store.read()['pending_checkout'])
+
+    def test_review_waits_for_complete_checkout_and_still_rejects_missing_or_drifted_fields(self):
+        native = MathemBrowser.__new__(MathemBrowser)
+        expected = native._cart_expectation(self.cart)
+        ready = {'url': native.checkout_url, 'authenticated': True, 'available': True,
+            'items': [{'quantity': line['quantity'], 'text': line['identity']} for line in expected['lines']],
+            'delivery_roots': [expected['delivery_text']], 'address_matches': True,
+            'payment_display': '•••• 1234', 'submit_controls': 1}
+        native._account_reference = mock.Mock(return_value=123)
+        native._open = mock.Mock()
+        native._navigate_to_checkout = mock.Mock()
+        native._settle = mock.Mock()
+        native._read_checkout_amounts = mock.Mock(side_effect=lambda *a: {**deepcopy(self.amounts), 'discount_breakdown': deepcopy(self.discount_breakdown)})
+        native._invoke = mock.Mock(side_effect=AssertionError('no payment dispatch during review'))
+        for delta in ({'items': []}, {'delivery_roots': []}, {'payment_display': None}, {'submit_controls': 0}):
+            with self.subTest(delayed=delta):
+                native._eval = mock.Mock(side_effect=[{'account_matches': True}, {'ready': True},
+                    {**ready, **delta}, ready])
+                review = native._review_checkout(self.cart)
+                self.assertEqual(review['payment_display'], '•••• 1234')
+                self.assertEqual(review['amounts'], self.amounts)
+        for delta in ({'payment_display': None}, {'submit_controls': 0}, {'address_matches': False},
+                      {'items': []}, {'delivery_roots': []}):
+            with self.subTest(persistent=delta):
+                native._read_checkout_amounts.reset_mock()
+                native._eval = mock.Mock(side_effect=[{'account_matches': True}, {'ready': True}]
+                    + [{**ready, **delta}] * 20)
+                with self.assertRaises(HouseholdError): native._review_checkout(self.cart)
+                native._read_checkout_amounts.assert_not_called()
+        native._invoke.assert_not_called()
 
     def test_slow_account_read_cannot_outlive_checkout_confirmation(self):
         import hashlib
@@ -659,6 +1586,204 @@ process.stdout.write(eval(script));
             self.assertFalse(order_matches_checkout({**self.order(), **change}, summary, provider='mathem'))
 
     @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
+    def test_addition_final_turn_binds_original_added_combined_and_exact_destination(self):
+        from oda_browser import _mathem_addition_amount_script
+        from core import CheckoutPreconditionError
+        browser = MathemBrowser.__new__(MathemBrowser)
+        browser._checkout_deadline = None
+        binding = {'receipt_address': 'Exempelvägen 1', 'account_reference_digest': 'a' * 64}
+        browser._invoke = mock.Mock()
+        order = self.order()
+        order['grossAmount'] = 564.01
+        order['products'][0]['quantity'] = 17
+        cart = {**self.cart, 'totalGrossAmount': 18.5, 'deliverySlot': None}
+        expected = browser._addition_expectation(cart, '123456', order, binding)
+        harness = r"""
+const {script,change}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+class E {
+ constructor(tag,text='',children=[]){this.tag=tag;this.tagName=tag.toUpperCase();this.text=text;this.children=children;for(const child of children)child.parentElement=this;}
+ get innerText(){return this.text||this.children.map(e=>e.innerText).join('\n');}
+ get textContent(){return this.innerText;}
+ getBoundingClientRect(){return {width:100,height:20};}
+ getAttribute(){return null;}
+ contains(node){return this===node||this.children.some(e=>e.contains(node));}
+ matches(s){return s==='*'||s===this.tag||(s===`input[type="${this.type}"]`&&this.tag==='input');}
+ querySelectorAll(selector){return this.children.flatMap(e=>[...(selector.split(',').some(s=>e.matches(s))?[e]:[]),...e.querySelectorAll(selector)]);}
+ querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+ closest(selector){return selector.split(',').some(s=>this.matches(s))?this:this.parentElement?.closest(selector)||null;}
+ click(){this.clicks=(this.clicks||0)+1;}
+}
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={href:'https://www.mathem.se/se/checkout/confirm/'+(change==='new_order'?'':'?orderNumber='+(change==='order'?'999999':'123456'))};
+const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;quantity.labels=[new E('label','Antal')];
+const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Barilla'),quantity]);
+const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
+const radio=new E('input');radio.type='radio';radio.checked=true;
+const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
+const rows=[['Ursprunglig beställning','17 varor',change==='original'?'564,02 kr':'564,01 kr'],['Varor tillagda i efterhand',change==='count'?'2 varor':'1 vara','18,50 kr'],['Att betala nu',change==='payable'?'582,51 kr':'18,50 kr'],['Totalsumma för beställning','18 varor',change==='combined'?'582,52 kr':'582,51 kr']];
+if(change==='duplicate')rows.push(['Att betala nu','18,50 kr']);
+if(change==='missing')rows.pop();
+if(change==='currency')rows[0][2]='564,01 NOK';
+const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(text=>new E('span',text)))));
+const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':'18,50')+' kr');pay.disabled=change==='disabled';
+global.document=new E('document','',[new E('body','',[item,delivery,label,summary,pay])]);document.body=document.children[0];
+const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
+"""
+        def evaluate(script, change=None):
+            value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
+                                   capture_output=True, text=True, check=True, timeout=10)
+            return json.loads(value.stdout)
+        read = evaluate(_mathem_addition_amount_script(expected))
+        self.assertEqual(read['clicks'], 0)
+        self.assertTrue(read['result']['amounts_valid'])
+        self.assertEqual(read['result']['order_amounts']['payable_minor'], 1850)
+        self.assertEqual(read['result']['order_amounts']['combined_minor'], 58251)
+        review = browser._checked_surface(expected, evaluate(browser._checkout_surface_script(expected))['result'])
+        review.update(binding=binding, order_amounts=read['result']['order_amounts'])
+        browser.review_order_change = lambda *a, **kw: deepcopy(review)
+        for change in (None, 'new_order', 'order', 'quantity', 'delivery', 'card', 'original', 'count', 'payable', 'combined', 'duplicate', 'missing', 'currency', 'button', 'disabled'):
+            with self.subTest(change=change):
+                observed = []
+                def final_eval(script):
+                    value = evaluate(script, change); observed.append(value); return value['result']
+                browser._eval = final_eval
+                if change is None:
+                    browser.submit_order_change(cart, '123456', order, review)
+                else:
+                    with self.assertRaises(CheckoutPreconditionError): browser.submit_order_change(cart, '123456', order, review)
+                self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
+        def expired(): raise HouseholdError('expired before dispatch')
+        browser._eval = mock.Mock()
+        with self.assertRaises(CheckoutPreconditionError): browser.submit_order_change(cart, '123456', order, review, expired)
+        browser._eval.assert_not_called()
+        browser._eval = mock.Mock(side_effect=HouseholdError('lost browser reply after click'))
+        with self.assertRaises(HouseholdError) as failure: browser.submit_order_change(cart, '123456', order, review)
+        self.assertNotIsInstance(failure.exception, CheckoutPreconditionError)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
+    def test_free_delivery_final_turn_binds_original_goods_total_card_and_destination(self):
+        from oda_browser import _mathem_addition_amount_script
+        from core import CheckoutPreconditionError
+        browser = MathemBrowser.__new__(MathemBrowser)
+        browser._checkout_deadline = None
+        binding = {'receipt_address': 'Exempelvägen 1', 'account_reference_digest': 'a' * 64}
+        browser._invoke = mock.Mock()
+        order = self.order()
+        order['grossAmount'] = 582.51
+        order['products'][0]['quantity'] = 18
+        delivery = {'slot_id': 77, 'display': 'Lör 12. sep 09:00 - 12:00',
+                    'slot': normalize_retail_delivery_slots({**SLOTS, 'slots': [{**SLOTS['slots'][0], 'price': '0,00 kr'}]}, provider='mathem')['slots'][0]}
+        expected = browser._delivery_change_expectation('123456', order, delivery, binding)
+        harness = r"""
+const {script,change}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+class E {
+ constructor(tag,text='',children=[]){this.tag=tag;this.tagName=tag.toUpperCase();this.text=text;this.children=children;for(const child of children)child.parentElement=this;}
+ get innerText(){return this.text||this.children.map(e=>e.innerText).join('\n');}
+ get textContent(){return this.innerText;}
+ getBoundingClientRect(){return {width:100,height:20};}
+ getAttribute(){return null;}
+ contains(node){return this===node||this.children.some(e=>e.contains(node));}
+ matches(s){return s==='*'||s===this.tag||(s===`input[type="${this.type}"]`&&this.tag==='input');}
+ querySelectorAll(selector){return this.children.flatMap(e=>[...(selector.split(',').some(s=>e.matches(s))?[e]:[]),...e.querySelectorAll(selector)]);}
+ querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+ closest(selector){return selector.split(',').some(s=>this.matches(s))?this:this.parentElement?.closest(selector)||null;}
+ click(){this.clicks=(this.clicks||0)+1;}
+}
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={href:'https://www.mathem.se/se/checkout/confirm/'+(change==='new_order'?'':'?orderNumber='+(change==='order'?'999999':'123456'))};
+const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;quantity.labels=[new E('label','Antal')];
+const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Barilla'),quantity]);
+const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
+const radio=new E('input');radio.type='radio';radio.checked=true;
+const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
+const rows=[['Ursprunglig beställning',change==='count'?'19 varor':'18 varor',change==='original'?'582,52 kr':'582,51 kr'],['Att betala nu',change==='payable'?'582,51 kr':'0,00 kr'],['Totalsumma för beställning','18 varor',change==='combined'?'582,52 kr':'582,51 kr']];
+if(change==='added')rows.push(['Varor tillagda i efterhand','1 vara','18,50 kr']);
+if(change==='duplicate')rows.push(['Att betala nu','0,00 kr']);
+if(change==='missing')rows.pop();
+if(change==='currency')rows[0][2]='582,51 NOK';
+const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(text=>new E('span',text)))));
+const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':'0,00')+' kr');pay.disabled=change==='disabled';
+global.document=new E('document','',[new E('body','',[...(change==='quantity'?[item]:[]),delivery,label,summary,pay])]);document.body=document.children[0];
+const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
+"""
+        def evaluate(script, change=None):
+            value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
+                                   capture_output=True, text=True, check=True, timeout=10)
+            return json.loads(value.stdout)
+        read = evaluate(_mathem_addition_amount_script(expected))
+        self.assertEqual(read['clicks'], 0)
+        self.assertTrue(read['result']['amounts_valid'])
+        self.assertEqual(read['result']['order_amounts']['payable_minor'], 0)
+        self.assertEqual(read['result']['order_amounts']['combined_minor'], 58251)
+        review = browser._checked_surface(expected, evaluate(browser._checkout_surface_script(expected))['result'])
+        review.update(binding=binding, order_amounts=read['result']['order_amounts'])
+        browser._read_order_binding = mock.Mock(return_value=deepcopy(binding))
+        browser._open = mock.Mock()
+        browser._read_delivery_change_review = lambda *a, **kw: deepcopy(review)
+        for change in (None, 'new_order', 'order', 'added', 'quantity', 'delivery', 'card', 'original', 'count', 'payable', 'combined', 'duplicate', 'missing', 'currency', 'button', 'disabled'):
+            with self.subTest(change=change):
+                observed = []
+                def final_eval(script):
+                    value = evaluate(script, change); observed.append(value); return value['result']
+                browser._eval = final_eval
+                if change is None:
+                    browser.submit_delivery_change('123456', order, delivery, review)
+                else:
+                    with self.assertRaises(CheckoutPreconditionError): browser.submit_delivery_change('123456', order, delivery, review)
+                self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
+        def expired(): raise HouseholdError('expired before dispatch')
+        browser._eval = mock.Mock()
+        with self.assertRaises(CheckoutPreconditionError): browser.submit_delivery_change('123456', order, delivery, review, expired)
+        browser._eval.assert_not_called()
+        browser._eval = mock.Mock(side_effect=HouseholdError('lost browser reply after click'))
+        with self.assertRaises(HouseholdError) as failure: browser.submit_delivery_change('123456', order, delivery, review)
+        self.assertNotIsInstance(failure.exception, CheckoutPreconditionError)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node executes the observed collapsed summary')
+    def test_zero_payable_collapsed_review_still_expands_original_order_amount(self):
+        browser = MathemBrowser.__new__(MathemBrowser)
+        expected = {'checkout_url': browser.checkout_url + '?orderNumber=123456',
+                    'order_id': '123456', 'delivery_change': True, 'lines': []}
+        script = browser._checkout_expand_script(expected, set())
+        after = browser._checkout_expand_script(expected, {'Visa sammanfattning'})
+        harness = r"""
+const {script,after}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location={href:'https://www.mathem.se/se/checkout/confirm/?orderNumber=123456'};
+global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
+const node=t=>({innerText:t,getBoundingClientRect:()=>({width:10,height:10}),getAttribute:()=>null});
+const original=node('Ursprunglig beställning');original.hidden=true;
+const expand=node('Visa sammanfattning');let clicks=0;
+expand.click=()=>{clicks++;original.hidden=false;expand.innerText='Dölj sammanfattning';};
+const labels=[original,node('Att betala nu'),node('Totalsumma för beställning')];
+global.document={querySelectorAll:s=>s==='*'?labels:s==='button'?[expand]:[]};
+const first=JSON.parse(eval(script)),second=JSON.parse(eval(after));
+process.stdout.write(JSON.stringify({first,second,clicks}));
+"""
+        result = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'after': after}),
+                                capture_output=True, text=True, check=True, timeout=10)
+        self.assertEqual(json.loads(result.stdout), {'first': {'ready': False, 'clicked': ['Visa sammanfattning']},
+                                                    'second': {'ready': True}, 'clicks': 1})
+
+    def test_checkout_destination_never_uses_default_existing_order_for_new_purchase(self):
+        browser = MathemBrowser.__new__(MathemBrowser)
+        browser._settle = mock.Mock()
+        browser._invoke = mock.Mock()
+        browser._eval = mock.Mock(side_effect=[
+            {'text': 'Skapa en ny beställning Du väljer leveranstid i nästa steg.', 'checked': False, 'selected_count': 1},
+            {'text': 'Skapa en ny beställning Du väljer leveranstid i nästa steg.', 'checked': True, 'selected_count': 1}])
+        browser._choose_checkout_destination(None)
+        self.assertEqual(browser._invoke.call_args_list, [
+            mock.call('click', '[data-mathem-destination="true"]'), mock.call('click', '[data-mathem-destination-next="true"]')])
+        expected = {'order_id': '123456', 'delivery_text': 'Lör 12. sep 09:00 - 12:00', 'delivery_address': 'Exempelvägen 1'}
+        for label in ('Lägg till i din nuvarande beställning 999999 Lör 12. sep 09:00 - 12:00 Exempelvägen 1',
+                      'Lägg till i din nuvarande beställning 123456 Lör 12. sep 10:00 - 12:00 Exempelvägen 1',
+                      'Lägg till i din nuvarande beställning 123456 Lör 12. sep 09:00 - 12:00 Annan adress 2'):
+            browser._invoke.reset_mock()
+            browser._eval.return_value = {'text': label, 'checked': True, 'selected_count': 1}
+            browser._eval.side_effect = None
+            with self.assertRaises(HouseholdError): browser._choose_checkout_destination(expected)
+            browser._invoke.assert_not_called()
+
     def test_final_browser_turn_rejects_card_item_delivery_or_amount_drift(self):
         import hashlib
         from core import CheckoutPreconditionError
@@ -702,6 +1827,8 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         review = browser._checked_surface(expected, surface)
         review['account_reference_digest'] = hashlib.sha256(b'123').hexdigest()
         review['amounts'] = self.amounts
+        review['discount_breakdown'] = self.discount_breakdown
+        review = json.loads(json.dumps(review, sort_keys=True))
         browser.review_checkout = lambda cart: deepcopy(review)
         for change in (None, 'card', 'quantity', 'delivery', 'amount'):
             observed = []

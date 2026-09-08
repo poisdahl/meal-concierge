@@ -223,6 +223,10 @@ class RecurringDietaryTests(unittest.TestCase):
         self.assertTrue(paid['confirmed']); self.assertEqual(self.browser.checkout_clicks, 1)
         replay = self.call('auto', occurrence='2026-W36')
         self.assertEqual(replay['notice']['notice_token'], paid['notice']['notice_token'])
+        self.assertEqual(replay['payment'], paid['payment'])
+        self.assertEqual(replay['notice']['payload']['payment'], paid['payment'])
+        self.assertEqual(paid['payment']['authorization'], 'unknown')
+        self.assertEqual(paid['payment']['charge'], 'unknown')
         self.assertFalse(replay['notice']['dispatch']); self.assertEqual(self.browser.checkout_clicks, 1)
         self.assertEqual(len(self.store.read()['checkout_notices']), 2)
 
@@ -318,6 +322,48 @@ class RecurringDietaryTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, 'current-summary finding IDs'):
             self.call('confirm', confirmation_id=prepared['confirmation_id'], dietary_review=['nonexistent'])
         self.assertEqual(self.browser.checkout_clicks, 0)
+
+    def test_cancellation_result_and_replay_do_not_claim_payment_release(self):
+        for lost in (False, True):
+            with self.subTest(lost=lost):
+                self.provider.tracking = 'paid_and_modifiable'
+                prepared = self.app.handle({'operation': 'orders', 'action': 'cancel_prepare', 'order_id': 'old'})
+                dispatch = self.browser.submit_cancellation
+                def submit(*args, **kwargs):
+                    dispatch(*args, **kwargs)
+                    if lost:
+                        raise HouseholdError('synthetic lost cancellation reply')
+                self.browser.submit_cancellation = submit
+                request = {'operation': 'orders', 'action': 'cancel_confirm', 'order_id': 'old', 'confirmation_id': prepared['confirmation_id']}
+                try:
+                    if lost:
+                        with self.assertRaisesRegex(HouseholdError, 'lost cancellation'):
+                            self.app.handle(request)
+                        result = self.app.handle({'operation': 'orders', 'action': 'cancel_reconcile', 'confirmation_id': prepared['confirmation_id']})
+                    else:
+                        result = self.app.handle(request)
+                finally:
+                    self.browser.submit_cancellation = dispatch
+                replay = self.app.handle(request)
+                self.assertEqual(result['confirmation_id'], prepared['confirmation_id'])
+                self.assertEqual(result['payment_resolution'], {'authorization_release': 'unknown', 'refund': 'unknown'})
+                self.assertEqual(replay['payment_resolution'], result['payment_resolution'])
+        self.assertEqual(self.browser.cancel_clicks, 2)
+
+    def test_legacy_result_readback_adds_unknown_without_rewriting_journal(self):
+        for kind, flag in [('checkout', 'confirmed'), ('cancellation', 'cancelled')]:
+            with self.subTest(kind=kind), self.store.locked() as state:
+                self.app._bind_protected_request(state, kind, 'legacy', 'legacy-' + kind, target_id='old' if kind == 'cancellation' else None)
+                self.app._store_protected_result(state, 'legacy-' + kind, kind, {flag: True, 'order_id': 'old', 'confirmation_id': 'legacy-' + kind})
+        original = deepcopy(self.store.read())
+        for kind, operation, action, field in [('checkout', 'checkout', 'confirm', 'payment'), ('cancellation', 'orders', 'cancel_confirm', 'payment_resolution')]:
+            result = self.app.handle({'operation': operation, 'action': action, 'confirmation_id': 'legacy-' + kind, 'order_id': 'old'})
+            self.assertTrue(all(v == 'unknown' for k, v in result[field].items() if k not in {'provider_status', 'source'}))
+            self.app.confirmation_policy = 'standing'
+            replay = self.app.handle({'operation': operation, 'action': 'submit' if kind == 'checkout' else 'cancel_submit', 'idempotency_key': 'legacy', 'order_id': 'old'})
+            self.assertEqual(replay[field], result[field])
+        self.assertEqual(self.store.read(), original)
+        self.assertEqual(self.browser.cancel_clicks, 0); self.assertEqual(self.browser.checkout_clicks, 0)
 
     def test_malformed_batch_leftovers_is_an_input_error(self):
         plan = self.batch()

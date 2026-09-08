@@ -7379,11 +7379,11 @@ class FlowTests(unittest.TestCase):
         reconcile_finished = threading.Event()
         original_call = self.oda.call
 
-        def blocked_tracking(tool, arguments):
+        def blocked_tracking(tool, arguments, **kwargs):
             if tool == "order_tracking" and self.browser.cancel_clicks == 1:
                 tracking_started.set()
                 release_tracking.wait(1)
-            return original_call(tool, arguments)
+            return original_call(tool, arguments, **kwargs)
 
         self.oda.call = blocked_tracking
         confirmed = {}

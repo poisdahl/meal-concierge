@@ -235,10 +235,8 @@ def _json_value(value: Any) -> Any:
 
 class RetailMcpClient:
     def product_dietary_evidence(self, reference, *, deadline=None):
-        if self.provider != 'oda':
-            return {'unavailable': 'provider_product_detail_not_verified'}
-        from dietary_assessment import read_oda_product_evidence
-        return read_oda_product_evidence(reference, deadline)
+        from dietary_assessment import read_retail_product_evidence
+        return read_retail_product_evidence(reference, deadline, provider=self.provider)
 
     def __init__(self, token_directory: Path | str, *, provider: str = "oda"):
         if provider not in {"oda", "mathem"}:
@@ -258,7 +256,22 @@ class RetailMcpClient:
         timeout = 90.0 if deadline is None else deadline - time.monotonic()
         if timeout <= 0:
             raise HouseholdError(f"{self.label} operation deadline reached")
-        return self._run(tool, dict(arguments), min(timeout, 90.0))
+        provider_arguments = dict(arguments)
+        translated_query = (
+            self.provider == "mathem" and tool == "product_search"
+            and provider_arguments.get("queries") == ["rapsolje"]
+        )
+        if translated_query:
+            # The Swedish catalog's oil search uses rapsolja. Keep the exact
+            # ingredient identity and the actual provider search observable.
+            provider_arguments["queries"] = ["rapsolja"]
+        result = self._run(tool, provider_arguments, min(timeout, 90.0))
+        if translated_query:
+            if result.get("query") != "rapsolja":
+                raise HouseholdError("Mathem product search query changed")
+            result["query"] = "rapsolje"
+            result["scope"]["provider_query"] = "rapsolja"
+        return result
 
     def _run(self, tool: str | None, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
         if not self.token_directory.is_dir():

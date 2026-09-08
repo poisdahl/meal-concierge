@@ -108,15 +108,18 @@ def covered(profile, finding):
     return any(p.get('accepted') is True and p.get('notify') is True and all(str(p.get(k)) == str(finding.get(k)) for k in ('kind', 'term', 'product_ref', 'condition')) for p in profile['diet'].get('uncertainty_permissions', []))
 
 
-def parse_oda_product_page(raw, url):
+def parse_retail_product_page(raw, url, *, provider):
     """Read the observed visible product-information rows; scripts remain inert."""
     from recipe_import_readers import _WebpageText
     parser = _WebpageText()
     parser.feed(raw.decode('utf-8') if isinstance(raw, bytes) else raw)
     lines = [line.strip() for line in ''.join(parser.parts).splitlines() if line.strip()]
-    headings = {'Ingredienser', 'Allergener', 'Kan inneholde spor av', 'Produksjonsland', 'Leverandør', 'Oppbevaring', 'Næringsinnhold'}
+    trace_label = 'Kan innehålla spår av' if provider == 'mathem' else 'Kan inneholde spor av'
+    headings = {'Ingredienser', 'Allergener', trace_label}
+    headings.update({'Tillverkningsland', 'Hanterad i', 'Leverantör', 'Förvaring', 'Kontaktuppgifter', 'Näringsinnehåll'}
+                    if provider == 'mathem' else {'Produksjonsland', 'Leverandør', 'Oppbevaring', 'Næringsinnhold'})
     result = {'source_url': url}
-    for label, field in (('Ingredienser', 'ingredients'), ('Allergener', 'allergens'), ('Kan inneholde spor av', 'may_contain')):
+    for label, field in (('Ingredienser', 'ingredients'), ('Allergener', 'allergens'), (trace_label, 'may_contain')):
         positions = [i for i, line in enumerate(lines) if line == label]
         if len(positions) != 1:
             continue
@@ -130,19 +133,28 @@ def parse_oda_product_page(raw, url):
     return result
 
 
+def parse_oda_product_page(raw, url):
+    return parse_retail_product_page(raw, url, provider='oda')
+
+
 def read_oda_product_evidence(reference, deadline=None):
-    """Unauthenticated public detail, bound to one Oda product ID and origin."""
+    return read_retail_product_evidence(reference, deadline, provider='oda')
+
+
+def read_retail_product_evidence(reference, deadline=None, *, provider):
+    """Unauthenticated public detail, bound to one provider product ID and origin."""
     import http.client
     import threading
     import time
     from urllib.parse import urlsplit, urljoin
     from recipe_import_sources import _PinnedConnection, _get_bytes, TIMEOUT, RecipeImportSourceError
+    host, region = {'oda': ('oda.com', 'no'), 'mathem': ('www.mathem.se', 'se')}[provider]
     if not re.fullmatch(r'[1-9][0-9]{0,19}', str(reference)):
-        raise HouseholdError('Oda dietary detail needs an exact product ID')
-    url = f'https://oda.com/no/products/{reference}/'
+        raise HouseholdError(f'{provider} dietary detail needs an exact product ID')
+    url = f'https://{host}/{region}/products/{reference}/'
     if deadline is not None and time.monotonic() + 2 * TIMEOUT > deadline:
         return {'source_url': url, 'unavailable': 'detail_time_budget_exhausted'}
-    connection = _PinnedConnection('oda.com', 443, tls=True, public_only=True)
+    connection = _PinnedConnection(host, 443, tls=True, public_only=True)
     timer = threading.Timer(TIMEOUT, connection.abort)
     timer.daemon = True
     timer.start()
@@ -154,8 +166,8 @@ def read_oda_product_evidence(reference, deadline=None):
         if response.status in {301, 302, 307, 308}:
             location = urljoin(url, response.getheader('Location', ''))
             parsed = urlsplit(location)
-            if parsed.scheme != 'https' or parsed.netloc != 'oda.com' or parsed.query or parsed.fragment or not re.fullmatch(r'/no/products/' + str(reference) + r'-[A-Za-z0-9._~-]+/', parsed.path):
-                raise HouseholdError('Oda product detail redirect changed identity')
+            if parsed.scheme != 'https' or parsed.netloc != host or parsed.query or parsed.fragment or not re.fullmatch('/' + region + r'/products/' + str(reference) + r'-[A-Za-z0-9._~-]+/', parsed.path):
+                raise HouseholdError('Product detail redirect changed identity')
             url = location
         elif response.status != 200:
             raise HouseholdError('Oda product detail is unavailable')
@@ -164,8 +176,8 @@ def read_oda_product_evidence(reference, deadline=None):
         timer.cancel()
         raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024)
         if content_type != 'text/html':
-            raise HouseholdError('Oda product detail is not HTML')
-        return parse_oda_product_page(raw, url)
+            raise HouseholdError('Product detail is not HTML')
+        return parse_retail_product_page(raw, url, provider=provider)
     except (OSError, http.client.HTTPException, RecipeImportSourceError, ValueError, HouseholdError):
         return {'source_url': url, 'unavailable': 'exact_public_product_detail_unavailable'}
     finally:

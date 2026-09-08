@@ -692,7 +692,7 @@ def oda_order_quantities(order: Mapping[str, Any]) -> dict[str, int] | None:
         result[product_id] = result.get(product_id, 0) + item["quantity"]
     return result
 
-def oda_order_delivery_identity(order: Mapping[str, Any]) -> tuple[tuple[str, Any], ...] | None:
+def oda_order_delivery_identity(order: Mapping[str, Any], *, provider: str = "oda") -> tuple[tuple[str, Any], ...] | None:
     identity: list[tuple[str, Any]] = []
     for key in ("deliveryDate", "delivery_date"):
         if key in order:
@@ -709,7 +709,7 @@ def oda_order_delivery_identity(order: Mapping[str, Any]) -> tuple[tuple[str, An
             break
     for key in ("deliverySlotDisplay", "delivery_slot_display"):
         if key in order:
-            signature = oda_delivery_signature(str(order.get(key) or ""))
+            signature = oda_delivery_signature(str(order.get(key) or ""), provider=provider)
             if signature is None:
                 return None
             identity.append(("slot", signature))
@@ -735,14 +735,15 @@ def oda_order_address_identity(order: Mapping[str, Any]) -> str | None:
         return normalized or None
     return None
 
-def oda_order_matches_addition(before: Mapping[str, Any], after: Mapping[str, Any], additions: Mapping[str, Any]) -> bool:
-
+def oda_order_matches_addition(before: Mapping[str, Any], after: Mapping[str, Any], additions: Mapping[str, Any], *, provider: str = "oda") -> bool:
+    if provider == "mathem" and (before.get("currency") != "SEK" or after.get("currency") != "SEK"):
+        return False
     expected = oda_order_quantities(before)
     observed = oda_order_quantities(after)
     if expected is None or observed is None:
         return False
-    before_delivery = oda_order_delivery_identity(before)
-    after_delivery = oda_order_delivery_identity(after)
+    before_delivery = oda_order_delivery_identity(before, provider=provider)
+    after_delivery = oda_order_delivery_identity(after, provider=provider)
     if before_delivery is None or before_delivery != after_delivery:
         return False
     for item in additions.get("items", []):

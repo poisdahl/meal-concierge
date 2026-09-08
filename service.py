@@ -240,7 +240,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         record = state.get("protected_results", {}).get(confirmation_id) if isinstance(state.get("protected_results"), Mapping) else None
         if not isinstance(record, Mapping) or record.get("kind") != kind or not isinstance(record.get("result"), Mapping):
             return None
-        return {**deepcopy(dict(record["result"])), "idempotent": True}
+        return {**OrderOperations._protected_result_view(record["result"], kind), "idempotent": True}
 
     @staticmethod
     def _idempotency_key(value: Any, kind: str) -> str:
