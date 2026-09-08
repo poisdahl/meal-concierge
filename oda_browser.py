@@ -148,6 +148,7 @@ def _oda_checkout_amount_script(
     expected_amounts: Mapping[str, Any] | None = None,
     expected_url: str | None = None,
     provider: str = "oda",
+    vipps: bool = False,
 ) -> str:
     """Build the shared read/final-click parser from observed retailer rows."""
 
@@ -241,7 +242,7 @@ def _oda_checkout_amount_script(
             if provider == "mathem" else f"String({expected_product_count})+' varer'"
         )
         .replace("CURRENCY_CODE", "SEK" if provider == "mathem" else "NOK")
-        .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Bekreft og betal|Confirm and pay")
+        .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
         .replace(
@@ -540,34 +541,47 @@ def _oda_delivery_change_surface_script(expected_url: str) -> str:
 """.replace("URL", json.dumps(expected_url))
 
 
-def _oda_checkout_payment_script() -> str:
-    """Read only the selected saved card; callers separately bind the checkout URL."""
+def _oda_checkout_payment_script(payment: Mapping[str, Any] | None = None, *, select: bool = False, expected_url: str | None = None) -> str:
+    """Read the configured method, or select its unique existing radio during prepare."""
     return r"""
 (() => {
+ const preference=PREFERENCE;
+ URL_CHECK
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{const style=getComputedStyle(e),r=e.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&r.width>0&&r.height>0;};
  const radios=[...document.querySelectorAll('input[type="radio"]')];
  const observed=radios.some(visible),selected=radios.filter(e=>e.checked);
  const failure={verified:false,observed};
- if(selected.length!==1)return JSON.stringify(failure);
- const radio=selected[0];
- if(!visible(radio)||radio.disabled||radio.getAttribute('aria-disabled')==='true')return JSON.stringify(failure);
- const labels=[...radio.labels].filter(visible).filter(label=>label.contains(radio)&&label.querySelectorAll('input[type="radio"]').length===1);
- const texts=labels.map(label=>label.innerText||'');
- const cards=[...new Set(texts.flatMap(text=>[...text.matchAll(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/gi)].map(match=>match[1])))];
- if(cards.length!==1||texts.some(text=>/(?:\d[ -]?){12,19}/.test(text)))return JSON.stringify(failure);
- return JSON.stringify({verified:true,observed,payment_display:'•••• '+cards[0]});
+ const choices=radios.filter(r=>visible(r)&&!r.disabled&&r.getAttribute('aria-disabled')!=='true').map(radio=>{
+   const labels=[...radio.labels].filter(visible).filter(label=>label.contains(radio)&&label.querySelectorAll('input[type="radio"]').length===1);
+   const texts=labels.map(label=>norm(label.innerText||''));
+   if(texts.some(text=>/(?:\d[ -]?){12,19}/.test(text)))return null;
+   if(texts.some(text=>/nytt kort|new card|legg til(?: et)?(?: nytt)? kort|add(?: a)?(?: new)? card/i.test(text)))return null;
+   const cards=[...new Set(texts.flatMap(text=>[...text.matchAll(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/gi)].map(match=>match[1])))];
+   const vipps=texts.some(text=>/^Vipps$/i.test(text));
+   if(cards.length===1&&!vipps)return {radio,method:'saved_card',last4:cards[0],display:'•••• '+cards[0]};
+   if(cards.length===0&&vipps)return {radio,method:'vipps',last4:null,display:'Vipps'};
+   return null;
+ }).filter(Boolean);
+ const matching=choices.filter(c=>c.method===preference.method&&(!preference.card_last4||c.last4===preference.card_last4));
+ if((preference.card_last4||preference.method==='vipps')&&matching.length!==1)return JSON.stringify(failure);
+ const current=selected.length===1?matching.find(c=>c.radio===selected[0]):null;
+ if(current){if(matching.filter(c=>c.display===current.display).length!==1)return JSON.stringify(failure);return JSON.stringify({verified:true,observed,payment_display:current.display});}
+ SELECTION_ACTION
 })()
-"""
+""".replace("PREFERENCE", json.dumps(payment or {"method": "saved_card", "card_last4": None})).replace(
+        "URL_CHECK", "if(location.href!==" + json.dumps(expected_url) + ")return JSON.stringify({verified:false,observed:true});" if select else "",
+    ).replace("SELECTION_ACTION", "if(selected.length>1||matching.length!==1)return JSON.stringify(failure);matching[0].radio.click();return JSON.stringify({verified:false,observed,selected:true});" if select else "return JSON.stringify(failure);")
 
 
-def _oda_checkout_surface_script(expected: Mapping[str, Any]) -> str:
+def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[str, Any] | None = None) -> str:
     return r"""
 (() => {
  const expected=EXPECTED;
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const text=norm(document.body?.innerText||'');
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(Bekreft og betal|Confirm and pay)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|NOK)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
+ const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|NOK)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
  const login=!!document.querySelector('form[action*="login"],input[type="password"]');
  const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i.test(text);
  const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
@@ -579,11 +593,11 @@ def _oda_checkout_surface_script(expected: Mapping[str, Any]) -> str:
  const escaped=norm(expected.delivery_address).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  const addressMatch=deliveryRoots.length===1&&Boolean(expected.delivery_address)&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(norm(deliveryRoots[0].innerText||''));
  const payment=JSON.parse(PAYMENT);
- const maskedPayment=payment.verified===true;
- const paymentDisplay=maskedPayment?payment.payment_display:null;
- return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:maskedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
+ const verifiedPayment=payment.verified===true;
+ const paymentDisplay=verifiedPayment?payment.payment_display:null;
+ return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:verifiedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
 })()
-""".replace("PAYMENT", _oda_checkout_payment_script().strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
+""".replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Confirm and pay").replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
 
 
 class OdaBrowser:
@@ -717,9 +731,9 @@ class OdaBrowser:
             self._settle(0.25)
         raise HouseholdError("Log the dedicated browser into the same account as retailer OAuth")
 
-    def review_checkout(self, cart: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+    def review_checkout(self, cart: Mapping[str, Any], *, deadline: float | None = None, payment: Mapping[str, Any] | None = None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
-            return self._review_checkout(cart)
+            return self._review_checkout(cart, payment=payment, select_payment=True) if payment is not None else self._review_checkout(cart)
 
     def _order_cart(self, cart, order_id, order, binding):
         binding = require_order_binding(binding)
@@ -734,13 +748,13 @@ class OdaBrowser:
             review["binding"] = binding
             return review
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None) -> dict[str, Any]:
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False) -> dict[str, Any]:
         expected = self._cart_expectation(cart)
         account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
         if delivery_text is not None:
             expected["delivery_text"] = delivery_text
         if order_id is None:
-            self._navigate_to_checkout()
+            self._navigate_to_checkout(payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout()
         else:
             self._navigate_to_checkout(order_id)
         expanded = self._eval(r"""
@@ -770,7 +784,7 @@ class OdaBrowser:
         else:
             raise HouseholdError("Oda checkout items did not finish rendering")
         self._expand_checkout_amount_summary()
-        script = _oda_checkout_surface_script(expected)
+        script = _oda_checkout_surface_script(expected, payment)
         result = self._eval(script)
         required = {"url", "authenticated", "available", "items", "total_matches", "delivery_roots", "address_matches", "masked_payment", "payment_display", "submit_controls"}
         expected_url = CHECKOUT_URL if order_id is None else f"{CHECKOUT_URL}?orderNumber={order_id}"
@@ -783,7 +797,7 @@ class OdaBrowser:
         if result["address_matches"] is not True:
             raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
         if result["masked_payment"] is not True:
-            raise HouseholdError("Oda selected saved payment card could not be verified; select the intended existing card in Oda, then request a new checkout review")
+            raise HouseholdError("Oda configured payment selection could not be verified; review checkout_payment in setup, then request a new checkout review")
         surface = dict(result)
         result["line_matches"] = checkout_lines_match(expected["lines"], result.pop("items"))
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
@@ -792,8 +806,10 @@ class OdaBrowser:
         result["amounts"] = self._read_checkout_amounts(
             expected["total_minor"], expected["product_count"],
         )
-        if re.fullmatch(r"•••• \d{4}", str(result.get("payment_display") or "")) is None:
+        if not (payment and payment.get("method") == "vipps" and result.get("payment_display") == "Vipps") and re.fullmatch(r"•••• \d{4}", str(result.get("payment_display") or "")) is None:
             raise HouseholdError("Oda checkout payment identity is unavailable")
+        if payment is not None:
+            result["payment_choice"] = dict(payment)
         result["surface"] = surface
         if account_digest is not None:
             result["account_reference_digest"] = account_digest
@@ -853,10 +869,10 @@ class OdaBrowser:
             amounts["discount_breakdown"] = {key: value / 100 if value is not None else None for key, value in breakdown.items()}
         return amounts
 
-    def _navigate_to_checkout(self, order_id: str | None = None) -> None:
+    def _navigate_to_checkout(self, order_id: str | None = None, *, payment: Mapping[str, Any] | None = None, select_payment: bool = False) -> None:
         self._continue_checkout_cart()
         if order_id is None:
-            self._advance_checkout_path()
+            self._advance_checkout_path(payment=payment, select_payment=select_payment) if payment is not None else self._advance_checkout_path()
         else:
             self._advance_checkout_path(order_id)
 
@@ -991,7 +1007,7 @@ class OdaBrowser:
                     return found
         return None
 
-    def _advance_checkout_path(self, order_id: str | None = None) -> None:
+    def _advance_checkout_path(self, order_id: str | None = None, *, payment: Mapping[str, Any] | None = None, select_payment: bool = False) -> None:
         script = r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
@@ -1024,7 +1040,7 @@ class OdaBrowser:
    const payment=JSON.parse(PAYMENT);
    if(payment.observed&&!payment.verified)return JSON.stringify({action:'payment_required'});
    const controls=[...document.querySelectorAll('button')].filter(enabled);
-   const submit=controls.filter(x=>/^(Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
+   const submit=controls.filter(x=>/^(FINAL_CONTROL)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
    if(submit.length===1){
      if(payment.verified)return JSON.stringify({action:'ready'});
      return JSON.stringify({action:'wait'});
@@ -1066,7 +1082,7 @@ class OdaBrowser:
    if(ORDER!==null && newOrder.length===0 && previous.length===0 && payment.length===1){payment[0].setAttribute('data-oda-household-action','payment');return JSON.stringify({action:'payment'});}
    return JSON.stringify({action:'blocked'});
 })()
-""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script().strip()).replace("ORDER", json.dumps(order_id))
+""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("FINAL_CONTROL", "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order").replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
         self._settle(10)
         for _ in range(30):
@@ -1074,7 +1090,17 @@ class OdaBrowser:
             if action == "ready":
                 return
             if action == "payment_required":
-                raise HouseholdError("Oda checkout requires a selected saved card; select the intended existing card in Oda, then request a new checkout review")
+                if not select_payment:
+                    raise HouseholdError("Oda configured payment is not selected; request a new checkout review")
+                if "select-payment" in dispatched:
+                    self._settle(0.5)
+                    continue
+                dispatched.add("select-payment")
+                selected = self._eval(_oda_checkout_payment_script(payment, select=True, expected_url=CHECKOUT_URL))
+                if selected.get("selected") is not True and selected.get("verified") is not True:
+                    raise HouseholdError("Oda configured payment is unavailable or ambiguous; choose checkout_payment in setup, with card_last4 if several saved cards exist")
+                self._settle(1)
+                continue
             if action == "blocked":
                 raise HouseholdError("Oda checkout navigation is ambiguous")
             if action in {"new_order", "previous_order", "payment", "recommendations"}:
@@ -1233,7 +1259,7 @@ class OdaBrowser:
 
     def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None) -> None:
         try:
-            current = self.review_checkout(cart)
+            current = self._review_checkout(cart, payment=review["payment_choice"]) if "payment_choice" in review else self.review_checkout(cart)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         if current != dict(review):
@@ -1252,7 +1278,7 @@ class OdaBrowser:
             before_click,
             expected_product_count=expected_cart["product_count"],
             expected_amounts=review.get("amounts"),
-            review_surface=(_oda_checkout_surface_script(expected_cart), review["surface"]),
+            review_surface=(_oda_checkout_surface_script(expected_cart, review.get("payment_choice")), review["surface"]),
         )
 
     def _click_checkout_submit(
@@ -1287,6 +1313,7 @@ class OdaBrowser:
             expected_product_count=expected_product_count,
             expected_amounts=amounts_minor,
             expected_url=expected_url,
+            vipps=review_surface is not None and review_surface[1].get("payment_display") == "Vipps",
         )
         if review_surface is not None:
             surface_script, expected_surface = review_surface

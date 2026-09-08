@@ -1971,6 +1971,7 @@ class OrderOperations:
                     raise HouseholdError("checkout occurrence is no longer cart_ready")
                 if record.get("scheduler_context"):
                     scheduler_context = {**deepcopy(record["scheduler_context"]), "manual": True}
+            checkout_payment = deepcopy(state["checkout_payment"])
             current_pending = state.get("pending_checkout")
             inherited_occurrence = (
                 current_pending.get("occurrence")
@@ -2014,6 +2015,8 @@ class OrderOperations:
             pending_cancellation = deepcopy(state.get("pending_cancellation"))
         allow_recovery = self.provider == "meny" and not order_change and not pending_cancellation
         if order_change:
+            if self.provider == "oda" and checkout_payment["method"] == "vipps":
+                raise HouseholdError("Configured Oda Vipps payment supports new orders only; finish this existing-order change in Oda")
             if order_change.get("provider") != self.provider or order_change.get("status") != "editing":
                 raise HouseholdError("the order change is not ready for checkout; abort or recover it first")
         if order_change and self.provider in {"oda", "mathem"}:
@@ -2083,7 +2086,7 @@ class OrderOperations:
                     )
                 else:
                     try:
-                        review = self.browser.review_checkout(cart, deadline=deadline)
+                        review = self.browser.review_checkout(cart, deadline=deadline, **({"payment": checkout_payment} if self.provider == "oda" else {}))
                     except OdaCheckoutMismatchError:
                         refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                         refreshed_summary = cart_summary(refreshed_cart)
@@ -2161,8 +2164,12 @@ class OrderOperations:
             payment_display = None
             if self.provider in {"oda", "mathem"}:
                 payment_display = str((review.get("summary") or {}).get("payment") or review.get("payment_display") or "")
-                if re.fullmatch(r"•••• \d{4}", payment_display) is None:
-                    raise HouseholdError("Oda checkout returned no verified masked payment identity")
+                vipps = self.provider == "oda" and not order_change and checkout_payment["method"] == "vipps"
+                if (vipps and payment_display != "Vipps") or (not vipps and re.fullmatch(r"•••• \d{4}", payment_display) is None):
+                    raise HouseholdError("checkout returned no verified configured payment identity")
+                summary["payment"] = payment_display
+                if self.provider == "oda" and not order_change:
+                    summary["payment_method"] = checkout_payment["method"]
             if retail_addition:
                 if self.provider == "mathem":
                     summary["order_amounts"] = deepcopy(review["order_amounts"])
@@ -2203,7 +2210,10 @@ class OrderOperations:
                 if cart_plan_baseline is not None and canonical(state.get("cart_plan")) != canonical(cart_plan_baseline):
                     raise HouseholdError("cart plan changed while preparing checkout; prepare a new summary")
                 self._guard_scheduled_context(state, scheduler_context)
+                if state["checkout_payment"] != checkout_payment:
+                    raise HouseholdError("payment preference changed while preparing checkout; prepare a new summary")
                 state["pending_checkout"] = {
+                    "checkout_payment": checkout_payment,
                     "scheduler_context": deepcopy(scheduler_context),
                     "status": "awaiting_confirmation",
                     "confirmation_id": confirmation_id,
@@ -2249,6 +2259,7 @@ class OrderOperations:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout")
+            current_payment = deepcopy(state["checkout_payment"])
         if recovered:
             return recovered
         if not pending or pending["status"] != "awaiting_confirmation":
@@ -2257,6 +2268,8 @@ class OrderOperations:
             self._require_menu_provider(pending.get("menu"))
         if confirmation_id != pending.get("confirmation_id"):
             raise HouseholdError("checkout confirmation does not match the prepared summary")
+        if current_payment != pending.get("checkout_payment"):
+            raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
         if self._now() >= datetime.fromisoformat(pending["expires_at"]):
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) == canonical(pending):
@@ -2306,6 +2319,8 @@ class OrderOperations:
                         raise HouseholdError("order change changed; show a new summary")
                     if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                         raise HouseholdError("cart plan changed; show a new summary")
+                    if state["checkout_payment"] != pending.get("checkout_payment"):
+                        raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
                     self._pending_scheduler_guard(state, pending)
                     state["pending_checkout"]["status"] = "clicking"
 
@@ -2354,6 +2369,8 @@ class OrderOperations:
                             raise CheckoutPreconditionError(str(exc)) from exc
                         if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                             raise CheckoutPreconditionError("cart plan changed before the final click")
+                        if state["checkout_payment"] != pending.get("checkout_payment"):
+                            raise CheckoutPreconditionError("payment preference changed before dispatch; prepare a new summary")
                         current_pending = state.get("pending_checkout")
                         expected = {**pending, "status": "clicking"}
                         if not current_pending or canonical(current_pending) != canonical(expected):
@@ -2625,6 +2642,10 @@ class OrderOperations:
             "tracking": tracking if confirmed else None,
             "retry_allowed": expired_unpaid or undispatched_retryable,
             **({"payment_dispatched": False} if undispatched_retryable else {}),
+            **({"payment_followup_required": True,
+                "payment_method": "vipps",
+                "next": "The original Oda/Vipps payment is not confirmed. Check its original payment page and complete any requested approval, then reconcile this same attempt. Do not submit again."}
+               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed else {}),
             **({"tracking_status": tracking_status or None,
                 "payment": self._payment_evidence(tracking_status or None),
                 "next": "The original Mathem payment is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}
