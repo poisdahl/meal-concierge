@@ -18,6 +18,10 @@ later added and removed one real cart item through Application, as described
 below. Those menu conversations performed no live delivery selection, order,
 payment or cancellation. Later provider probes have their separate scope below.
 
+The [final client/platform matrix](platform-acceptance.md) integrates #50, #53,
+#54 and the qualified MC09/scheduler results, including the newer Desktop
+menu and preserved-state upgrade. Older checkpoints below remain chronological.
+
 ## Served features
 
 Tool names below omit the common `meal_concierge_` prefix. The
@@ -43,7 +47,7 @@ provider outcome.
 | Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | Native Mathem whole-week cart17 packages and exact Sep13 slot selection/readback passed; earlier Sep9 reservation release remains unverified |
 | Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Native Mathem original order accepted after one dispatch and reconciliation; bank authorization/charge unknown. Bound addition accepted after one failed native payment and one operator-assisted recovery; Free delivery change accepted through native prepare/confirm/reconcile after scoped UI preparation, with unchanged18 packages/582.51 SEK and zero payable. Native cancellation accepted after two pre-dispatch stops and a persisted-review comparison fix; independent receipt/tracking confirmed the result with unrelated order preserved. Oda/MENY guards and external phone approval retained |
 | Scheduling and email | `schedule`, `email` | `test_meal_concierge.py`, `test_weekly_scheduler.py`, `test_email_scheduler.py`; recorded local-sender/occurrence/recovery checks | One owned systemd occurrence ran ordinary Hermes with standing Mathem checkout and verified local pre/result notices; no real recipients or Hermes-native-cron claim |
-| Finalized menu presentation | `recipe_delivery`; maintained CLI byte export | `test_recipe_delivery.py`; current shared frozen text/PDF/image/email, begin/ack and unknown-send recovery contracts | Existing shared evidence is retained; #50 does not depend on #53's remaining native PDF/transport acceptance or permit real recipients |
+| Finalized menu presentation | `recipe_delivery`; maintained CLI byte export | `test_recipe_delivery.py`; current shared frozen text/PDF/image/email, begin/ack and unknown-send recovery contracts | #53's original Codex PDF opened/read and image preview are confirmed; its unknown transport acknowledgments remain unchanged. Other destinations/senders retain their own limits; see [platform matrix](platform-acceptance.md) |
 
 ## Mathem installation and continuity — 2026-09-07
 

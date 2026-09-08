@@ -2,6 +2,8 @@
 
 The [verified installation lifecycle](../docs/client-install.md#verified-installation-lifecycle)
 records the separately tested Codex CLI, Claude Code CLI and Desktop Code flows.
+The [current platform matrix](../docs/platform-acceptance.md) separates their
+actual source versions, preserved-state upgrades and remaining qualifications.
 
 Start with the [repo-URL installation guide](../docs/client-install.md) for fresh
 setup, reuse, native activation and recovery. The commands below describe the
@@ -57,9 +59,10 @@ new attempt. Mathem supports guarded saved-card checkout when the installation
 has a configured dedicated browser logged into the same account. Without an
 available checkout browser, it returns a manual website handoff. Failed login,
 account/address or saved-card checks stop checkout and require attention before
-a fresh review. Other payment methods and existing-order
-changes/cancellation still require the website; native purchase acceptance
-remains open in #50.
+a fresh review. Mathem also supports guarded additions and cancellation, and bound free-window
+delivery changes. Other payment methods and paid/refund-bearing changes remain
+manual. The [native Mathem result](../docs/acceptance.md) records the completed
+#50 scope, including recovery assistance and unknown bank settlement/refunds.
 
 The attachment uses the installation's stable `current` paths. Rebuild packages
 from the updated running release into a new output directory. Attachment or skill
@@ -188,3 +191,14 @@ implement a second importer, normalizer, scheduler, sender or credential owner.
 On 2026-09-07, native Codex CLI 0.153.4 also passed original text/photo import, the bundled three-page PDF fallback, explicit draft saves, internal-only planning and saving of seven dated dinners for two, and fresh-client readback after a synthetic service restart. Saved recipe revisions, quantities, unknown measures, menu contents and managed image bytes were preserved. Cover upload used the host CLI in normal native approval mode; save and image retrieval used MCP. Recipe and image attribution remained separate, and the source's hostile instructions caused no observed provider writes or favorite changes.
 
 The photo's initial sandbox denial and the planner's initial six-eligible-recipe shortfall were retained and reconciled before the reviewed follow-ups. Codex JSONL does not expose individual builtin image-view or approval-decision events; native helper execution, transcript, business-tool results and managed image bytes are observed. Import prompts also repeated source and quantity safeguards, so these runs do not isolate the canonical skill’s prompt-injection defenses. These checks used synthetic fixtures and subprocess services, and do not establish external-provider recommendation quality, complete nutrition, native service managers, scheduler persistence or full Desktop lifecycle acceptance.
+
+
+## Desktop menu and preserved-state upgrade — 8 September 2026
+
+The [MC10 platform matrix](../docs/platform-acceptance.md#new-desktop-menu-and-upgrade-acceptance)
+records the subsequent seven-dinner menu, actual local image presentation and
+public-source upgrade/readback on the retained #54 launchd installation. It
+supersedes earlier “full Desktop menu/restart unverified” statements only for
+that observed scope. The original attachment/PDF and CLI results above are
+reused, not replayed; outgoing PDF/email transports and physical-sleep behavior
+retain their separate qualifications.
