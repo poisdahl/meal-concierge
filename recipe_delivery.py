@@ -12,7 +12,7 @@ import re
 
 from recipe_assets import RecipeAssetError
 from recipe_email import _plain_text, prepare_recipe_media
-from service_common import format_portions, menu_email_html
+from service_common import format_portions, menu_email_html, meal_type_label
 
 
 def render_menu(menu, assets, *, images=True):
@@ -46,7 +46,7 @@ def render_menu(menu, assets, *, images=True):
     names = {r.get("recipe_key"): r.get("name", "")
              for group in ("dishes", "salads") for r in frozen.get(group, [])}
     for slot in frozen.get("slots", []):
-        dates.append(" · ".join(str(v) for v in (slot.get("date"), names.get(slot.get("recipe_key")),
+        dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type")), names.get(slot.get("recipe_key")),
                      f"{format_portions(slot['portions'])} porsjoner" if slot.get("portions") else None) if v))
     if dates:
         position = full.index("</h1>") + len("</h1>")

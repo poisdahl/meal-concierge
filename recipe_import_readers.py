@@ -418,7 +418,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     them. Input is an internal result of one of the read_* functions above.
     """
     try:
-        from recipes import source_ingredient, source_yield
+        from recipes import source_ingredient, source_yield, categories_from_tags
     except ImportError as exc:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
@@ -453,6 +453,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": 2, "name": raw["name"], "language": raw["language"],
         "tags": list(raw["tags"]), "source": deepcopy(raw["source"]),
+        "categories": categories_from_tags(raw["tags"]),
         "rights": {"storage": "full", "credit": raw["credit"] or None},
         "ingredients": ingredients,
         "steps": list(raw["steps"]), "yield": yield_value, "portions": portions,
@@ -468,7 +469,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
     that supplied text, not against original image pixels or document bytes.
     No file, network, bank or provider operation occurs here.
     """
-    from recipes import bind_recipe_source, normalize_recipe, source_ingredient, source_yield
+    from recipes import bind_recipe_source, normalize_recipe, source_ingredient, source_yield, categories_from_tags
     from recipe_quantities import UNITS, normalized_unit, quantity_json, read_quantity
     if not isinstance(value, dict) or set(value) - {"kind", "pages", "interpretation", "attribution"}:
         raise RecipeImportReaderError("transcript contains unsupported fields")
@@ -501,7 +502,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
                    _text(attribution.get(key), "attribution " + key, 200 if key in {"publisher", "author"} else 300) or None
                    for key in ("url", "publisher", "title", "author")}
     interpretation = value.get("interpretation")
-    if not isinstance(interpretation, dict) or set(interpretation) - {"name", "language", "ingredients", "steps", "yield", "notes", "tags"}:
+    if not isinstance(interpretation, dict) or set(interpretation) - {"name", "language", "ingredients", "steps", "yield", "notes", "tags", "categories"}:
         raise RecipeImportReaderError("transcript requires an allowlisted interpretation")
 
     def excerpt(item, field, *, maximum=500, extra=()):
@@ -576,6 +577,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
         "rights": {"storage": "full"}, "ingredients": ingredients, "steps": steps,
         "yield": yield_value, "portions": portions, "portions_evidence": portions_evidence,
         "tags": tags, "notes": notes,
+        "categories": interpretation.get("categories", categories_from_tags(tags)),
     }))
     return {"candidate": candidate, "source_context": {"kind": kind, "content_sha256": source_digest,
         "source_mode": "supplied_text" if kind == "pasted_text" else "host_transcript",

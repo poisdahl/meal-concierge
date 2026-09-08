@@ -223,6 +223,12 @@ def menu_digest(menu: Mapping[str, Any]) -> str:
     import hashlib
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
+def meal_type_label(value: Any) -> str:
+    return {"breakfast": "Frokost", "brunch": "Brunsj", "lunch": "Lunsj", "dinner": "Middag",
+            "starter": "Forrett", "side": "Tilbehør", "dessert": "Dessert", "snack": "Mellommåltid",
+            "drink": "Drikke"}.get(str(value or ""), str(value or ""))
+
+
 def format_portions(value: Any) -> str:
     try:
         return quantity_text(value)
@@ -375,6 +381,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             if isinstance(item, Mapping):
                 day = escape(item.get("day"))
                 meal = escape(item.get("meal") or item.get("action"))
+                meal_type = escape(meal_type_label(item.get("meal_type")))
+                if meal_type:
+                    meal = f"{meal_type}: {meal}"
                 portions = escape(format_portions(item.get("portions")))
                 suffix = f" ({portions} porsjoner)" if portions else ""
                 parts.append(f"<li><strong>{day}</strong>: {meal}{suffix}</li>")

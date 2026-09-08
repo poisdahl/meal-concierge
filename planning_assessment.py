@@ -30,7 +30,7 @@ def assess_menu(state):
     meals = profile["meals"]
     selection = menu.get("planner_selection") or {}
     requested = menu.get("planning_scope") or selection.get("request") or {}
-    expected_days = len(requested["dates"]) if requested.get("dates") else meals["dinner_days"]
+    expected_days = len(requested["dates"]) if "dates" in requested else meals["dinner_days"]
     expected_portions = requested.get("portions") or meals["portions"]
     dishes = menu.get("dishes", [])
     recipes = [*dishes, *menu.get("salads", [])]

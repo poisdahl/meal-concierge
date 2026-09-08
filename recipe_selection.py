@@ -81,7 +81,7 @@ def candidate_groups(candidates: list[Mapping[str, Any]]) -> list[list[Mapping[s
 
 def compact_candidate(recipe: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
     """Project a loaded version without passing a partial document as a recipe."""
-    fields = ("name", "portions", "times", "tags", "source", "source_provider", "schema_version",
+    fields = ("name", "portions", "times", "tags", "categories", "source", "source_provider", "schema_version",
               "recipe_digest", "entry_origin", "is_favorite", "locally_modified", "status")
     result = {key: deepcopy(recipe[key]) for key in fields if key in recipe}
     result.update(deepcopy(dict(reference)))

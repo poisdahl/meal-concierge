@@ -44,6 +44,8 @@ def normalize(state, menu, value, today):
     if value['source_slot_id'] in reserved or (isinstance(value['leftovers'], list) and any(x.get('slot_id') in reserved for x in value['leftovers'] if isinstance(x, dict))):
         raise HouseholdError('batch component intersects an existing source or leftover')
     source=mp.slot_by_id(menu,value['source_slot_id'])
+    if source['meal_type'] != 'dinner':
+        raise HouseholdError('linked batch sources must be dinner slots; add other meals as fresh dishes')
     if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
         raise HouseholdError('batch source must be one exact fresh recipe snapshot')
     if source['date'] < today or mp.slot_outcome(state,menu,source) is not None:
@@ -80,6 +82,8 @@ def normalize(state, menu, value, today):
         if not isinstance(item,dict) or set(item)!={'slot_id','portions'}:
             raise HouseholdError('each leftover needs an exact target slot_id and portions')
         target=mp.slot_by_id(menu,item['slot_id'])
+        if target['meal_type'] != 'dinner':
+            raise HouseholdError('linked leftover targets must be dinner slots so source failures can be replanned')
         if target['slot_id'] in seen or target['slot_id']==source['slot_id']:
             raise HouseholdError('leftover target is duplicated or equals its source')
         seen.add(target['slot_id'])
@@ -181,14 +185,16 @@ def evaluate_plan(state, original, successor):
     if not handoff:
         return {'status':'unknown','reason':'an exact structured planner selection is required'}
     facts={mp.canonical({k:v for k,v in c.items() if k!='facts'}):c.get('facts',{}) for c in handoff['request']['candidates']}
-    recipes={r['recipe_key']:r for r in successor['dishes']}
+    recipes={r['recipe_key']:r for r in successor['dishes'] + successor['salads']}
     candidates=[]; hard=[]
     for slot in successor['slots']:
         recipe=recipes[slot['recipe_key']]
         candidate={'recipe':recipe,'recipe_key':slot['recipe_key'],'usage':{'eligible':True},'materialization_error':None,
                    'facts':_effective_facts(recipe,facts.get(mp.canonical(slot['reference']),{}))}
-        check=_hard_evaluation(candidate,state['profile'],{})
-        hard.append(check); candidates.append(candidate)
+        check=_hard_evaluation(candidate,state['profile'],{},meal_type=slot['meal_type'])
+        hard.append(check)
+        if slot['meal_type'] == 'dinner':
+            candidates.append(candidate)
     strict=_strict_evaluation(tuple(candidates),handoff['request'].get('strict_targets',[]),state['profile'])
     return {'status':'pass' if all(c['status']=='pass' for c in hard) and strict['status']=='pass' else 'unknown',
             'hard':hard,'strict':strict}
@@ -268,6 +274,4 @@ def attach_recurring(menu, layout, resolved):
     menu['batches'] = batches
     menu['slots'].sort(key=lambda s: s['date'])
     menu['planning_scope'] = {'dates': [s['date'] for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
-    names = {r['recipe_key']: r['name'] for r in menu['dishes']}
-    menu['schedule'] = [{'day': s['date'], 'meal': names[s['recipe_key']] + (' (rester)' if s.get('kind') == 'leftover' else ''),
-                         'slot_id': s['slot_id'], 'recipe_key': s['recipe_key']} for s in menu['slots']]
+    menu['schedule'] = mp.schedule(menu)

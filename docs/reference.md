@@ -1328,6 +1328,58 @@ successors without deleting historical or unresolved state. The default remains
 one different dinner per day with no inferred leftovers or batch capability.
 
 
+## Explicit meal additions
+
+Recipe documents support multiple standard `categories`, independent of their
+original free-form tags. Recipe `libraries` lists the supported categories;
+`recipes/search` with `library_id=builtin, category=dessert` finds an exact
+classification. Other useful filters include brunch, breakfast, lunch, baking
+and bread. Canonical category filtering applies to the built-in bank; native
+provider filters retain their own meanings. An unclassified recipe remains
+usable and can be found by ordinary text search or discovery.
+
+The host interprets “add a dessert for two on Thursday” or “add a brunch dish for
+four on Sunday”, resolves the date in the requested week, and chooses a suitable
+recipe. It then sends a concrete addition through the ordinary menu tool:
+
+```json
+{
+  "operation": "menu",
+  "action": "add_slot",
+  "menu_ref": {"menu_id": "<returned ID>", "revision": 1, "digest": "<returned digest>"},
+  "slot_input": {
+    "date": "2026-09-10",
+    "meal_type": "dessert",
+    "portions": 2,
+    "reference": {"recipe_ref": {"id": "<returned recipe ID>", "revision": 1}}
+  },
+  "idempotency_key": "thursday-dessert-1"
+}
+```
+
+Use a returned `discovery_ref` instead of `recipe_ref` for an unsaved imported
+recipe. Dates must be canonical, today or later, and in the active menu's week.
+Omit `menu_ref` only when no menu exists; the addition creates a menu for its ISO
+week. Each meal has its own 1–100 person portions and one of breakfast, brunch,
+lunch, dinner, starter, side, dessert, snack or drink. Recipes retain their source
+yield; unknown source servings are not replaced by the requested person count.
+
+Additions preserve current slots, snapshots, cooking history, locks and batch
+context through the existing menu successor path. A menu permits up to 31 slots,
+including multiple courses on the same date. There is one dinner per date;
+replace dinner through replanning. The existing one-fresh-entry-per-recipe rule
+still applies; linked leftovers use the explicit batch flow. Linked
+batch sources and targets are limited to dinner slots, whose failed dependencies
+can be repaired together through dinner replanning. Returned
+`shopping_comparison` describes ingredient changes at the requested portions.
+Product selection, cart writes, checkout and recipe sending retain their existing
+separate operations. An uncertain call reuses the exact original key and content.
+
+Dinner `replan_prepare` interprets `remaining_dates` as dinner dates and carries
+desserts, brunches and other additional slots unchanged. Dinner coverage and
+weekly dietary targets do not count an additional dessert as a dinner. Recipe
+delivery shows the date, meal type and portions for every saved slot.
+
 ## Explicit planning feedback
 
 `meal_concierge_feedback` supports `inspect`, `accept`, `reject`, `swap`, `undo`

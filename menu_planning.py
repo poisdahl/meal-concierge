@@ -18,6 +18,18 @@ def digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
+def slot_order(slot):
+    from recipes import MEAL_TYPES
+    return slot["date"], MEAL_TYPES.index(slot["meal_type"]), slot["slot_id"]
+
+
+def schedule(menu):
+    recipes = {r["recipe_key"]: r for r in menu["dishes"] + menu["salads"]}
+    return [{"day": s["date"], "meal": recipes[s["recipe_key"]]["name"] + (" (rester)" if s.get("kind") == "leftover" else ""), "meal_type": s["meal_type"],
+             "portions": deepcopy(s.get("portions", recipes[s["recipe_key"]].get("portions"))),
+             "recipe_key": s["recipe_key"], "slot_id": s["slot_id"]} for s in menu["slots"]]
+
+
 def initial_planning():
     return {"locks": {}, "history": {}, "retired": {}, "applied": {}, "outcomes": {}}
 

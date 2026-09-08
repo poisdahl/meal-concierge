@@ -70,14 +70,19 @@ Direct explicit inputs retain the
 planner's explicit work-limit error. The shortlist is a bounded preference
 ranking, not an exhaustive or globally optimal catalog search.
 
-Known non-dinner tags and coarse culinary terms for desserts, beverages,
-breakfast components, condiments and plain potato sides exclude those recipes
-from dinner slots. This bounded culinary heuristic is not general meal-type
-understanding; absent classifications do not establish meal completeness.
+Canonical recipe categories guide dinner selection. `breakfast` plus `dinner`
+can serve as dinner; desserts, drinks and condiments remain excluded even if
+also labeled dinner. A meal-role classification without dinner, or bread alone,
+is excluded. `baking` alone does not establish meal suitability, so the existing
+tag/name checks still apply. With no usable category, known non-dinner tags and
+coarse culinary terms for desserts, beverages, breakfast components, condiments
+and plain potato sides remain the fallback. Absent classifications do not
+establish meal completeness. Explicitly requested other meals use menu
+`add_slot`, which carries their own date, meal type and portions.
 Unknown/non-scalable ingredient measures remain visible in saved menus with
 `scaling_ready=false`, and products remain unresolved without invented amounts.
 
-Planner version `weekly-menu-v3` adds exact recipe-tag matches for
+Planner version `weekly-menu-v4` adds category-aware dinner selection and retains exact recipe-tag matches for
 `cuisine.wanted`/`flavours`, personal favorites, documented English/Norwegian
 food-category matches for `diet.prioritise`, and positive leafy-green evidence
 on requested ISO weekdays or English weekday names. Whole grains and potatoes
