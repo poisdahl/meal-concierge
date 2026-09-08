@@ -33,9 +33,9 @@ No credentials, cookies or authentication logs were exported.
 | `get_orders`, `get_order`, `order_tracking` | Separate cancelled receipts returned currency, ISO delivery date, display, gross amount and product quantities. Both omit `productQuantityCount` and order address. Oda: 24 packages/948.05 NOK; owned Mathem test order: 18/582.51 SEK | Sum product quantities for both. Bind full date and currency. Cancellation status is observed; no new cancellation was submitted |
 | `get_delivery_slots` | For 13 September, Oda returned 20 available slots with exact prices 19–79 NOK; Mathem returned 19 at zero SEK. Both returned dated timestamps with offsets | Shared slot normalization; Oslo/Stockholm provider binding. One date's free Mathem slots do not establish a store-wide restriction |
 | Browser account/receipt | After owner Oda login, both exact cancelled receipts and their own MCP address references matched independently on 8 September. Oda uses `Total inkl. MVA`; Mathem uses `Totalt inkl. moms` | Shared reader with provider origins/labels verified separately; frozen-reference mismatch rejected for both. This is read acceptance, not payment acceptance |
-| Cart writes and slot selection | Existing native Mathem acceptance retained; no new writes in this inspection | Matching schemas alone do not verify new mutation semantics |
-| Addition/payment | Earlier original native order succeeded. Its native addition payment failed; a separate helper later paid the retry page | Ordinary paid addition and product-owned recovery remain open |
-| Delivery change | Earlier native review/confirm/reconcile followed UI preparation. Current code limits Mathem to zero payable/unchanged total | Ordinary navigation from a normal starting page and price-changing review remain open; the zero limit is local |
+| Cart writes and slot selection | Later ordinary Mathem turns on the 8 September candidate staged one package, selected the original slot, then staged one extra package bound to the same order | Independent live write/readback evidence; Oda cart effects were not authorized |
+| Addition/payment | Earlier addition required helper recovery. New ordinary candidate flow paid one extra package once and later reconciled two packages/143 SEK | Ordinary paid addition demonstrated; failed-payment recovery remains unverified |
+| Delivery change | Earlier acceptance followed UI preparation. New ordinary candidate flow began with a closed browser, prepared 10 September14–16, submitted once and reconciled unchanged two packages/143 SEK | Ordinary free change demonstrated; paid review remains unverified and the zero limit remains local |
 
 ## Established Oda candidate and retained differences
 
@@ -53,8 +53,19 @@ passed; the normal cart surface returned `wait`, and checkout review stopped
 at `cart is empty`. No slot or destination was selected and no submit occurred.
 An earlier redundant read failed with a browser operation error; its closed
 browser and unchanged-state result were preserved. The focused continuation
-completed, also with unchanged state and normal browser close. Full review of
-an authorized nonempty Mathem order flow remains outstanding.
+completed, also with unchanged state and normal browser close.
+
+At 12:41 UTC on 8 September, the complete established Oda initial-review flow,
+with static Mathem origin/provider/locale binding applied before customer data,
+passed against the authorized one-package Mathem cart. Source browser SHA256
+was `2d9dc062599df874dd037e120149491aec883621eec302a7410ecf39b0abc91b`;
+the isolated rebound source was
+`1fcf89bf1e7959e55cb32fe76f90bcf57aba47e4eea554eb1bb7548f260cf725`.
+Account, cart continuation, recommendations, expanded items and total review
+passed at 124.50 SEK. Cart and household state remained byte-identical and the
+owned browser closed. Submit methods were disabled. This proves the bounded
+initial control-flow comparison, not ordinary product/payment acceptance,
+selected-card semantics or the active-order modify route.
 
 Shared transport, Application order journals, protected confirmations and
 reconciliation remain in place. Product quantity counting now uses the shared
@@ -129,16 +140,128 @@ Oda returned 20 per date with prices spanning 0–89 NOK. These reads use the
 installed adapter's validated minor-unit prices, not guessed raw response keys.
 They do not establish a paid Mathem edit contract or authorize new orders.
 
+At 13:55 UTC, after the new ordinary addition had reconciled, a separate read-only
+browser observation opened the owned order's actual delivery calendar through
+its merchant-provided action link. The installed browser source SHA256 was
+`a10895f5c31ddf3f8ea70e7a1127ca6cec7308927243689acb7cf20d2bf0392e`.
+The initially visible calendar covered 9–11 September: 38 parsed available
+windows on 10–11 September displayed `0 kr`; the only button price text anywhere
+in that table was `0 kr`. Empty cells were not counted as available windows.
+No slot was selected and no submit occurred. Original account/receipt binding,
+cart, order/tracking and household-state comparisons passed; the observation
+browser closed. The first subsequent ordinary turn stopped after fresh reads because the model
+interpreted the preserved local cart plan's missing quantity as an order
+discrepancy. No change began. The plan compares with the now-empty cart; the
+merchant order independently contained both paid packages. That distinction was
+clarified without editing the plan. Subsequent ordinary delivery review must
+navigate independently from a cold browser. This establishes the offered current calendar, not paid
+edit behavior or a permanent store restriction.
+
 ## Remaining acceptance
 
-Required and still open: ordinary Mathem addition payment; any supported recovery
-through the product with original-change/goods binding; delivery change starting
-without UI preparation; supported price-changing review/authorization; affected Oda native flow checks after the now-verified browser/account/receipt reads; candidate
-publication, normal installation/upgrade and verification on exactly authorized
-runtime/client targets. No new general order, payment, deployment
+Required and still open: any supported recovery
+through the product with original-change/goods binding; supported price-changing
+review/authorization; affected Oda native flow checks after the now-verified browser/account/receipt reads; verification of each subsequent fix on exactly authorized runtime/client targets. No new general order, payment, deployment
 or recipient authorization follows from historical one-shot tests.
 
-New single-order testing awaits exact authorization. Existing unrelated state,
+On 8 September the owner approved one bounded Mathem order, its addition,
+delivery change and cancellation, plus the exact Bob/Oda and dedicated Mathem
+rollout. Published source `058c43f` was verified in all three installations and
+through both installed MCP connections. Two source-directory permission defects
+in the deployment procedure were preserved and corrected; product state and
+configuration bytes were unchanged through rollout.
+
+The first ordinary Hermes prepare staged one package and selected delivery,
+then reviewed 124.50 SEK including fees. It did not submit. Inspection caught a
+shared attribution bug: a supplemental-only cart would mark the unrelated saved
+seven-slot menu ordered. Checkout now distinguishes cart-only purchase from
+quantified menu shopping and preserves that unassessed menu. That initial review was replaced through ordinary prepare after the fix, before
+payment. The first prepare alone was not completed-order acceptance.
+
+The next ordinary Hermes prepare failed with `Mathem checkout navigation did
+not finish`, before confirmation or payment. A read-only observation found the
+complete Mathem cart page with exactly one enabled `Fortsätt` button. The shared
+cart startup now reuses the established Oda open/reload/settle/click sequence
+with separately observed provider labels and origins. Mathem retains its exact
+storefront full-cart link, destination choices and scoped card parser. Delayed
+navigation is polled without repeating a dispatched control; lost click replies
+stop. Login, wrong origins and ambiguous controls stop before continuation.
+The installed candidate's fresh ordinary Hermes prepare then passed, followed
+by the required local notice and one payment confirmation. The first two
+reconciliations reported `unpaid_order`; the original attempt stayed uncertain
+with retry disabled. A later ordinary reconciliation returned
+`confirmed=true`, `paid_and_modifiable` and the exact 124.50 SEK order, without
+another payment. Its result notice was delivered locally. Initial checkout and
+delayed reconciliation are now demonstrated; delivery-change acceptance remains
+a separate criterion. The cart-only menu and usage stayed outside
+ordered-menu attribution.
+
+The ordinary addition then staged exactly one extra package. Its first prepare
+failed during navigation without payment; the CLI exited 134 after recording its
+result. A bounded diagnostic now records only fixed route/action names. The
+intermittent redirect cause remains unproven. A later ordinary prepare succeeded,
+but confirmation correctly stopped because Mathem had populated the addition
+cart's delivery with the original order's delivery during browser navigation.
+Fresh MCP comparisons found only that delivery field changed; goods and 18.50 SEK
+were unchanged. The guard was retained and a fresh ordinary review was required.
+That review passed and the local before-notice was delivered and acknowledged.
+After one payment confirmation, the immediate ordinary reconciliation reported
+`unpaid_order_change`; retry stayed disabled. A later ordinary reconciliation
+returned `confirmed=true`, `changed_existing_order=true` and
+`paid_and_modifiable`: two packages, combined 143 SEK. No helper submitted or
+recovered payment. The after-notice was delivered to the local receiver. Natural
+CLI 134 exits are retained separately from the persisted tool results and do not
+justify repeating an action. Tool-call IDs distinguish new intents from history
+rows reinserted by conversation compaction. This completes the ordinary paid
+addition criterion; it does not demonstrate recovery of an explicitly failed
+payment.
+
+The next ordinary delivery sequence began with the browser closed. Hermes called
+`orders change_begin`, MCP delivery list/select for 10 September14–16 Stockholm,
+and checkout prepare; the product performed all calendar/review navigation.
+Review bound the same original account/address, two goods, original and combined
+143 SEK and zero payable. One confirmation initially remained unconfirmed with
+retry disabled despite merchant status `paid_and_modifiable`. One reconciliation
+of that same attempt then confirmed the exact new delivery and unchanged goods
+and amount. No second submit, slot choice, helper preparation or result notice
+was needed. This demonstrates the formerly UI-prepared criterion through the
+ordinary installed skill/MCP/Application path, within its free-change limit.
+
+The same ordinary conversation then prepared cancellation of only the new test
+order, confirmed once and received `cancelled=true`. Fresh product reads and an
+independent provider verification both confirmed the same cancelled order, two
+packages/143 SEK and the changed delivery. The cart was empty with no selected
+cart delivery. No protected operation or order edit remained pending. All four
+new local notices were acknowledged, as were the four retained historical
+notices. Both pre-existing first-page order entries remained byte-identical and
+no unexpected order appeared. Original menu, menu planning, usage/history,
+configuration, standing policy and disabled scheduler were preserved; the own
+cart plan was unchanged from its pre-addition snapshot. No timer was created.
+The verifier only read original protected results and current provider state;
+it did not perform any product action.
+
+| Ordinary scenario | Expected | Actual installed candidate outcome |
+|---|---|---|
+| Mathem initial order | One package, at most250 SEK; one payment; retained saved menu | 124.50 SEK, one dispatch, delayed ordinary reconciliation confirmed; cart-only/not-assessed |
+| Mathem addition | Exactly one extra package, at most25 SEK | 18.50 SEK extra; one payment dispatch, later ordinary reconciliation confirmed two packages/143 SEK |
+| Mathem delivery | Normal start, valid review, one submit, exact new date and unchanged goods | Cold browser to 10 September14–16; zero payable; one submit and one later reconciliation confirmed |
+| Mathem cancellation | Cancel only the new order and preserve unrelated activity | One cancellation confirmation; merchant cancelled; cart empty, no selected cart delivery/pending edits; original two entries unchanged |
+| Oda affected review | Own account, ordinary review and verified selected-payment field | Account/receipt reads and paired isolated guards passed; current cart empty. Separate no-purchase review scope awaits owner authorization |
+
+The required fleet profile passed on current private main plus the ten owned
+files, including the separately committed Grok changes for regression only.
+The actual runtime candidate remains public `058c43f` plus the owned source
+manifest, not those disjoint Grok changes. The retained unauthenticated installation completed a normal update to this
+candidate, verified all 52 staged runtime/skill files and reconnected through
+its installed SDK with 27 tools. All 1,581 state files and configuration remained
+byte-identical; the fixture stopped normally. The public suite's first run
+exposed five module-import errors caused by one privately rooted exported test;
+that export was corrected and all 305 tests in the affected five modules passed
+(two optional skips). The other modules had passed in the first run. Final
+published-byte and required GitHub CI verification remain separate from these
+merchant outcomes.
+
+Existing unrelated state,
 original standing policy, private journals and the explicit documentation/client
 exclusions are preserved.
 

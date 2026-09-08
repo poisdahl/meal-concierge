@@ -4745,7 +4745,9 @@ class RecipeFlowTests(unittest.TestCase):
     def test_ordered_current_menu_cannot_bind_to_a_second_new_order(self):
         planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         with self.store.locked() as state:
-            self.app._record_order_snapshot(state, {"menu": planned}, "order-1")
+            self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(planned),
+                "required_quantities": {"10": 1}}}, "order-1")
         with self.assertRaisesRegex(HouseholdError, "already belongs to an order"):
             self.app.handle({"operation": "checkout", "action": "prepare"})
         state = self.store.read()
@@ -4755,10 +4757,14 @@ class RecipeFlowTests(unittest.TestCase):
     def test_recent_unscheduled_order_snapshot_survives_a_later_order(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         with self.store.locked() as state:
-            self.app._record_order_snapshot(state, {"menu": first}, "order-1")
+            self.app._record_order_snapshot(state, {"menu": first, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(first),
+                "required_quantities": {"10": 1}}}, "order-1")
         second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
         with self.store.locked() as state:
-            self.app._record_order_snapshot(state, {"menu": second}, "order-2")
+            self.app._record_order_snapshot(state, {"menu": second, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(second),
+                "required_quantities": {"10": 1}}}, "order-2")
             state["email_recipient"] = "owner@example.test"
         self.assertIn("order-1", self.store.read()["order_snapshots"])
         scheduled = self.app.handle({
