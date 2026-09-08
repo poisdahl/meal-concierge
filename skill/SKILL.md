@@ -319,10 +319,11 @@ Favorites-only search requires the selected library's `favorite_read` capability
 it does not relax archive, cooldown, rights or meal constraints.
 
 For requests such as “add a dessert for two on Thursday” or “add brunch for four
-on Sunday”, read the current menu, resolve the date in its week and household
-timezone, and search builtin with `category=dessert` or `category=brunch` and the
-target week. Inspect the actual recipe before choosing it. When classification
-is missing, ordinary source discovery/search can find suitable recipes; an empty
+on Sunday”, or sauce and side dishes with dinner, read the current menu, resolve
+the date in its week and household timezone, and search builtin with the requested
+category (for example `dessert`, `brunch`, `sauce` or `side`) and the target week.
+Inspect the actual recipe before choosing it. When classification is missing,
+ordinary source discovery/search can find suitable recipes; an empty
 category search does not prove there are none. Import or resolve external recipes
 before using their exact reference. The LLM chooses the dish; the service saves
 the date and portions, performs scaling and retains the existing meals.
@@ -330,11 +331,15 @@ the date and portions, performs scaling and retains the existing meals.
 Call menu `add_slot` with `slot_input={date,meal_type,portions,reference}`,
 the returned exact `menu_ref`, and one stable `idempotency_key`. `reference` is
 `{recipe_ref:{id,revision}}` or `{discovery_ref}`; portions are the explicit
-person count, independent of the dinner default. Meal types are breakfast,
-brunch, lunch, dinner, starter, side, dessert, snack and drink. Omit `menu_ref`
-only if no menu exists; the dated addition then creates one. Repeat an uncertain
-call only with its original key and content. This adds to the plan; it does not
-replace dinner, rebuild the week, change a cart, order groceries or send recipes.
+person count, independent of the dinner default. Every recipe category is an
+addable meal type: breakfast, brunch, lunch, dinner, starter, side, dessert, snack,
+baking, bread, drink, sauce, dressing, condiment and preserve. Add a sauce or side
+as its own slot on the dinner date, using the requested person portions. Source
+yield still controls scaling; do not invent servings from a jar, loaf or volume.
+Omit `menu_ref` only if no menu exists; the dated addition then creates one.
+Repeat an uncertain call only with its original key and content. This adds to the
+plan; it does not replace dinner, rebuild the week, change a cart, order groceries
+or send recipes.
 Show the added date/type/portions and any unresolved quantities. Use the returned
 menu reference for later requested products/cart/delivery work. Dinner replanning
 preserves additional courses and meals on the same date. Linked batch sources

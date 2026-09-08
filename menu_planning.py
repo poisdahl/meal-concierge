@@ -19,8 +19,8 @@ def digest(value):
 
 
 def slot_order(slot):
-    from recipes import MEAL_TYPES
-    return slot["date"], MEAL_TYPES.index(slot["meal_type"]), slot["slot_id"]
+    from recipes import RECIPE_CATEGORIES
+    return slot["date"], RECIPE_CATEGORIES.index(slot["meal_type"]), slot["slot_id"]
 
 
 def schedule(menu):
