@@ -15,7 +15,7 @@ import unicodedata
 from core import HouseholdError
 from product_planner import normalize_available_ingredients, available_ingredient_matches
 from recipe_selection import candidate_groups, merge_family_usage
-from recipes import RecipeError, scale_recipe, MEAL_TYPES
+from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
@@ -272,9 +272,9 @@ def _non_dinner_role(recipe: Mapping[str, Any]) -> str | None:
         return "category_non_dinner"
     if "dinner" in categories:
         return None
-    if categories.intersection(MEAL_TYPES) or "bread" in categories:
-        return "category_non_dinner"
     # Baking alone describes preparation; it does not establish a meal role.
+    if categories - {"baking"}:
+        return "category_non_dinner"
     tags = {str(tag).casefold() for tag in recipe.get("tags", [])}
     if tags.intersection({"dessert", "desserts", "drink", "drinks", "beverage", "breakfast", "side dish", "condiment"}):
         return "source_tag_non_dinner"

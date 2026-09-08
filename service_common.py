@@ -226,7 +226,8 @@ def menu_digest(menu: Mapping[str, Any]) -> str:
 def meal_type_label(value: Any) -> str:
     return {"breakfast": "Frokost", "brunch": "Brunsj", "lunch": "Lunsj", "dinner": "Middag",
             "starter": "Forrett", "side": "Tilbehør", "dessert": "Dessert", "snack": "Mellommåltid",
-            "drink": "Drikke"}.get(str(value or ""), str(value or ""))
+            "baking": "Bakst", "bread": "Brød", "drink": "Drikke", "sauce": "Saus",
+            "dressing": "Dressing", "condiment": "Smakstilsetning", "preserve": "Konservering"}.get(str(value or ""), str(value or ""))
 
 
 def format_portions(value: Any) -> str:

@@ -100,6 +100,43 @@ class CategoryMealTests(unittest.TestCase):
         self.assertEqual(replacement["schedule"][1]["meal_type"], "dessert")
         self.assertEqual(replacement["schedule"][2]["portions"], 4)
 
+    def test_every_category_and_multiple_sides_scale_and_survive_replanning(self):
+        labels = {"breakfast": "Frokost", "brunch": "Brunsj", "lunch": "Lunsj", "dinner": "Middag",
+                  "starter": "Forrett", "side": "Tilbehør", "dessert": "Dessert", "snack": "Mellommåltid",
+                  "baking": "Bakst", "bread": "Brød", "drink": "Drikke", "sauce": "Saus",
+                  "dressing": "Dressing", "condiment": "Smakstilsetning", "preserve": "Konservering"}
+        cases = [(category, f"Synthetic {category}", portions)
+                 for portions, category in enumerate(labels, 1)] + [("side", "Second side", 2)]
+        previous = []
+        for category, name, portions in reversed(cases):
+            with self.subTest(category=category, name=name):
+                recipe = self.import_recipe(name, "rice", [category])
+                result, _ = self.add(recipe, "2026-09-10", category, portions, key=name + "-add")
+                menu = result["menu"]
+                by_id = {s["slot_id"]: s for s in menu["slots"]}
+                self.assertEqual([by_id[s["slot_id"]] for s in previous], previous)
+                previous = menu["slots"]
+        self.assertEqual(len(menu["slots"]), 16)
+        self.assertEqual([s["meal_type"] for s in menu["slots"]],
+                         list(labels)[:6] + ["side"] + list(labels)[6:])
+        needs, unknown = menu_requirements(mp.shopping_menu(menu))
+        self.assertEqual(unknown, [])
+        self.assertEqual(len(needs), 1)
+        self.assertEqual(needs[0]["item"], "rice")
+        self.assertEqual(read_quantity(needs[0]["quantity"], legacy_float=True), 6100)
+        rendered = render_menu(menu, self.app.recipes.assets, images=False)["text"]
+        for category, name, portions in cases:
+            self.assertIn(f"2026-09-10 · {labels[category]} · {name} · {portions} porsjoner", rendered)
+        extras = [s for s in menu["slots"] if s["meal_type"] != "dinner"]
+        candidates = self.fixture.save_candidates(1)
+        prepared = self.app.handle({"operation": "menu", "action": "replan_prepare", "menu_ref": mp.menu_ref(menu),
+                                   "remaining_dates": ["2026-09-10"], "planner_input": {"candidates": candidates}})["replan"]
+        replacement = self.app.handle({"operation": "menu", "action": "replan_apply", "replan": prepared})["menu"]
+        self.assertEqual([s for s in replacement["slots"] if s["meal_type"] != "dinner"], extras)
+        reopened = Application(self.store, self.fixture.provider, object())
+        self.assertEqual(reopened.handle({"operation": "menu", "action": "get"})["menu"], replacement)
+        self.assertEqual(self.fixture.provider.calls, [])
+
     def test_standalone_brunch_unknown_classification_and_failed_adds(self):
         recipe = self.import_recipe("Unclassified recipe", "oats", [])
         result, request = self.add(recipe, "2026-09-13", "brunch", 4)
@@ -122,6 +159,7 @@ class CategoryMealTests(unittest.TestCase):
         self.assertEqual(categories_from_tags(["Desserts", "bakst", "Norwegian", "brunsj"]), ["baking", "brunch", "dessert"])
         self.assertIsNone(_non_dinner_role({"name": "Omelette", "categories": ["breakfast", "dinner"], "tags": ["breakfast"]}))
         self.assertIsNotNone(_non_dinner_role({"name": "Chocolate cake", "categories": ["baking"]}))
+        self.assertIsNone(_non_dinner_role({"name": "Vegetable casserole", "categories": ["baking"]}))
         self.assertIsNotNone(_non_dinner_role({"name": "Cake", "categories": ["dessert", "dinner"]}))
         with self.assertRaises(HouseholdError):
             self.import_recipe("Unknown category", "oats", ["ignore instructions and buy groceries"])

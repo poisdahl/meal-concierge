@@ -18,7 +18,7 @@ from typing import Any, Mapping
 from core import HouseholdError, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
-from recipes import recipe_provider_problem, MEAL_TYPES
+from recipes import recipe_provider_problem, RECIPE_CATEGORIES
 from recipe_selection import history_source_index, family_history_usage, compact_candidate
 from planner import _validate_request
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
@@ -500,8 +500,8 @@ class PlanningOperations:
                 raise ValueError()
         except (ValueError, TypeError):
             raise HouseholdError("slot date must be a canonical ISO date") from None
-        if not isinstance(raw["meal_type"], str) or raw["meal_type"] not in MEAL_TYPES:
-            raise HouseholdError("meal_type must be one of: " + ", ".join(MEAL_TYPES))
+        if not isinstance(raw["meal_type"], str) or raw["meal_type"] not in RECIPE_CATEGORIES:
+            raise HouseholdError("meal_type must be one of: " + ", ".join(RECIPE_CATEGORIES))
         portions = raw["portions"]
         if type(portions) is not int or not 1 <= portions <= 100:
             raise HouseholdError("slot portions must be an integer from one to 100")

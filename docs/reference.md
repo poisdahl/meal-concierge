@@ -1360,9 +1360,12 @@ recipe. It then sends a concrete addition through the ordinary menu tool:
 Use a returned `discovery_ref` instead of `recipe_ref` for an unsaved imported
 recipe. Dates must be canonical, today or later, and in the active menu's week.
 Omit `menu_ref` only when no menu exists; the addition creates a menu for its ISO
-week. Each meal has its own 1–100 person portions and one of breakfast, brunch,
-lunch, dinner, starter, side, dessert, snack or drink. Recipes retain their source
-yield; unknown source servings are not replaced by the requested person count.
+week. Each addition has its own 1–100 person portions. Every recipe category is
+accepted as `meal_type`: breakfast, brunch, lunch, dinner, starter, side, dessert,
+snack, baking, bread, drink, sauce, dressing, condiment and preserve. For example,
+add a sauce and two different side dishes as three additional slots on the dinner
+date. Recipes retain their source yield; unknown source servings are not replaced
+by the requested person count, including recipes measured in jars, loaves or volume.
 
 Additions preserve current slots, snapshots, cooking history, locks and batch
 context through the existing menu successor path. A menu permits up to 31 slots,

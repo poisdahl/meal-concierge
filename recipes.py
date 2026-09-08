@@ -56,7 +56,6 @@ RECIPE_CATEGORIES = (
     "breakfast", "brunch", "lunch", "dinner", "starter", "side", "dessert", "snack",
     "baking", "bread", "drink", "sauce", "dressing", "condiment", "preserve",
 )
-MEAL_TYPES = ("breakfast", "brunch", "lunch", "dinner", "starter", "side", "dessert", "snack", "drink")
 CATEGORY_ALIASES = {
     **{category: category for category in RECIPE_CATEGORIES},
     "frokost": "breakfast", "frukost": "breakfast", "brunsj": "brunch", "brunches": "brunch",
