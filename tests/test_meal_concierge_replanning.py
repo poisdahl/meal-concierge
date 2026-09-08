@@ -160,7 +160,9 @@ class ReplanningTests(unittest.TestCase):
         successor = self.apply(prepared)['menu']
         carried = self.menu['slots'][1]['recipe_key']
         with self.store.locked() as state:
-            self.app._record_order_snapshot(state, {'menu':successor}, '12345')
+            self.app._record_order_snapshot(state, {'menu': successor, 'cart_plan': {
+                'provider': 'oda', 'menu_ref': self.app._cart_menu_ref(successor),
+                'required_quantities': {'10': 1}}}, '12345')
         self.app.handle({'operation':'menu','action':'clear','menu_id':successor['menu_id'],'expected_revision':successor['revision']})
         with self.store.locked() as state:
             state['email_jobs'] = [{'provider':'oda','order_id':'12345','status':'sent'}]
