@@ -2055,6 +2055,95 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
         self.assertIn("orderTokens", scripts[0])
         self.assertNotIn("includes(ORDER)", scripts[0])
 
+    @unittest.skipUnless(shutil.which("node"), "Node needed for browser boundary fixture")
+    def test_checkout_modify_binds_new_order_before_payment(self):
+        # Observed Oda shape: nested labels per native radio; only the outer new
+        # label has the destination text. The existing-order radio starts checked.
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8')), c=input.case, marked=[];
+const node=(id,text='')=>({id,innerText:text,disabled:false,hidden:false,
+ getAttribute:()=>null,setAttribute:(_k,value)=>marked.push({id,action:value}),removeAttribute:()=>{},
+ getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
+const old=node('old'), fresh=node('new');old.checked=!c.newSelected;fresh.checked=!!c.newSelected;
+if(c.noSelection)old.checked=fresh.checked=false;
+if(c.doubleSelection)old.checked=fresh.checked=true;
+fresh.disabled=!!c.disabled;fresh.hidden=!!c.hidden;
+const outer=node('outer',c.wrongLabel?'Ingen ny bestilling':'Lag en ny bestilling\nEgen levering');
+outer.contains=x=>!c.unbound&&x===fresh;outer.querySelectorAll=()=>c.mixedLabel?[old,fresh]:[fresh];
+outer.hidden=!!c.hiddenLabel;
+const inner=node('inner');inner.contains=x=>x===fresh;inner.querySelectorAll=()=>[fresh];
+const invisible=node('invisible','Lag en ny bestilling');invisible.hidden=true;
+invisible.contains=()=>false;invisible.querySelectorAll=()=>[];
+fresh.labels=[outer,inner,invisible];old.labels=[];
+if(c.duplicateLabel)fresh.labels.push(outer);
+const radios=c.noRadios?[]:[old,fresh];
+if(c.duplicateCandidate){const duplicate={...fresh,id:'duplicate',checked:false};
+ const label={...outer,contains:x=>x===duplicate,querySelectorAll:()=>[duplicate]};duplicate.labels=[label];radios.push(duplicate);}
+const payment=node('payment','Gå til betaling');payment.disabled=!!c.disabledPayment;
+const buttons=c.noPayment?[]:c.duplicatePayment?[payment,{...payment,id:'duplicate-payment'}]:[payment];
+const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radios:s==='button'?buttons:[];
+const submit=node('submit','Bekreft og betal 246,40 kr');
+const document={body:{innerText:c.unavailable?'utsolgt':''},
+ querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
+ querySelectorAll:s=>s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:[]};
+const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
+const getComputedStyle=x=>({display:x.hidden?'none':'block',visibility:'visible'});
+process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
+"""
+        def evaluate(script, case):
+            run = subprocess.run([shutil.which("node"), "-e", harness],
+                                 input=json.dumps({"script": script, "case": case}),
+                                 text=True, capture_output=True, check=True)
+            return json.loads(run.stdout)
+
+        browser = OdaBrowser.__new__(OdaBrowser)
+        scripts = []
+        browser._eval = lambda script: scripts.append(script) or {"action": "ready"}
+        browser._settle = lambda _seconds: None
+        browser._advance_checkout_path()
+        script = scripts[0]
+        for case, action in [({}, "new_order"), ({"newSelected": True}, "payment")]:
+            with self.subTest(case=case):
+                result = evaluate(script, case)
+                self.assertEqual(result["value"], {"action": action})
+                self.assertEqual(result["marked"], [{"id": "new" if action == "new_order" else "payment",
+                                                    "action": action.replace("_", "-")}])
+        for case in [{key: True} for key in ("noSelection", "doubleSelection", "disabled", "hidden",
+                     "hiddenLabel", "wrongLabel", "unbound", "mixedLabel", "duplicateLabel",
+                     "noRadios", "duplicateCandidate", "noMain", "login", "dialog", "unavailable")] + [
+                     {"newSelected": True, key: True} for key in ("disabledPayment", "duplicatePayment", "noPayment")] + [
+                     {"url": url} for url in ("https://wrong.example/no/checkout/modify/",
+                     "https://oda.com/no/checkout/modify/?orderNumber=123", "https://oda.com/no/checkout/modify/#other",
+                     "https://oda.com/no/checkout/other/")]:
+            with self.subTest(case=case):
+                self.assertEqual(evaluate(script, case), {"value": {"action": "blocked"}, "marked": []})
+        browser._advance_checkout_path("123")
+        self.assertEqual(evaluate(scripts[-1], {}), {"value": {"action": "blocked"}, "marked": []})
+
+        for selection_takes_effect in (True, False):
+            with self.subTest(selection_takes_effect=selection_takes_effect):
+                state, clicks, readings = {}, [], []
+                def read(script):
+                    result = evaluate(script, state)
+                    readings.append(result["value"]["action"])
+                    return result["value"]
+                def click(action, mouse=False):
+                    clicks.append(action)
+                    if action == "new-order" and selection_takes_effect:
+                        state["newSelected"] = True
+                    if action == "payment":
+                        state["url"] = CHECKOUT_URL
+                browser._eval, browser._click_action = read, click
+                if selection_takes_effect:
+                    browser._advance_checkout_path()
+                    self.assertEqual(clicks, ["new-order", "payment"])
+                    self.assertEqual(readings, ["new_order", "payment", "ready"])
+                else:
+                    with self.assertRaisesRegex(HouseholdError, "navigation timed out"):
+                        browser._advance_checkout_path()
+                    self.assertEqual(clicks, ["new-order"])
+                    self.assertNotIn("payment", readings)
+
     def test_checkout_navigation_wait_is_bounded(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         evaluations = []

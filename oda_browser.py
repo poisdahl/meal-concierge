@@ -30,6 +30,7 @@ class OdaCheckoutMismatchError(HouseholdError):
 STORE_URL = "https://oda.com/no/"
 CART_URL = "https://oda.com/no/cart/"
 CHECKOUT_ENTRY_URL = "https://oda.com/no/checkout/"
+CHECKOUT_MODIFY_URL = "https://oda.com/no/checkout/modify/"
 RECOMMENDATIONS_URL = "https://oda.com/no/checkout/recommendations/"
 CHECKOUT_URL = "https://oda.com/no/checkout/confirm/"
 CHECKOUT_BROWSER_TIMEOUT = 90
@@ -979,9 +980,24 @@ class OdaBrowser:
  const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i;
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
  const confirmPage=location.origin==='https://oda.com'&&location.pathname==='/no/checkout/confirm/';
- if(![STORE,CART,CHECKOUT_ENTRY,RECOMMENDATIONS].includes(location.href)&&!confirmPage)return JSON.stringify({action:'blocked'});
+ if(![STORE,CART,CHECKOUT_ENTRY,MODIFY,RECOMMENDATIONS].includes(location.href)&&!confirmPage)return JSON.stringify({action:'blocked'});
  const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
  if(unavailable.test(norm(document.body?.innerText||''))||dialogs.some(root=>unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
+ if(location.href===MODIFY){
+   // Oda defaults to an existing order here. Bind the new-order radio before advancing.
+   const main=document.querySelector('main');
+   if(ORDER!==null||!main||!visible(main)||dialogs.length||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
+   const radios=[...main.querySelectorAll('input[type="radio"]')];
+   const selected=radios.filter(x=>x.checked);
+   const candidates=radios.filter(x=>enabled(x)&&[...x.labels].filter(label=>visible(label)&&label.contains(x)&&label.querySelectorAll('input[type="radio"]').length===1&&/^Lag en ny bestilling(?:\s|$)/.test(norm(label.innerText))).length===1);
+   if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return JSON.stringify({action:'blocked'});
+   const target=candidates[0];
+   if(!target.checked){target.setAttribute('data-oda-household-action','new-order');return JSON.stringify({action:'new_order'});}
+   const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Gå til betaling');
+   if(payment.length!==1)return JSON.stringify({action:'blocked'});
+   payment[0].setAttribute('data-oda-household-action','payment');
+   return JSON.stringify({action:'payment'});
+ }
  if(confirmPage){
    const controls=[...document.querySelectorAll('button')].filter(enabled);
    const submit=controls.filter(x=>/^(Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
@@ -1028,7 +1044,7 @@ class OdaBrowser:
    if(ORDER!==null && newOrder.length===0 && previous.length===0 && payment.length===1){payment[0].setAttribute('data-oda-household-action','payment');return JSON.stringify({action:'payment'});}
    return JSON.stringify({action:'blocked'});
 })()
-""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("ORDER", json.dumps(order_id))
+""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
         self._settle(10)
         for _ in range(30):
