@@ -362,7 +362,11 @@ const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p
 const rows=[['1 varer','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button','Bekreft og betal 45,50 kr');pay.disabled=change==='disabled';
-global.document=new E('document','',[new E('body','',[item,delivery,new E('p',change==='spoof'?'Eksempelveien 1':''),new E('p',change==='card'?'•••• 5678':'•••• 1234'),summary,pay])]);document.body=document.children[0];
+const card=new E('input');card.type='radio';card.checked=change!=='selection';
+const cardLabel=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),card]);card.labels=[cardLabel];
+const vipps=new E('input');vipps.type='radio';vipps.checked=change==='selection';
+const vippsLabel=new E('label','',[new E('span','Vipps'),vipps]);vipps.labels=[vippsLabel];
+global.document=new E('document','',[new E('body','',[item,delivery,new E('p',change==='spoof'?'Eksempelveien 1':''),cardLabel,vippsLabel,summary,pay])]);document.body=document.children[0];
 if(change==='login'){const old=document.querySelector.bind(document);document.querySelector=s=>s.includes('input[type="password"]')?{}:old(s);}
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
@@ -375,11 +379,11 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         for addition in (False,True):
             url=CHECKOUT_URL+('?orderNumber=123456' if addition else '')
             surface=evaluate(_oda_checkout_surface_script(expected),url)['result']
-            self.assertTrue(surface['authenticated'] and surface['address_matches'] and surface['total_matches'])
+            self.assertTrue(surface['authenticated'] and surface['address_matches'] and surface['total_matches'] and surface['masked_payment'])
             self.assertFalse(evaluate(_oda_checkout_surface_script(expected),url,'spoof')['result']['address_matches'])
             review={'surface':surface,'amounts':amounts,'binding':binding,'account_reference_digest':binding['account_reference_digest']}
             review=json.loads(json.dumps(review,sort_keys=True))
-            for change in (None,'card','quantity','item','address','spoof','delivery','amount','disabled','login','url'):
+            for change in (None,'card','selection','quantity','item','address','spoof','delivery','amount','disabled','login','url'):
                 with self.subTest(addition=addition,change=change):
                     browser=OdaBrowser.__new__(OdaBrowser);browser._checkout_deadline=None
                     browser._invoke=mock.Mock();browser._account_reference=lambda address:123

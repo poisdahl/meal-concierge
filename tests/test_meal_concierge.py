@@ -39,6 +39,8 @@ from oda_browser import (  # noqa: E402
     OdaCheckoutMismatchError,
     ODA_CHECKOUT_AMOUNT_LABELS,
     _oda_checkout_amount_script,
+    _oda_checkout_payment_script,
+    _oda_checkout_surface_script,
     cancellation_delivery_matches,
     cancellation_total_matches,
     clear_cancellation_cache,
@@ -2083,9 +2085,11 @@ const payment=node('payment',c.newSelected&&!c.oldPaymentLabel?'Fortsett':'Gå t
 const buttons=c.noPayment?[]:c.duplicatePayment?[payment,{...payment,id:'duplicate-payment'}]:[payment];
 const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radios:s==='button'?buttons:[];
 const submit=node('submit','Bekreft og betal 246,40 kr');
+const card=node('card');card.checked=true;
+const cardLabel=node('card-label','•••• 1111');cardLabel.contains=x=>x===card;cardLabel.querySelectorAll=()=>[card];card.labels=[cardLabel];
 const document={body:{innerText:c.unavailable?'utsolgt':''},
  querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
- querySelectorAll:s=>s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:[]};
+ querySelectorAll:s=>s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
 const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
 const getComputedStyle=x=>({display:x.hidden?'none':'block',visibility:'visible'});
 process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
@@ -2143,6 +2147,67 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
                         browser._advance_checkout_path()
                     self.assertEqual(clicks, ["new-order"])
                     self.assertNotIn("payment", readings)
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes observed payment DOM contract")
+    def test_oda_review_binds_the_selected_radio_and_reports_unsupported_payment(self):
+        # Actual Oda confirm shape: Vipps selected, visible saved card unselected,
+        # two nested visible labels and one hidden non-containing label per radio.
+        harness = r"""
+const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=(text='')=>({innerText:text,disabled:false,hidden:false,getAttribute:()=>null,
+ getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
+const vipps=node(),card=node();vipps.checked=!c.cardSelected;card.checked=!!c.cardSelected;
+if(c.none)vipps.checked=card.checked=false;
+if(c.multiple)vipps.checked=card.checked=true;
+card.disabled=!!c.disabled;card.hidden=!!c.hidden;
+function labels(r,text){const outer=node(text),inner=node(),hidden=node('•••• 9999');hidden.hidden=true;
+ for(const l of [outer,inner]){l.contains=x=>x===r&&!c.unbound;l.querySelectorAll=()=>c.mixed?[vipps,card]:[r];}
+ hidden.contains=()=>false;hidden.querySelectorAll=()=>[];
+ return [outer,inner,hidden];}
+vipps.labels=labels(vipps,'Vipps');card.labels=labels(card,c.full?'4111 1111 1111 1111':c.two?'•••• 1111 •••• 2222':'•••• 1111');
+if(c.hiddenLabel)card.labels.forEach(l=>l.hidden=true);
+if(c.otherCard)card.labels[0].innerText='•••• 2222';
+const button=node(c.cardSelected?'Bekreft og betal 246,40 kr':'Betal med 246,40 kr');
+const document={body:{innerText:'Total inkl. MVA 246,40 kr •••• 1111'},querySelector:()=>null,
+ querySelectorAll:s=>s==='input[type="radio"]'?(c.loading?[]:[vipps,card]):s==='button'?[button]:[]};
+const location=new URL(c.url||'https://oda.com/no/checkout/confirm/');
+const getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
+process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
+"""
+        def evaluate(script, case):
+            run = subprocess.run([shutil.which("node"), "-e", harness],
+                                 input=json.dumps({"script": script, "c": case}),
+                                 text=True, capture_output=True, check=True, timeout=10)
+            return json.loads(run.stdout)
+
+        expected = {"total_minor": 24640, "delivery_address": "PAYMENT street"}
+        surface_script = _oda_checkout_surface_script(expected)
+        browser = OdaBrowser.__new__(OdaBrowser)
+        scripts = []
+        browser._eval = lambda script: scripts.append(script) or {"action": "ready"}
+        browser._settle = lambda _seconds: None
+        browser._advance_checkout_path()
+        navigation = scripts[0]
+        self.assertEqual(evaluate(navigation, {}), {"action": "payment_required"})
+        self.assertEqual(evaluate(navigation, {"loading": True}), {"action": "wait"})
+        self.assertEqual(evaluate(navigation, {"cardSelected": True}), {"action": "ready"})
+        self.assertEqual(evaluate(navigation, {"url": CHECKOUT_URL + "?orderNumber=123"}), {"action": "blocked"})
+        valid = evaluate(surface_script, {"cardSelected": True})
+        self.assertTrue(valid["masked_payment"])
+        self.assertEqual(valid["payment_display"], "•••• 1111")
+        for case in [{}] + [{"cardSelected": True, key: True} for key in
+                           ("none", "multiple", "disabled", "hidden", "unbound", "mixed", "full", "two", "hiddenLabel")]:
+            with self.subTest(case=case):
+                result = evaluate(surface_script, case)
+                self.assertFalse(result["masked_payment"])
+                self.assertIsNone(result["payment_display"])
+        self.assertEqual(evaluate(_oda_checkout_payment_script(), {"cardSelected": True, "otherCard": True})["payment_display"], "•••• 2222")
+
+        browser._eval = lambda script: evaluate(script, {})
+        browser._click_action = mock.Mock()
+        with self.assertRaisesRegex(HouseholdError, "requires a selected saved card"):
+            browser._advance_checkout_path()
+        browser._click_action.assert_not_called()
 
     def test_checkout_navigation_wait_is_bounded(self):
         browser = OdaBrowser.__new__(OdaBrowser)
