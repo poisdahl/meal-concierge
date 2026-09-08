@@ -248,18 +248,40 @@ it did not perform any product action.
 | Mathem cancellation | Cancel only the new order and preserve unrelated activity | One cancellation confirmation; merchant cancelled; cart empty, no selected cart delivery/pending edits; original two entries unchanged |
 | Oda affected review | Own account, ordinary review and verified selected-payment field | Account/receipt reads and paired isolated guards passed; current cart empty. Separate no-purchase review scope awaits owner authorization |
 
-The required fleet profile passed on current private main plus the ten owned
+The required fleet profile passed on current private main plus the eleven owned
 files, including the separately committed Grok changes for regression only.
-The actual runtime candidate remains public `058c43f` plus the owned source
-manifest, not those disjoint Grok changes. The retained unauthenticated installation completed a normal update to this
-candidate, verified all 52 staged runtime/skill files and reconnected through
-its installed SDK with 27 tools. All 1,581 state files and configuration remained
-byte-identical; the fixture stopped normally. The public suite's first run
-exposed five module-import errors caused by one privately rooted exported test;
-that export was corrected and all 305 tests in the affected five modules passed
-(two optional skips). The other modules had passed in the first run. Final
-published-byte and required GitHub CI verification remain separate from these
-merchant outcomes.
+Public feature `1797d13840ea082a02d42373f412bd9f448348a5` was merged through
+PR58 as `d5084d2e9add484a55f105b43a72464d4da8d998`, with identical trees.
+Required GitHub CI passed all 1,284 tests with three optional Linux skips.
+The first local public-suite run exposed five module-import errors from one
+privately rooted exported test; the corrected export passed all 305 tests in
+those five modules before the full CI pass. The failure log is retained.
+
+All 151 files in the actual published archive matched the reviewed manifest.
+The exact immutable feature release, excluding the disjoint unmerged Grok
+changes, is now installed in the three approved Bob/Oda/dedicated Mathem
+services. All 151 source files per service and both native SDK connections with
+27 tools passed; Bob was healthy. Original household state/configuration,
+empty carts, cancelled own Mathem order and unrelated services were unchanged.
+Deployment retained an initial macOS archive-metadata rejection and a strict
+receipt-page close rejection, both before any restart. Explicit continuation
+verified the actual frozen-account delivery page before closing only the own
+browser; no lock or journal was removed or restored. Both image and Bob bind
+passed complete unprivileged runtime preflight before the three idle restarts.
+
+The retained unauthenticated installation completed a normal update to the
+same 52 runtime/skill files and reconnected through its installed SDK with
+27 tools. All 1,581 state files and configuration remained byte-identical;
+the fixture stopped normally. Documentation follow-up revisions do not change
+the pinned functional runtime or the remaining acceptance criteria.
+The final real Hermes continuation on the published runtime exited normally
+and made exactly three new tool calls: status, cart get and exact own cancelled
+order get. It reported Mathem ready/standing, cancelled order, empty cart and no
+selected cart delivery. Pending checkout/cancellation and order edit were null;
+pending cart was not exposed in those tool replies, so the model correctly
+marked it unshown. The separate read-only state verifier confirmed no pending
+cart operation. Household state/configuration and service identities were
+unchanged, and no provider browser was opened.
 
 Existing unrelated state,
 original standing policy, private journals and the explicit documentation/client

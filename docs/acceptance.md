@@ -4,7 +4,7 @@ The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
 recovery-assisted addition and UI-prepared delivery results below do not
 demonstrate the complete ordinary product flows. The [current Oda/Mathem
 matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
-fixes and the still-open native/payment/deployment criteria. Bank reconciliation
+fixes and the still-open Oda-review, recovery and changed-price criteria. Bank reconciliation
 is outside this acceptance.
 
 After owner login, Oda and Mathem separately passed the shared account/receipt
@@ -20,9 +20,12 @@ payment dispatch per intent, two packages and combined 143 SEK. Local result
 notices were delivered and acknowledged. A subsequent ordinary cold-start delivery change also passed through review,
 one submit and reconciliation with unchanged goods/total. The same new order
 was then cancelled once through ordinary tools; independent reads confirmed
-cancellation, empty cart, cleared pending operations and unchanged earlier orders. Supported
-changed-price review and final publication/runtime verification remain separate
-criteria; see the current matrix for source hashes and retained failures.
+cancellation, empty cart, cleared pending operations and unchanged earlier orders. Public feature `1797d138` now passed required CI (1,284 tests; three optional
+Linux skips), published-archive verification and all 151 source files in each
+of the three approved runtime services; both installed SDK connections expose
+27 tools, with original state/configuration preserved. Affected ordinary Oda
+review, failed-payment recovery and supported changed-price review remain open;
+see the current matrix for source hashes, normal update and retained failures.
 
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
