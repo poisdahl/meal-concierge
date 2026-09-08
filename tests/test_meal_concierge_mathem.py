@@ -78,6 +78,221 @@ class MathemDietaryDetailTests(unittest.TestCase):
         self.assertEqual(set(result), {'source_url'})
 
 
+class SharedRetailBindingTests(unittest.TestCase):
+    # Labels/origins were separately read from the two authenticated services
+    # on 2026-09-08. Synthetic addresses here are never provider evidence.
+    EXAMPLES = (
+        ('oda', 'https://oda.com/no/', 'Total inkl. MVA', 'Eksempelveien 1', 'NOK'),
+        ('mathem', 'https://www.mathem.se/se/', 'Totalt inkl. moms', 'Exempelvägen 8', 'SEK'),
+    )
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for DOM contract')
+    def test_receipt_binding_has_exact_provider_order_address_and_structure(self):
+        from oda_browser import _receipt_address_script
+        harness = r"""
+const {script,order,address,label,url,cases}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const results=[];
+for(const c of cases){
+ const el=(text,kind)=>({innerText:text,children:[],closest:q=>kind==='main'?(c.dialogMain?{}:null):(c.excludedAddress&&kind==='address'?{}:null),getBoundingClientRect:()=>({width:10,height:10})});
+ const p=el(c.wrongAddress?'Other address':address,'address');if(c.hiddenAddress)p.hidden=true;
+ const total=el(c.wrongLabel?'Other total':label,'total');
+ const ps=c.duplicateAddress?[p,p]:[p], totals=c.duplicateTotal?[total,total]:[total];
+ const main=el((c.wrongOrder?'prefix'+order:order)+' '+address+' '+label,'main');
+ main.querySelectorAll=s=>s==='p'?ps:[...ps,...totals];
+ global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
+ global.location={href:c.page||url};global.document={querySelector:()=>c.login||null,querySelectorAll:()=>c.duplicateMain?[main,main]:[main]};
+ results.push(JSON.parse(eval(script)).address_verified);
+}process.stdout.write(JSON.stringify(results));
+"""
+        for provider, store, label, address, _currency in self.EXAMPLES:
+            with self.subTest(provider=provider):
+                order = 'synthetic-123'; url = store + 'account/orders/' + order + '/'
+                # Provider-like text inside data must survive interpolation.
+                address += ' /se/ https://www.mathem.se Totalt inkl. moms ADDRESS TOTAL_LABEL'
+                script = _receipt_address_script(order, address, provider=provider)
+                cases = [{}, {'wrongAddress': True}, {'wrongOrder': True}, {'wrongLabel': True},
+                         {'duplicateAddress': True}, {'duplicateTotal': True}, {'duplicateMain': True},
+                         {'hiddenAddress': True}, {'excludedAddress': True}, {'dialogMain': True},
+                         {'login': True}, {'page': url + '?other=1'},
+                         {'page': url.replace('https://', 'https://wrong.example/') }]
+                result = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps(
+                    dict(script=script, order=order, address=address, label=label, url=url, cases=cases)),
+                    text=True, capture_output=True, check=True, timeout=10)
+                self.assertEqual(json.loads(result.stdout), [True] + [False] * (len(cases)-1))
+
+    @unittest.skipUnless(shutil.which('node'), 'Node required for account contract')
+    def test_account_reference_is_bound_to_its_provider_and_visible_edit_link(self):
+        from oda_browser import _checkout_account_script
+        harness = r"""
+const {script,page,link}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+const results=[];
+for(const [url,href,login] of [[page,link,false],[page,link.replace('/123/','/999/'),false],[page,link+'?other=1',false],[page,link,true],[page+'?other=1',link,false]]){
+ global.location={href:url};global.document={querySelector:()=>login||null,querySelectorAll:()=>[{href,getBoundingClientRect:()=>({width:1,height:1})}]};results.push(JSON.parse(eval(script)).account_matches);
+}process.stdout.write(JSON.stringify(results));
+"""
+        for provider, store, _label, _address, _currency in self.EXAMPLES:
+            with self.subTest(provider=provider):
+                result=subprocess.run([shutil.which('node'),'-e',harness],input=json.dumps({
+                    'script': _checkout_account_script(123,provider=provider), 'page':store+'account/delivery/',
+                    'link':store+'account/delivery/edit/123/'}),text=True,capture_output=True,check=True,timeout=10)
+                self.assertEqual(json.loads(result.stdout),[True,False,False,False,False])
+
+    def test_frozen_original_reference_survives_selection_change_but_not_account_change(self):
+        from oda_browser import OdaBrowser
+        import hashlib,time
+        for provider,store,_label,address,currency in self.EXAMPLES:
+            with self.subTest(provider=provider):
+                native=(OdaBrowser if provider=='oda' else MathemBrowser).__new__(OdaBrowser if provider=='oda' else MathemBrowser)
+                native.provider_client=mock.Mock(provider=provider)
+                original={'id':123,'address':address,'isSelected':False}
+                native.provider_client.call.return_value={'result':[original,{'id':456,'address':'Different selected address','isSelected':True}]}
+                native._open=mock.Mock();native._settle=mock.Mock()
+                native._eval=mock.Mock(side_effect=[{'address_verified':True},{'address_verified':False},{'account_matches':True}])
+                order={'orderNumber':'synthetic-123','currency':currency}
+                deadline=time.monotonic()+60
+                binding=native._read_order_binding('synthetic-123',order,deadline=deadline)
+                self.assertEqual(binding,{'account_reference_digest':hashlib.sha256(b'123').hexdigest(),'receipt_address':address})
+                native._eval=mock.Mock(side_effect=[{'address_verified':True},{'account_matches':True}])
+                self.assertEqual(native._read_order_binding('synthetic-123',order,deadline=deadline,expected_binding=binding),binding)
+                self.assertEqual(native._open.call_args.args[0],store+'account/delivery/')
+                native.provider_client.call.return_value={'result':[{**original,'id':789}]};native._eval.reset_mock()
+                with self.assertRaisesRegex(HouseholdError,'original order account binding'):
+                    native._read_order_binding('synthetic-123',order,deadline=deadline,expected_binding=binding)
+                native._eval.assert_not_called()
+                native.provider_client.provider='mathem' if provider=='oda' else 'oda';native.provider_client.call.reset_mock()
+                with self.assertRaisesRegex(HouseholdError,'mismatched'):
+                    native._read_order_binding('synthetic-123',order,deadline=deadline)
+                native.provider_client.call.assert_not_called()
+
+    def test_legacy_uncertain_change_without_binding_survives_restart_without_dispatch(self):
+        from order_operations import OrderOperations
+        for provider,*_ in self.EXAMPLES:
+            with self.subTest(provider=provider),tempfile.TemporaryDirectory() as temp:
+                settings={**existing.CONFIG,'provider':provider}
+                store=StateStore(Path(temp),settings)
+                pending={'status':'uncertain','confirmation_id':'legacy-change','order_change':{'order_id':'synthetic-123'}}
+                with store.locked() as state: state['pending_checkout']=deepcopy(pending)
+                before=store.path.read_bytes() if hasattr(store,'path') else (Path(temp)/'state.json').read_bytes()
+                app=OrderOperations();app.provider=provider;app.store=StateStore(Path(temp),settings);app.browser=mock.Mock();app._orders=mock.Mock()
+                with self.assertRaisesRegex(HouseholdError,'Original order account binding'):
+                    app._order_change_reconcile(pending)
+                self.assertEqual(app.store.read()['pending_checkout'],pending)
+                self.assertEqual((Path(temp)/'state.json').read_bytes(),before)
+                app._orders.assert_not_called();app.browser.submit_order_change.assert_not_called()
+
+    def test_legacy_cancellation_review_cannot_reach_a_dispatch(self):
+        from oda_browser import OdaBrowser, CancellationPreconditionError
+        from contextlib import contextmanager
+        @contextmanager
+        def operation(_deadline):yield {'final_dispatched':False}
+        browser=OdaBrowser.__new__(OdaBrowser);browser._cancellation_operation=operation
+        browser._review_cancellation=mock.Mock();browser._invoke=mock.Mock()
+        with self.assertRaises(CancellationPreconditionError):
+            browser.submit_cancellation('synthetic-123',{}, {'available':True})
+        browser._review_cancellation.assert_not_called();browser._invoke.assert_not_called()
+
+
+
+class OdaFinalBindingTests(unittest.TestCase):
+    def test_cancellation_binding_first_open_keeps_cancellation_launch_flags(self):
+        from oda_browser import OdaBrowser, CANCELLATION_BROWSER_ARGS
+        browser=OdaBrowser(instance='synthetic',binary='/synthetic/browser',executable='/synthetic/chromium',
+            profile='/synthetic/profile',home='/synthetic/home',socket_directory='/synthetic/socket',uid=10001,gid=10002,
+            provider_client=mock.Mock(provider='oda'))
+        browser.provider_client.call.return_value={'result':[{'id':123,'address':'Eksempelveien 1'}]}
+        browser._clear_cancellation_cache=mock.Mock()
+        calls=[]
+        def run(command, **kw):
+            calls.append((command,kw['env']['AGENT_BROWSER_ARGS']))
+            if 'open' in command:
+                data={'url':command[-1]}
+            elif 'eval' in command:
+                key='address_verified' if 'address_verified' in kw['input'] else 'account_matches'
+                data={'result':json.dumps({key:True})}
+            else:data={}
+            return SimpleNamespace(returncode=0,stdout=json.dumps({'success':True,'data':data}))
+        with mock.patch('oda_browser.subprocess.run',side_effect=run):
+            with browser._cancellation_operation():
+                browser._read_order_binding('123456',{'orderNumber':'123456','currency':'NOK'},deadline=browser._cancellation_deadline)
+        self.assertEqual(len([cmd for cmd,args in calls if 'open' in cmd]),2)
+        self.assertTrue(all(args==CANCELLATION_BROWSER_ARGS for cmd,args in calls))
+
+    def test_same_postal_address_changed_selected_reference_stops_new_checkout(self):
+        from oda_browser import OdaBrowser
+        from core import CheckoutPreconditionError
+        import hashlib
+        browser=OdaBrowser.__new__(OdaBrowser)
+        review={'account_reference_digest':hashlib.sha256(b'123').hexdigest(),'surface':{}}
+        browser.review_checkout=lambda cart:dict(review)
+        browser._cart_expectation=lambda cart:{'delivery_address':'Eksempelveien 1','total_minor':100,'product_count':1}
+        browser._account_reference=mock.Mock(return_value=789)
+        browser._click_checkout_submit=mock.Mock()
+        with self.assertRaisesRegex(CheckoutPreconditionError,'selected account changed'):
+            browser._submit_checkout({},review)
+        browser._click_checkout_submit.assert_not_called()
+
+    @unittest.skipUnless(shutil.which('node'), 'Node executes actual atomic checkout guards')
+    def test_new_checkout_and_addition_recheck_entire_review_after_callback(self):
+        from oda_browser import OdaBrowser, _oda_checkout_surface_script, CHECKOUT_URL
+        from core import CheckoutPreconditionError
+        import hashlib
+        harness=r"""
+const {script,change,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+class E {
+ constructor(tag,text='',children=[]){this.tag=tag;this.text=text;this.children=children;for(const c of children)c.parentElement=this;}
+ get innerText(){return this.text||this.children.map(c=>c.innerText).join('\n');}
+ getBoundingClientRect(){return {width:100,height:20};} getAttribute(){return null;}
+ contains(n){return this===n||this.children.some(c=>c.contains(n));}
+ matches(s){return s==='*'||s===this.tag||(s===`input[type="${this.type}"]`&&this.tag==='input');}
+ querySelectorAll(s){return this.children.flatMap(c=>[...(s.split(',').some(x=>c.matches(x))?[c]:[]),...c.querySelectorAll(s)]);}
+ querySelector(s){return this.querySelectorAll(s)[0]||null;}
+ closest(s){return s.split(',').some(x=>this.matches(x))?this:this.parentElement?.closest(s)||null;}
+ click(){this.clicks=(this.clicks||0)+1;}
+}
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});global.location={href:change==='url'?url+'other':url};
+const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;
+const item=new E('article','',[new E('p',change==='item'?'Ris':'Pasta'),new E('p','500 g, Sopps'),new E('label','Antall'),quantity]);
+const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00'),new E('p',['address','spoof'].includes(change)?'Annen vei 2':'Eksempelveien 1')]);
+const rows=[['1 varer','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
+const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
+const pay=new E('button','Bekreft og betal 45,50 kr');pay.disabled=change==='disabled';
+global.document=new E('document','',[new E('body','',[item,delivery,new E('p',change==='spoof'?'Eksempelveien 1':''),new E('p',change==='card'?'•••• 5678':'•••• 1234'),summary,pay])]);document.body=document.children[0];
+if(change==='login'){const old=document.querySelector.bind(document);document.querySelector=s=>s.includes('input[type="password"]')?{}:old(s);}
+const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
+"""
+        expected={'delivery_address':'Eksempelveien 1','delivery_text':'12. september 09:00–12:00','total_minor':4550,'product_count':1,'lines':[]}
+        amounts={'product_subtotal':26.5,'delivery_price':19,'discounts':None,'deposits':None,'bags':None,'other_fees':None,'provider_total':45.5}
+        binding={'account_reference_digest':hashlib.sha256(b'123').hexdigest(),'receipt_address':'Eksempelveien 1'}
+        def evaluate(script,url,change=None):
+            result=subprocess.run([shutil.which('node'),'-e',harness],input=json.dumps(dict(script=script,url=url,change=change)),capture_output=True,text=True,check=True,timeout=10)
+            return json.loads(result.stdout)
+        for addition in (False,True):
+            url=CHECKOUT_URL+('?orderNumber=123456' if addition else '')
+            surface=evaluate(_oda_checkout_surface_script(expected),url)['result']
+            self.assertTrue(surface['authenticated'] and surface['address_matches'] and surface['total_matches'])
+            self.assertFalse(evaluate(_oda_checkout_surface_script(expected),url,'spoof')['result']['address_matches'])
+            review={'surface':surface,'amounts':amounts,'binding':binding,'account_reference_digest':binding['account_reference_digest']}
+            review=json.loads(json.dumps(review,sort_keys=True))
+            for change in (None,'card','quantity','item','address','spoof','delivery','amount','disabled','login','url'):
+                with self.subTest(addition=addition,change=change):
+                    browser=OdaBrowser.__new__(OdaBrowser);browser._checkout_deadline=None
+                    browser._invoke=mock.Mock();browser._account_reference=lambda address:123
+                    browser._cart_expectation=lambda cart:expected;browser._order_cart=lambda *args:{}
+                    browser.review_checkout=lambda cart:deepcopy(review)
+                    browser.review_order_change=lambda *a,**kw:deepcopy(review)
+                    callback=[];observed=[]
+                    def final_eval(script):
+                        self.assertEqual(callback,[True]);result=evaluate(script,url,change);observed.append(result);return result['result']
+                    browser._eval=final_eval
+                    def submit():
+                        if addition:browser.submit_order_change({},'123456',{},review,lambda:callback.append(True))
+                        else:browser._submit_checkout({},review,lambda:callback.append(True))
+                    if change:
+                        with self.assertRaises(CheckoutPreconditionError):submit()
+                    else:submit()
+                    self.assertEqual(observed,[{'result':{'clicked':change is None},'clicks':0 if change else 1}])
+
 class SharedRetailOrderCountTests(unittest.TestCase):
     def test_current_order_shapes_use_product_quantities(self):
         # Independent authenticated 2026-09-08 reads from both MCP 1.1.0
@@ -102,6 +317,59 @@ class SharedRetailOrderCountTests(unittest.TestCase):
 
 
 class SharedRetailReconciliationTests(unittest.TestCase):
+    @mock.patch("service.now", new=lambda: existing.ODA_FIXTURE_NOW)
+    def test_checkout_receipt_fills_only_missing_address_with_frozen_account(self):
+        for provider in ('oda','mathem'):
+            for address_field in (None,'deliveryAddress','delivery_address'):
+                with self.subTest(provider=provider,address_field=address_field):
+                    case=existing.FlowTests() if provider=='oda' else MathemGuardedCheckoutTests()
+                    case.setUp()
+                    try:
+                        app=case.app;browser=case.browser;shop=case.oda if provider=='oda' else case.shop
+                        original_review=browser.review_checkout
+                        browser.review_checkout=lambda cart,**kw:{**original_review(cart,**kw),'account_reference_digest':'a'*64}
+                        original_submit=browser.submit_checkout
+                        def submit(cart,review,before_click,**kw):
+                            if provider=='oda': original_submit(cart,review,before_click,**kw)
+                            else:
+                                before_click();browser.checkout_clicks+=1;shop.orders.append(case.order())
+                            order=shop.orders[-1];order.pop('deliveryAddress',None)
+                            if address_field:order[address_field]='Wrong address'
+                        browser.submit_checkout=submit
+                        reader=mock.Mock(wraps=browser.read_order_binding);browser.read_order_binding=reader
+                        prepared=app.handle({'operation':'checkout','action':'prepare'})
+                        result=app.handle({'operation':'checkout','action':'confirm','confirmation_id':prepared['confirmation_id']})
+                        self.assertEqual(result['confirmed'],address_field is None)
+                        self.assertEqual(browser.checkout_clicks,1)
+                        if address_field:
+                            reader.assert_not_called();self.assertFalse(result['retry_allowed'])
+                            before=case.store.read()['pending_checkout']
+                            again=app.handle({'operation':'checkout','action':'reconcile','confirmation_id':prepared['confirmation_id']})
+                            self.assertFalse(again['confirmed']);self.assertEqual(case.store.read()['pending_checkout']['confirmation_id'],before['confirmation_id'])
+                        else:reader.assert_called_once()
+                        self.assertEqual(browser.checkout_clicks,1)
+                    finally:
+                        if provider=='oda':case.tearDown()
+                        else:case.doCleanups()
+
+    def test_legacy_uncertain_cancellation_preserves_state_across_restart(self):
+        for provider in ('oda','mathem'):
+            with self.subTest(provider=provider),tempfile.TemporaryDirectory() as temp:
+                from order_operations import OrderOperations
+                from contextlib import nullcontext
+                settings={**existing.CONFIG,'provider':provider}
+                store=StateStore(Path(temp),settings)
+                pending={'status':'uncertain','confirmation_id':'legacy-cancel','order_id':'123456','browser':{'available':True}}
+                with store.locked() as state:state['pending_cancellation']=deepcopy(pending)
+                before=(Path(temp)/'state.json').read_bytes()
+                app=OrderOperations();app.provider=provider;app.store=StateStore(Path(temp),settings)
+                app._browser_operation=lambda deadline:nullcontext();app._read_protected_result=lambda *a:None
+                app._orders=mock.Mock(return_value={'order':{},'tracking':{'status':'cancelled'}});app.browser=mock.Mock()
+                with self.assertRaisesRegex(HouseholdError,'Original order account binding'):
+                    app._cancel_reconcile(confirmation_id='legacy-cancel')
+                self.assertEqual((Path(temp)/'state.json').read_bytes(),before)
+                app.browser.read_order_binding.assert_not_called();app.browser.submit_cancellation.assert_not_called()
+
     def test_delivery_reconciliation_binds_full_date_and_currency(self):
         from contextlib import contextmanager
         from order_operations import OrderOperations
@@ -129,7 +397,7 @@ class SharedRetailReconciliationTests(unittest.TestCase):
             pending = {"confirmation_id": "synthetic-confirmation", "status": "uncertain",
                        "summary": {"items": [], "total": 0},
                        "order_change": {"order_id": "synthetic-order", "before": {"order": before},
-                                        "requested_delivery": requested, "binding": {"receipt_address": "Synthetic"}}}
+                                        "requested_delivery": requested, "binding": {"account_reference_digest": "a" * 64, "receipt_address": "Synthetic"}}}
             for drift in ({}, {"currency": "SEK" if provider == "oda" else "NOK"},
                           {"currency": None}, {"deliveryDate": day.replace("2026", "2027")}):
                 with self.subTest(provider=provider, drift=drift):
@@ -205,7 +473,9 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                 input=json.dumps({'script': script, 'change': change}), capture_output=True, text=True, check=True, timeout=10)
             return json.loads(result.stdout)
         surface = evaluate(_oda_delivery_change_surface_script(CHECKOUT_URL + '?orderNumber=123456'))['result']
-        review = browser._delivery_change_review('123456', order, delivery, surface)
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Eksempelveien 1'}
+        browser._read_order_binding = mock.Mock(return_value=binding)
+        review = browser._delivery_change_review('123456', order, delivery, surface, binding)
         # Real state serialization reorders dict keys. Values still match.
         review = json.loads(json.dumps(review, sort_keys=True))
         for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login'):
@@ -964,6 +1234,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.shop.slots['slots'][0]['price'] = '0,00 kr'
         self.store = StateStore(self.root / 'state', {**existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'})
         self.browser = existing.FakeBrowser()
+        self.browser.receipt_address = 'Exempelvägen 1'
         self.browser.oda = self.shop
         self.browser.order_followup = mock.Mock(return_value={
             'deadline_text': 'Du har till och med 23:59 på 12. september att lägga till varor i din leverans.',
@@ -995,7 +1266,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         native = MathemBrowser.__new__(MathemBrowser)
         original = {'id': 123, 'address': 'Exempelvägen 1', 'isSelected': False}
         other = {'id': 456, 'address': 'Annan väg 2', 'isSelected': True}
-        native.provider_client = mock.Mock()
+        native.provider_client = mock.Mock(provider='mathem')
         native.provider_client.call.return_value = {'result': [original, other]}
         native._open = mock.Mock()
         native._settle = mock.Mock()
@@ -1973,19 +2244,20 @@ global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:'https://www.mathem.se/se/checkout/confirm/'};
 const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;quantity.labels=[new E('label','Antal')];
 const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Barilla'),quantity]);
-const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
+const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p',change==='spoof'?'Annan väg 2':'Exempelvägen 1')]);
 const radio=new E('input');radio.type='radio';radio.checked=true;
 const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
 const rows=[['1 vara','15,95 kr'],['Delsumma','15,95 kr'],['Avgift för liten varukorg',change==='amount'?'100,00 kr':'99,00 kr'],['Lådor','7,00 kr'],['Leverans','59,00 kr'],['Gratis leverans','−59,00 kr'],['Totalt inkl. moms','121,95 kr']];
 const summary=new E('section','',rows.map(([a,b])=>new E('div','',[new E('span',a),new E('span',b)])));
 const pay=new E('button','Bekräfta och betala 121,95 kr');
-global.document=new E('document','',[new E('body','',[item,delivery,label,summary,pay])]);document.body=document.children[0];
+global.document=new E('document','',[new E('body','',[item,delivery,new E('p',change==='spoof'?'Exempelvägen 1':''),label,summary,pay])]);document.body=document.children[0];
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
         def evaluate(script, change=None):
             value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
                                    capture_output=True, text=True, check=True, timeout=10)
             return json.loads(value.stdout)
+        self.assertFalse(evaluate(browser._checkout_surface_script(expected),'spoof')['result']['address_matches'])
         surface = evaluate(browser._checkout_surface_script(expected))['result']
         review = browser._checked_surface(expected, surface)
         review['account_reference_digest'] = hashlib.sha256(b'123').hexdigest()
@@ -1993,7 +2265,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         review['discount_breakdown'] = self.discount_breakdown
         review = json.loads(json.dumps(review, sort_keys=True))
         browser.review_checkout = lambda cart: deepcopy(review)
-        for change in (None, 'card', 'quantity', 'delivery', 'amount'):
+        for change in (None, 'card', 'quantity', 'delivery', 'amount', 'spoof'):
             observed = []
             def final_eval(script):
                 value = evaluate(script, change)

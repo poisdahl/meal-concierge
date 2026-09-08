@@ -153,6 +153,16 @@ class FakeBrowser:
         self.cancellation_review_deadlines = []
         self.cancellation_submit_deadlines = []
         self.confirmation_order_id = None
+        self.receipt_address = "Eksempelveien 1"
+
+    def read_order_binding(self, order_id, order, *, expected_binding=None, deadline=None):
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": self.receipt_address}
+        if expected_binding is not None and binding != expected_binding:
+            raise HouseholdError("original order account changed")
+        return binding
+
+    def receipt_address_matches(self, order_id, address, *, deadline=None):
+        return address == self.receipt_address
 
     def review_checkout(self, cart, *, deadline=None):
         self.review_deadlines.append(deadline)
@@ -172,9 +182,9 @@ class FakeBrowser:
             "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}],
         })
 
-    def review_order_change(self, cart, order_id, order, *, deadline=None):
+    def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
         self.review_deadlines.append(deadline)
-        return {"page_digest": "b" * 64, "target_order_id": order_id, "payment_display": "•••• 1234"}
+        return {"binding": self.read_order_binding(order_id, order, expected_binding=expected_binding), "page_digest": "b" * 64, "target_order_id": order_id, "payment_display": "•••• 1234"}
 
     def submit_order_change(self, cart, order_id, order, review, before_click=None, *, deadline=None):
         self.submit_deadlines.append(deadline)
@@ -189,8 +199,9 @@ class FakeBrowser:
         ]
         target["grossAmount"] = float(target["grossAmount"]) + float(cart["subtotal"])
 
-    def review_delivery_change(self, order_id, order, delivery, *, deadline=None):
+    def review_delivery_change(self, order_id, order, delivery, *, deadline=None, expected_binding=None):
         return {
+            "binding": self.read_order_binding(order_id, order, expected_binding=expected_binding),
             "page_digest": "c" * 64,
             "summary": {"items": [], "count": 0, "total": 0.0, "delivery": deepcopy(delivery), "payment": "•••• 1234"},
             "target_order_id": order_id,
@@ -209,7 +220,7 @@ class FakeBrowser:
 
     def review_cancellation(self, order_id, order, *, deadline=None):
         self.cancellation_review_deadlines.append(deadline)
-        return {"available": self.cancellation_available, "consequence": None}
+        return {"available": self.cancellation_available, "consequence": None, "binding": self.read_order_binding(order_id, order)}
 
     def submit_cancellation(self, order_id, order, review, before_click=None, *, deadline=None):
         self.cancellation_submit_deadlines.append(deadline)
@@ -1064,6 +1075,8 @@ class CoreTestsBase:
 
     def test_cancellation_review_checks_normalized_delivery_before_click(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
+        browser._read_order_binding = mock.Mock(return_value=binding)
         opened = []
         invoked = []
         browser._open_order = opened.append
@@ -1077,7 +1090,7 @@ class CoreTestsBase:
         browser._eval = lambda script, **kwargs: scripts.append((script, kwargs.get("browser_args"))) or next(results)
         order = {"orderNumber": "test-oda-order", "grossAmount": 1234.56, "deliverySlotDisplay": "Lør 5. sep 07:00 - 13:00"}
 
-        self.assertEqual(browser.review_cancellation("test-oda-order", order), {"available": True, "consequence": None})
+        self.assertEqual(browser.review_cancellation("test-oda-order", order), {"available": True, "consequence": None, "binding": binding})
         self.assertEqual(opened, ["test-oda-order"])
         self.assertEqual(invoked, [
             (("close",), CANCELLATION_BROWSER_ARGS),
@@ -1113,8 +1126,11 @@ class CoreTestsBase:
             (("close",), CANCELLATION_BROWSER_ARGS),
         ])
 
+
     def test_cancellation_review_waits_for_react_hydration(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
+        browser._read_order_binding = mock.Mock(return_value=binding)
         browser._open_order = lambda _order_id: None
         invoked = []
         browser._invoke = lambda *arguments, **kwargs: invoked.append((arguments, kwargs.get("browser_args"))) or {}
@@ -1130,9 +1146,10 @@ class CoreTestsBase:
         with mock.patch("oda_browser.time.sleep") as sleep:
             result = browser.review_cancellation("test-oda-order", order)
 
-        self.assertEqual(result, {"available": True, "consequence": None})
+        self.assertEqual(result, {"available": True, "consequence": None, "binding": binding})
         sleep.assert_called_once_with(0.5)
         self.assertIn((("click", "[data-oda-household-cancel-review]"), CANCELLATION_BROWSER_ARGS), invoked)
+
 
     def test_cancellation_cache_reset_preserves_profile_state(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -1199,8 +1216,8 @@ class CoreTestsBase:
 
     def test_cancellation_submit_relaunches_once_and_keeps_final_dispatch_alive(self):
         browser = OdaBrowser.__new__(OdaBrowser)
-        review = {"available": True, "consequence": None}
-        browser._review_cancellation = lambda *_arguments: review
+        review = {"available": True, "consequence": None, "binding": {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}}
+        browser._review_cancellation = lambda *_arguments, **_kwargs: review
         invoked = []
         browser._invoke = lambda *arguments, **kwargs: invoked.append((arguments, kwargs.get("browser_args"))) or {}
         evaluated = []
@@ -1217,10 +1234,11 @@ class CoreTestsBase:
         self.assertEqual(len(evaluated), 2)
         self.assertTrue(all(browser_args == CANCELLATION_BROWSER_ARGS for _script, browser_args in evaluated))
 
+
     def test_cancellation_submit_does_not_close_after_ambiguous_final_dispatch(self):
         browser = OdaBrowser.__new__(OdaBrowser)
-        review = {"available": True, "consequence": None}
-        browser._review_cancellation = lambda *_arguments: review
+        review = {"available": True, "consequence": None, "binding": {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}}
+        browser._review_cancellation = lambda *_arguments, **_kwargs: review
         invoked = []
 
         def invoke(*arguments, **kwargs):
@@ -1242,11 +1260,12 @@ class CoreTestsBase:
             (("click", "[data-oda-household-cancel-submit-final]"), CANCELLATION_BROWSER_ARGS),
         ])
 
+
     def test_cancellation_submit_requires_margin_before_final_dispatch(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser._cancellation_deadline = None
-        review = {"available": True, "consequence": None}
-        browser._review_cancellation = lambda *_arguments: review
+        review = {"available": True, "consequence": None, "binding": {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}}
+        browser._review_cancellation = lambda *_arguments, **_kwargs: review
         invoked = []
         browser._invoke = lambda *arguments, **kwargs: invoked.append((arguments, kwargs.get("browser_args"))) or {}
         results = iter([{"ready": True}, {"ready": True}])
@@ -1262,6 +1281,7 @@ class CoreTestsBase:
             (("close",), CANCELLATION_BROWSER_ARGS),
         ])
         self.assertIsNone(browser._cancellation_deadline)
+
 
     def test_cancellation_relaunch_honors_an_expired_deadline(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -1404,6 +1424,7 @@ class CoreTestsBase:
             "deliverySlot": {"id": 7, "name": "Hjemlevering mellom kl 07 og 13, 3. sep"},
         }
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser._verify_checkout_account = mock.Mock(return_value="a" * 64)
         browser._navigate_to_checkout = lambda: None
         scripts = []
         extracted = {
@@ -1475,6 +1496,7 @@ class CoreTestsBase:
                 browser._eval = lambda _script: next(responses)
                 with self.assertRaisesRegex(HouseholdError, message):
                     browser._review_checkout(cart)
+
 
     def test_oda_final_click_rechecks_every_protected_amount_component(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -2070,24 +2092,28 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
         )
 
     def test_checkout_deadline_blocks_the_final_click(self):
+        import hashlib
         browser = OdaBrowser.__new__(OdaBrowser)
         browser._checkout_deadline = None
         browser._invoke = lambda *_arguments, **_kwargs: {}
-        browser.review_checkout = lambda _cart: {"review": "same"}
-        browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1}
+        browser.review_checkout = lambda _cart: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
+        browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1, "delivery_address": "Eksempelveien 1"}
+        browser._account_reference = lambda address: 123
         evaluations = []
         browser._eval = lambda script: evaluations.append(script) or {"clicked": True}
 
         with mock.patch("oda_browser.time.monotonic", return_value=86.0):
             with self.assertRaisesRegex(CheckoutPreconditionError, "deadline reached"):
-                browser.submit_checkout({}, {"review": "same"}, deadline=100.0)
+                browser.submit_checkout({}, {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}, deadline=100.0)
 
         self.assertEqual(evaluations, [])
 
     def test_checkout_read_only_preclick_failure_is_not_uncertain(self):
+        import hashlib
         browser = OdaBrowser.__new__(OdaBrowser)
-        browser.review_checkout = lambda _cart: {"review": "same"}
-        browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1}
+        browser.review_checkout = lambda _cart: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
+        browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1, "delivery_address": "Eksempelveien 1"}
+        browser._account_reference = lambda address: 123
         evaluations = []
         browser._eval = lambda script: evaluations.append(script) or {"clicked": True}
 
@@ -2095,7 +2121,7 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
             raise HouseholdError("cart read failed")
 
         with self.assertRaisesRegex(CheckoutPreconditionError, "cart read failed"):
-            browser._submit_checkout({}, {"review": "same"}, fail_before_click)
+            browser._submit_checkout({}, {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}, fail_before_click)
 
         self.assertEqual(evaluations, [])
 

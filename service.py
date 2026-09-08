@@ -902,7 +902,7 @@ def run(args) -> None:
         available = shutil.which(str(args.browser_binary)) and shutil.which(str(args.browser_executable))
         checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments) if available else None
     else:
-        checkout_browser = OdaBrowser(**browser_arguments)
+        checkout_browser = OdaBrowser(provider_client=provider_client, **browser_arguments)
     app = Application(
         StateStore(args.state, settings),
         provider_client,

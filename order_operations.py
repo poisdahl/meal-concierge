@@ -13,7 +13,7 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo
-from oda_browser import OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
+from oda_browser import require_order_binding, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
 from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
@@ -756,12 +756,12 @@ class OrderOperations:
         with self.store.locked() as state:
             self._pending_scheduler_guard(state, pending)
         change = pending.get("order_change")
-        if self.provider == "mathem" and change and not change.get("requested_delivery"):
+        if self.provider in {"oda", "mathem"} and change and not change.get("requested_delivery"):
             # Additions inherit the existing order's delivery, not a new cart
             # reservation. Revalidate that original order without selecting one.
             current = self._orders({"action": "get", "order_id": change["order_id"], "_deadline": deadline})
             if canonical(current) != canonical(change["before"]):
-                raise HouseholdError("the target Mathem order changed; prepare a new review")
+                raise HouseholdError("the target retailer order changed; prepare a new review")
             return None
         delivery = (pending.get("summary") or {}).get("delivery")
         expected = delivery.get("slot") if isinstance(delivery, Mapping) else None
@@ -1028,8 +1028,8 @@ class OrderOperations:
 
     def _orders(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
-        if self.provider == "mathem" and action == "change_begin" and self.browser is None:
-            raise HouseholdError("Mathem order changes require the dedicated logged-in browser")
+        if self.provider in {"oda", "mathem"} and action == "change_begin" and self.browser is None:
+            raise HouseholdError(f"{self.provider.title()} order changes require the dedicated logged-in browser")
         if self.provider == "mathem" and action.startswith("cancel_") and self.browser is None:
             raise HouseholdError("Mathem cancellation requires the dedicated logged-in browser; use the store website when no browser is configured")
         cancellation_deadline = time.monotonic() + CANCELLATION_OPERATION_TIMEOUT if action in {"cancel_prepare", "cancel_confirm", "cancel_reconcile", "cancel_submit"} else None
@@ -1112,7 +1112,7 @@ class OrderOperations:
                                 "order_id": order_id, "cart": cart, "cart_digest": digest,
                                 "next": "Preserve these goods. Pass this cart_digest only when the user has authorized all shown staged goods for this exact order; otherwise clarify their destination."}
                     started = {"provider": self.provider, "order_id": order_id, "editing": True}
-                    if self.provider == "mathem":
+                    if self.provider in {"oda", "mathem"}:
                         with self._browser_operation(deadline):
                             started["binding"] = self.browser.read_order_binding(order_id, current["order"], deadline=deadline)
                     code = ""
@@ -1123,7 +1123,7 @@ class OrderOperations:
                     "status": "editing",
                     "started_at": reservation["started_at"],
                     **({"code": code} if code else {}),
-                    **({"binding": started["binding"]} if self.provider == "mathem" else {}),
+                    **({"binding": started["binding"]} if self.provider in {"oda", "mathem"} else {}),
                     **({"expected_cart_quantities": quantities, "starting_cart_quantities": quantities} if self.provider in {"oda", "mathem"} else {}),
                 }
                 with self.store.locked() as state:
@@ -1333,6 +1333,8 @@ class OrderOperations:
         current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
         if pending["status"] != "awaiting_confirmation" or canonical(current) != canonical(pending["before"]):
             raise HouseholdError("the order changed; ask for a new cancellation confirmation")
+        if self.provider in {"oda", "mathem"}:
+            require_order_binding(pending["browser"].get("binding"))
         with self._browser_operation(deadline):
             with self.store.locked() as state:
                 current_pending = state.get("pending_cancellation")
@@ -1363,9 +1365,9 @@ class OrderOperations:
                 )
                 tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
                 require_provider_identity(tracking, order_id, tracking=True)
-                if self.provider == "mathem":
+                if self.provider in {"oda", "mathem"}:
                     self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
-                                                    expected_binding=pending["browser"]["binding"])
+                                                    expected_binding=require_order_binding(pending["browser"].get("binding")))
                 current = {"order": current["order"], "tracking": tracking}
             except CancellationPreconditionError:
                 with self.store.locked() as state:
@@ -1478,9 +1480,9 @@ class OrderOperations:
             order_id = pending["order_id"]
             current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
             cancelled = str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}
-            if self.provider == "mathem":
+            if self.provider in {"oda", "mathem"}:
                 self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
-                                                expected_binding=pending["browser"]["binding"])
+                                                expected_binding=require_order_binding(pending["browser"].get("binding")))
             with self.store.locked() as state:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
                     raise HouseholdError("cancellation state changed while reconciling the order")
@@ -2019,14 +2021,14 @@ class OrderOperations:
                 return cart_gate
             cart_plan_baseline = deepcopy(self.store.read().get("cart_plan"))
         delivery_change = bool(order_change and order_change.get("requested_delivery"))
-        mathem_addition = self.provider == "mathem" and bool(order_change) and not delivery_change
-        if mathem_addition:
+        retail_addition = self.provider in {"oda", "mathem"} and bool(order_change) and not delivery_change
+        if retail_addition:
             summary["delivery"] = {
                 "display": order_change["before"]["order"]["deliverySlotDisplay"],
-                "address": order_change["binding"]["receipt_address"],
+                "address": require_order_binding(order_change.get("binding"))["receipt_address"],
                 "order_id": order_change["order_id"], "selection_origin": "existing_order",
             }
-        if self.provider in {"oda", "mathem"} and not delivery_change and not mathem_addition:
+        if self.provider in {"oda", "mathem"} and not delivery_change and not retail_addition:
             delivery = summary.get("delivery")
             if not isinstance(delivery, Mapping) or not delivery.get("display"):
                 raise HouseholdError("select a delivery slot before checkout")
@@ -2047,7 +2049,7 @@ class OrderOperations:
                     order_change["before"]["order"],
                     order_change["requested_delivery"],
                     deadline=deadline,
-                    **({"expected_binding": order_change["binding"]} if self.provider == "mathem" else {}),
+                    **({"expected_binding": require_order_binding(order_change.get("binding"))} if self.provider in {"oda", "mathem"} else {}),
                 )
                 reviewed_summary = review.get("summary")
                 if not isinstance(reviewed_summary, Mapping):
@@ -2059,7 +2061,7 @@ class OrderOperations:
                     order_change["order_id"],
                     order_change["before"]["order"],
                     deadline=deadline,
-                    **({"expected_binding": order_change["binding"]} if self.provider == "mathem" else {}),
+                    **({"expected_binding": require_order_binding(order_change.get("binding"))} if self.provider in {"oda", "mathem"} else {}),
                 )
             else:
                 if self.provider == "meny":
@@ -2151,8 +2153,9 @@ class OrderOperations:
                 payment_display = str((review.get("summary") or {}).get("payment") or review.get("payment_display") or "")
                 if re.fullmatch(r"•••• \d{4}", payment_display) is None:
                     raise HouseholdError("Oda checkout returned no verified masked payment identity")
-            if mathem_addition:
-                summary["order_amounts"] = deepcopy(review["order_amounts"])
+            if retail_addition:
+                if self.provider == "mathem":
+                    summary["order_amounts"] = deepcopy(review["order_amounts"])
             elif delivery_binding is None:
                 delivery_binding = self._current_delivery_choice(
                     occurrence=occurrence, deadline=deadline, allow_recovery=allow_recovery,
@@ -2166,7 +2169,7 @@ class OrderOperations:
                     allow_recovery=allow_recovery,
                     scope_cart=cart,
                 )
-            if not mathem_addition:
+            if not retail_addition:
                 summary = self._bind_delivery_summary(summary, delivery_binding, provider=self.provider,
                                                       discount_breakdown=review.get("discount_breakdown"))
             summary["menu_shortfall"] = self._menu_shortfall(cart_plan_baseline, summary)
@@ -2301,7 +2304,7 @@ class OrderOperations:
                         if canonical(cart_summary(fresh)) != canonical(expected):
                             raise CheckoutPreconditionError("cart or delivery changed before the final click")
                         try:
-                            if not (self.provider == "mathem" and pending_change and not pending_change.get("requested_delivery")):
+                            if not (self.provider in {"oda", "mathem"} and pending_change and not pending_change.get("requested_delivery")):
                                 self._unchanged_delivery_binding(
                                     pending["summary"]["delivery"],
                                     occurrence=str(pending.get("occurrence") or "") or None,
@@ -2522,16 +2525,23 @@ class OrderOperations:
             order = {**candidates[0], **details}
         tracking_status = str((tracking or {}).get("status") or "").casefold()
         receipt_order = order
-        if (self.provider == "mathem" and order is not None and candidate_id == details_id == tracking_id
+        if (self.provider in {"oda", "mathem"} and order is not None and candidate_id == details_id == tracking_id
                 and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}):
             # Keep an unpaid checkout or bank challenge on its current page.
             # Receipt navigation is needed only for a potentially accepted order.
             address = (pending["summary"].get("delivery") or {}).get("address")
             verified = False
+            # Receipt fallback may fill an omitted address, never replace explicit MCP evidence.
+            addressed_order = order if "deliveryAddress" in order or "delivery_address" in order else {**order, "deliveryAddress": address}
             if (isinstance(address, str) and address.strip() and self.browser is not None
-                    and order_matches_checkout({**order, "deliveryAddress": address}, pending["summary"], provider="mathem")):
+                    and order_matches_checkout(addressed_order, pending["summary"], provider=self.provider)):
                 try:
-                    verified = self.browser.receipt_address_matches(candidate_id, address, deadline=deadline)
+                    reference = (pending.get("browser_review") or {}).get("account_reference_digest")
+                    if reference:
+                        binding = {"account_reference_digest": reference, "receipt_address": address}
+                        verified = self.browser.read_order_binding(candidate_id, order, deadline=deadline, expected_binding=binding) == binding
+                    else:
+                        verified = self.browser.receipt_address_matches(candidate_id, address, deadline=deadline)
                 except HouseholdError:
                     pass  # Keep this attempt uncertain; no second payment.
             if verified is True:
@@ -2602,6 +2612,7 @@ class OrderOperations:
 
     def _order_change_reconcile(self, pending: Mapping[str, Any], deadline: float | None = None) -> dict[str, Any]:
         change = pending["order_change"]
+        binding = require_order_binding(change.get("binding")) if self.provider in {"oda", "mathem"} else None
         order_id = change["order_id"]
         confirmation_order_id = self.browser.checkout_confirmation_order_id(deadline=deadline) if self.provider == "meny" else order_id
         current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
@@ -2625,13 +2636,11 @@ class OrderOperations:
                 "jan": 1, "feb": 2, "mar": 3, "apr": 4, "mai": 5, "maj": 5, "jun": 6,
                 "jul": 7, "aug": 8, "sep": 9, "okt": 10, "nov": 11, "des": 12, "dec": 12,
             }.get(expected_signature[5]) if expected_signature is not None else None
+            # The frozen receipt/account binding is rechecked below only once
+            # MCP reports the expected accepted change. No new address is inferred.
             before_address = oda_order_address_identity(change["before"]["order"])
             current_address = oda_order_address_identity(current["order"])
-            address_matches = before_address is not None and before_address == current_address
-            if self.provider == "mathem":
-                # Mathem omits the receipt address in MCP. The independent
-                # original binding above supplies it; never invent an MCP ID.
-                address_matches = True
+            address_matches = binding is not None and before_address == current_address
             before_quantities = oda_order_quantities(change["before"]["order"])
             current_quantities = oda_order_quantities(current["order"])
             before_total = money_cents(change["before"]["order"].get("grossAmount"))
@@ -2659,12 +2668,12 @@ class OrderOperations:
             matched = oda_order_matches_addition(change["before"]["order"], current["order"], pending["summary"], provider=self.provider)
             fulfillable = status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
         confirmed = current_id == tracking_id == order_id and matched and fulfillable
-        if self.provider == "mathem" and confirmed:
+        if self.provider in {"oda", "mathem"} and confirmed:
             # An unpaid change may still be completing in the checkout page or
             # showing a bank challenge. Do not navigate away for receipt binding
             # until the provider actually reports the expected accepted change.
             self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
-                                            expected_binding=change["binding"])
+                                            expected_binding=binding)
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("checkout state changed while reconciling the order change")

@@ -538,6 +538,10 @@ submits. One stable idempotency key represents one intent; reuse it only to
 recover that attempt. A later intent needs a new key. Begin exact existing-order
 changes before modifying their cart/delivery. No uncertain action is repeated.
 Only bound checkout submit/reconcile `confirmed=true` establishes success.
+Oda and Mathem preserve the original account/address binding across order edits
+and reconciliation. If an older uncertain operation lacks this evidence, retain
+it and report the missing binding; never rewrite the journal or substitute the
+currently selected account. A new review is appropriate only before dispatch.
 
 MENY still requires approval of its actual payment request through Vipps on the
 user's phone.

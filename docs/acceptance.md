@@ -7,6 +7,15 @@ matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
 fixes and the still-open native/payment/deployment criteria. Bank reconciliation
 is outside this acceptance.
 
+After owner login, Oda and Mathem separately passed the shared account/receipt
+reader on their original cancelled orders, with frozen-reference rejection and
+unchanged household state. Oda's account login is no longer an external blocker.
+The implementation now shares original-order binding and covers Oda callback-time
+review drift and contradictory MCP-address rejection. These isolated checks do
+not establish ordinary addition/payment, normal-start delivery navigation,
+supported changed-price review, or deployment of the candidate. Those criteria
+remain open; the live source is still `b8cc15f3` at this inspection.
+
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
 **82e64b8** on **2026-09-07**. A shared

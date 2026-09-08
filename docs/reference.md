@@ -1696,6 +1696,19 @@ local implementation limit, not an established store restriction. Do not retry
 a failed or uncertain addition payment through a separate helper and describe
 that as product recovery.
 
+Oda and Mathem bind checkout accounts and original order receipts through the
+same reader with separate origins and receipt labels. Existing-order review and
+reconciliation retain the reference captured before editing. Missing binding
+in an older uncertain journal requires preserving that attempt; never infer its
+original identity from today's selected account or rewrite the journal.
+
+When either Oda or Mathem changes an MCP or website interface, check the
+corresponding interface at both stores and consider a shared fix first. Record
+the other store's result, including unchanged or unavailable, with provider,
+date and source version. Use separate provider examples; matching schemas or
+copied fixtures alone do not establish equal behavior. Deployment remains an
+explicit decision for each target.
+
 For existing orders, read/select the exact order and call `orders change_begin`
 first. Oda/Mathem live modifiability and MENY's enabled order-change controls
 decide whether editing is possible; no fixed local cutoff overrides the store.

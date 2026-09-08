@@ -252,7 +252,23 @@ def _oda_checkout_amount_script(
 
 
 
-def _mathem_checkout_account_script(address_id: Any) -> str:
+def require_order_binding(value: Any) -> Mapping[str, Any]:
+    # Persisted pre-upgrade operations may have no original account reference.
+    # Never replace that missing evidence with today's selected address.
+    if (not isinstance(value, Mapping)
+            or re.fullmatch(r"[0-9a-f]{64}", str(value.get("account_reference_digest") or "")) is None
+            or not isinstance(value.get("receipt_address"), str) or not value["receipt_address"].strip()):
+        raise HouseholdError("Original order account binding is unavailable; preserve any dispatched attempt and prepare a new review only before dispatch")
+    return value
+
+
+def _retail_store_url(provider: str) -> str:
+    if provider not in {"oda", "mathem"}:
+        raise HouseholdError("unsupported browser provider")
+    return "https://oda.com/no/" if provider == "oda" else "https://www.mathem.se/se/"
+
+
+def _checkout_account_script(address_id: Any, *, provider: str) -> str:
     """Bind the browser account to a selected MCP address without returning its ID.
 
     The authenticated account page exposes duplicate edit links for one address;
@@ -260,20 +276,29 @@ def _mathem_checkout_account_script(address_id: Any) -> str:
     the human-readable address would accept another account at the same address.
     """
     if type(address_id) is not int or not 0 < address_id < 2**53:
-        raise HouseholdError("Mathem selected account address is unavailable")
-    return r"""
+        raise HouseholdError("Retail selected account address is unavailable")
+    store_url = _retail_store_url(provider)
+    origin = store_url.rsplit("/", 2)[0]
+    script = r"""
 (() => {
- const origin='https://www.mathem.se';
- if(location.href!==origin+'/se/account/delivery/'||document.querySelector('input[type="password"]'))return JSON.stringify({account_matches:false});
+ const origin=ORIGIN;
+ if(location.href!==ACCOUNT_URL||document.querySelector('input[type="password"]'))return JSON.stringify({account_matches:false});
  const visible=e=>{const style=getComputedStyle(e),r=e.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&r.width>0&&r.height>0;};
- const expected='/se/account/delivery/edit/'+ADDRESS_ID+'/';
+ const expected=EDIT_PATH;
  const matches=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
   const url=new URL(e.href);
   return url.origin===origin&&url.pathname===expected&&!url.search&&!url.hash;
  });
  return JSON.stringify({account_matches:matches.length>0});
 })()
-""".replace("ADDRESS_ID", str(address_id))
+"""
+    values = {"ORIGIN": json.dumps(origin), "ACCOUNT_URL": json.dumps(store_url + "account/delivery/"),
+              "EDIT_PATH": json.dumps("/" + store_url.rstrip("/").rsplit("/", 1)[1] + "/account/delivery/edit/" + str(address_id) + "/")}
+    return re.sub(r"\b(?:ORIGIN|ACCOUNT_URL|EDIT_PATH)\b", lambda match: values[match[0]], script)
+
+
+def _mathem_checkout_account_script(address_id: Any) -> str:
+    return _checkout_account_script(address_id, provider="mathem")
 
 
 def _mathem_checkout_payment_script(expected_url: str = "https://www.mathem.se/se/checkout/confirm/") -> str:
@@ -334,10 +359,10 @@ def _mathem_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
 })()
 """.replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False)).replace("SUBMIT", "true" if submit else "false")
 
-def _mathem_receipt_address_script(order_id: str, address: str) -> str:
+def _receipt_address_script(order_id: str, address: str, *, provider: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None or not address.strip():
-        raise HouseholdError("Mathem receipt identity is unavailable")
-    url = "https://www.mathem.se/se/account/orders/" + quote(order_id, safe="") + "/"
+        raise HouseholdError("Retail receipt identity is unavailable")
+    url = _retail_store_url(provider) + "account/orders/" + quote(order_id, safe="") + "/"
     script = r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
@@ -349,12 +374,17 @@ def _mathem_receipt_address_script(order_id: str, address: str) -> str:
  const escaped=ORDER.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  const orderMatches=new RegExp(`(?:^|[^A-Za-z0-9._:-])${escaped}(?=$|[^A-Za-z0-9._:-])`).test(text);
  const addressNodes=[...main.querySelectorAll('p')].filter(visible).filter(e=>!e.closest('li,article,[role="dialog"]')&&norm(e.innerText)===norm(ADDRESS));
- const totalNodes=[...main.querySelectorAll('*')].filter(visible).filter(e=>norm(e.innerText)==='Totalt inkl. moms').filter(e=>![...e.children].some(c=>visible(c)&&norm(c.innerText)==='Totalt inkl. moms'));
+ const totalNodes=[...main.querySelectorAll('*')].filter(visible).filter(e=>norm(e.innerText)===TOTAL_LABEL).filter(e=>![...e.children].some(c=>visible(c)&&norm(c.innerText)===TOTAL_LABEL));
  return JSON.stringify({address_verified:orderMatches&&addressNodes.length===1&&totalNodes.length===1});
 })()
 """
-    values = {"URL": json.dumps(url), "ORDER": json.dumps(order_id), "ADDRESS": json.dumps(address, ensure_ascii=False)}
-    return re.sub(r"\b(?:URL|ORDER|ADDRESS)\b", lambda match: values[match[0]], script)
+    label = (ODA_CHECKOUT_AMOUNT_LABELS if provider == "oda" else MATHEM_CHECKOUT_AMOUNT_LABELS)["provider_total"]
+    values = {"TOTAL_LABEL": json.dumps(label), "URL": json.dumps(url), "ORDER": json.dumps(order_id), "ADDRESS": json.dumps(address, ensure_ascii=False)}
+    return re.sub(r"\b(?:URL|ORDER|ADDRESS|TOTAL_LABEL)\b", lambda match: values[match[0]], script)
+
+
+def _mathem_receipt_address_script(order_id: str, address: str) -> str:
+    return _receipt_address_script(order_id, address, provider="mathem")
 
 
 def identity_tokens(value: str) -> tuple[str, ...]:
@@ -509,6 +539,32 @@ def _oda_delivery_change_surface_script(expected_url: str) -> str:
 """.replace("URL", json.dumps(expected_url))
 
 
+def _oda_checkout_surface_script(expected: Mapping[str, Any]) -> str:
+    return r"""
+(() => {
+ const expected=EXPECTED;
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const text=norm(document.body?.innerText||'');
+ const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
+ const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(Bekreft og betal|Confirm and pay)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|NOK)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
+ const login=!!document.querySelector('form[action*="login"],input[type="password"]');
+ const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i.test(text);
+ const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
+ const items=itemInputs.map(input=>{const root=input.closest('li,article');return {quantity:Number(input.value),text:norm([...(root?.querySelectorAll('p')||[])].filter(visible).slice(0,2).map(x=>x.innerText).join(' '))};});
+ const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
+ const amounts=labels.length===1?money(labels[0].innerText||labels[0].getAttribute('aria-label')||''):[];
+ const totalMatch=amounts.length===1&&amounts[0]===expected.total_minor;
+ const deliveryRoots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText||'')==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean);
+ const escaped=norm(expected.delivery_address).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+ const addressMatch=deliveryRoots.length===1&&Boolean(expected.delivery_address)&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(norm(deliveryRoots[0].innerText||''));
+ const paymentMatch=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/i);
+ const maskedPayment=Boolean(paymentMatch) && !/(?:\d[ -]?){12,19}/.test(text);
+ const paymentDisplay=maskedPayment?`•••• ${paymentMatch[1]}`:null;
+ return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:maskedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
+})()
+""".replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
+
+
 class OdaBrowser:
     checkout_provider = "oda"
     checkout_url = CHECKOUT_URL
@@ -524,7 +580,9 @@ class OdaBrowser:
         socket_directory: Path | str,
         uid: int,
         gid: int,
+        provider_client: Any = None,
     ):
+        self.provider_client = provider_client
         self.instance = instance
         self.binary = Path(binary)
         self.executable = Path(executable)
@@ -537,17 +595,127 @@ class OdaBrowser:
         self._checkout_deadline: float | None = None
         self._cancellation_deadline: float | None = None
 
+    def _account_reference(self, expected_address: str) -> int:
+        value = self._binding_client().call("get_delivery_addresses", {}, deadline=self._checkout_deadline)
+        rows = value.get("result") if isinstance(value, Mapping) else None
+        if not isinstance(rows, list):
+            raise HouseholdError("Retail account addresses are unavailable")
+        selected = [row for row in rows if isinstance(row, Mapping) and row.get("isSelected") is True]
+        if len(selected) != 1:
+            raise HouseholdError("Select one retailer delivery address before checkout")
+        address = selected[0].get("address")
+        normalize = lambda text: unicodedata.normalize("NFC", " ".join(text.split())).casefold()
+        if not isinstance(address, str) or normalize(address) != normalize(expected_address):
+            raise HouseholdError("Retail selected account address changed")
+        reference = selected[0].get("id")
+        _checkout_account_script(reference, provider=self.checkout_provider)
+        return reference
+
+    def receipt_address_matches(self, order_id, address, *, deadline=None):
+        # Both MCP receipts omit the address. Read it only from the exact
+        # order page, independently of the current cart or selected address.
+        script = _receipt_address_script(order_id, address, provider=self.checkout_provider)
+        with self._checkout_operation(deadline):
+            self._open(self._order_url(order_id))
+            for _ in range(20):
+                if self._eval(script) == {"address_verified": True}:
+                    return True
+                self._settle(0.25)
+        return False
+
+    def _read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
+        """Bind the exact receipt to an OAuth address without selecting that address.
+
+        The caller owns the browser operation. Recovery retains the original
+        address reference even if another address is now selected for shopping.
+        """
+        if expected_binding is not None:
+            require_order_binding(expected_binding)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise HouseholdError("Retail order binding deadline reached")
+        if order.get("currency") != ("SEK" if self.checkout_provider == "mathem" else "NOK"):
+            raise HouseholdError("Retail order currency does not match the provider")
+        if str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "") != order_id:
+            raise HouseholdError("Retail order identity changed")
+        self._order_url(order_id)
+        response = self._binding_client().call("get_delivery_addresses", {}, deadline=deadline)
+        rows = response.get("result") if isinstance(response, Mapping) else None
+        if not isinstance(rows, list) or not rows:
+            raise HouseholdError("Retail order account addresses are unavailable")
+        candidates = []
+        for row in rows:
+            if not isinstance(row, Mapping) or not isinstance(row.get("address"), str) or not row["address"].strip():
+                raise HouseholdError("Retail order account address is incomplete")
+            reference = row.get("id")
+            account_script = _checkout_account_script(reference, provider=self.checkout_provider)
+            binding = {"account_reference_digest": hashlib.sha256(str(reference).encode()).hexdigest(),
+                       "receipt_address": " ".join(unicodedata.normalize("NFC", row["address"]).split())}
+            if expected_binding is None or binding == expected_binding:
+                candidates.append((binding, account_script))
+        if not candidates or expected_binding is not None and len(candidates) != 1:
+            raise HouseholdError("Retail original order account binding is unavailable")
+        scripts = [_receipt_address_script(order_id, binding["receipt_address"], provider=self.checkout_provider) for binding, _ in candidates]
+        self._open(self._order_url(order_id))
+        for _ in range(20):
+            matched = [candidate for candidate, script in zip(candidates, scripts, strict=True)
+                       if self._eval(script) == {"address_verified": True}]
+            if len(matched) > 1:
+                raise HouseholdError("Retail order receipt address is ambiguous")
+            if matched:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError("Retail order receipt address cannot be verified")
+        binding, account_script = matched[0]
+        self._open(_retail_store_url(self.checkout_provider) + "account/delivery/")
+        for _ in range(20):
+            if self._eval(account_script) == {"account_matches": True}:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HouseholdError("Retail order binding deadline reached")
+                return binding
+            self._settle(0.25)
+        raise HouseholdError("Retail browser and original order account do not match")
+
+    def read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
+        with self._checkout_operation(deadline):
+            return self._read_order_binding(order_id, order, deadline=deadline, expected_binding=expected_binding)
+
+    def _binding_client(self):
+        client = getattr(self, "provider_client", None)
+        if client is None or getattr(client, "provider", self.checkout_provider) != self.checkout_provider:
+            raise HouseholdError("Dedicated browser provider client is unavailable or mismatched")
+        return client
+
+    def _verify_checkout_account(self, address: str) -> str:
+        reference = self._account_reference(address)
+        self._open(_retail_store_url(self.checkout_provider) + "account/delivery/")
+        for _ in range(20):
+            if self._eval(_checkout_account_script(reference, provider=self.checkout_provider)) == {"account_matches": True}:
+                self._require_checkout_time()
+                return hashlib.sha256(str(reference).encode()).hexdigest()
+            self._settle(0.25)
+        raise HouseholdError("Log the dedicated browser into the same account as retailer OAuth")
+
     def review_checkout(self, cart: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
             return self._review_checkout(cart)
 
-    def review_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+    def _order_cart(self, cart, order_id, order, binding):
+        binding = require_order_binding(binding)
+        original = self._order_expectation(order_id, order)
+        return {**cart, "deliverySlot": {"name": original["delivery_text"]}, "deliveryAddress": binding["receipt_address"]}
+
+    def review_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
-            expected_order = self._order_expectation(order_id, order)
-            return self._review_checkout(cart, order_id=order_id, delivery_text=expected_order["delivery_text"])
+            binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
+            bound_cart = self._order_cart(cart, order_id, order, binding)
+            review = self._review_checkout(bound_cart, order_id=order_id, delivery_text=self._order_expectation(order_id, order)["delivery_text"])
+            review["binding"] = binding
+            return review
 
     def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None) -> dict[str, Any]:
         expected = self._cart_expectation(cart)
+        account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
         if delivery_text is not None:
             expected["delivery_text"] = delivery_text
         if order_id is None:
@@ -581,29 +749,7 @@ class OdaBrowser:
         else:
             raise HouseholdError("Oda checkout items did not finish rendering")
         self._expand_checkout_amount_summary()
-        script = r"""
-(() => {
- const expected=EXPECTED;
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const text=norm(document.body?.innerText||'');
- const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(Bekreft og betal|Confirm and pay)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|NOK)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
- const login=!!document.querySelector('form[action*="login"],input[type="password"]');
- const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i.test(text);
- const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
- const items=itemInputs.map(input=>{const root=input.closest('li,article');return {quantity:Number(input.value),text:norm([...(root?.querySelectorAll('p')||[])].filter(visible).slice(0,2).map(x=>x.innerText).join(' '))};});
- const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
- const amounts=labels.length===1?money(labels[0].innerText||labels[0].getAttribute('aria-label')||''):[];
- const totalMatch=amounts.length===1&&amounts[0]===expected.total_minor;
- const deliveryRoots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText||'')==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean);
- const escaped=norm(expected.delivery_address).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
- const addressMatch=Boolean(expected.delivery_address)&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(text);
- const paymentMatch=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/i);
- const maskedPayment=Boolean(paymentMatch) && !/(?:\d[ -]?){12,19}/.test(text);
- const paymentDisplay=maskedPayment?`•••• ${paymentMatch[1]}`:null;
- return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:maskedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
-})()
-""".replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
+        script = _oda_checkout_surface_script(expected)
         result = self._eval(script)
         required = {"url", "authenticated", "available", "items", "total_matches", "delivery_roots", "address_matches", "masked_payment", "payment_display", "submit_controls"}
         expected_url = CHECKOUT_URL if order_id is None else f"{CHECKOUT_URL}?orderNumber={order_id}"
@@ -617,6 +763,7 @@ class OdaBrowser:
             raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
         if result["masked_payment"] is not True:
             raise HouseholdError("Oda saved payment card could not be verified; check Payment in your Oda account and complete any card entry there, then request a new checkout review")
+        surface = dict(result)
         result["line_matches"] = checkout_lines_match(expected["lines"], result.pop("items"))
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
@@ -626,6 +773,9 @@ class OdaBrowser:
         )
         if re.fullmatch(r"•••• \d{4}", str(result.get("payment_display") or "")) is None:
             raise HouseholdError("Oda checkout payment identity is unavailable")
+        result["surface"] = surface
+        if account_digest is not None:
+            result["account_reference_digest"] = account_digest
         return result
 
     def _expand_checkout_amount_summary(self) -> None:
@@ -879,22 +1029,25 @@ class OdaBrowser:
     def submit_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
             try:
-                current = self.review_order_change(cart, order_id, order)
+                binding = require_order_binding(review.get("binding"))
+                current = self.review_order_change(cart, order_id, order, expected_binding=binding)
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
                 raise CheckoutPreconditionError("Oda order change changed after confirmation")
-            expected_cart = self._cart_expectation(cart)
+            expected_cart = self._cart_expectation(self._order_cart(cart, order_id, order, binding))
             self._click_checkout_submit(
                 expected_cart["total_minor"],
                 f"{CHECKOUT_URL}?orderNumber={order_id}",
                 before_click,
                 expected_product_count=expected_cart["product_count"],
                 expected_amounts=review.get("amounts"),
+                review_surface=(_oda_checkout_surface_script(expected_cart), review["surface"]),
             )
 
-    def review_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+    def review_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
+            binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
             expected_order = self._order_expectation(order_id, order)
             expected_product_count = self._order_product_count(order)
             target = str(delivery.get("display") or "")
@@ -943,7 +1096,7 @@ class OdaBrowser:
 """.replace("REVIEW", _oda_delivery_change_surface_script(expected_url).strip()).replace("SIGNATURE", json.dumps(signature_value)).replace("URL", json.dumps(expected_url)).replace("SELECTED", "true" if selected else "false"))
                 action = surface.get("action")
                 if action == "ready":
-                    return self._delivery_change_review(order_id, order, delivery, surface)
+                    return self._delivery_change_review(order_id, order, delivery, surface, binding)
                 if action == "slot":
                     if "slot" in dispatched:
                         raise HouseholdError("Oda delivery slot selection did not advance")
@@ -958,7 +1111,8 @@ class OdaBrowser:
                 self._settle(0.5)
             raise HouseholdError("Oda delivery change navigation timed out")
 
-    def _delivery_change_review(self, order_id, order, delivery, surface):
+    def _delivery_change_review(self, order_id, order, delivery, surface, binding):
+        binding = require_order_binding(binding)
         expected_order = self._order_expectation(order_id, order)
         expected_product_count = self._order_product_count(order)
         target = str(delivery.get("display") or "")
@@ -977,15 +1131,16 @@ class OdaBrowser:
             "items": [],
             "count": 0,
             "total": amounts[0] / 100,
-            "delivery": {"slot_id": delivery.get("slot_id"), "display": target},
+            "delivery": {"slot_id": delivery.get("slot_id"), "display": target, "address": binding["receipt_address"]},
             "payment": payment_display,
             "amounts": checkout_amounts,
         }
-        return {"page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"], "surface": surface}
+        return {"binding": binding, "page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"], "surface": surface}
 
     def submit_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
             try:
+                binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=require_order_binding(review.get("binding")))
                 expected_url = f"{CHECKOUT_URL}?orderNumber={order_id}"
                 surface_script = _oda_delivery_change_surface_script(expected_url)
                 # Each operation starts a fresh browser process. Reopen only
@@ -996,7 +1151,7 @@ class OdaBrowser:
                     if surface.get("action") == "ready":
                         break
                     self._settle(0.25)
-                current = self._delivery_change_review(order_id, order, delivery, surface)
+                current = self._delivery_change_review(order_id, order, delivery, surface, binding)
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
@@ -1019,6 +1174,9 @@ class OdaBrowser:
             raise CheckoutPreconditionError("Oda checkout changed after confirmation")
         expected_cart = self._cart_expectation(cart)
         try:
+            reference = self._account_reference(expected_cart["delivery_address"])
+            if hashlib.sha256(str(reference).encode()).hexdigest() != review.get("account_reference_digest"):
+                raise HouseholdError("Oda selected account changed before the final click")
             self._require_checkout_time(FINAL_CLICK_MARGIN)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
@@ -1028,6 +1186,7 @@ class OdaBrowser:
             before_click,
             expected_product_count=expected_cart["product_count"],
             expected_amounts=review.get("amounts"),
+            review_surface=(_oda_checkout_surface_script(expected_cart), review["surface"]),
         )
 
     def _click_checkout_submit(
@@ -1079,7 +1238,8 @@ class OdaBrowser:
         with self._cancellation_operation(deadline):
             return self._review_cancellation(order_id, order)
 
-    def _review_cancellation(self, order_id: str, order: Mapping[str, Any]) -> dict[str, Any]:
+    def _review_cancellation(self, order_id: str, order: Mapping[str, Any], *, expected_binding=None) -> dict[str, Any]:
+        binding = self._read_order_binding(order_id, order, deadline=self._cancellation_deadline, expected_binding=expected_binding)
         url = self._order_url(order_id)
         self._open_order(order_id)
         expected = self._order_expectation(order_id, order)
@@ -1160,7 +1320,7 @@ class OdaBrowser:
             if closed == {"closed": True}:
                 break
             self._settle_cancellation(0.25)
-        return dialog if closed == {"closed": True} else {"available": False, "reason": "Oda tilbyr ikke avbestilling nå"}
+        return {**dialog, "binding": binding} if closed == {"closed": True} else {"available": False, "reason": "Oda tilbyr ikke avbestilling nå"}
 
     def submit_cancellation(self, order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         operation = None
@@ -1173,7 +1333,7 @@ class OdaBrowser:
             raise
 
     def _submit_cancellation(self, order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], operation: dict[str, bool], before_click: Callable[[], None] | None = None) -> None:
-        if self._review_cancellation(order_id, order) != dict(review):
+        if self._review_cancellation(order_id, order, expected_binding=require_order_binding(review.get("binding"))) != dict(review):
             raise HouseholdError("Oda tilbyr ikke avbestilling nå")
         ready = self._eval(r"""
 (() => {
@@ -1307,6 +1467,7 @@ class OdaBrowser:
 
     def _settle(self, seconds: float) -> None:
         self._require_checkout_time(seconds)
+        self._require_cancellation_time(seconds)
         time.sleep(seconds)
 
     def _settle_cancellation(self, seconds: float) -> None:
@@ -1441,6 +1602,10 @@ class OdaBrowser:
         return value
 
     def _invoke(self, *arguments: str, stdin: str | None = None, check: bool = True, browser_args: str = DEFAULT_BROWSER_ARGS) -> dict[str, Any]:
+        # Shared binding may be the first open in a cold cancellation session.
+        # Chromium's launch flags must match that operation from its first read.
+        if getattr(self, "_cancellation_deadline", None) is not None and browser_args == DEFAULT_BROWSER_ARGS:
+            browser_args = CANCELLATION_BROWSER_ARGS
         command = [str(self.binary), "--json", "--session", self.session, "--profile", str(self.profile), "--executable-path", str(self.executable), *arguments]
         environment = {
             "AGENT_BROWSER_ARGS": browser_args,
@@ -1512,25 +1677,9 @@ class MathemBrowser(OdaBrowser):
     checkout_url = "https://www.mathem.se/se/checkout/confirm/"
 
     def __init__(self, *, provider_client: Any, **arguments):
-        super().__init__(**arguments)
-        self.provider_client = provider_client
+        super().__init__(provider_client=provider_client, **arguments)
         self.session = f"mathem-household-{self.instance}"
 
-    def _account_reference(self, expected_address: str) -> int:
-        value = self.provider_client.call("get_delivery_addresses", {}, deadline=self._checkout_deadline)
-        rows = value.get("result") if isinstance(value, Mapping) else None
-        if not isinstance(rows, list):
-            raise HouseholdError("Mathem account addresses are unavailable")
-        selected = [row for row in rows if isinstance(row, Mapping) and row.get("isSelected") is True]
-        if len(selected) != 1:
-            raise HouseholdError("Select one Mathem delivery address before checkout")
-        address = selected[0].get("address")
-        normalize = lambda text: unicodedata.normalize("NFC", " ".join(text.split())).casefold()
-        if not isinstance(address, str) or normalize(address) != normalize(expected_address):
-            raise HouseholdError("Mathem selected account address changed")
-        reference = selected[0].get("id")
-        _mathem_checkout_account_script(reference)
-        return reference
 
     def _review_checkout(self, cart, *, order_id=None, delivery_text=None):
         if order_id is not None or delivery_text is not None:
@@ -1538,17 +1687,10 @@ class MathemBrowser(OdaBrowser):
         expected = self._cart_expectation(cart)
         if delivery_signature(expected["delivery_text"], provider="mathem") is None:
             raise HouseholdError("Select a Mathem delivery window before checkout")
-        reference = self._account_reference(expected["delivery_address"])
-        self._open("https://www.mathem.se/se/account/delivery/")
-        for _ in range(20):
-            if self._eval(_mathem_checkout_account_script(reference)) == {"account_matches": True}:
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Log the dedicated Mathem browser into the same account and selected address as Mathem OAuth")
+        account_digest = self._verify_checkout_account(expected["delivery_address"])
         self._navigate_to_checkout()
         result = self._review_mathem_surface(expected)
-        result["account_reference_digest"] = hashlib.sha256(str(reference).encode()).hexdigest()
+        result["account_reference_digest"] = account_digest
         result["amounts"] = self._read_checkout_amounts(expected["total_minor"], expected["product_count"])
         result["discount_breakdown"] = result["amounts"].pop("discount_breakdown")
         return result
@@ -1755,65 +1897,7 @@ class MathemBrowser(OdaBrowser):
         if self._eval(script) != {"clicked": True}:
             raise CheckoutPreconditionError("Mathem checkout changed before the final click")
 
-    def receipt_address_matches(self, order_id, address, *, deadline=None):
-        # Mathem MCP receipts omit the address. Read it only from the exact
-        # order page, independently of the current cart or selected address.
-        script = _mathem_receipt_address_script(order_id, address)
-        with self._checkout_operation(deadline):
-            self._open("https://www.mathem.se/se/account/orders/" + quote(order_id, safe="") + "/")
-            for _ in range(20):
-                if self._eval(script) == {"address_verified": True}:
-                    return True
-                self._settle(0.25)
-        return False
 
-    def _read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
-        """Bind the exact receipt to an OAuth address without selecting that address.
-
-        The caller owns the browser operation. Recovery retains the original
-        address reference even if another address is now selected for shopping.
-        """
-        if order.get("currency") != "SEK":
-            raise HouseholdError("Mathem order currency is not SEK")
-        if str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "") != order_id:
-            raise HouseholdError("Mathem order identity changed")
-        response = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
-        rows = response.get("result") if isinstance(response, Mapping) else None
-        if not isinstance(rows, list) or not rows:
-            raise HouseholdError("Mathem order account addresses are unavailable")
-        candidates = []
-        for row in rows:
-            if not isinstance(row, Mapping) or not isinstance(row.get("address"), str) or not row["address"].strip():
-                raise HouseholdError("Mathem order account address is incomplete")
-            reference = row.get("id")
-            account_script = _mathem_checkout_account_script(reference)
-            binding = {"account_reference_digest": hashlib.sha256(str(reference).encode()).hexdigest(),
-                       "receipt_address": " ".join(unicodedata.normalize("NFC", row["address"]).split())}
-            if expected_binding is None or binding == expected_binding:
-                candidates.append((binding, account_script))
-        if not candidates or expected_binding is not None and len(candidates) != 1:
-            raise HouseholdError("Mathem original order account binding is unavailable")
-        scripts = [_mathem_receipt_address_script(order_id, binding["receipt_address"]) for binding, _ in candidates]
-        self._open("https://www.mathem.se/se/account/orders/" + quote(order_id, safe="") + "/")
-        for _ in range(20):
-            matched = [candidate for candidate, script in zip(candidates, scripts, strict=True)
-                       if self._eval(script) == {"address_verified": True}]
-            if len(matched) > 1:
-                raise HouseholdError("Mathem order receipt address is ambiguous")
-            if matched:
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Mathem order receipt address cannot be verified")
-        binding, account_script = matched[0]
-        self._open("https://www.mathem.se/se/account/delivery/")
-        for _ in range(20):
-            if self._eval(account_script) == {"account_matches": True}:
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise HouseholdError("Mathem order binding deadline reached")
-                return binding
-            self._settle(0.25)
-        raise HouseholdError("Mathem browser and original order account do not match")
 
     def _addition_expectation(self, cart, order_id, order, binding):
         self._order_url(order_id)
@@ -1821,7 +1905,7 @@ class MathemBrowser(OdaBrowser):
         original_count = self._order_product_count(order)
         # An addition cart has no new delivery reservation. It inherits the
         # independently verified original receipt address and delivery window.
-        bound = {**cart, "deliverySlot": {"name": original["delivery_text"]}, "deliveryAddress": binding["receipt_address"]}
+        bound = self._order_cart(cart, order_id, order, binding)
         expected = self._cart_expectation(bound)
         expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
                         original_minor=original["total_minor"], original_count=original_count)
@@ -2003,9 +2087,6 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
                 raise CheckoutPreconditionError("Mathem delivery changed before the final click")
 
 
-    def read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
-        with self._checkout_operation(deadline):
-            return self._read_order_binding(order_id, order, deadline=deadline, expected_binding=expected_binding)
 
     @staticmethod
     def _order_url(order_id):
