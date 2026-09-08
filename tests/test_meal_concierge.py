@@ -2079,7 +2079,7 @@ if(c.duplicateLabel)fresh.labels.push(outer);
 const radios=c.noRadios?[]:[old,fresh];
 if(c.duplicateCandidate){const duplicate={...fresh,id:'duplicate',checked:false};
  const label={...outer,contains:x=>x===duplicate,querySelectorAll:()=>[duplicate]};duplicate.labels=[label];radios.push(duplicate);}
-const payment=node('payment','Gå til betaling');payment.disabled=!!c.disabledPayment;
+const payment=node('payment',c.newSelected&&!c.oldPaymentLabel?'Fortsett':'Gå til betaling');payment.disabled=!!c.disabledPayment;
 const buttons=c.noPayment?[]:c.duplicatePayment?[payment,{...payment,id:'duplicate-payment'}]:[payment];
 const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radios:s==='button'?buttons:[];
 const submit=node('submit','Bekreft og betal 246,40 kr');
@@ -2111,7 +2111,7 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
         for case in [{key: True} for key in ("noSelection", "doubleSelection", "disabled", "hidden",
                      "hiddenLabel", "wrongLabel", "unbound", "mixedLabel", "duplicateLabel",
                      "noRadios", "duplicateCandidate", "noMain", "login", "dialog", "unavailable")] + [
-                     {"newSelected": True, key: True} for key in ("disabledPayment", "duplicatePayment", "noPayment")] + [
+                     {"newSelected": True, key: True} for key in ("disabledPayment", "duplicatePayment", "noPayment", "oldPaymentLabel")] + [
                      {"url": url} for url in ("https://wrong.example/no/checkout/modify/",
                      "https://oda.com/no/checkout/modify/?orderNumber=123", "https://oda.com/no/checkout/modify/#other",
                      "https://oda.com/no/checkout/other/")]:

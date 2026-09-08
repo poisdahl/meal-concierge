@@ -993,7 +993,7 @@ class OdaBrowser:
    if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return JSON.stringify({action:'blocked'});
    const target=candidates[0];
    if(!target.checked){target.setAttribute('data-oda-household-action','new-order');return JSON.stringify({action:'new_order'});}
-   const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Gå til betaling');
+   const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett');
    if(payment.length!==1)return JSON.stringify({action:'blocked'});
    payment[0].setAttribute('data-oda-household-action','payment');
    return JSON.stringify({action:'payment'});
