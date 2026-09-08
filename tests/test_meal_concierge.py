@@ -7693,7 +7693,7 @@ class FlowTests(unittest.TestCase):
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         scheduled = self.app.handle({"operation": "email", "action": "schedule", "order_id": "old", "delivery_date": delivery})
         repeated = self.app.handle({"operation": "email", "action": "schedule", "order_id": "old", "delivery_date": delivery})
         self.app.handle({"operation": "email", **scheduled["automation_ack"]})
@@ -7715,7 +7715,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("<h2>A</h2>", payload["html"])
         self.assertEqual(payload["automation_environment"], {"HERMES_WORKSPACE_AUTOMATION_PROFILE": "test-email"})
         self.app.handle({"operation": "email", "action": "release", "order_id": "old", "claim_token": due["claim_token"]})
-        moved = (date.today() + timedelta(days=1)).isoformat()
+        moved = (datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=1)).isoformat()
         self.oda.order_delivery = moved
         result = self.app.handle({"operation": "email", "action": "due", "order_id": "old"})
         self.assertFalse(result["send"])
@@ -7769,7 +7769,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["email_jobs"], before)
 
     def test_due_requires_exact_menu_and_one_job_before_send(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "other", "week": "2026-W36", "dishes": []}
@@ -7796,7 +7796,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["email_jobs"], duplicate)
 
     def test_due_claims_until_token_bound_mark_sent(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
@@ -7841,7 +7841,7 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(due["claim"])
 
     def test_due_requires_fresh_confirmed_status_and_delivery_date(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         menu = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
@@ -7865,10 +7865,10 @@ class FlowTests(unittest.TestCase):
             state["email_recipient"] = "owner@example.test"
             state["order_snapshots"][malicious] = {"order_id": malicious, "week": "2026-W36", "dishes": []}
         with self.assertRaisesRegex(HouseholdError, "bounded safe"):
-            self.app.handle({"operation": "email", "action": "schedule", "order_id": malicious, "delivery_date": date.today().isoformat()})
+            self.app.handle({"operation": "email", "action": "schedule", "order_id": malicious, "delivery_date": datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()})
 
     def test_email_due_never_uses_another_orders_provider_response(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         menu = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
