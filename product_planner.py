@@ -347,6 +347,7 @@ def _normalize_hard_product_constraints(value: Any) -> dict[str, list[str]]:
 
 
 def _option_costs(product: Mapping[str, Any], maximum: int) -> list[dict[str, Any] | None]:
+    maximum = min(maximum, product.get("package_limit", {}).get("count", maximum))
     options = product.get("purchase_options")
     if not isinstance(options, list) or not options:
         raise HouseholdError("candidate has no purchase options")
@@ -417,6 +418,19 @@ def _option_costs(product: Mapping[str, Any], maximum: int) -> list[dict[str, An
     return costs
 
 
+def _package_quantity(package, unit):
+    if not isinstance(package, Mapping):
+        return None
+    if package.get("unit") == unit:
+        try:
+            return _read_fraction(package.get("quantity"), positive=True)
+        except HouseholdError:
+            return None
+    if unit == "count" and type(package.get("contained_count")) is int and package["contained_count"] > 0:
+        return Fraction(package["contained_count"])
+    return None
+
+
 def _select_requirement(
     requirement: Mapping[str, Any], observation: Mapping[str, Any], approval: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, str | None, int]:
@@ -439,11 +453,8 @@ def _select_requirement(
         if product.get("availability") != "available":
             return None, "candidate_availability_unresolved", 0
         package = product.get("package")
-        if not isinstance(package, Mapping) or package.get("unit") != requirement.get("unit"):
-            return None, "candidate_package_incompatible", 0
-        try:
-            package_quantity = _read_fraction(package.get("quantity"), positive=True)
-        except HouseholdError:
+        package_quantity = _package_quantity(package, requirement["unit"])
+        if package_quantity is None:
             return None, "candidate_package_incompatible", 0
         options = product.get("purchase_options")
         if not isinstance(options, list) or not options:
@@ -587,15 +598,15 @@ def _estimated_single_product(requirement, observation, approval):
     product = matches[0]
     package = product.get("package")
     options = product.get("purchase_options", [])
-    if product.get("availability") != "available" or not isinstance(package, Mapping) or package.get("unit") != requirement["unit"] or len(options) != 1:
+    size = _package_quantity(package, requirement["unit"])
+    if product.get("availability") != "available" or size is None or len(options) != 1:
         return None
     option = options[0]
     if option.get("price_kind") != "exact" or option.get("eligibility") != "confirmed" or option.get("offer_kind") != "regular" or option.get("package_count") != 1 or type(option.get("merchandise_ore")) is not int or option["merchandise_ore"] < 0:
         return None
-    size = _read_fraction(package["quantity"], positive=True)
     needed = _read_fraction(requirement["quantity"], positive=True)
     count = math.ceil(needed / size)
-    if not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT:
+    if not 1 <= count <= min(MAX_PACKAGES_PER_REQUIREMENT, product.get("package_limit", {}).get("count", MAX_PACKAGES_PER_REQUIREMENT)):
         return None
     excess = (count * size - needed) / needed
     if approval.get("max_excess") is not None and excess > _read_fraction(approval["max_excess"]):
@@ -607,6 +618,32 @@ def _estimated_single_product(requirement, observation, approval):
             "coverage": _fraction_json(count * size), "required": _fraction_json(needed),
             "unit": requirement["unit"], "excess_score": _fraction_json(excess), "package_count": count,
             "merchandise_ore": merchandise, "mandatory_deposit_ore": None, "total_payable_ore": None}
+
+
+def _candidate_diagnostics(requirement, observation, approval):
+    """Explain observed size/unit/price blockers without inventing conversions."""
+    result = []
+    for product in observation["products"]:
+        if product["product_ref"] not in approval["candidate_refs"]:
+            continue
+        package = product.get("package")
+        detail = {"product_ref": product["product_ref"], "required_unit": requirement["unit"]}
+        if not isinstance(package, Mapping) or (package.get("unit") == requirement["unit"]
+                                               and _package_quantity(package, requirement["unit"]) is None):
+            detail["reason"] = "package_size_unresolved"
+        elif _package_quantity(package, requirement["unit"]) is None:
+            detail.update(reason="unit_conversion_required", observed_unit=package.get("unit"))
+        elif (product.get("package_limit") and math.ceil(_read_fraction(requirement["quantity"], positive=True)
+                / _package_quantity(package, requirement["unit"])) > product["package_limit"]["count"]):
+            detail.update(reason="package_limit_exceeded", package_limit=deepcopy(product["package_limit"]))
+        elif any(option.get("price_kind") == "exact" and option.get("eligibility") == "confirmed"
+                 and option.get("mandatory_deposit_ore") is None
+                 for option in product.get("purchase_options", [])):
+            detail["reason"] = "deposit_unobserved"
+        else:
+            continue
+        result.append(detail)
+    return result
 
 
 def build_product_plan(
@@ -688,7 +725,11 @@ def build_product_plan(
                 selection, reason, eligible_count = estimated, None, 1
         item["eligible_candidate_count"] = eligible_count
         if reason is not None:
-            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": reason})
+            problem = {"requirement_id": requirement_id, "item": requirement["item"], "reason": reason}
+            diagnostics = _candidate_diagnostics(requirement, evaluated_observation, filtered)
+            if diagnostics:
+                problem["candidate_diagnostics"] = diagnostics
+            unresolved.append(problem)
             item["status"] = "needs_input"
         else:
             item["status"] = "selected"
