@@ -128,6 +128,22 @@ def valid_email_address(value: Any) -> bool:
     ) is not None
 
 
+def checkout_payment_settings(value: Any, provider: str) -> dict[str, Any]:
+    """Validate the non-secret payment preference at config/setup/state boundaries."""
+    if value is None:
+        value = {"method": "vipps" if provider == "meny" else "saved_card"}
+    if not isinstance(value, Mapping) or not set(value).issubset({"method", "card_last4"}):
+        raise HouseholdError("checkout_payment needs method and optional card_last4 only")
+    methods = {"oda": {"saved_card", "vipps"}, "mathem": {"saved_card"}, "meny": {"vipps"}}
+    method = value.get("method")
+    if not isinstance(method, str) or method not in methods.get(provider, {"saved_card"}):
+        raise HouseholdError(f"checkout_payment method is not supported for {provider}")
+    last4 = value.get("card_last4")
+    if last4 is not None and (method != "saved_card" or provider != "oda" or not isinstance(last4, str) or re.fullmatch(r"[0-9]{4}", last4) is None):
+        raise HouseholdError("checkout_payment card_last4 must be four digits for an Oda saved card")
+    return {"method": method, "card_last4": last4}
+
+
 def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
     profile = deepcopy(DEFAULT_PROFILE)
     schedule = deepcopy(DEFAULT_SCHEDULE)
@@ -141,6 +157,7 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "household": str(config["household"]),
         "provider": str(config.get("provider") or "oda").casefold(),
         "profile": profile,
+        "checkout_payment": checkout_payment_settings(config.get("checkout_payment"), str(config.get("provider") or "oda").casefold()),
         "product_favorites": [],
         "recurring_items": [],
         "schedule": schedule,
@@ -729,6 +746,7 @@ def _migrate_state(
         state["version"] = 12
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
+    state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
     state.setdefault("recipe_delivery", initial_recipe_delivery(
         legacy=True, legacy_email=valid_email_address(state.get("email_recipient"))))
     batch = state.get("batch_outcomes")

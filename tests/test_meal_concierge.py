@@ -166,9 +166,9 @@ class FakeBrowser:
     def receipt_address_matches(self, order_id, address, *, deadline=None):
         return address == self.receipt_address
 
-    def review_checkout(self, cart, *, deadline=None):
+    def review_checkout(self, cart, *, deadline=None, payment=None):
         self.review_deadlines.append(deadline)
-        return {"page_digest": "a" * 64, "payment_display": "•••• 1234"}
+        return {"page_digest": "a" * 64, "payment_display": "Vipps" if payment and payment["method"] == "vipps" else "•••• 1234"}
 
     def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
         self.submit_deadlines.append(deadline)
@@ -1488,7 +1488,7 @@ class CoreTestsBase:
         for changes, message in [
             ({"authenticated": False}, "browser login could not be verified"),
             ({"address_matches": False}, "address does not match"),
-            ({"masked_payment": False, "payment_display": None}, "saved payment card could not be verified"),
+            ({"masked_payment": False, "payment_display": None}, "configured payment selection could not be verified"),
             ({"available": False, "masked_payment": False}, "unavailable items or details"),
             ({"total_matches": False}, "does not match the reviewed cart"),
         ]:
@@ -2205,7 +2205,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
 
         browser._eval = lambda script: evaluate(script, {})
         browser._click_action = mock.Mock()
-        with self.assertRaisesRegex(HouseholdError, "requires a selected saved card"):
+        with self.assertRaisesRegex(HouseholdError, "configured payment is not selected"):
             browser._advance_checkout_path()
         browser._click_action.assert_not_called()
 
@@ -5644,7 +5644,7 @@ class CartPlanTests(unittest.TestCase):
                 "cart_digest": stopped["cart_plan"]["cart_digest"],
             })
 
-            def changed_review(_cart, *, deadline=None):
+            def changed_review(_cart, *, deadline=None, payment=None):
                 provider._mutate_cart({"operations": [{"productId": 20, "quantity": 1}]})
                 raise OdaCheckoutMismatchError("Oda checkout does not match the reviewed cart")
 
@@ -5667,7 +5667,7 @@ class CartPlanTests(unittest.TestCase):
             })
             original_review = browser.review_checkout
 
-            def review_then_change(cart, *, deadline=None):
+            def review_then_change(cart, *, deadline=None, payment=None):
                 review = original_review(cart, deadline=deadline)
                 provider._mutate_cart({"operations": [{"productId": 20, "quantity": 1}]})
                 return review
@@ -7095,6 +7095,86 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 1)
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_oda_configured_vipps_prepares_without_payment_and_reconciles_one_attempt(self):
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                         "changes": {"checkout_payment": {"method": "vipps"}}})
+        self.oda.orders = [{"order_number": "old-unpaid"}]
+        self.oda.tracking = "unpaid_order"
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertEqual(prepared["summary"]["payment"], "Vipps")
+        self.assertEqual(prepared["summary"]["payment_method"], "vipps")
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        request = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+        waiting = self.app.handle(request)
+        with self.assertRaisesRegex(HouseholdError, "pending provider operation"):
+            self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                             "changes": {"checkout_payment": {"method": "saved_card"}}})
+        self.assertFalse(waiting["confirmed"])
+        self.assertFalse(waiting["retry_allowed"])
+        self.assertTrue(waiting["payment_followup_required"])
+        self.assertNotIn("awaiting_user_payment", waiting)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        with self.assertRaises(HouseholdError):
+            self.app.handle(request)
+        again = self.app.handle({"operation": "checkout", "action": "reconcile"})
+        self.assertTrue(again["payment_followup_required"])
+        self.assertFalse(again["confirmed"])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.oda.tracking = "paid_and_modifiable"
+        paid = self.app.handle({"operation": "checkout", "action": "reconcile"})
+        self.assertTrue(paid["confirmed"])
+        self.assertEqual(paid["order_id"], "new-order")
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertTrue(self.app.handle(request)["idempotent"])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_user_can_change_payment_after_prepare_and_get_a_new_review_without_paying(self):
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        frozen = self.store.read()["pending_checkout"]
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                         "changes": {"checkout_payment": {"method": "vipps"}}})
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
+        with self.assertRaisesRegex(HouseholdError, "payment preference changed"):
+            self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
+        revised = self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertNotEqual(revised["confirmation_id"], prepared["confirmation_id"])
+        self.assertEqual(revised["summary"]["payment"], "Vipps")
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_legacy_unsubmitted_review_cannot_dispatch_after_payment_setup_changes(self):
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        with self.store.locked() as state:
+            state["pending_checkout"].pop("checkout_payment")
+        frozen = self.store.read()["pending_checkout"]
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                         "changes": {"checkout_payment": {"method": "vipps"}}})
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
+        with self.assertRaisesRegex(HouseholdError, "payment preference changed or was not bound"):
+            self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
+        revised = self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertEqual(revised["summary"]["payment"], "Vipps")
+        self.assertNotEqual(revised["confirmation_id"], prepared["confirmation_id"])
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_payment_preference_changed_during_prepare_does_not_freeze_stale_review(self):
+        original = self.browser.review_checkout
+        def review(cart, *, deadline=None, payment=None):
+            result = original(cart, deadline=deadline, payment=payment)
+            self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                             "changes": {"checkout_payment": {"method": "vipps"}}})
+            return result
+        self.browser.review_checkout = review
+        with self.assertRaisesRegex(HouseholdError, "payment preference changed"):
+            self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_checkout_preserves_browser_supplied_named_amounts(self):
         self.oda.cart["subtotal"] = 107.95
         self.oda.delivery_slots["slots"][0]["price_ore"] = 0
@@ -7107,7 +7187,7 @@ class FlowTests(unittest.TestCase):
             "other_fees": {"Tillegg for mindre bestilling": 29.0},
             "provider_total": 107.95,
         }
-        self.browser.review_checkout = lambda _cart, *, deadline=None: {
+        self.browser.review_checkout = lambda _cart, *, deadline=None, payment=None: {
             "page_digest": "a" * 64,
             "payment_display": "•••• 1234",
             "amounts": deepcopy(amounts),
@@ -7119,7 +7199,7 @@ class FlowTests(unittest.TestCase):
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_checkout_rejects_browser_delivery_price_that_disagrees_with_slot(self):
-        self.browser.review_checkout = lambda _cart, *, deadline=None: {
+        self.browser.review_checkout = lambda _cart, *, deadline=None, payment=None: {
             "page_digest": "a" * 64,
             "payment_display": "•••• 1234",
             "amounts": {
@@ -7534,7 +7614,7 @@ class FlowTests(unittest.TestCase):
                 release_tracking.wait(1)
             return original_call(tool, arguments, **kwargs)
 
-        def observed_review(cart, *, deadline=None):
+        def observed_review(cart, *, deadline=None, payment=None):
             checkout_entered.set()
             return original_review(cart, deadline=deadline)
 
@@ -7613,7 +7693,7 @@ class FlowTests(unittest.TestCase):
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         scheduled = self.app.handle({"operation": "email", "action": "schedule", "order_id": "old", "delivery_date": delivery})
         repeated = self.app.handle({"operation": "email", "action": "schedule", "order_id": "old", "delivery_date": delivery})
         self.app.handle({"operation": "email", **scheduled["automation_ack"]})
@@ -7635,7 +7715,7 @@ class FlowTests(unittest.TestCase):
         self.assertIn("<h2>A</h2>", payload["html"])
         self.assertEqual(payload["automation_environment"], {"HERMES_WORKSPACE_AUTOMATION_PROFILE": "test-email"})
         self.app.handle({"operation": "email", "action": "release", "order_id": "old", "claim_token": due["claim_token"]})
-        moved = (date.today() + timedelta(days=1)).isoformat()
+        moved = (datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=1)).isoformat()
         self.oda.order_delivery = moved
         result = self.app.handle({"operation": "email", "action": "due", "order_id": "old"})
         self.assertFalse(result["send"])
@@ -7689,7 +7769,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["email_jobs"], before)
 
     def test_due_requires_exact_menu_and_one_job_before_send(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "other", "week": "2026-W36", "dishes": []}
@@ -7716,7 +7796,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.store.read()["email_jobs"], duplicate)
 
     def test_due_claims_until_token_bound_mark_sent(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
             state["menu"] = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
@@ -7761,7 +7841,7 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(due["claim"])
 
     def test_due_requires_fresh_confirmed_status_and_delivery_date(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         menu = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
@@ -7785,10 +7865,10 @@ class FlowTests(unittest.TestCase):
             state["email_recipient"] = "owner@example.test"
             state["order_snapshots"][malicious] = {"order_id": malicious, "week": "2026-W36", "dishes": []}
         with self.assertRaisesRegex(HouseholdError, "bounded safe"):
-            self.app.handle({"operation": "email", "action": "schedule", "order_id": malicious, "delivery_date": date.today().isoformat()})
+            self.app.handle({"operation": "email", "action": "schedule", "order_id": malicious, "delivery_date": datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()})
 
     def test_email_due_never_uses_another_orders_provider_response(self):
-        delivery = date.today().isoformat()
+        delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         menu = {"order_id": "old", "week": "2026-W36", "dishes": [{"name": "A", "ingredients": ["x"], "steps": ["y"]}]}
         with self.store.locked() as state:
             state["email_recipient"] = "owner@example.test"
@@ -8330,7 +8410,7 @@ class FlowTests(unittest.TestCase):
         })
         original_review = self.browser.review_checkout
 
-        def drift_after_review(cart, *, deadline=None):
+        def drift_after_review(cart, *, deadline=None, payment=None):
             result = original_review(cart, deadline=deadline)
             self.oda.delivery_slots["slots"][1]["price_ore"] = 1900
             return result
@@ -8414,7 +8494,7 @@ class FlowTests(unittest.TestCase):
         self.app.handle({"operation": "schedule", "action": "update", "changes": {"enabled": True, "maximum_total": 100.0, "delivery": {"weekday": "Saturday"}, "auto_checkout": True}})
         self.app.handle({"operation": "schedule", "action": "set_cron_job", "cron_job_id": "test-cron"})
 
-        def fail_review(_cart, *, deadline=None):
+        def fail_review(_cart, *, deadline=None, payment=None):
             raise HouseholdError("browser deadline")
 
         self.browser.review_checkout = fail_review
