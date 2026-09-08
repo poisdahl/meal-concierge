@@ -53,7 +53,18 @@ _ODA_RANGED_COUNT_PREFIX = re.compile(
     re.IGNORECASE,
 )
 _ODA_DISCOUNT_PREFIX = re.compile(
-    r"^maks\s+[1-9]\d{0,2}\s+til\s+nedsatt\s+pris$", re.IGNORECASE
+    r"^maks\s+(?P<count>[1-9]\d{0,2})\s+til\s+nedsatt\s+pris$", re.IGNORECASE
+)
+_ODA_CUSTOMER_LIMIT_PREFIX = re.compile(
+    r"^maks\s+(?P<count>[1-9]\d{0,2})\s+per\s+kunde$", re.IGNORECASE
+)
+_ODA_PACKAGE_DESCRIPTOR = re.compile(
+    r"^(?:Norge|Naturell|Skinnfri|Saktevoksende kylling|Revet|Fine|Tørket|Malt|Økologisk|"
+    r"(?:Frisk )?i (?:Pose|Beger/pose)|(?:Vår laveste pris )?Nederland/\s*(?:Spania|Italia)|"
+    r"Etiopia\s*/\s*Kenya|Flate|Peru/\s*Zimbabwe|Wiig Gartneri Norge|"
+    r"Lagret i \d{1,2}[–-]\d{1,2} måneder|\d{1,2} Mnd|"
+    r"Vår laveste pris|klasse [1-3]|\d{1,3}(?:[.,]\d{1,2})?%)$",
+    re.IGNORECASE,
 )
 _MULTIBUY = re.compile(r"^(?P<take>[2-9])\s+for\s+(?P<pay>[1-8])$", re.IGNORECASE)
 _MENY_MULTI_CAMPAIGN = re.compile(
@@ -206,13 +217,14 @@ def _strict_package(value: str) -> tuple[Fraction, str, int] | None:
 
 
 def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] | None:
-    """Parse only complete package strings whose shapes are fixture-established."""
+    """Read a fixed package size; descriptive prefixes supply no quantity."""
 
     text = _display_text(value, maximum=300)
     if text is None or _VARIABLE.search(text):
         return None
     if provider == "mathem":
         text = re.sub(r"\bst\b", "stk", text, flags=re.IGNORECASE)
+    contained_count = None
     parsed = _strict_package(text)
     if provider == "mathem" and parsed is None:
         # Verified Swedish produce labels include origin before a fixed mass.
@@ -250,14 +262,33 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
                 and multipack[:2] == total[:2] and multipack[2] > 1
             ):
                 parsed = multipack
+        if provider == "oda" and parsed is None and len(segments) >= 2:
+            # Origin, variety and promotion copy precede Oda's fixed size.
+            # Only the final complete quantity supplies capacity. Other sizes,
+            # uncertain-weight qualifiers and unexplained numbers stay unresolved.
+            descriptors = segments[:-1]
+            size = _strict_package(segments[-1])
+            pieces = _strict_package(segments[-2])
+            if (size is not None and size[1] in {"g", "ml"} and size[2] == 1
+                    and pieces is not None and pieces[1:] == ("count", 1)
+                    and pieces[0].denominator == 1):
+                # "5 stk, 400 g" declares both capacities of one package.
+                contained_count = pieces[0].numerator
+                descriptors = segments[:-2]
+            if all(_ODA_DISCOUNT_PREFIX.fullmatch(segment) or _ODA_CUSTOMER_LIMIT_PREFIX.fullmatch(segment)
+                   or _ODA_PACKAGE_DESCRIPTOR.fullmatch(segment) for segment in descriptors):
+                parsed = size
     if parsed is None:
         return None
     quantity, unit, item_count = parsed
-    return {
+    result = {
         "quantity": {"numerator": quantity.numerator, "denominator": quantity.denominator},
         "unit": unit,
         "item_count": item_count,
     }
+    if contained_count is not None:
+        result["contained_count"] = contained_count
+    return result
 
 
 def _unit_price(merchandise_ore: int, package: Mapping[str, Any], packages: int) -> dict[str, Any]:
@@ -511,6 +542,15 @@ def _normalize_retail_product(raw: Any, observed_at: str, *, provider: str = "od
     result["dietary_evidence"] = observation(raw)
     if package is not None:
         result["package"] = package
+    if provider == "oda" and package_text:
+        limits = []
+        for segment in package_text.split(", "):
+            for pattern, kind in ((_ODA_DISCOUNT_PREFIX, "discount_price"), (_ODA_CUSTOMER_LIMIT_PREFIX, "per_customer")):
+                match = pattern.fullmatch(segment)
+                if match:
+                    limits.append({"count": int(match["count"]), "kind": kind})
+        if limits:
+            result["package_limit"] = min(limits, key=lambda limit: limit["count"])
     return result
 
 
