@@ -40,6 +40,111 @@ SLOTS = {'deliveryDate': '2026-09-12', 'slots': [{
 
 
 
+class SharedRetailCartNavigationTests(unittest.TestCase):
+    def browser(self, cls):
+        browser = cls.__new__(cls)
+        browser._open = mock.Mock()
+        browser._settle = mock.Mock()
+        browser._invoke = mock.Mock()
+        browser._cart_surface = mock.Mock(return_value={'action': 'continue'})
+        browser._click_action = mock.Mock()
+        return browser
+
+    def test_both_providers_use_one_cart_continue_after_reload(self):
+        for cls, origin in ((existing.OdaBrowser, 'https://oda.com/no/'), (MathemBrowser, 'https://www.mathem.se/se/')):
+            with self.subTest(provider=cls.checkout_provider):
+                b = self.browser(cls)
+                self.assertEqual(b._continue_checkout_cart(), 'continue')
+                b._open.assert_called_once_with(origin + 'cart/')
+                self.assertEqual(b._invoke.call_args_list, [mock.call('reload'), mock.call('snapshot')])
+                b._click_action.assert_called_once_with('continue', mouse=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node needed for browser boundary fixture')
+    def test_actual_cart_script_binds_each_origin_language_and_ambiguity(self):
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));let marked=[];
+const node=()=>({tagName:input.full?'A':'BUTTON',innerText:input.label,href:input.cart,disabled:false,
+ getAttribute:()=>null,setAttribute:(key,value)=>marked.push(value),removeAttribute:()=>{},
+ getBoundingClientRect:()=>({width:10,height:10})});
+const controls=Array.from({length:input.count},node);
+const document={innerText:'Delsumma',querySelector:s=>s==='main'?document:(input.login?{}:null),
+ querySelectorAll:s=>s==='button'?(input.full?[]:controls):s==='a'?(input.full?controls:[]):[]};
+document.body=document;const location={href:input.url};
+const getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
+"""
+        for cls, origin, label in ((existing.OdaBrowser, 'https://oda.com/no/', 'Fortsett'),
+                                   (MathemBrowser, 'https://www.mathem.se/se/', 'Fortsätt')):
+            b = cls.__new__(cls); b._eval = lambda script: script
+            script = b._cart_surface()
+            cases = [(origin+'cart/', label, 1, False, False, 'continue'),
+                     ('https://wrong.example/se/cart/', label, 1, False, False, 'blocked'),
+                     (origin+'cart/', label, 2, False, False, 'blocked'),
+                     (origin+'cart/', label, 1, False, True, 'blocked')]
+            if cls is MathemBrowser:
+                cases.append((origin, 'Fortsätt till varukorgen', 1, True, False, 'full_cart'))
+                cases.append((origin, label, 1, False, False, 'wait'))
+            for url, text, count, full, login, action in cases:
+                with self.subTest(provider=cls.checkout_provider, action=action, url=url):
+                    run = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({
+                        'script': script, 'url': url, 'cart': origin+'cart/', 'label': text,
+                        'count': count, 'full': full, 'login': login}), text=True, capture_output=True, check=True)
+                    result = json.loads(run.stdout)
+                    self.assertEqual(result['value']['action'], action)
+                    self.assertEqual(len(result['marked']), 0 if action in {'blocked', 'wait'} else 1)
+
+    def test_mathem_storefront_keeps_one_full_cart_then_one_continue(self):
+        b = self.browser(MathemBrowser)
+        b._open.side_effect = HouseholdError('cart redirected to storefront')
+        b._eval = mock.Mock(return_value={'url': 'https://www.mathem.se/se/'})
+        b._cart_surface.side_effect = [{'action': 'full_cart'}, {'action': 'full_cart'}, {'action': 'continue'}]
+        self.assertEqual(b._continue_checkout_cart(), 'continue')
+        self.assertEqual(b._click_action.call_args_list, [mock.call('full-cart'), mock.call('continue', mouse=True)])
+        b._open.assert_called_once()
+
+    def test_delayed_mathem_cart_and_modify_never_repeat_continue(self):
+        for target in (None, {'checkout_url': MathemBrowser.checkout_url + '?orderNumber=123456'}):
+            b = self.browser(MathemBrowser)
+            b._continue_checkout_cart = mock.Mock(return_value='continue')
+            b._eval = mock.Mock(side_effect=[{'action': 'https://www.mathem.se/se/cart/#continue'},
+                {'action': 'https://www.mathem.se/se/cart/#continue'}, {'action': 'modify'},
+                {'action': 'modify'}, {'action': 'ready'}])
+            b._choose_checkout_destination = mock.Mock()
+            b._navigate_to_checkout('123456' if target else None, expected=target)
+            b._continue_checkout_cart.assert_called_once()
+            b._choose_checkout_destination.assert_called_once_with(target)
+            b._invoke.assert_not_called()
+            b._open.assert_not_called()
+
+    def test_lost_continue_expiry_and_ambiguous_cart_stop_without_retry(self):
+        for failure in ('lost_continue', 'expiry', 'ambiguous', 'stale_full_cart'):
+            b = self.browser(MathemBrowser)
+            b._eval = mock.Mock(side_effect=AssertionError('no subsequent navigation'))
+            if failure == 'lost_continue': b._click_action.side_effect = HouseholdError('mouse up response lost')
+            elif failure == 'expiry': b._settle.side_effect = HouseholdError('checkout deadline reached')
+            elif failure == 'ambiguous': b._cart_surface.return_value = {'action': 'blocked'}
+            else: b._cart_surface.return_value = {'action': 'full_cart'}
+            with self.subTest(failure=failure), self.assertRaises(HouseholdError): b._navigate_to_checkout()
+            self.assertLessEqual(b._click_action.call_count, 1)
+            b._eval.assert_not_called()
+
+    def test_timeout_distinguishes_storefront_before_and_after_destination(self):
+        for modified in (False, True):
+            b = self.browser(MathemBrowser)
+            b._continue_checkout_cart = mock.Mock(return_value='continue')
+            states = ([{'action': 'modify', 'route': 'modify'}] if modified else [])
+            b._eval = mock.Mock(side_effect=states + [{'action': 'wait', 'route': 'storefront'}] * 60)
+            b._choose_checkout_destination = mock.Mock()
+            with self.assertRaises(HouseholdError) as error:
+                b._navigate_to_checkout('private-order', expected={'checkout_url': MathemBrowser.checkout_url+'?orderNumber=private-order'})
+            message = str(error.exception)
+            self.assertIn('cart:continue-dispatched', message)
+            self.assertIn('storefront:wait', message)
+            self.assertEqual('modify:destination-dispatched' in message, modified)
+            self.assertNotIn('private-order', message)
+            self.assertEqual(b._choose_checkout_destination.call_count, int(modified))
+            b._invoke.assert_not_called()
+
 class MathemDietaryDetailTests(unittest.TestCase):
     # Visible row labels from Mathem's public product 4694, 2026-09-07.
     HTML = ('<div>Ingredienser</div><div>PASTA AV DURUMVETE.</div>'
@@ -1251,6 +1356,114 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                 'deliveryDate': '2026-09-12', 'deliverySlotDisplay': 'Lör 12. sep 09:00 - 12:00',
                 'deliveryAddress': 'Exempelvägen 1', 'products': deepcopy(self.cart['items'])}
 
+    @mock.patch.object(Application, '_now', return_value=datetime(2026, 9, 4, 13, 5, tzinfo=timezone.utc))
+    def test_supplemental_checkout_preserves_unassessed_menu_after_lost_response(self, _clock):
+        for provider_name in ('oda', 'mathem'):
+            with self.subTest(provider=provider_name), tempfile.TemporaryDirectory() as directory:
+                if provider_name == 'oda':
+                    shop = existing.MutableFakeOda()
+                    browser = existing.FakeBrowser(); browser.oda = shop
+                    product_id = '10'
+                else:
+                    shop = MathemShop()
+                    shop.cart = deepcopy(self.cart)
+                    shop.cart['items'] = []
+                    shop.cart['productQuantityCount'] = 0
+                    shop.slots['slots'][0]['isSelected'] = True
+                    shop.slots['slots'][0]['price'] = '0,00 kr'
+                    browser = existing.FakeBrowser(); browser.oda = shop
+                    browser.receipt_address = 'Exempelvägen 1'
+                    amounts = {**self.amounts, 'product_subtotal': 29.9, 'provider_total': 135.9}
+                    browser.review_checkout = lambda cart, **kw: {'payment_display': '•••• 1234',
+                        'amounts': amounts, 'discount_breakdown': self.discount_breakdown}
+                    product_id = '4694'
+                shop.cart['items'] = []
+                shop.cart['subtotal'] = 0
+                config = {**existing.CONFIG, 'provider': provider_name, 'confirmation_policy': 'standing'}
+                store = StateStore(Path(directory), config)
+                app = Application(store, shop, browser)
+                from test_meal_concierge_planner import recipe
+                refs = []
+                for i in range(7):
+                    saved = app.handle({'operation': 'recipes', 'action': 'save',
+                        'recipe': recipe('Saved dinner ' + str(i), 'saved-dinner-' + str(i)),
+                        'idempotency_key': 'saved-dinner-' + str(i)})['recipe']
+                    refs.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
+                app.handle({'operation': 'profile', 'action': 'update', 'changes': {'recipes': {'sources': {
+                    'oda': False, 'mathem': False, 'meny': False, 'themealdb': False, 'wikibooks': False}}}})
+                plan = app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                    'week': '2026-W38', 'dates': [f'2026-09-{14+i}' for i in range(7)],
+                    'portions': 2, 'candidates': refs}})['plan']
+                menu = app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref']})['menu']
+                self.assertEqual(len(menu['slots']), 7)
+                app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
+                    'rules': [{'kind': 'allergy', 'term': 'sesam'}],
+                    'uncertainty_permissions': [{'kind': 'allergy', 'term': 'sesam', 'product_ref': product_id,
+                        'condition': 'unknown', 'accepted': True, 'notify': True}]}}})
+                browser.order_followup = lambda *a, **kw: {'deadline_text': None,
+                    'cancellation_deadline_text': None, 'cancellation_available': True}
+                app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+                    {'product_id': product_id, 'product_name': 'Separate groceries', 'quantity': 1}]})
+                if provider_name == 'mathem':
+                    shop.cart['totalGrossAmount'] = 135.9
+                    shop.cart['productQuantityCount'] = 1
+                prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+                self.assertEqual(prepared['summary']['menu_attribution'], 'cart_only')
+                self.assertEqual(prepared['summary']['menu_coverage'], 'not_assessed')
+                self.assertEqual(prepared['summary']['menu_shortfall'], [])
+                before = store.read()
+                def lost(cart, review, before_click, **kwargs):
+                    before_click(); browser.checkout_clicks += 1
+                    summary = store.read()['pending_checkout']['summary']
+                    shop.orders.append({'orderNumber': '123456', 'currency': 'SEK' if provider_name == 'mathem' else 'NOK',
+                        'grossAmount': summary['total'], 'deliveryDate': '2026-09-12' if provider_name == 'mathem' else '2026-09-05',
+                        'deliverySlotDisplay': 'Lör 12. sep 09:00 - 12:00' if provider_name == 'mathem' else 'Lør 5. sep 09:00 - 12:00',
+                        'deliveryAddress': browser.receipt_address,
+                        'products': [{'product': {'id': int(product_id), 'name': 'Separate groceries'},
+                                      'quantity': 1, 'totalGrossAmount': summary['total']}]})
+                    raise HouseholdError('synthetic accepted order response lost')
+                browser.submit_checkout = lost
+                request = {'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'separate-groceries'}
+                notice = app.handle(request)['notice']
+                self.assertTrue(notice['dispatch'])
+                self.assertEqual(browser.checkout_clicks, 0)
+                inbox = Path(directory) / 'notice.txt'
+                inbox.write_text(notice['payload']['message'])
+                self.assertEqual(inbox.read_text(), notice['payload']['message'])
+                app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': notice['notice_token'],
+                            'send_outcome': 'sent', 'sender_receipt': 'synthetic-local-inbox-verified'})
+                with self.assertRaisesRegex(HouseholdError, 'response lost'):
+                    app.handle(request)
+                restarted = Application(StateStore(Path(directory), config), shop, browser)
+                result = restarted.handle(request)
+                self.assertTrue(result['confirmed'])
+                self.assertEqual(result['menu_attribution'], 'cart_only')
+                self.assertEqual(result['menu_coverage'], 'not_assessed')
+                after = result['notice']
+                self.assertEqual(after['phase'], 'after_reconciliation')
+                inbox.write_text(after['payload']['message'])
+                self.assertEqual(inbox.read_text(), after['payload']['message'])
+                restarted.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': after['notice_token'],
+                    'send_outcome': 'sent', 'sender_receipt': 'synthetic-result-inbox-verified'})
+                self.assertTrue(restarted.handle(request)['idempotent'])
+                self.assertEqual(browser.checkout_clicks, 1)
+                for key in ('menu', 'recipe_usage', 'cart_plan', 'order_snapshots'):
+                    self.assertEqual(restarted.store.read()[key], before[key], key)
+
+    def test_legacy_cart_only_receipt_does_not_attribute_a_newer_menu_plan(self):
+        old_menu = existing.CartPlanTests.menu()
+        old_plan = self.app._new_cart_plan(self.app._cart_menu_ref(old_menu), {}, {}, {}, {}, set())
+        new_menu = existing.CartPlanTests.menu(revision=2, digest="b" * 64)
+        with self.store.locked() as state:
+            state['menu'] = new_menu
+            state['cart_plan'] = self.app._new_cart_plan(self.app._cart_menu_ref(new_menu),
+                {'4694': 1}, {'4694': 'Pasta'}, {'4694': 1}, {}, set())
+            original = deepcopy(state)
+            # Historical pending has no new attribution fields. Only its frozen
+            # requirements can establish that a menu was part of the purchase.
+            self.app._record_order_snapshot(state, {'menu': old_menu, 'cart_plan': old_plan}, '123456')
+            self.assertEqual(state, original)
+
     def test_prepare_uses_final_amounts_and_masked_payment(self):
         prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
         self.assertNotIn('manual_checkout_required', prepared)
@@ -1784,6 +1997,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                  'accepted': True, 'notify': True}]}}})
         self.shop.product_dietary_evidence = lambda *a, **kw: {'unavailable': 'synthetic'}
         prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertEqual(prepared['summary']['menu_attribution'], 'menu_bound')
         self.assertEqual(prepared['summary']['menu_shortfall'], [{'product_id': '10', 'name': 'Ägg',
             'required_quantity': 3, 'live_quantity': 2, 'missing_quantity': 1}])
         self.assertEqual(self.browser.checkout_clicks, 0)

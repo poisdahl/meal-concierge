@@ -738,6 +738,16 @@ class OrderOperations:
             return "delivery does not match preference"
         return None
 
+    def _checkout_menu_attribution(self, menu, plan):
+        # A supplemental-only cart proves nothing about the saved menu. Use the
+        # frozen plan, including during recovery of older pending checkouts.
+        return "menu_bound" if (
+            isinstance(menu, Mapping) and isinstance(plan, Mapping)
+            and plan.get("provider") == self.provider
+            and plan.get("menu_ref") == self._cart_menu_ref(menu)
+            and bool(plan.get("required_quantities"))
+        ) else "cart_only"
+
     def _menu_shortfall(self, plan, summary):
         if not isinstance(plan, Mapping):
             return []
@@ -2173,6 +2183,10 @@ class OrderOperations:
                 summary = self._bind_delivery_summary(summary, delivery_binding, provider=self.provider,
                                                       discount_breakdown=review.get("discount_breakdown"))
             summary["menu_shortfall"] = self._menu_shortfall(cart_plan_baseline, summary)
+            if not order_change:
+                summary["menu_attribution"] = self._checkout_menu_attribution(menu_baseline, cart_plan_baseline)
+                if menu_baseline and summary["menu_attribution"] == "cart_only":
+                    summary["menu_coverage"] = "not_assessed"
             if self.provider == "meny":
                 review = deepcopy(dict(review))
                 review["delivery_guard"] = deepcopy(dict(delivery_binding))
@@ -2437,6 +2451,10 @@ class OrderOperations:
                 record["completed_at"] = self._now().isoformat()
         if pending.get("order_change"):
             return
+        attribution = pending.get("summary", {}).get("menu_attribution") or self._checkout_menu_attribution(
+            pending.get("menu"), pending.get("cart_plan"))
+        if attribution != "menu_bound":
+            return
         if isinstance(pending.get("cart_plan"), Mapping) and canonical(state.get("cart_plan")) == canonical(pending.get("cart_plan")):
             state["cart_plan"] = None
         snapshot = deepcopy(pending.get("menu"))
@@ -2587,6 +2605,9 @@ class OrderOperations:
                     "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
                     "payment": self._payment_evidence(tracking_status),
                     "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
+                    "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
+                        pending.get("menu"), pending.get("cart_plan")),
+                    **({"menu_coverage": pending["summary"]["menu_coverage"]} if "menu_coverage" in pending["summary"] else {}),
                 }
                 self._store_protected_result(
                     state, pending["confirmation_id"], "checkout", terminal,

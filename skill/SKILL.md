@@ -501,6 +501,12 @@ Never route “favorite this recipe” to the product tool.
 
 ## Delivery, checkout and email
 
+A checkout with `menu_attribution=cart_only` does not order the saved menu.
+`menu_coverage=not_assessed` means there are no quantified menu requirements;
+an empty `menu_shortfall` is not evidence that the menu is covered. Report the
+actual grocery purchase separately and preserve the saved menu and recipe usage.
+Quantified menu checkout retains its existing shortfall review and notice rules.
+
 
 Dietary checkout uses the actual final product IDs and the exact public Oda or
 Mathem product information reader where available. Missing detail remains unknown.

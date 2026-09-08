@@ -1683,6 +1683,17 @@ There are no additional services, registries or public-data stores.
 
 ## Everyday replenishment before and after checkout
 
+Checkout freezes `summary.menu_attribution`: `menu_bound` requires the exact
+provider/menu reference and nonempty quantified requirements from the frozen
+cart plan. Otherwise it is `cart_only`. With a saved menu,
+`menu_coverage=not_assessed` explicitly distinguishes an incidental grocery
+purchase from menu coverage; `menu_shortfall=[]` alone proves no coverage.
+Cart-only reconciliation preserves the saved menu, recipe usage and cart-plan
+context. Quantified menu purchases retain their existing accepted-shortfall
+behavior. Replay derives legacy attribution only from the frozen pending
+menu/plan, never from a newer menu or a current cart. Purchase, dietary and
+notification authorization remain unchanged.
+
 `meal_concierge_cart(action="ensure", requirements=[{product_id, product_name, quantity}])`
 ensures a minimum package count without duplicate additions on repeated calls.
 Use `change` for explicit additional quantity deltas. Both actions accept an

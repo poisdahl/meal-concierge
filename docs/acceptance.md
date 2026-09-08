@@ -4,17 +4,28 @@ The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
 recovery-assisted addition and UI-prepared delivery results below do not
 demonstrate the complete ordinary product flows. The [current Oda/Mathem
 matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
-fixes and the still-open native/payment/deployment criteria. Bank reconciliation
+fixes and the still-open Oda-review, recovery and changed-price criteria. Bank reconciliation
 is outside this acceptance.
 
 After owner login, Oda and Mathem separately passed the shared account/receipt
 reader on their original cancelled orders, with frozen-reference rejection and
 unchanged household state. Oda's account login is no longer an external blocker.
 The implementation now shares original-order binding and covers Oda callback-time
-review drift and contradictory MCP-address rejection. These isolated checks do
-not establish ordinary addition/payment, normal-start delivery navigation,
-supported changed-price review, or deployment of the candidate. Those criteria
-remain open; the live source is still `b8cc15f3` at this inspection.
+review drift and contradictory MCP-address rejection. Those isolated checks did
+not establish ordinary payment or delivery acceptance. Subsequent authorized
+rollout verified public `058c43f` and the shared-navigation/menu-attribution
+candidate through both installed MCP connections. The ordinary native Mathem
+initial order and one paid addition have now reconciled successfully, with one
+payment dispatch per intent, two packages and combined 143 SEK. Local result
+notices were delivered and acknowledged. A subsequent ordinary cold-start delivery change also passed through review,
+one submit and reconciliation with unchanged goods/total. The same new order
+was then cancelled once through ordinary tools; independent reads confirmed
+cancellation, empty cart, cleared pending operations and unchanged earlier orders. Public feature `1797d138` now passed required CI (1,284 tests; three optional
+Linux skips), published-archive verification and all 151 source files in each
+of the three approved runtime services; both installed SDK connections expose
+27 tools, with original state/configuration preserved. Affected ordinary Oda
+review, failed-payment recovery and supported changed-price review remain open;
+see the current matrix for source hashes, normal update and retained failures.
 
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
@@ -61,7 +72,7 @@ provider outcome.
 | Catalog, product planning and substitutions | `catalog`, `products` | `test_meal_concierge_products.py`, `test_meal_concierge_product_capacity.py`; whole-week and offline-pack preparation below | No measured native-hint speedup; current prices/availability and exact candidate approval remain required |
 | Favorites and recurring goods | `product_favorites`, `recurring` | `test_meal_concierge.py`, `test_meal_concierge_acceptance.py`, `test_meal_concierge_products.py` | Shared persistence/interval behavior verified; real account cart effects remain separately pending |
 | Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | Native Mathem whole-week cart17 packages and exact Sep13 slot selection/readback passed; earlier Sep9 reservation release remains unverified |
-| Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Native Mathem original order accepted after one dispatch and reconciliation; bank authorization/charge unknown. Bound addition accepted after one failed native payment and one operator-assisted recovery; Free delivery change accepted through native prepare/confirm/reconcile after scoped UI preparation, with unchanged18 packages/582.51 SEK and zero payable. Native cancellation accepted after two pre-dispatch stops and a persisted-review comparison fix; independent receipt/tracking confirmed the result with unrelated order preserved. Oda/MENY guards and external phone approval retained |
+| Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Historical native Mathem original order accepted after one dispatch and reconciliation. Bound addition accepted after one failed native payment and one operator-assisted recovery; Free delivery change accepted through native prepare/confirm/reconcile after scoped UI preparation, with unchanged18 packages/582.51 SEK and zero payable. Native cancellation accepted after two pre-dispatch stops and a persisted-review comparison fix; independent receipt/tracking confirmed the result with unrelated order preserved. Oda/MENY guards and external phone approval retained |
 | Scheduling and email | `schedule`, `email` | `test_meal_concierge.py`, `test_weekly_scheduler.py`, `test_email_scheduler.py`; recorded local-sender/occurrence/recovery checks | One owned systemd occurrence ran ordinary Hermes with standing Mathem checkout and verified local pre/result notices; no real recipients or Hermes-native-cron claim |
 | Finalized menu presentation | `recipe_delivery`; maintained CLI byte export | `test_recipe_delivery.py`; current shared frozen text/PDF/image/email, begin/ack and unknown-send recovery contracts | #53's original Codex PDF opened/read and image preview are confirmed; its unknown transport acknowledgments remain unchanged. Other destinations/senders retain their own limits; see [platform matrix](platform-acceptance.md) |
 

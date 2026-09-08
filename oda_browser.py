@@ -833,11 +833,21 @@ class OdaBrowser:
         return amounts
 
     def _navigate_to_checkout(self, order_id: str | None = None) -> None:
+        self._continue_checkout_cart()
+        if order_id is None:
+            self._advance_checkout_path()
+        else:
+            self._advance_checkout_path(order_id)
+
+    def _continue_checkout_cart(self) -> str:
+        store_url = _retail_store_url(self.checkout_provider)
         for attempt in range(3):
             try:
-                self._open(CART_URL)
+                self._open(store_url + "cart/")
                 break
             except HouseholdError:
+                if self.checkout_provider == "mathem" and self._eval("JSON.stringify({url:location.href})") == {"url": store_url}:
+                    break  # Mathem can initially expose the storefront cart panel.
                 if attempt == 2:
                     raise
                 try:
@@ -849,11 +859,19 @@ class OdaBrowser:
         self._invoke("reload")
         self._invoke("snapshot")
         action = "wait"
+        full_cart_dispatched = False
         for attempt in range(2):
             self._settle(5)
             for _ in range(5):
                 surface = self._cart_surface()
                 action = surface.get("action")
+                if action == "full_cart" and self.checkout_provider == "mathem":
+                    if not full_cart_dispatched:
+                        full_cart_dispatched = True
+                        self._click_action("full-cart")
+                    action = "wait"
+                    self._settle(1)
+                    continue
                 if action in {"continue", "blocked"}:
                     break
                 self._settle(1)
@@ -865,19 +883,20 @@ class OdaBrowser:
         if action != "continue":
             raise HouseholdError("Oda cart cannot continue to checkout")
         self._click_action("continue", mouse=True)
-        if order_id is None:
-            self._advance_checkout_path()
-        else:
-            self._advance_checkout_path(order_id)
+        return "continue"
 
     def _cart_surface(self) -> dict[str, Any]:
+        mathem = self.checkout_provider == "mathem"
+        store_url = _retail_store_url(self.checkout_provider)
         return self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i;
+ const unavailable=new RegExp(UNAVAILABLE_LABELS,'i');
+ const storefrontLinkOnly=ALLOW_STOREFRONT_LINK;
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
  if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked'});
+ if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
  const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
  if(dialogs.some(root=>unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
  let roots=[];
@@ -886,24 +905,31 @@ class OdaBrowser:
    roots=[main||document];
    if(unavailable.test(norm((main||document.body).innerText||'')))return JSON.stringify({action:'blocked'});
  }else{
-   roots=dialogs.filter(root=>{
+   const candidates=dialogs.length?dialogs:(storefrontLinkOnly?[document]:[]);
+   roots=candidates.filter(root=>{
      const text=norm(root.innerText||'');
-     const next=[...root.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett');
-     const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Gå til handlekurven'&&x.href===CART);
-     return full.length===1||(next.length===1&&/(?:Delsum|Tøm handlekurv|Du har \d+ varer)/i.test(text));
+     const next=[...root.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+     const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===FULL_CART_LABEL&&x.href===CART);
+     return full.length===1||(!storefrontLinkOnly&&next.length===1&&new RegExp(CART_CONTENTS,'i').test(text));
    });
  }
  if(roots.length>1)return JSON.stringify({action:'blocked'});
  if(roots.length===0)return JSON.stringify({action:'wait'});
  const root=roots[0];
- const next=[...root.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett');
- const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Gå til handlekurven'&&x.href===CART);
+ const next=storefrontLinkOnly&&location.href!==CART?[]:[...root.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+ const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===FULL_CART_LABEL&&x.href===CART);
  if(next.length>1||full.length>1)return JSON.stringify({action:'blocked'});
  if(next.length===1){next[0].setAttribute('data-oda-household-action','continue');return JSON.stringify({action:'continue'});}
  if(full.length===1){full[0].setAttribute('data-oda-household-action','full-cart');return JSON.stringify({action:'full_cart'});}
  return JSON.stringify({action:'wait'});
 })()
-""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)))
+""".replace("ALLOW_STOREFRONT_LINK", "true" if mathem else "false")
+          .replace("CONTINUE_LABEL", json.dumps("Fortsätt" if mathem else "Fortsett"))
+          .replace("FULL_CART_LABEL", json.dumps("Fortsätt till varukorgen" if mathem else "Gå til handlekurven"))
+          .replace("UNAVAILABLE_LABELS", json.dumps("inte tillgänglig|slut i lager|unavailable" if mathem else "ikke tilgjengelig|utsolgt|unavailable"))
+          .replace("CART_CONTENTS", json.dumps("Delsumma" if mathem else r"Delsum|Tøm handlekurv|Du har \d+ varer"))
+          .replace("STORE", json.dumps(store_url))
+          .replace("CART", json.dumps(store_url + "cart/")))
 
     def _click_action(self, action: str, *, mouse: bool = False) -> None:
         if action not in {"open-cart", "full-cart", "continue", "new-order", "previous-order", "payment", "recommendations"}:
@@ -1779,35 +1805,43 @@ class MathemBrowser(OdaBrowser):
         target_url = expected["checkout_url"] if order_id is not None else self.checkout_url
         # Navigation effects are dispatched once per observed route/control. A
         # lost response stops the operation; subsequent review starts afresh.
-        try:
-            self._open("https://www.mathem.se/se/cart/")
-        except HouseholdError:
-            current = self._eval("JSON.stringify({url:location.href})")
-            if current != {"url": "https://www.mathem.se/se/"}:
-                raise
-        dispatched = set()
+        action = self._continue_checkout_cart()
+        assert action == "continue"
+        dispatched = {"https://www.mathem.se/se/cart/#continue"}
+        trace = ["cart:continue-dispatched"]
         for _ in range(60):
             state = self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
  const routes=['https://www.mathem.se/se/','https://www.mathem.se/se/cart/','https://www.mathem.se/se/checkout/','https://www.mathem.se/se/checkout/recommendations/','https://www.mathem.se/se/checkout/confirm/','https://www.mathem.se/se/checkout/modify/',TARGET_URL];
- if(!routes.includes(location.href)||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
- if(location.href===TARGET_URL)return JSON.stringify({action:'ready'});
- if(location.href===routes[4])return JSON.stringify({action:'blocked'});
- if(location.href===routes[5])return JSON.stringify({action:'modify'});
+ const route=['storefront','cart','checkout','recommendations','confirm','modify','target'][routes.indexOf(location.href)]||'other';
+ const report=action=>JSON.stringify({action,route});
+ if(!routes.includes(location.href)||document.querySelector('input[type="password"]'))return report('blocked');
+ if(location.href===TARGET_URL)return report('ready');
+ if(location.href===routes[4])return report('blocked');
+ if(location.href===routes[5])return report('modify');
  document.querySelectorAll('[data-mathem-checkout-next]').forEach(e=>e.removeAttribute('data-mathem-checkout-next'));
  const controls=[...document.querySelectorAll('a,button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true');
  const full=controls.filter(e=>e.tagName==='A'&&norm(e.innerText)==='Fortsätt till varukorgen'&&e.href===routes[1]);
  const next=controls.filter(e=>norm(e.innerText)==='Fortsätt'&&(location.href===routes[1]&&e.tagName==='BUTTON'||location.href===routes[3]&&e.tagName==='A'&&e.href===routes[4]));
  const matches=full.length?full:next;
- if(matches.length>1)return JSON.stringify({action:'blocked'});
- if(matches.length===0)return JSON.stringify({action:'wait'});
+ if(matches.length>1)return report('blocked');
+ if(matches.length===0)return report('wait');
  matches[0].setAttribute('data-mathem-checkout-next','true');
- return JSON.stringify({action:location.href+(full.length?'#full':'#continue')});
+ return report(location.href+(full.length?'#full':'#continue'));
 })()
 """.replace("TARGET_URL", json.dumps(target_url)))
             action = state.get("action")
+            # Only fixed route/action names enter diagnostics, never private
+            # order query values, account data or arbitrary page text.
+            route = state.get("route")
+            if route not in {"storefront", "cart", "checkout", "recommendations", "confirm", "modify", "target", "other"}:
+                route = "unknown"
+            label = action if action in {"ready", "blocked", "modify", "wait"} else "control"
+            observation = f"{route}:{label}"
+            if trace[-1] != observation:
+                trace.append(observation)
             if action == "ready":
                 return
             if action == "blocked":
@@ -1816,13 +1850,14 @@ class MathemBrowser(OdaBrowser):
                 if action not in dispatched:
                     dispatched.add(action)
                     self._choose_checkout_destination(expected if order_id else None)
+                    trace.append("modify:destination-dispatched")
                 self._settle(0.5)
                 continue
             if action != "wait" and action not in dispatched:
                 dispatched.add(action)
                 self._invoke("click", '[data-mathem-checkout-next="true"]')
             self._settle(0.5)
-        raise HouseholdError("Mathem checkout navigation did not finish")
+        raise HouseholdError("Mathem checkout navigation did not finish; steps: " + ", ".join(trace))
 
     def _choose_checkout_destination(self, expected):
         # Mathem defaults to the existing order. A new checkout must explicitly
