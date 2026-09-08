@@ -329,10 +329,18 @@ update and rebuilt client package to acquire the helper and dependency.
 ### Transcription and interpretation
 
 The interpretation contains a name, ingredient and step selections, and optional
-yield, notes, tags and language. Selections use `{page, quote}`; each quote must
+yield, notes, tags, categories and language. Selections use `{page, quote}`; each quote must
 occur verbatim on that supplied page. The shared ingredient/yield parsers derive
 source quantities. Ingredient and yield evidence retains its page number and
 original wording. Unknown amounts or servings remain unknown.
+
+`categories` is a plain list of the [standard culinary categories](recipe-contract.md#recipe-classification),
+independent of the source's free-form `tags`. The host can classify a cake as
+`["dessert", "baking"]` or an omelette as `["breakfast", "brunch", "dinner"]`.
+Use the actual recipe and its relevant section heading; unrelated page text
+does not establish its role. Missing categories map only exact known tag aliases;
+unknown roles remain empty. Classification is visible in the preview and saved
+with the same discovery snapshot.
 
 An ingredient may add `estimated_amount: {quantity, unit, assumptions}`; a yield
 selection may add `estimated_portions: {quantity, assumptions}`. These values

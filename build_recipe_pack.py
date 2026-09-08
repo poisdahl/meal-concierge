@@ -460,7 +460,7 @@ class Covers:
 def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None):
     from recipe_assets import RecipeAssetError
     from recipe_portable import canonical_bytes, write_archive
-    from recipes import RecipeError, normalize_recipe
+    from recipes import RecipeError, normalize_recipe, categories_from_tags
     started = time.monotonic()
     # Resolve only after rejecting symlinks in every root component.
     for root in (snapshot, output):
@@ -569,6 +569,7 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                         recipe, credit = curate(recipe, credit, pack_version=pack_version, amendments=amendments)
                     except (RecipeError, KeyError, TypeError, ValueError) as exc:
                         raise PackBuildError('curation failed for '+entry['source']+':'+entry['source_id']+': '+str(exc)) from exc
+                recipe = normalize_recipe({**recipe, "categories": categories_from_tags(recipe.get("tags", []))})
                 status, reasons = readiness(recipe)
                 reasons.extend(credit.get('normalization_issues', []))
                 if reasons:

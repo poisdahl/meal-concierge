@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from core import DEFAULT_RECIPE_SOURCES, HouseholdError, RECIPE_SOURCE_IDS
-from recipes import RecipeError, normalize_recipe, normalize_source_url, source_ingredient
+from recipes import RecipeError, normalize_recipe, normalize_source_url, source_ingredient, categories_from_tags
 
 
 SOURCE_IDS = RECIPE_SOURCE_IDS
@@ -160,6 +160,7 @@ class TheMealDBSource:
             "ingredients": ingredients,
             "steps": steps,
             "tags": tags[:50],
+            "categories": categories_from_tags(tags),
             "source": {
                 "kind": "themealdb", "publisher": "TheMealDB", "title": name,
                 "author": None, "url": f"https://www.themealdb.com/meal/{meal_id}",

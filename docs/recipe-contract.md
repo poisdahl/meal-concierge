@@ -21,6 +21,27 @@ user-writable origin grants. [Managed covers and bank origin](recipe-assets.md)
 describe their storage and import boundaries. Provider eligibility remains
 independent of entry origin.
 
+## Recipe classification
+
+`categories` is an optional sorted, deduplicated list with values `breakfast`,
+`brunch`, `lunch`, `dinner`, `starter`, `side`, `dessert`, `snack`, `baking`, `bread`,
+`drink`, `sauce`, `dressing`, `condiment`, `preserve`. Missing or empty means
+unclassified. Original source labels remain in the independent free-form `tags`.
+No recipe type is required to save a recipe. Categories describe culinary use;
+they do not establish servings, dietary compliance or user authorization.
+
+Cookbook transcripts accept `interpretation.categories`. The host classifies
+from the recipe and relevant headings, leaving uncertain roles unspecified.
+Structured/native imports and recipe-pack builds map exact known source labels
+(including common Norwegian/Swedish aliases). They do not guess roles from an
+ingredient, cuisine or title. Ordinary recipe updates/conversions can correct
+classification. Builtin search accepts one exact `category`; recipe reads,
+search results and discovery summaries expose the saved classification.
+
+Classification is separate from a scheduled meal: a recipe can be both breakfast
+and dinner, while one saved slot names a specific date, meal type and person
+count. See [explicit meal additions](reference.md#explicit-meal-additions).
+
 ## Quantities and matching
 
 Schema-2 `ingredients[].quantity` is null or a reduced positive rational:

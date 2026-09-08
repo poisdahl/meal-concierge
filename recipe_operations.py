@@ -23,7 +23,7 @@ from recipe_assets import RecipeAssetError, sanitize_image
 from urllib.error import HTTPError
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
-from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value
+from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value, normalize_categories, RECIPE_CATEGORIES
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
@@ -3071,7 +3071,8 @@ class RecipeOperations:
                         else "unavailable"
                     )
                 libraries.append(item)
-            return {"primary_recipe_library_id": self.primary_recipe_library_id, "recipe_libraries": libraries}
+            return {"primary_recipe_library_id": self.primary_recipe_library_id, "recipe_libraries": libraries,
+                    "recipe_categories": list(RECIPE_CATEGORIES)}
         if action == "search":
             requested_ids = request.get("library_ids")
             if requested_ids is not None:
@@ -3085,6 +3086,11 @@ class RecipeOperations:
                 library_ids = [validate_library_id(selected)]
             if any(item not in self.recipe_libraries for item in library_ids):
                 raise RecipeLibraryError("library_id must name one exact configured recipe library")
+            category = request.get("category")
+            if category is not None:
+                normalize_categories([category])
+                if library_ids != ["builtin"]:
+                    raise RecipeLibraryError("standard category filtering requires library_id=builtin")
             favorites_only = request.get("favorites_only", False)
             if not isinstance(favorites_only, bool):
                 raise RecipeLibraryError("favorites_only must be true or false")
@@ -3152,6 +3158,7 @@ class RecipeOperations:
                                     include_archived=request.get("include_archived") is True,
                                     favorites_only=favorites_only,
                                     entry_origin=entry_origin,
+                                    category=category,
                                 )
                                 offset += len(rows)
                                 for row in rows:
@@ -3164,7 +3171,7 @@ class RecipeOperations:
                                     item = {
                                         key: deepcopy(row.get(key))
                                         for key in (
-                                            "id", "revision", "status", "name", "language", "tags",
+                                            "id", "revision", "status", "name", "language", "tags", "categories",
                                             "source", "rights", "portions", "library_id", "is_favorite",
                                             "favorite_revision",
                                             "entry_origin", "pack", "locally_modified", "image",
@@ -3316,6 +3323,7 @@ class RecipeOperations:
                     include_archived=request.get("include_archived") is True,
                     favorites_only=favorites_only, offset=offset,
                     entry_origin=entry_origin,
+                    category=category,
                 )
                 offset += len(rows)
                 for row in rows:
@@ -3323,7 +3331,7 @@ class RecipeOperations:
                     value = {
                         key: deepcopy(row.get(key))
                         for key in (
-                            "id", "revision", "status", "name", "language", "tags", "source", "rights",
+                            "id", "revision", "status", "name", "language", "tags", "categories", "source", "rights",
                             "portions", "created_at", "updated_at", "created_via", "content_fingerprint", "recipe_key",
                             "library_id", "is_favorite", "favorite_revision",
                             "entry_origin", "pack", "locally_modified", "image",

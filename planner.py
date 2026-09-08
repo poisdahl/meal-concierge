@@ -15,11 +15,11 @@ import unicodedata
 from core import HouseholdError
 from product_planner import normalize_available_ingredients, available_ingredient_matches
 from recipe_selection import candidate_groups, merge_family_usage
-from recipes import RecipeError, scale_recipe
+from recipes import RecipeError, scale_recipe, MEAL_TYPES
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v3"
+PLANNER_VERSION = "weekly-menu-v4"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
@@ -267,6 +267,14 @@ def _profile_rules(profile: Mapping[str, Any], field: str) -> list[str]:
 def _non_dinner_role(recipe: Mapping[str, Any]) -> str | None:
     """Conservative culinary labels, never allergen/nutritional evidence."""
     name = str(recipe.get("name") or "").casefold()
+    categories = set(recipe.get("categories", []))
+    if categories.intersection({"dessert", "drink", "sauce", "dressing", "condiment", "preserve"}):
+        return "category_non_dinner"
+    if "dinner" in categories:
+        return None
+    if categories.intersection(MEAL_TYPES) or "bread" in categories:
+        return "category_non_dinner"
+    # Baking alone describes preparation; it does not establish a meal role.
     tags = {str(tag).casefold() for tag in recipe.get("tags", [])}
     if tags.intersection({"dessert", "desserts", "drink", "drinks", "beverage", "breakfast", "side dish", "condiment"}):
         return "source_tag_non_dinner"
@@ -291,11 +299,11 @@ def _non_dinner_role(recipe: Mapping[str, Any]) -> str | None:
 
 
 def _hard_evaluation(
-    candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str]
+    candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], *, meal_type: str = "dinner"
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     status = "pass"
-    if role := _non_dinner_role(candidate["recipe"]):
+    if meal_type == "dinner" and (role := _non_dinner_role(candidate["recipe"])):
         status = "fail"
         reasons.append({"code": "meal_role:non_dinner", "status": "fail", "detail": role})
     error = candidate.get("materialization_error")

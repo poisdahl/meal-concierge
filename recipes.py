@@ -52,6 +52,24 @@ DISCOVERY_DESTINATION_PATTERN = re.compile(r"[a-z][a-z0-9-]{0,62}")
 VALID_RELATIONSHIPS = {"original", "adapted", "inspired_by", "generated", "user_supplied", "unknown"}
 VALID_STORAGE = {"full", "link_only"}
 RESTRICTED_FULL_HOSTS = {"meny.no", "www.meny.no", "oda.com", "www.oda.com", "mathem.se", "www.mathem.se"}
+RECIPE_CATEGORIES = (
+    "breakfast", "brunch", "lunch", "dinner", "starter", "side", "dessert", "snack",
+    "baking", "bread", "drink", "sauce", "dressing", "condiment", "preserve",
+)
+MEAL_TYPES = ("breakfast", "brunch", "lunch", "dinner", "starter", "side", "dessert", "snack", "drink")
+CATEGORY_ALIASES = {
+    **{category: category for category in RECIPE_CATEGORIES},
+    "frokost": "breakfast", "frukost": "breakfast", "brunsj": "brunch", "brunches": "brunch",
+    "lunsj": "lunch", "middag": "dinner", "main course": "dinner", "main dish": "dinner",
+    "forrett": "starter", "förrätt": "starter", "appetizer": "starter", "appetizers": "starter",
+    "starters": "starter", "side dish": "side", "side dishes": "side", "tilbehør": "side",
+    "desserts": "dessert", "desserter": "dessert", "etterrett": "dessert", "efterrätt": "dessert",
+    "snacks": "snack", "mellommåltid": "snack", "bakst": "baking", "baking recipes": "baking",
+    "bread recipes": "bread", "breads": "bread", "brød": "bread", "bröd": "bread",
+    "drinks": "drink", "beverage": "drink", "beverages": "drink", "drikke": "drink",
+    "sauces": "sauce", "saus": "sauce", "dressings": "dressing",
+    "condiments": "condiment", "preserves": "preserve", "syltetøy": "preserve",
+}
 SERVER_FIELDS = {
     "id", "revision", "status", "created_at", "updated_at", "created_via",
     "recipe_key", "content_fingerprint", "content_hash", "shopping_requirements",
@@ -584,6 +602,20 @@ def bind_recipe_source(value: Any, *, prior: Mapping[str, Any] | None = None, pr
     return result
 
 
+def normalize_categories(value: Any) -> list[str]:
+    if not isinstance(value, list) or len(value) > len(RECIPE_CATEGORIES) or any(
+        not isinstance(item, str) or item not in RECIPE_CATEGORIES for item in value
+    ):
+        raise RecipeError("categories must be a list of standard recipe categories: " + ", ".join(RECIPE_CATEGORIES))
+    return sorted(set(value))
+
+
+def categories_from_tags(tags: list[str]) -> list[str]:
+    """Map exact source labels, preserving all original wording separately."""
+    return sorted({CATEGORY_ALIASES[label] for tag in tags
+                   if (label := " ".join(tag.casefold().split())) in CATEGORY_ALIASES})
+
+
 def normalize_recipe(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RecipeError("recipe must be an object")
@@ -619,6 +651,8 @@ def normalize_recipe(value: Any) -> dict[str, Any]:
         "rights": rights,
         "notes": _bounded_text(cleaned.get("notes"), "notes", maximum=MAX_TEXT),
     }
+    if "categories" in cleaned:
+        result["categories"] = normalize_categories(cleaned["categories"])
     external_snapshot = _external_snapshot(cleaned.get("external_snapshot"), source, version=version)
     if external_snapshot is not None:
         result["external_snapshot"] = external_snapshot
@@ -1641,7 +1675,7 @@ class RecipeStore:
     @staticmethod
     def _search_text(recipe: Mapping[str, Any]) -> str:
         source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
-        return " ".join(_normalized_text(value) for value in [recipe.get("name"), *(recipe.get("tags") or []), source.get("publisher"), source.get("author")] if value)
+        return " ".join(_normalized_text(value) for value in [recipe.get("name"), *(recipe.get("tags") or []), *(recipe.get("categories") or []), source.get("publisher"), source.get("author")] if value)
 
     @staticmethod
     def _favorite_state(connection: sqlite3.Connection, recipe_id: str) -> dict[str, Any]:
@@ -4397,6 +4431,7 @@ class RecipeStore:
         entry_origin: str | None = None,
         offset: int = 0,
         status_filter: str | None = None,
+        category: str | None = None,
     ) -> list[dict[str, Any]]:
         text = _bounded_text(query, "query", maximum=200) or ""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
@@ -4409,6 +4444,8 @@ class RecipeStore:
             raise RecipeError("entry_origin must be user, bundled or unknown")
         if status_filter not in {None, "active", "draft", "archived"}:
             raise RecipeError("invalid recipe status filter")
+        if category is not None:
+            normalize_categories([category])
         literal = _normalized_text(text).replace("!", "!!").replace("%", "!%").replace("_", "!_")
         needle = f"%{literal}%"
         status = "" if include_archived else "AND status != 'archived'"
@@ -4421,12 +4458,13 @@ class RecipeStore:
             if favorites_only else ""
         )
         origin_filter = "AND EXISTS (SELECT 1 FROM recipe_entry_metadata m WHERE m.recipe_id=recipes.id AND m.entry_origin=?)" if entry_origin is not None else ""
+        category_filter = "AND EXISTS (SELECT 1 FROM json_each(recipes.document, '$.categories') WHERE value=?)" if category is not None else ""
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN")
                 rows = connection.execute(
-                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
-                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), limit, offset),
+                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} {category_filter} ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
+                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), *([category] if category is not None else []), limit, offset),
                 ).fetchall()
                 return [self._record(connection, row) for row in rows]
         except sqlite3.Error as exc:
