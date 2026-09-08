@@ -540,6 +540,26 @@ def _oda_delivery_change_surface_script(expected_url: str) -> str:
 """.replace("URL", json.dumps(expected_url))
 
 
+def _oda_checkout_payment_script() -> str:
+    """Read only the selected saved card; callers separately bind the checkout URL."""
+    return r"""
+(() => {
+ const visible=e=>{const style=getComputedStyle(e),r=e.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&r.width>0&&r.height>0;};
+ const radios=[...document.querySelectorAll('input[type="radio"]')];
+ const observed=radios.some(visible),selected=radios.filter(e=>e.checked);
+ const failure={verified:false,observed};
+ if(selected.length!==1)return JSON.stringify(failure);
+ const radio=selected[0];
+ if(!visible(radio)||radio.disabled||radio.getAttribute('aria-disabled')==='true')return JSON.stringify(failure);
+ const labels=[...radio.labels].filter(visible).filter(label=>label.contains(radio)&&label.querySelectorAll('input[type="radio"]').length===1);
+ const texts=labels.map(label=>label.innerText||'');
+ const cards=[...new Set(texts.flatMap(text=>[...text.matchAll(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/gi)].map(match=>match[1])))];
+ if(cards.length!==1||texts.some(text=>/(?:\d[ -]?){12,19}/.test(text)))return JSON.stringify(failure);
+ return JSON.stringify({verified:true,observed,payment_display:'•••• '+cards[0]});
+})()
+"""
+
+
 def _oda_checkout_surface_script(expected: Mapping[str, Any]) -> str:
     return r"""
 (() => {
@@ -558,12 +578,12 @@ def _oda_checkout_surface_script(expected: Mapping[str, Any]) -> str:
  const deliveryRoots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText||'')==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean);
  const escaped=norm(expected.delivery_address).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  const addressMatch=deliveryRoots.length===1&&Boolean(expected.delivery_address)&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(norm(deliveryRoots[0].innerText||''));
- const paymentMatch=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|ending in\s*)(\d{4})\b/i);
- const maskedPayment=Boolean(paymentMatch) && !/(?:\d[ -]?){12,19}/.test(text);
- const paymentDisplay=maskedPayment?`•••• ${paymentMatch[1]}`:null;
+ const payment=JSON.parse(PAYMENT);
+ const maskedPayment=payment.verified===true;
+ const paymentDisplay=maskedPayment?payment.payment_display:null;
  return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:maskedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
 })()
-""".replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
+""".replace("PAYMENT", _oda_checkout_payment_script().strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
 
 
 class OdaBrowser:
@@ -763,7 +783,7 @@ class OdaBrowser:
         if result["address_matches"] is not True:
             raise HouseholdError("Oda browser delivery address does not match the reviewed cart; check the intended account and address in Oda, then request a new checkout review")
         if result["masked_payment"] is not True:
-            raise HouseholdError("Oda saved payment card could not be verified; check Payment in your Oda account and complete any card entry there, then request a new checkout review")
+            raise HouseholdError("Oda selected saved payment card could not be verified; select the intended existing card in Oda, then request a new checkout review")
         surface = dict(result)
         result["line_matches"] = checkout_lines_match(expected["lines"], result.pop("items"))
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
@@ -999,13 +1019,15 @@ class OdaBrowser:
    return JSON.stringify({action:'payment'});
  }
  if(confirmPage){
+   const expected=ORDER,actual=new URL(location.href).searchParams.get('orderNumber');
+   if(!((expected===null&&actual===null)||(expected!==null&&actual===expected)))return JSON.stringify({action:'blocked'});
+   const payment=JSON.parse(PAYMENT);
+   if(payment.observed&&!payment.verified)return JSON.stringify({action:'payment_required'});
    const controls=[...document.querySelectorAll('button')].filter(enabled);
    const submit=controls.filter(x=>/^(Bekreft og betal|Legg inn bestilling|Confirm and pay|Place order)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
    if(submit.length===1){
-     const expected=ORDER;
-     const actual=new URL(location.href).searchParams.get('orderNumber');
-     if((expected===null&&actual===null)||(expected!==null&&actual===expected))return JSON.stringify({action:'ready'});
-     return JSON.stringify({action:'blocked'});
+     if(payment.verified)return JSON.stringify({action:'ready'});
+     return JSON.stringify({action:'wait'});
    }
    if(submit.length>1)return JSON.stringify({action:'blocked'});
    return JSON.stringify({action:'wait'});
@@ -1044,13 +1066,15 @@ class OdaBrowser:
    if(ORDER!==null && newOrder.length===0 && previous.length===0 && payment.length===1){payment[0].setAttribute('data-oda-household-action','payment');return JSON.stringify({action:'payment'});}
    return JSON.stringify({action:'blocked'});
 })()
-""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("ORDER", json.dumps(order_id))
+""".replace("STORE", json.dumps(STORE_URL)).replace("CART", json.dumps(CART_URL)).replace("CHECKOUT_ENTRY", json.dumps(CHECKOUT_ENTRY_URL)).replace("MODIFY", json.dumps(CHECKOUT_MODIFY_URL)).replace("RECOMMENDATIONS", json.dumps(RECOMMENDATIONS_URL)).replace("CHECKOUT", json.dumps(CHECKOUT_URL)).replace("PAYMENT", _oda_checkout_payment_script().strip()).replace("ORDER", json.dumps(order_id))
         dispatched: set[str] = set()
         self._settle(10)
         for _ in range(30):
             action = self._eval(script).get("action")
             if action == "ready":
                 return
+            if action == "payment_required":
+                raise HouseholdError("Oda checkout requires a selected saved card; select the intended existing card in Oda, then request a new checkout review")
             if action == "blocked":
                 raise HouseholdError("Oda checkout navigation is ambiguous")
             if action in {"new_order", "previous_order", "payment", "recommendations"}:
