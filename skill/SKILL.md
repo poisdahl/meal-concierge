@@ -45,7 +45,12 @@ without starting a larger flow. On first interactive planning/discovery, show
 setup's single keep-all-or-change question and apply the explicit answer once.
 Scheduled work may use defaults but must retain `needs_review` for the next
 interactive run. Reuse standing authorization; ask only for a choice actually
-missing or a confirmation required by the active policy.
+missing or a confirmation required by the active policy. Explain the next
+useful step in ordinary language. Show unknown prices, unresolved ingredients
+and incomplete actions when relevant to the request. Keep unrelated acceptance
+checks and implementation details in the technical handoff, not routine meal
+conversation. For failures, use returned reason codes and bounded, sanitized
+details; do not paste raw provider/browser exceptions.
 
 ## Store setup and payment readiness
 
@@ -74,7 +79,10 @@ empty cart or an inaccessible page. Show one next action for the actual blocker;
 do not repeatedly ask a configured user to redo setup just because an unprobed
 payment field is unknown. During a legitimate requested checkout, use its fresh
 review and errors. Do not call checkout, change a cart, reserve delivery, create
-an order or repeat login merely to check readiness.
+an order or repeat login merely to check readiness. An OAuth grant and a store
+website session are separate checks, but the OAuth handoff may already leave
+the intended dedicated browser signed in. Reuse its valid session for the
+intended account; request login only when the actual store flow requires it.
 
 Let the user enter passwords/card details and complete bank/device approval in
 the provider's UI. Never request passwords, card numbers, CVC or payment tokens
@@ -431,7 +439,16 @@ Products `prepare` is read-only and requires the exact menu reference or complet
 planner handoff. Show observed candidate packages; pass only explicitly approved
 exact interchangeable `candidate_refs` for each requirement. A search hit is
 not proof of ingredient equivalence. Raw quantities, incompatible units,
-unknown availability and eligibility remain unresolved.
+unknown availability and eligibility remain unresolved. Use returned
+`candidate_diagnostics` to explain the actual blocker: unreadable package size,
+incompatible units, unknown pant or an observed package limit. Estimate pricing
+does not convert ml to g or pieces to weight. A conversion needs an observed
+basis; a product's declared piece count is such a basis, a guessed piece weight
+is not. Never mark ingredients as already at home to hide unresolved coverage.
+If the user authorizes exact package counts, use the ordinary cart tools and
+keep the menu coverage unresolved where it remains unproven. Observed package
+limits bound this selection; they do not establish remaining customer eligibility
+after prior purchases or account for separate cart extras.
 
 Ask once about unknown pantry/optional ingredients. Pass `ingredient_decisions`
 with the returned source position `{collection,recipe_index,ingredient_index}`:
@@ -531,11 +548,13 @@ returned; “fra 0” is not free. Preserve explicit or provider-external select
 Cheapest delivery requires exact prices for every eligible candidate. Checkout
 revalidates the selected slot and provider totals before final dispatch.
 
-Follow `confirmation_policy`: fresh requires one confirmation of the exact
-prepared summary; standing permits submit/cancel_submit for an explicit current
-order/pay/cancel request without another agent question. Preview/prepare never
-submits. One stable idempotency key represents one intent; reuse it only to
-recover that attempt. A later intent needs a new key. Begin exact existing-order
+Follow `confirmation_policy` and explain it in ordinary language: fresh means
+"show the final order or cancellation summary and ask before submitting";
+standing permits submit/cancel_submit for an explicit current order/pay/cancel
+request without another agent question. Keep the configured policy unless the
+user changes it. It governs the final protected action, not intermediate reads
+or searches. Preview/prepare never submits. One stable idempotency key represents
+one intent; reuse it only to recover that attempt. A later intent needs a new key. Begin exact existing-order
 changes before modifying their cart/delivery. No uncertain action is repeated.
 Only bound checkout submit/reconcile `confirmed=true` establishes success.
 Oda and Mathem preserve the original account/address binding across order edits
