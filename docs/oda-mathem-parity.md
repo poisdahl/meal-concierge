@@ -6,6 +6,43 @@ change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
+## Ordinary Oda preflight — 2026-09-08
+
+The owner resumed #60's existing prepare-only authorization. At 19:12–19:22 UTC,
+Bob and its Oda service still used public `a109de99be80815df01f64f15b2d4c1fd30f6ff3`;
+the affected Application, order, browser, planning and installed skill bytes
+matched the reviewed source. Bob was healthy. No runtime code or service changed.
+
+A new, separate ordinary Hermes conversation loaded the installed skill and
+used the normal Oda MCP/socket/Application for status, profile, menu, schedule,
+cart, catalog and order reads. It found an available ZAFFIRI Fullkornsspaghetti
+500 g package at NOK 16.70 and read its product/dietary facts, but added nothing.
+Independent provider reads confirmed an empty cart with no delivery, and the
+dedicated browser's authenticated delivery-account page matched the selected
+MCP account reference. The original state had no menu, quantified cart plan,
+occurrence or pending checkout/cart change/cancellation/order change.
+
+Provider tracking nevertheless reported one existing `unpaid_order` and another
+`paid_and_modifiable` order. Two ordinary native order reads and the model's
+reply agreed. Whether the unpaid order represented ongoing payment/change work
+remained unresolved; staging stopped before selecting delivery or preparing
+checkout. This status does not establish failed payment or any bank outcome.
+Both read-only turns ended with CLI exit134 after persisting their replies.
+Original call IDs established 20 read-only tool intents across the two turns.
+The first turn's unchanged household state was reconciled before the second
+read-only turn. The original process failures were retained, not retried.
+
+Final independent cart read: zero goods, NOK 0.00, no delivery and no pending
+review. No test cleanup is needed. Household state and configuration remained
+byte-identical, preserving menu/usage, plan, policy and all journal fields.
+No Mathem or #54 operation was performed. Without a
+menu/quantified plan, a later successful review should be `cart_only`; no actual
+review attribution or selected payment was produced here. The existing Oda
+page-wide masked-card extractor remains unverified against selected state.
+#60 stays open pending the existing-order clarification and actual ordinary
+prepare/selected-payment evidence. Failed-payment recovery and changed-price
+delivery criteria in #50 remain open.
+
 ## Observations and source binding
 
 Separate authenticated calls on 2026-09-08 at 08:28 UTC used Oda's

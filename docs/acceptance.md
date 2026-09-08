@@ -49,6 +49,19 @@ The [final client/platform matrix](platform-acceptance.md) integrates #50, #53,
 #54 and the qualified MC09/scheduler results, including the newer Desktop
 menu and preserved-state upgrade. Older checkpoints below remain chronological.
 
+## Resumed Oda review prerequisite — 2026-09-08
+
+The authorized #60 run reached a concrete stop before cart staging on Bob's
+verified public `a109de99`. A separate ordinary Hermes conversation and
+independent provider reads agreed that an existing Oda order was `unpaid_order`;
+whether it represented ongoing work remained unresolved. Browser/account login
+matched, the cart was empty, and no menu, quantified plan or protected operation
+was pending locally. No goods, delivery or checkout review were created.
+Both read-only model turns persisted their replies before CLI exit134; their
+original call IDs and unchanged state were reconciled without replay.
+See the [provider matrix](oda-mathem-parity.md#ordinary-oda-preflight--2026-09-08)
+for the exact limits. Ordinary prepare and selected-payment acceptance remain open.
+
 ## Served features
 
 Tool names below omit the common `meal_concierge_` prefix. The
