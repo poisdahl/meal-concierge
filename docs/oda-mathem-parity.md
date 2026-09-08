@@ -8,40 +8,56 @@ is outside this work and is not a completion gate.
 
 ## Ordinary Oda preflight — 2026-09-08
 
-The owner resumed #60's existing prepare-only authorization. At 19:12–19:22 UTC,
-Bob and its Oda service still used public `a109de99be80815df01f64f15b2d4c1fd30f6ff3`;
-the affected Application, order, browser, planning and installed skill bytes
-matched the reviewed source. Bob was healthy. No runtime code or service changed.
+The owner clarified the pre-existing `unpaid_order` and required it to remain
+untouched. Fresh original cart/journal/account checks allowed the bounded test
+to resume through a separate ordinary Hermes conversation, installed shared
+skill, Oda MCP, normal socket and Application. One available ZAFFIRI
+Fullkornsspaghetti 500 g package was staged at NOK 16.70. Delivery is selected for
+12 September 07:00–13:00 Europe/Oslo (05:00–11:00 UTC), with an exact NOK 19
+price. Independent provider reads confirm one package and NOK 246.40 total;
+itemized final review fees are still unverified.
 
-A new, separate ordinary Hermes conversation loaded the installed skill and
-used the normal Oda MCP/socket/Application for status, profile, menu, schedule,
-cart, catalog and order reads. It found an available ZAFFIRI Fullkornsspaghetti
-500 g package at NOK 16.70 and read its product/dietary facts, but added nothing.
-Independent provider reads confirmed an empty cart with no delivery, and the
-dedicated browser's authenticated delivery-account page matched the selected
-MCP account reference. The original state had no menu, quantified cart plan,
-occurrence or pending checkout/cart change/cancellation/order change.
+Ordinary prepare exposed two navigation gaps: the modify page's new-order radio
+and its `Fortsett` continuation. Reviewed PRs #64 and #65 fixed those observed
+steps. The next ordinary attempt reached the confirm page but timed out: Vipps
+was selected and the visible saved-card radio was unchecked. The product's
+page-wide masked-card extraction therefore lacked selected-state binding; no
+false successful review or payment occurred. PR #66 binds review and the final
+callback recheck to exactly one selected, visible, enabled saved-card radio and
+its own visible labels, and reports a selected-card prerequisite instead of
+waiting for the wrong payment button. It does not choose a method or add Vipps
+payment support. Isolated actual-script cases include a visible unchecked card,
+missing/ambiguous/hidden/disabled selection and a method/card switch after the
+callback with zero final clicks, for new checkout and Oda additions. Mathem's
+payment parser is unchanged.
 
-Provider tracking nevertheless reported one existing `unpaid_order` and another
-`paid_and_modifiable` order. Two ordinary native order reads and the model's
-reply agreed. Whether the unpaid order represented ongoing payment/change work
-remained unresolved; staging stopped before selecting delivery or preparing
-checkout. This status does not establish failed payment or any bank outcome.
-Both read-only turns ended with CLI exit134 after persisting their replies.
-Original call IDs established 20 read-only tool intents across the two turns.
-The first turn's unchanged household state was reconciled before the second
-read-only turn. The original process failures were retained, not retried.
+Bob and its Oda service were deployed to reviewed public runtime `534baf8a450f4aad2afcb973636ca1fb6d3d2ebc`;
+all 153 published files matched each installation, the installed SDK exposed
+27 tools, normal-socket status returned Oda ready and Bob was healthy. Original
+household journals and configuration were retained across the scoped updates.
+The final ordinary turn on that release called prepare once and returned the
+selected-saved-card prerequisite. Its actual reply reported the block and no
+review, and the CLI exited 0. Independent reads confirmed Vipps selected,
+the saved card unchecked, unchanged staged state and no pending operation.
+Successful review now requires the owner to select the intended existing card;
+no tool changed the payment method.
 
-Final independent cart read: zero goods, NOK 0.00, no delivery and no pending
-review. No test cleanup is needed. Household state and configuration remained
-byte-identical, preserving menu/usage, plan, policy and all journal fields.
-No Mathem or #54 operation was performed. Without a
-menu/quantified plan, a later successful review should be `cart_only`; no actual
-review attribution or selected payment was produced here. The existing Oda
-page-wide masked-card extractor remains unverified against selected state.
-#60 stays open pending the existing-order clarification and actual ordinary
-prepare/selected-payment evidence. Failed-payment recovery and changed-price
-delivery criteria in #50 remain open.
+Final observed test state is one pasta package, selected delivery and no pending
+checkout/cart change/cancellation/order change. All ten observed existing-order
+references/statuses match preflight. No menu, quantified cart plan or usage was
+changed; standing policy and disabled scheduling were retained. No payment
+method, order or payment was changed; no real message or Mathem/#54 operation
+was performed. CLI134 outcomes after persisted native replies, failed registry
+discovery, navigation failures and reconciled deployment/fixture failures remain
+in private evidence rather than being recast as clean success. Helpers only
+read independent evidence; they did not stage or prepare the review UI.
+
+#60 remains open for a successful ordinary saved-card review. Frozen menu
+attribution and final product/address/fee comparisons have not been produced;
+`cart_only` is expected from the preserved absent menu/quantified plan, not an
+observed review result. Manual owner cleanup is accepted; no discard/release API
+or expiry wait is required. #50's failed-payment recovery and same/lower/higher
+final-total delivery criteria remain open.
 
 ## Observations and source binding
 
@@ -70,7 +86,7 @@ No credentials, cookies or authentication logs were exported.
 | `get_orders`, `get_order`, `order_tracking` | Separate cancelled receipts returned currency, ISO delivery date, display, gross amount and product quantities. Both omit `productQuantityCount` and order address. Oda: 24 packages/948.05 NOK; owned Mathem test order: 18/582.51 SEK | Sum product quantities for both. Bind full date and currency. Cancellation status is observed; no new cancellation was submitted |
 | `get_delivery_slots` | For 13 September, Oda returned 20 available slots with exact prices 19–79 NOK; Mathem returned 19 at zero SEK. Both returned dated timestamps with offsets | Shared slot normalization; Oslo/Stockholm provider binding. One date's free Mathem slots do not establish a store-wide restriction |
 | Browser account/receipt | After owner Oda login, both exact cancelled receipts and their own MCP address references matched independently on 8 September. Oda uses `Total inkl. MVA`; Mathem uses `Totalt inkl. moms` | Shared reader with provider origins/labels verified separately; frozen-reference mismatch rejected for both. This is read acceptance, not payment acceptance |
-| Cart writes and slot selection | Later ordinary Mathem turns on the 8 September candidate staged one package, selected the original slot, then staged one extra package bound to the same order | Independent live write/readback evidence; Oda cart effects were not authorized |
+| Cart writes and slot selection | Ordinary Mathem turns staged the original and added package under their own authority. The later bounded Oda #60 conversation staged one 500 g package and selected 12 September 07–13 Oslo at exact NOK 19 | Separate live write/readback evidence for both; Oda remains prepare-only, with no purchase |
 | Addition/payment | Earlier addition required helper recovery. New ordinary candidate flow paid one extra package once and later reconciled two packages/143 SEK | Ordinary paid addition demonstrated; failed-payment recovery remains unverified |
 | Delivery change | Earlier acceptance followed UI preparation. New ordinary candidate flow began with a closed browser, prepared 10 September14–16, submitted once and reconciled unchanged two packages/143 SEK | Ordinary free change demonstrated; paid review remains unverified and the zero limit remains local |
 

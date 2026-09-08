@@ -51,16 +51,34 @@ menu and preserved-state upgrade. Older checkpoints below remain chronological.
 
 ## Resumed Oda review prerequisite — 2026-09-08
 
-The authorized #60 run reached a concrete stop before cart staging on Bob's
-verified public `a109de99`. A separate ordinary Hermes conversation and
-independent provider reads agreed that an existing Oda order was `unpaid_order`;
-whether it represented ongoing work remained unresolved. Browser/account login
-matched, the cart was empty, and no menu, quantified plan or protected operation
-was pending locally. No goods, delivery or checkout review were created.
-Both read-only model turns persisted their replies before CLI exit134; their
-original call IDs and unchanged state were reconciled without replay.
-See the [provider matrix](oda-mathem-parity.md#ordinary-oda-preflight--2026-09-08)
-for the exact limits. Ordinary prepare and selected-payment acceptance remain open.
+The owner clarified that the pre-existing unpaid order is expected and must be
+left untouched. The resumed ordinary Hermes conversation then staged one
+available 500 g wholegrain pasta at NOK 16.70 and selected 12 September,
+07:00–13:00 Europe/Oslo (05:00–11:00 UTC), at an exact NOK 19 delivery price.
+Independent reads confirm one package and the provider's NOK 246.40 cart total.
+No final itemized fee review has been produced; the total is not a purchase.
+
+Actual ordinary prepare attempts exposed Oda's new-order radio route and its
+changed continuation button. Published fixes now reach the confirm page. There,
+Vipps was selected while the saved masked card was visible but unchecked; the
+attempt timed out without creating a review. The subsequent selected-payment
+fix binds the product review and final callback recheck to the selected card's
+own visible radio labels and reports a clear prerequisite for other choices.
+The final ordinary turn on that release called prepare once and returned the
+selected-saved-card prerequisite. Its actual reply reported the block and no
+review, and the CLI exited 0. Independent reads confirmed Vipps selected,
+the saved card unchecked, unchanged staged state and no pending operation.
+Successful review now requires the owner to select the intended existing card;
+no tool changed the payment method.
+
+No payment method was changed and no confirm, submit, payment or order mutation
+was performed. Remaining manual-cleanup state is one pasta package, the selected
+delivery and no pending review. Menu/plan/usage, policy/configuration and the
+observed unrelated orders were preserved. The native failures, including CLI134
+after persisted replies, remain retained. Frozen menu attribution is still
+unobserved; without a menu/quantified plan, a successful review should be
+`cart_only`. See the [provider matrix](oda-mathem-parity.md#ordinary-oda-preflight--2026-09-08).
+Ordinary successful prepare and live selected-card acceptance remain open.
 
 ## Served features
 
