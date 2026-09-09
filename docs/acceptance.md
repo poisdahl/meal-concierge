@@ -23,8 +23,8 @@ was then cancelled once through ordinary tools; independent reads confirmed
 cancellation, empty cart, cleared pending operations and unchanged earlier orders. Public feature `1797d138` now passed required CI (1,284 tests; three optional
 Linux skips), published-archive verification and all 151 source files in each
 of the three approved runtime services; both installed SDK connections expose
-27 tools, with original state/configuration preserved. Affected ordinary Oda
-review, failed-payment recovery and supported changed-price review remain open;
+27 tools, with original state/configuration preserved. The later Oda prepare-only review passed as recorded below; failed-payment
+recovery and supported changed-price review remain open;
 see the current matrix for source hashes, normal update and retained failures.
 
 This matrix accounts for all 27 currently served MCP tools and the documented
@@ -49,18 +49,51 @@ The [final client/platform matrix](platform-acceptance.md) integrates #50, #53,
 #54 and the qualified MC09/scheduler results, including the newer Desktop
 menu and preserved-state upgrade. Older checkpoints below remain chronological.
 
-## Resumed Oda review prerequisite — 2026-09-08
+## Resumed ordinary Oda review — 2026-09-09
 
-The authorized #60 run reached a concrete stop before cart staging on Bob's
-verified public `a109de99`. A separate ordinary Hermes conversation and
-independent provider reads agreed that an existing Oda order was `unpaid_order`;
-whether it represented ongoing work remained unresolved. Browser/account login
-matched, the cart was empty, and no menu, quantified plan or protected operation
-was pending locally. No goods, delivery or checkout review were created.
-Both read-only model turns persisted their replies before CLI exit134; their
-original call IDs and unchanged state were reconciled without replay.
-See the [provider matrix](oda-mathem-parity.md#ordinary-oda-preflight--2026-09-08)
-for the exact limits. Ordinary prepare and selected-payment acceptance remain open.
+The bounded ordinary Oda prepare-only test passed on 2026-09-09 with public
+`b8152c6e24e1da51f9cc8b79fcc5c75b99e1c0f1`. The same real Hermes conversation
+used the installed skill, normal Oda MCP socket and Application. One prepare
+returned a frozen review; a subsequent status read confirmed
+`awaiting_confirmation`, and the actual model reply agreed (CLI exit 0).
+No helper staged goods or prepared the checkout UI.
+
+The review contains one ZAFFIRI Fullkornsspaghetti 500 g package at NOK 16.70,
+NOK 199 small-order fee, NOK 11.70 packaging and NOK 19 delivery: NOK 246.40
+total. Delivery remains 12 September 07:00–13:00 Europe/Oslo, CEST
+(05:00–11:00 UTC), at the exact selected price. Discounts and deposits remain
+null, not proven zero. Independent provider and browser reads match the frozen
+cart, selected delivery, account/address, amounts and the actually selected
+saved card. The product itself binds that selected card; this is not inferred
+from page-wide masked text. Original dietary unknowns remain reported and no
+permission or suitability claim was added.
+
+`menu_attribution=cart_only` is now an observed review result. No menu,
+quantified plan or frozen menu reference exists; an empty shortfall list does
+not establish menu coverage. Existing menu/plan/usage, profile, policy,
+configuration and all ten observed existing orders are preserved. The expected
+unpaid order remains untouched. One test package, selected delivery and the
+unsubmitted review remain for manual owner cleanup. No confirm, submit, auto,
+order/payment dispatch, cancellation, real message, timer or Mathem/#54 action
+was performed. Cleanup, reservation release and expiry were not claimed.
+
+Earlier native failures and CLI134 outcomes remain retained. PRs #64–66 fixed
+observed navigation and selected-card binding. The owner then authorized
+automatic saved-card selection and configurable Vipps: PR #68 added those
+settings, and ordinary turn08 demonstrably selected the saved card before a
+separate amount-parser failure. Oda rendered `1 vare`, while the parser expected
+`1 varer`; PR #69 corrects that singular label without relaxing count or fee
+checks. The final ordinary turn passed after that fix. No helper performed the
+payment-method selection. Live Vipps payment acceptance remains unverified.
+
+Both source changes passed independent correctness/adversarial review and
+required GitHub CI. The final candidate passed 1,313 public tests and actual MCP
+transport; all 154 published files matched both Bob installations, with normal
+27-tool MCP status and healthy Bob. The first update added only the saved-card
+default to household state; the singular-label update preserved state bytes.
+The earlier 18 CI errors were fixed by using the household timezone in test
+fixtures, with all 18 reproduced as passing under UTC while Oslo's date differed.
+Production scheduler behavior and CI configuration were unchanged.
 
 ## Served features
 

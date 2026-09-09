@@ -1,47 +1,60 @@
 # Oda and Mathem: current evidence and open ordinary flows
 
-As of 2026-09-08, #50 is **incomplete for ordinary end-to-end parity**. Its earlier
+As of 2026-09-09, #50 is **incomplete for ordinary end-to-end parity**. Its earlier
 closure accepted a recovery-assisted addition and a UI-prepared free delivery
 change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
-## Ordinary Oda preflight — 2026-09-08
+## Ordinary Oda review — 2026-09-09
 
-The owner resumed #60's existing prepare-only authorization. At 19:12–19:22 UTC,
-Bob and its Oda service still used public `a109de99be80815df01f64f15b2d4c1fd30f6ff3`;
-the affected Application, order, browser, planning and installed skill bytes
-matched the reviewed source. Bob was healthy. No runtime code or service changed.
+The bounded ordinary Oda prepare-only test passed on 2026-09-09 with public
+`b8152c6e24e1da51f9cc8b79fcc5c75b99e1c0f1`. The same real Hermes conversation
+used the installed skill, normal Oda MCP socket and Application. One prepare
+returned a frozen review; a subsequent status read confirmed
+`awaiting_confirmation`, and the actual model reply agreed (CLI exit 0).
+No helper staged goods or prepared the checkout UI.
 
-A new, separate ordinary Hermes conversation loaded the installed skill and
-used the normal Oda MCP/socket/Application for status, profile, menu, schedule,
-cart, catalog and order reads. It found an available ZAFFIRI Fullkornsspaghetti
-500 g package at NOK 16.70 and read its product/dietary facts, but added nothing.
-Independent provider reads confirmed an empty cart with no delivery, and the
-dedicated browser's authenticated delivery-account page matched the selected
-MCP account reference. The original state had no menu, quantified cart plan,
-occurrence or pending checkout/cart change/cancellation/order change.
+The review contains one ZAFFIRI Fullkornsspaghetti 500 g package at NOK 16.70,
+NOK 199 small-order fee, NOK 11.70 packaging and NOK 19 delivery: NOK 246.40
+total. Delivery remains 12 September 07:00–13:00 Europe/Oslo, CEST
+(05:00–11:00 UTC), at the exact selected price. Discounts and deposits remain
+null, not proven zero. Independent provider and browser reads match the frozen
+cart, selected delivery, account/address, amounts and the actually selected
+saved card. The product itself binds that selected card; this is not inferred
+from page-wide masked text. Original dietary unknowns remain reported and no
+permission or suitability claim was added.
 
-Provider tracking nevertheless reported one existing `unpaid_order` and another
-`paid_and_modifiable` order. Two ordinary native order reads and the model's
-reply agreed. Whether the unpaid order represented ongoing payment/change work
-remained unresolved; staging stopped before selecting delivery or preparing
-checkout. This status does not establish failed payment or any bank outcome.
-Both read-only turns ended with CLI exit134 after persisting their replies.
-Original call IDs established 20 read-only tool intents across the two turns.
-The first turn's unchanged household state was reconciled before the second
-read-only turn. The original process failures were retained, not retried.
+`menu_attribution=cart_only` is now an observed review result. No menu,
+quantified plan or frozen menu reference exists; an empty shortfall list does
+not establish menu coverage. Existing menu/plan/usage, profile, policy,
+configuration and all ten observed existing orders are preserved. The expected
+unpaid order remains untouched. One test package, selected delivery and the
+unsubmitted review remain for manual owner cleanup. No confirm, submit, auto,
+order/payment dispatch, cancellation, real message, timer or Mathem/#54 action
+was performed. Cleanup, reservation release and expiry were not claimed.
 
-Final independent cart read: zero goods, NOK 0.00, no delivery and no pending
-review. No test cleanup is needed. Household state and configuration remained
-byte-identical, preserving menu/usage, plan, policy and all journal fields.
-No Mathem or #54 operation was performed. Without a
-menu/quantified plan, a later successful review should be `cart_only`; no actual
-review attribution or selected payment was produced here. The existing Oda
-page-wide masked-card extractor remains unverified against selected state.
-#60 stays open pending the existing-order clarification and actual ordinary
-prepare/selected-payment evidence. Failed-payment recovery and changed-price
-delivery criteria in #50 remain open.
+Earlier native failures and CLI134 outcomes remain retained. PRs #64–66 fixed
+observed navigation and selected-card binding. The owner then authorized
+automatic saved-card selection and configurable Vipps: PR #68 added those
+settings, and ordinary turn08 demonstrably selected the saved card before a
+separate amount-parser failure. Oda rendered `1 vare`, while the parser expected
+`1 varer`; PR #69 corrects that singular label without relaxing count or fee
+checks. The final ordinary turn passed after that fix. No helper performed the
+payment-method selection. Live Vipps payment acceptance remains unverified.
+
+Both source changes passed independent correctness/adversarial review and
+required GitHub CI. The final candidate passed 1,313 public tests and actual MCP
+transport; all 154 published files matched both Bob installations, with normal
+27-tool MCP status and healthy Bob. The first update added only the saved-card
+default to household state; the singular-label update preserved state bytes.
+The earlier 18 CI errors were fixed by using the household timezone in test
+fixtures, with all 18 reproduced as passing under UTC while Oslo's date differed.
+Production scheduler behavior and CI configuration were unchanged.
+
+The bounded #60 review criterion is complete. #50 remains open for supported
+failed-payment recovery and the provider-independent same/lower/higher-final-total
+delivery-change criteria. This test adds no payment or delivery-change authority.
 
 ## Observations and source binding
 
@@ -70,7 +83,7 @@ No credentials, cookies or authentication logs were exported.
 | `get_orders`, `get_order`, `order_tracking` | Separate cancelled receipts returned currency, ISO delivery date, display, gross amount and product quantities. Both omit `productQuantityCount` and order address. Oda: 24 packages/948.05 NOK; owned Mathem test order: 18/582.51 SEK | Sum product quantities for both. Bind full date and currency. Cancellation status is observed; no new cancellation was submitted |
 | `get_delivery_slots` | For 13 September, Oda returned 20 available slots with exact prices 19–79 NOK; Mathem returned 19 at zero SEK. Both returned dated timestamps with offsets | Shared slot normalization; Oslo/Stockholm provider binding. One date's free Mathem slots do not establish a store-wide restriction |
 | Browser account/receipt | After owner Oda login, both exact cancelled receipts and their own MCP address references matched independently on 8 September. Oda uses `Total inkl. MVA`; Mathem uses `Totalt inkl. moms` | Shared reader with provider origins/labels verified separately; frozen-reference mismatch rejected for both. This is read acceptance, not payment acceptance |
-| Cart writes and slot selection | Later ordinary Mathem turns on the 8 September candidate staged one package, selected the original slot, then staged one extra package bound to the same order | Independent live write/readback evidence; Oda cart effects were not authorized |
+| Cart writes and slot selection | Ordinary Mathem turns staged the original and added package under their own authority. The later bounded Oda #60 conversation staged one 500 g package and selected 12 September 07–13 Oslo at exact NOK 19 | Separate live write/readback evidence for both; Oda remains prepare-only, with no purchase |
 | Addition/payment | Earlier addition required helper recovery. New ordinary candidate flow paid one extra package once and later reconciled two packages/143 SEK | Ordinary paid addition demonstrated; failed-payment recovery remains unverified |
 | Delivery change | Earlier acceptance followed UI preparation. New ordinary candidate flow began with a closed browser, prepared 10 September14–16, submitted once and reconciled unchanged two packages/143 SEK | Ordinary free change demonstrated; paid review remains unverified and the zero limit remains local |
 
