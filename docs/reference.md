@@ -126,6 +126,22 @@ missing or unreadable receipt keeps the attempt uncertain and never authorizes
 another payment. While unpaid, reconciliation leaves the payment/challenge
 page in place. Repeated confirmation/reconciliation uses the original journal.
 
+Oda and Mathem both retain an uncertain checkout/addition for reconciliation;
+neither currently exposes a verified failed-payment retry through Application
+or MCP. An unpaid tracking status is not an explicit payment failure. An explicit
+merchant failure is not proof that a new payment is authorized, and a required
+store/device approval must be completed on the original attempt. Do not infer
+that approval was requested from an unconfirmed response.
+
+For failed additions, a retry URL carrying an order number and merchant change
+ID, the same amount/card and a local frozen goods review do not by themselves
+bind that merchant change to those goods. The original Mathem review did not
+capture its merchant change ID; the later helper's successful receipt cannot
+repair that missing pre-payment evidence. Preserve original journals and use
+ordinary reconciliation; do not restage goods, retry through a helper or replace
+the pending attempt. The [recovery audit](oda-mathem-parity.md#failed-payment-recovery-audit--2026-09-09)
+records the evidence still needed before a supported product route can be enabled.
+
 Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
 amount/account/card helper reads and read-only receipt address verification have
 been exercised. Local tests cover guarded Application preparation, final DOM
