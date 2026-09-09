@@ -27,6 +27,13 @@ of the three approved runtime services; both installed SDK connections expose
 recovery and supported changed-price review remain open;
 see the current matrix for source hashes, normal update and retained failures.
 
+The 9 September original-journal audit confirms that the earlier helper's
+recovery did not establish merchant change-to-goods binding before payment.
+The successful later receipt proves the accepted addition, not that missing
+pre-dispatch binding. See [failed-payment recovery](oda-mathem-parity.md#failed-payment-recovery-audit--2026-09-09).
+Ordinary recovery remains unaccepted; this audit does not require repeating
+the already accepted initial order, addition, free delivery change or cancellation.
+
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
 **82e64b8** on **2026-09-07**. A shared
@@ -397,9 +404,10 @@ lost-response/restart/expiry/drift with one dispatch.
 One separately scoped operator-assisted recovery then completed the merchant's
 exact failed change through its existing payment page. An independent fresh
 account/receipt check and final UI guard verified the same saved card, address,
-delivery and18.50 SEK. The recovery page omitted product rows; its goods binding
-was the preserved original one-package review and exact merchant change
-reference. This limit is explicit. The guard was first exercised without a click,
+delivery and18.50 SEK. The recovery page omitted product rows. The helper
+associated its merchant change reference with the preserved one-package review,
+but the original review contained no merchant change ID. This did not verify
+which goods that change would pay for before dispatch. The guard was first exercised without a click,
 then one recovery payment was dispatched. No new cart, order or change was
 created. The immediate read remained unconfirmed; a later independent provider
 read showed all original goods plus exactly one extra pasta package,18packages,

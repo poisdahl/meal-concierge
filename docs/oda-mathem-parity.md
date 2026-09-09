@@ -56,6 +56,68 @@ The bounded #60 review criterion is complete. #50 remains open for supported
 failed-payment recovery and the provider-independent same/lower/higher-final-total
 delivery-change criteria. This test adds no payment or delivery-change authority.
 
+## Failed-payment recovery audit — 2026-09-09
+
+The original private journals were inspected on their original host, without
+copying credentials, cookies or authentication logs. They establish an explicit
+Mathem failure, followed by one helper-assisted payment and eventual acceptance
+of the extra package. They do **not** establish the required merchant
+change-to-goods binding before that recovery payment:
+
+| Evidence | What it establishes | Missing binding |
+|---|---|---|
+| Original frozen addition review | Original 17 packages/564.01 SEK, added one/18.50 SEK, combined 18/582.51 SEK; reviewed account, delivery and card | No merchant change ID in the original review or order-change journal |
+| Merchant failure notice and recovery link | Explicit failed latest addition, same order number and a merchant change ID | No product IDs or quantities associated with that change ID |
+| Recovery payment surface | Same retry URL, delivery, selected card and 18.50 SEK | No product rows; the helper associated the newly observed change ID with the older local review |
+| Later accepted receipt | Exactly the intended extra package and 582.51 SEK | An outcome after payment cannot supply the missing pre-dispatch proof |
+
+The cause of the original failure remains unknown. Neither a required device
+approval nor its absence was established by that failure. An unpaid tracking
+status alone also occurs during delayed successful payment and must remain
+distinct from explicit failure.
+
+Current public merchant code supplies a concrete further inspection route.
+Oda and Mathem serve identical retry/payment components in build
+`e058f12f2909fdc24119655b00ed36caff12210d`. Their native retry carries
+`orderNumber`, `orderChangeId` and the selected payment in `retry_modification`
+mode. Its review renders financial groups and delivery, without product rows;
+unrendered response fields remain unknown. Separately, the supported
+`/no/checkout/unpaid/` and `/se/checkout/unpaid/` pages read an unpaid change and
+render `payload.orderChange.itemGroups`, including product identities and
+quantities. The public component does not consume a change ID from that object.
+Its cancel/retry buttons are separate mutations, not inspection controls;
+their backend effects were not verified. See the merchant's
+[retry component](https://www.mathem.se/_next/static/chunks/18e-h93sthr5a.js)
+and [unpaid-change component](https://www.mathem.se/_next/static/chunks/0m0ld4kq-w21j.js),
+also served [by Oda](https://oda.com/_next/static/chunks/0m0ld4kq-w21j.js).
+This is static client evidence, not authenticated response or payment acceptance.
+
+The original artifacts contain no capture of that unpaid-change page or its
+goods payload. Thus its exact change-ID-to-goods association remains unverified;
+the sparse retry page does not prove that the shop lacks a richer supported
+route. A future implementation must first observe that association for an
+existing explicitly failed attempt, then retain provider/account/order/items,
+amount/payment, fresh review and authorization, one dispatch and reconciliation
+across lost responses/restart. Do not invoke the unpaid page's retry mutation to
+discover what it does, reconstruct an old journal or induce a new failure.
+
+Fresh read-only Mathem calls now show the original order cancelled, an empty
+cart and no selected delivery. The installation has no pending checkout, cart
+change, cancellation or order edit. Its checkout/browser/skill bytes match its
+recorded `a109de99` release; state bytes were unchanged by inspection. There is
+no remaining original payment to recover. No new purchase/payment authority was
+granted, and no recovery, protected-journal write, install or restart occurred.
+
+Oda/Mathem already share protected checkout journals and exact accepted-order
+reconciliation. MENY's proven no-dispatch/expiry retry rules do not establish an
+Oda/Mathem failed-change contract. Ten existing isolated tests passed for retained
+uncertainty, lost responses, restart/expiry, binding rejection, notice replay,
+pre-click failure and Oda payment follow-up. No recovery code or new ordinary
+Hermes recovery conversation is claimed. The criterion remains **open** for
+verified merchant binding and an authorized ordinary installed product recovery;
+static code and synthetic tests cannot complete it. The already accepted order,
+addition, free delivery, cancellation and #60 review remain accepted.
+
 ## Observations and source binding
 
 Separate authenticated calls on 2026-09-08 at 08:28 UTC used Oda's
