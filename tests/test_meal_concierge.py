@@ -1475,7 +1475,7 @@ class CoreTestsBase:
         self.assertIn("Vi leverer varene dine", scripts[-2])
         for label in ODA_CHECKOUT_AMOUNT_LABELS.values():
             self.assertIn(label, scripts[-1])
-        self.assertIn("String(1)+' varer'", scripts[-1])
+        self.assertIn('"1 vare"', scripts[-1])
         self.assertIn("labels.length===0&&candidates.length===0", scripts[-1])
         self.assertIn("summaryRoot.contains(row.root)", scripts[-1])
         self.assertIn("unknownRows", scripts[-1])
@@ -1527,7 +1527,7 @@ class CoreTestsBase:
         before_click.assert_called_once_with()
         script = scripts[0]
         self.assertIn('"product_subtotal":107100', script)
-        self.assertIn("String(26)+' varer'", script)
+        self.assertIn('"26 varer"', script)
         self.assertIn('"discounts":-6290', script)
         self.assertIn('"Tillegg for mindre bestilling":2900', script)
         self.assertIn("JSON.stringify(amounts)===JSON.stringify(expectedAmounts)", script)

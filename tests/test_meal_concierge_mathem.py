@@ -359,7 +359,7 @@ global.getComputedStyle=()=>({display:'block',visibility:'visible'});global.loca
 const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;
 const item=new E('article','',[new E('p',change==='item'?'Ris':'Pasta'),new E('p','500 g, Sopps'),new E('label','Antall'),quantity]);
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00'),new E('p',['address','spoof'].includes(change)?'Annen vei 2':'Eksempelveien 1')]);
-const rows=[['1 varer','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
+const rows=[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button','Bekreft og betal 45,50 kr');pay.disabled=change==='disabled';
 const card=new E('input');card.type='radio';card.checked=change!=='selection';
