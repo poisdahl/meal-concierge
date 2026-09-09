@@ -123,7 +123,7 @@ for(const [index,text] of (c.options||['Vipps','Nytt kort','•••• 1234'])
 const quantity=new E('input');quantity.type='number';quantity.value=c.quantity||1;
 const item=new E('article','',[new E('p','Pasta'),new E('p','500 g, Sopps'),new E('label','Antall'),quantity]);
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p','12. september 09:00–12:00'),new E('p','Eksempelveien 1')]);
-const rows=[['1 varer','26,50 kr'],['Delsum','26,50 kr'],['Levering',c.fee?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
+const rows=c.rows||[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',c.fee?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button',c.button||((c.selected??0)===0?'Betal med':'Bekreft og betal')+' 45,50 kr');pay.id='PAY';pay.disabled=!!c.payDisabled;
 global.document=new E('document','',[new E('body','',[item,delivery,...labels,summary,pay])]);document.body=document.children[0];
@@ -146,6 +146,38 @@ class PaymentBrowserTests(unittest.TestCase):
         completed = subprocess.run([self.node, "-e", PAYMENT_DOM], input=json.dumps({"script": script, "c": case}),
                                    text=True, capture_output=True, check=True, timeout=10)
         return json.loads(completed.stdout)
+
+    def test_observed_single_item_amount_row_binds_count_and_every_fee(self):
+        from oda_browser import _oda_checkout_amount_script, CHECKOUT_URL, oda_checkout_amount_minor
+        rows = [["1 vare", "16,70 kr"], ["Delsum", "16,70 kr"],
+                ["Tillegg for mindre bestilling", "199,00 kr"],
+                ["Leveringsemballasje", "11,70 kr"], ["Levering", "19,00 kr"],
+                ["Total inkl. MVA", "246,40 kr"]]
+        amounts = {"product_subtotal": 1670, "delivery_price": 1900, "discounts": None,
+                   "deposits": None, "bags": 1170,
+                   "other_fees": {"Tillegg for mindre bestilling": 19900}, "provider_total": 24640}
+        read = _oda_checkout_amount_script(24640, expected_product_count=1)
+        click = _oda_checkout_amount_script(24640, expected_product_count=1,
+                    expected_amounts=amounts, expected_url=CHECKOUT_URL)
+        options = {"selected": 2, "button": "Bekreft og betal 246,40 kr"}
+        observed = self.evaluate(read, rows=rows, **options)
+        self.assertEqual(observed["result"], {"amounts": amounts, "amounts_valid": True})
+        self.assertEqual(observed["clicks"], [])
+        self.assertEqual(self.evaluate(click, rows=rows, **options)["clicks"], ["PAY"])
+        self.assertEqual(oda_checkout_amount_minor("1 vare", "16,70 kr"), 1670)
+        for label in ("1 varer", "2 vare", "2 varer"):
+            changed = [[label, "16,70 kr"], *rows[1:]]
+            with self.subTest(label=label):
+                self.assertFalse(self.evaluate(read, rows=changed, **options)["result"]["amounts_valid"])
+                self.assertEqual(self.evaluate(click, rows=changed, **options)["clicks"], [])
+        for changed in (rows[1:], [*rows, rows[0]],
+                        [*rows[:2], ["Tillegg for mindre bestilling", "199,01 kr"], *rows[3:]]):
+            with self.subTest(rows=changed):
+                self.assertFalse(self.evaluate(read, rows=changed, **options)["result"]["amounts_valid"])
+                self.assertEqual(self.evaluate(click, rows=changed, **options)["clicks"], [])
+        plural = [["2 varer", "16,70 kr"], *rows[1:]]
+        self.assertTrue(self.evaluate(_oda_checkout_amount_script(24640, expected_product_count=2),
+                                     rows=plural, **options)["result"]["amounts_valid"])
 
     def test_configured_selection_clicks_only_one_existing_radio(self):
         from oda_browser import _oda_checkout_payment_script, CHECKOUT_URL

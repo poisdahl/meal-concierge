@@ -58,7 +58,7 @@ MATHEM_CHECKOUT_AMOUNT_LABELS = {
 # Observed product discounts and delivery credit are separate rows. Other
 # discounts or deposit rows still require their own verified provider contract.
 MATHEM_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vara|(?:0|[2-9]|[1-9]\d{1,6}) varor)")
-ODA_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:0|[1-9]\d{0,6}) varer")
+ODA_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vare|(?:0|[2-9]|[1-9]\d{1,6}) varer)")
 ODA_CHECKOUT_AMOUNT_KEYS = (
     "product_subtotal",
     "delivery_price",
@@ -239,7 +239,7 @@ def _oda_checkout_amount_script(
         .replace("TOTAL", json.dumps(expected_total))
         .replace("PRODUCT_LABEL",
             json.dumps("1 vara" if expected_product_count == 1 else f"{expected_product_count} varor")
-            if provider == "mathem" else f"String({expected_product_count})+' varer'"
+            if provider == "mathem" else json.dumps("1 vare" if expected_product_count == 1 else f"{expected_product_count} varer")
         )
         .replace("CURRENCY_CODE", "SEK" if provider == "mathem" else "NOK")
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
