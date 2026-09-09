@@ -43,6 +43,10 @@ Start with saved preferences and `status.workflow.next_action` when resuming
 work. It describes unfinished work, not new authorization. Answer a simple read
 without starting a larger flow. On first interactive planning/discovery, show
 setup's single keep-all-or-change question and apply the explicit answer once.
+Include its `checkout_payment` and supported `payment_choices` in that same
+question. Oda offers `saved_card` (default) or `vipps`; do not add a separate
+mandatory payment question. Save the user's choice with setup apply. If needed,
+`card_last4` identifies an existing Oda saved card using only its masked suffix.
 Scheduled work may use defaults but must retain `needs_review` for the next
 interactive run. Reuse standing authorization; ask only for a choice actually
 missing or a confirmation required by the active policy. Explain the next
@@ -67,6 +71,19 @@ remember/save-card option. A mandatory first order has not been established for
 every account: do not instruct the user to buy and cancel as a required setup
 step or perform such actions yourself. Explain cancellation only when available
 within the store's actual deadline, without promising immediate release of funds.
+For Oda new orders, ordinary checkout prepare automatically selects the
+configured method. For saved cards it preserves a verified selected card or
+selects the sole usable saved card; if several remain ambiguous, ask once which
+masked card to use and save `card_last4`. Never substitute another payment
+method, enter a new card, or ask the user to select an unambiguous existing card
+manually. Show the returned payment method/card in the final order summary.
+Vipps selection also happens during prepare, without sending payment. After an
+authorized submit, an unconfirmed Oda/Vipps result needs follow-up on the
+original payment page and any requested phone approval, then reconciliation of
+the same attempt. Do not claim a phone request was delivered, payment succeeded,
+or a retry is safe. Oda Vipps support here is for new orders; existing-order
+changes retain their separate saved-card flow.
+
 For MENY, explain persistent browser login, home delivery, locally configured
 Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its
 separate OAuth and a dedicated browser login for saved-card checkout; its help documents adding cards under

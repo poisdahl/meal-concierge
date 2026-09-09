@@ -19,5 +19,9 @@
         "wikibooks": true
       }
     }
+  },
+  "checkout_payment": {
+    "method": "vipps",
+    "card_last4": null
   }
 }

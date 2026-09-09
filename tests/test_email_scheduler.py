@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 import socket
 import sys
@@ -17,6 +17,7 @@ import socketserver
 from email import policy
 from email.parser import BytesParser
 from unittest import mock
+from zoneinfo import ZoneInfo
 from PIL import Image
 
 CORE = Path(__file__).resolve().parents[1]
@@ -54,7 +55,7 @@ class LocalSMTP(socketserver.StreamRequestHandler):
 
 class SyntheticProvider:
     def __init__(self):
-        self.delivery = date.today().isoformat()
+        self.delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
         self.reads = []
 
     def probe(self, **kwargs):

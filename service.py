@@ -39,6 +39,7 @@ from core import (
     HouseholdError,
     StateStore,
     cart_summary,
+    checkout_payment_settings,
     cheapest_delivery_slot,
     delivery_candidate_digest,
     delivery_price_display,
@@ -533,7 +534,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 "store_url": "https://oda.com/no/",
                 "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
                 "connection": "Complete standalone Oda OAuth and log the dedicated browser into the same intended Oda account and address.",
-                "payment": "Oda saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
+                "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
             },
             "meny": {
                 "store_url": "https://meny.no/",
@@ -584,11 +585,18 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "portions": meals["portions"],
             "diet": deepcopy(profile["diet"]),
             "confirmation_policy": self.confirmation_policy,
+            "checkout_payment": deepcopy(state["checkout_payment"]),
+            "payment_choices": ["saved_card", "vipps"] if self.provider == "oda" else ["vipps" if self.provider == "meny" else "saved_card"],
             "weekly_menu": {
                 key: deepcopy(meals[key])
                 for key in ("dinner_days", "dishes", "batch_dishes", "salads", "cook_days", "eat_days")
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
+            "payment_note": {
+                "oda": "For new orders, prepare automatically selects the configured existing method. Vipps may require completing a step on the original Oda/Vipps page and approval on your phone. Selecting a method never submits payment. Resolve saved-card ambiguity once with card_last4 in setup.",
+                "mathem": "Saved-card checkout uses the card selected in the dedicated Mathem browser.",
+                "meny": "Vipps requires a phone number configured locally and payment approval on your phone.",
+            }.get(self.provider),
             "primary_recipe_library_id": self.primary_recipe_library_id,
             "optional_recipe_libraries": "Configure external recipe libraries only with the local interactive recipe_library_setup.py helper.",
         }
@@ -633,7 +641,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("setup apply needs keep_current true or false and an optional changes object")
         if keep_current and changes:
             raise HouseholdError("keep_current cannot be combined with setup changes")
-        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources"}
+        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "checkout_payment"}
         if not set(changes).issubset(allowed):
             raise HouseholdError("setup changes contain unknown fields")
         requested_provider = str(changes.get("provider") or self.provider).casefold()
@@ -644,6 +652,15 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("changing confirmation_policy requires updating the private config and restarting the service")
         with self.store.locked() as state:
             before = self._setup_summary(state)
+            if "checkout_payment" in changes:
+                if not isinstance(changes["checkout_payment"], Mapping):
+                    raise HouseholdError("checkout_payment needs an explicit method object")
+                payment = checkout_payment_settings(changes["checkout_payment"], self.provider)
+                if payment != state["checkout_payment"]:
+                    pending = state.get("pending_checkout")
+                    if (pending and pending.get("status") != "awaiting_confirmation") or any(state.get(key) for key in ("pending_cancellation", "pending_cart_change", "order_change")):
+                        raise HouseholdError("finish the pending provider operation before changing checkout_payment")
+                    state["checkout_payment"] = payment
             profile = state["profile"]
             meals = profile["meals"]
             for field in ("people", "portions"):
