@@ -6,6 +6,45 @@ change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
+## Owner-authorized Oda Vipps timeout — 2026-09-09
+
+The owner subsequently authorized an intentionally unapproved Vipps test and
+explicitly reviewed the six existing dietary unknowns for one ZAFFIRI
+Fullkornsspaghetti 500 g package. The installed product at `b8152c6` and a real
+Hermes conversation prepared and dispatched the unchanged NOK 246.40 checkout
+through normal MCP/Application calls. An earlier confirm had stopped at the
+dietary gate before dispatch; after the owner's review, the expired review was
+replaced once and its actual finding IDs were supplied to one confirm. No
+permanent dietary permission was added.
+
+The original `pay.vipps.no` page showed Oda, NOK 246.40 and a prefilled phone
+field matching the household's configured number. Neither **Next** nor app
+approval was used. At 19:05:59 UTC that same retained page displayed **“Oh no,
+your payment timed out”**, with no phone inputs. Two independent reviewers
+confirmed the page and order evidence. This demonstrates the hosted timeout
+screen before phone submission, not delivery of an app request or an
+independently verified terminal merchant payment status. The current
+[Vipps frontend](https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway/assets/index-BAdhHFQL.js)
+can display timeout for a `TIMEOUT` status or HTTP 401; its **Go back** control
+calls its cancellation routine before returning, and remained untouched.
+
+The merchant still reports exactly one new `unpaid_order`, with the reviewed
+product/quantity, NOK 246.40 and 12 September 07:00–13:00 delivery. All 17 earlier
+order records remain unchanged. The cart is empty and the original product
+attempt remains `uncertain`. One ordinary same-attempt reconcile returned
+`confirmed=false`, `expired=false`, `payment_followup_required=true` and
+`retry_allowed=false`; the product does not reflect this hosted timeout as a
+recoverable failure. Completed native tool results and final replies were
+retained despite CLI exit 134; none of those processes was blindly repeated.
+
+This is a new-order test. Its merchant order details directly identify the
+goods, but do not establish an existing-order change ID or the required change-to-goods
+binding. A bounded supported unpaid-endpoint GET for this new order returned
+the delivery-slot state rather than an unpaid-change payload; that is not a
+general claim about the merchant's capabilities. No recovery payment, helper write to protected product journals, cancellation,
+runtime change or restart was performed. The unpaid
+order and original timeout page are preserved. **#50 recovery remains open.**
+
 ## Ordinary Oda review — 2026-09-09
 
 The bounded ordinary Oda prepare-only test passed on 2026-09-09 with public
