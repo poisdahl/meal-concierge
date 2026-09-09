@@ -126,12 +126,27 @@ missing or unreadable receipt keeps the attempt uncertain and never authorizes
 another payment. While unpaid, reconciliation leaves the payment/challenge
 page in place. Repeated confirmation/reconciliation uses the original journal.
 
-Oda and Mathem both retain an uncertain checkout/addition for reconciliation;
-neither currently exposes a verified failed-payment retry through Application
-or MCP. An unpaid tracking status is not an explicit payment failure. An explicit
-merchant failure is not proof that a new payment is authorized, and a required
-store/device approval must be completed on the original attempt. Do not infer
-that approval was requested from an unconfirmed response.
+Oda and Mathem retain an uncertain checkout/addition for reconciliation.
+For one identified unpaid **new order**, `checkout` with `action="prepare"`
+and `recovery=true` inspects the merchant's retry review without sending payment.
+The original merchant order must match the frozen goods, quantities, total and
+delivery; the browser independently checks the original account/address and fee
+rows. An unpaid tracking status alone does not prove a terminal payment failure.
+A missing or inconsistent merchant retry review stops preparation.
+
+The default method is the original `checkout_payment`. An explicitly authorized
+`checkout_payment` override selects an existing supported method for this
+recovery alone and leaves household preferences unchanged. Review the returned
+payment and actual dietary findings, then use `action="confirm"` with the fresh
+recovery `confirmation_id`. The final click revalidates the review and merchant
+target. After dispatch, use `action="reconcile"` on this retained attempt,
+including after a lost response or restart; the prior failure never authorizes
+another payment. Original and recovery IDs resolve to the same confirmed result.
+Store/device approvals remain external and must not be inferred from an
+unconfirmed response. Ordinary live recovery is demonstrated for an Oda new
+order using its existing saved card after a hosted Vipps timeout; the shared
+Mathem new-order route is implemented but not demonstrated live; the shared
+recovery logic has isolated coverage.
 
 For failed additions, a retry URL carrying an order number and merchant change
 ID, the same amount/card and a local frozen goods review do not by themselves

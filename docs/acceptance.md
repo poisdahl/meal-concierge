@@ -4,7 +4,7 @@ The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
 recovery-assisted addition and UI-prepared delivery results below do not
 demonstrate the complete ordinary product flows. The [current Oda/Mathem
 matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
-fixes and the still-open Oda-review, recovery and changed-price criteria. Bank reconciliation
+fixes, the completed Oda review and the still-open failed-addition recovery and changed-price criteria. Bank reconciliation
 is outside this acceptance.
 
 After owner login, Oda and Mathem separately passed the shared account/receipt
@@ -31,8 +31,14 @@ The 9 September original-journal audit confirms that the earlier helper's
 recovery did not establish merchant change-to-goods binding before payment.
 The successful later receipt proves the accepted addition, not that missing
 pre-dispatch binding. See [failed-payment recovery](oda-mathem-parity.md#failed-payment-recovery-audit--2026-09-09).
-Ordinary recovery remains unaccepted; this audit does not require repeating
-the already accepted initial order, addition, free delivery change or cancellation.
+Later on 9 September, ordinary installed Hermes/MCP recovery paid the same
+unpaid Oda new order once with an authorized existing saved card, preserving
+its goods, NOK 246.40 total, delivery and original journal. A separate Mathem
+addition genuinely failed, but the retained response evidence did not bind its
+merchant change ID to the reviewed goods before recovery. Addition recovery
+remains disabled and unaccepted. See the [current recovery result](oda-mathem-parity.md#ordinary-oda-payment-recovery-and-retained-mathem-failure--2026-09-09).
+The earlier initial-order, paid-addition, free-delivery and cancellation
+acceptance remains unchanged.
 
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source

@@ -6,6 +6,67 @@ change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
+## Ordinary Oda payment recovery and retained Mathem failure — 2026-09-09
+
+The later owner authorization covered the necessary bounded live payments.
+The installed candidate now exposes `checkout prepare recovery=true` through
+Application, MCP and the skill for an identified unpaid **new order**. It keeps
+the original journal and merchant order, checks the original products,
+quantities, account/address, delivery, total and fee rows, and prepares a fresh
+confirmation without restaging goods. An explicitly authorized
+`checkout_payment` override applies only to this recovery. The final payment
+rechecks the merchant target and review under the existing operation lock;
+a dispatched recovery, including a lost response or restart, is reconciled
+through the retained attempt and cannot authorize a second recovery dispatch.
+
+A real Hermes conversation used that installed path to recover the same Oda
+order from the hosted Vipps timeout below. The owner-authorized existing saved
+card paid the unchanged one-package, NOK 246.40 review for 12 September
+07:00–13:00. The ordinary confirm returned `confirmed=true` and
+`paid_and_modifiable`; independent merchant reads agreed. The pending checkout
+cleared, both original and recovery confirmation IDs resolve to the same
+protected result, and all 17 earlier orders remained unchanged. Global Vipps
+settings and dietary permissions were preserved. This demonstrates saved-card
+recovery of an unpaid Oda new order, not successful Vipps approval or Mathem
+addition recovery. One earlier confirmation stopped before payment on a review
+comparison error; that error and a separate prepared-summary inconsistency
+were corrected before the fresh confirmation. Helpers read evidence but did not perform recovery or write
+protected journals.
+
+The separately authorized Mathem test produced an actual failed addition:
+one extra pasta package, SEK 18.50, to a paid one-package base order of
+SEK 124.50 for 13 September 14:00–16:00. After one payment dispatch the native
+page explicitly reported that payment failed, and merchant tracking changed to
+`unpaid_order_change`. The original paid goods remained unchanged. An earlier
+confirmation had stopped before dispatch because checkout navigation populated
+the existing delivery in the cart; a fresh unchanged commercial review was used
+for the sole payment attempt.
+
+The supported unpaid endpoint, both with and without the order number, returned
+`checkout-payment-retry` with an order/change ID, delivery and financial rows,
+but no product IDs or quantities. The receipt showed only the original paid
+goods. The original payment response body was no longer retained. The available
+React Query entry was written by the later retry-page confirmation request,
+so it cannot prove that the original dispatch assigned this change ID to the
+frozen goods. The retry payable was SEK 18.51, including SEK 18.50 goods; it must
+not be silently substituted for the original SEK 18.50 review.
+
+Addition recovery remains disabled. Its missing evidence is a retained causal
+binding from the original dispatch to the merchant change and reviewed goods,
+or an authoritative merchant change-to-goods response. A merchant change ID
+actually returned by the original, revalidated dispatch could supply that
+binding; a second goods endpoint is not inherently required. This is a limit
+of the evidence retained for this attempt, not proof that Mathem cannot support
+recovery. No helper retry, second payment or journal repair was performed.
+The uncertain attempt and original retry page are preserved. **The requested
+#50 failed-addition recovery criterion remains open.**
+
+The Oda paid test order and Mathem paid base order remain active; neither was
+cancelled. The added Mathem goods remain unpaid. Isolated tests cover changed
+goods/fees/target, final DOM drift, method selection, lost response, reopening
+the journal and refusal of a second recovery dispatch. These tests and the
+Oda live result do not satisfy the missing Mathem acceptance.
+
 ## Owner-authorized Oda Vipps timeout — 2026-09-09
 
 The owner subsequently authorized an intentionally unapproved Vipps test and
@@ -28,10 +89,10 @@ independently verified terminal merchant payment status. The current
 can display timeout for a `TIMEOUT` status or HTTP 401; its **Go back** control
 calls its cancellation routine before returning, and remained untouched.
 
-The merchant still reports exactly one new `unpaid_order`, with the reviewed
+At the timeout checkpoint, the merchant reported exactly one new `unpaid_order`, with the reviewed
 product/quantity, NOK 246.40 and 12 September 07:00–13:00 delivery. All 17 earlier
-order records remain unchanged. The cart is empty and the original product
-attempt remains `uncertain`. One ordinary same-attempt reconcile returned
+order records remain unchanged. The cart was empty and the original product
+attempt remained `uncertain`. One ordinary same-attempt reconcile returned
 `confirmed=false`, `expired=false`, `payment_followup_required=true` and
 `retry_allowed=false`; the product does not reflect this hosted timeout as a
 recoverable failure. Completed native tool results and final replies were
@@ -42,8 +103,9 @@ goods, but do not establish an existing-order change ID or the required change-t
 binding. A bounded supported unpaid-endpoint GET for this new order returned
 the delivery-slot state rather than an unpaid-change payload; that is not a
 general claim about the merchant's capabilities. No recovery payment, helper write to protected product journals, cancellation,
-runtime change or restart was performed. The unpaid
-order and original timeout page are preserved. **#50 recovery remains open.**
+runtime change or restart was performed. At that checkpoint the unpaid
+order and original timeout page were preserved; the later recovery is recorded
+above. **#50 failed-addition recovery remains open.**
 
 ## Ordinary Oda review — 2026-09-09
 
