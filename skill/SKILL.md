@@ -84,6 +84,21 @@ the same attempt. Do not claim a phone request was delivered, payment succeeded,
 or a retry is safe. Oda Vipps support here is for new orders; existing-order
 changes retain their separate saved-card flow.
 
+If reconciliation identifies an unpaid Oda/Mathem new order, use checkout
+`prepare` with `recovery=true` to review the merchant's existing payment. This
+does not restage goods or send payment. It preserves the original attempt and
+checks its goods, account/address, delivery, total and fee rows. The default
+payment method is the original one. An explicitly authorized alternative may
+be passed as `checkout_payment` for this recovery alone; saved-card selection
+uses an existing card, and global preferences remain unchanged. Include the
+returned payment choice and actual dietary findings in the recovery review,
+reuse applicable authorization, and confirm only its fresh confirmation ID.
+After a recovery dispatch, reconcile that same attempt even after restart or
+timeout. The earlier failure never authorizes another payment. Report the
+method that actually completed recovery; saved-card recovery is not a completed
+Vipps payment. Existing-order addition recovery still needs its merchant
+change-to-goods binding and is not enabled by this new-order path.
+
 For MENY, explain persistent browser login, home delivery, locally configured
 Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its
 separate OAuth and a dedicated browser login for saved-card checkout; its help documents adding cards under

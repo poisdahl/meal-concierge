@@ -1530,7 +1530,7 @@ class CoreTestsBase:
         self.assertIn('"26 varer"', script)
         self.assertIn('"discounts":-6290', script)
         self.assertIn('"Tillegg for mindre bestilling":2900', script)
-        self.assertIn("JSON.stringify(amounts)===JSON.stringify(expectedAmounts)", script)
+        self.assertIn("JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts))", script)
         self.assertLess(script.index("amountsValid"), script.index("labels[0].click()"))
 
         browser._eval = mock.Mock(return_value={"clicked": False})

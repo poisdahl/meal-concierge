@@ -178,6 +178,8 @@ async def sdk_checks(root, process):
             else:
                 assert tool.output_schema["type"] == "object"
         schemas = {t.name: t.input_schema for t in discovered.tools}
+        assert schemas["meal_concierge_checkout"]["properties"]["recovery"]["type"] == "boolean"
+        assert "checkout_payment" in schemas["meal_concierge_checkout"]["properties"]
         assert schemas["meal_concierge_catalog"]["required"] == ["action"]
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
         assert "mathem" in json.dumps(schemas["meal_concierge_email"]["properties"]["provider"])
@@ -222,6 +224,8 @@ async def sdk_checks(root, process):
         await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": 2}])
         manual = await call(client, "checkout", action="prepare")
         assert manual["manual_checkout_required"] and not manual["confirmed"] and manual["currency"] == "SEK"
+        recovery = await client.call_tool("meal_concierge_checkout", {"action": "prepare", "recovery": True, "checkout_payment": {"method": "saved_card"}})
+        assert recovery.is_error and "No original dispatched checkout" in recovery.content[0].text, recovery
         await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": -2}])
         await call(client, "product_favorites", action="remove", product_id="10")
         print(json.dumps({"sdk": "passed", "protocol": initialized.protocol_version, "tools": len(expected), "identity": marker}), flush=True)

@@ -13,8 +13,8 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo
-from oda_browser import require_order_binding, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
-from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
+from oda_browser import require_order_binding, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature, _oda_checkout_amounts_minor
+from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
 from planning_assessment import assess_menu
@@ -1629,6 +1629,9 @@ class OrderOperations:
             return result
         state = self.store.read()
         before = next((n for n in state.get('checkout_notices', {}).values() if n['confirmation_id'] == confirmation_id and n['phase'] == 'before_dispatch'), None)
+        if not before and result.get('original_confirmation_id'):
+            confirmation_id = result['original_confirmation_id']
+            before = next((n for n in state.get('checkout_notices', {}).values() if n['confirmation_id'] == confirmation_id and n['phase'] == 'before_dispatch'), None)
         if not before:
             return result
         existing = next((n for n in state.get('checkout_notices', {}).values() if n['confirmation_id'] == confirmation_id and n['phase'] == 'after_reconciliation'), None)
@@ -1687,6 +1690,12 @@ class OrderOperations:
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
             raise HouseholdError("Mathem checkout is manual; use prepare for the cart summary and finish at https://www.mathem.se/se/cart/")
         deadline = time.monotonic() + (MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240)
+        if "recovery" in request and (type(request["recovery"]) is not bool or action != "prepare"):
+            raise HouseholdError("recovery is a boolean option for checkout prepare only")
+        if "checkout_payment" in request and not (action == "prepare" and request.get("recovery")):
+            raise HouseholdError("checkout_payment override is available only for recovery preparation")
+        if action == "prepare" and request.get("recovery"):
+            return self._checkout_recovery_prepare(deadline, request.get("checkout_payment"))
         if action == "prepare":
             occurrence = str(request.get("occurrence") or "") or None
             state = self.store.read()
@@ -2255,6 +2264,142 @@ class OrderOperations:
             ),
         }
 
+    def _checkout_recovery_target(self, pending, deadline):
+        if self.provider not in {"oda", "mathem"} or self.browser is None:
+            raise HouseholdError("Merchant payment recovery is unavailable for this installation")
+        if pending.get("order_change"):
+            raise HouseholdError("The original merchant change and its goods must be bound before addition recovery")
+        before = {str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
+                  for row in pending["orders_before"].get("orders", [])}
+        orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
+        candidates = [row for row in orders.get("orders", [])
+                      if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before]
+        if len(candidates) != 1:
+            raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
+        order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
+        order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
+        tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
+        if (str(order.get("orderNumber") or order.get("order_number") or "") != order_id
+                or str(tracking.get("orderNumber") or tracking.get("order_id") or "") != order_id
+                or tracking.get("status") != "unpaid_order"):
+            raise HouseholdError("The original order is no longer unpaid; reconcile it before recovery")
+        # MCP omits an unpaid order's address. The native retry review below
+        # independently verifies it and the original account reference.
+        addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
+            **order, "deliveryAddress": pending["summary"]["delivery"]["address"]}
+        if not order_matches_checkout(addressed, pending["summary"], provider=self.provider):
+            raise HouseholdError("The unpaid order goods, amount or delivery differ from the original checkout")
+        return order_id
+
+    def _checkout_recovery_prepare(self, deadline, checkout_payment=None):
+        with self._browser_operation(deadline):
+            return self._checkout_recovery_prepare_unlocked(deadline, checkout_payment)
+
+    def _checkout_recovery_prepare_unlocked(self, deadline, checkout_payment=None):
+        pending = deepcopy(self.store.read().get("pending_checkout"))
+        if not pending or pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
+            raise HouseholdError("No original dispatched checkout is pending recovery")
+        child = pending.get("recovery")
+        if child and child.get("status") != "awaiting_confirmation":
+            return self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
+        order_id = self._checkout_recovery_target(pending, deadline)
+        binding = require_order_binding({
+            "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
+            "receipt_address": pending["summary"]["delivery"]["address"],
+        })
+        payment = checkout_payment_settings(checkout_payment, self.provider) if checkout_payment is not None else pending["checkout_payment"]
+        review = self.browser.review_payment_recovery(pending["cart"], order_id,
+            payment=payment, expected_binding=binding, deadline=deadline)
+        if checkout_payment is None and review["payment_display"] != pending["browser_review"]["payment_display"]:
+            raise HouseholdError("Recovery payment differs from the original reviewed method")
+        expected_amounts = _oda_checkout_amounts_minor(pending["browser_review"]["amounts"], provider=self.provider)
+        if {key: review["amounts_minor"].get(key) for key in expected_amounts} != expected_amounts:
+            raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+        if self.provider == "mathem":
+            breakdown = pending["browser_review"].get("discount_breakdown")
+            if not isinstance(breakdown, Mapping) or {
+                    key: money_cents(value) if value is not None else None for key, value in breakdown.items()
+            } != review["amounts_minor"].get("discount_breakdown"):
+                raise HouseholdError("Recovery discount rows differ from the original review")
+        assessment = self._checkout_dietary(pending["summary"], deadline)
+        child = {"confirmation_id": secrets.token_urlsafe(24),
+                 "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
+                 "status": "awaiting_confirmation", "order_id": order_id,
+                 "browser_review": review, "dietary_assessment": assessment}
+        with self.store.locked() as state:
+            if canonical(state.get("pending_checkout")) != canonical(pending):
+                raise HouseholdError("The pending checkout changed during recovery preparation")
+            state["pending_checkout"]["recovery"] = child
+        return {"confirmed": False, "recovery": True, "order_id": order_id,
+                "confirmation_id": child["confirmation_id"], "original_confirmation_id": pending["confirmation_id"],
+                "confirmation_policy": self.confirmation_policy, "confirmation_required": True,
+                "summary": {**deepcopy(pending["summary"]), "dietary_assessment": assessment,
+                            "payment": review["payment_display"],
+                            "payment_method": review["payment_choice"]["method"]},
+                "next": "Review this same merchant order and authorize its recovery payment. Confirm only with this fresh confirmation_id and actually reviewed dietary finding IDs. No goods have been restaged or payment sent."}
+
+    def _checkout_recovery_confirm(self, pending, deadline, request):
+        confirmation_id = pending["recovery"]["confirmation_id"]
+        with self._browser_operation(deadline):
+            state = self.store.read()
+            recovered = self._read_protected_result(state, confirmation_id, "checkout")
+            if recovered:
+                return recovered
+            pending = deepcopy(state.get("pending_checkout"))
+            if not pending or (pending.get("recovery") or {}).get("confirmation_id") != confirmation_id:
+                raise HouseholdError("Recovery confirmation is no longer current")
+            child = pending["recovery"]
+            if child["status"] != "awaiting_confirmation":
+                return self._checkout_reconcile_unlocked(deadline, child["confirmation_id"])
+            if self._now() >= datetime.fromisoformat(child["expires_at"]):
+                raise HouseholdError("Recovery confirmation expired; prepare recovery again for the original order")
+            if self.store.read()["checkout_payment"] != pending["checkout_payment"]:
+                raise HouseholdError("Payment preference changed during recovery")
+            assessment = self._checkout_dietary(pending["summary"], deadline)
+            if assessment != child["dietary_assessment"]:
+                return {"confirmed": False, "reprepared": True, **self._checkout_recovery_prepare_unlocked(deadline, child["browser_review"]["payment_choice"])}
+            recovery_summary = {**deepcopy(pending["summary"]), "dietary_assessment": assessment,
+                                "payment": child["browser_review"]["payment_display"],
+                                "payment_method": child["browser_review"]["payment_choice"]["method"]}
+            gate_pending = {**pending, "confirmation_id": child["confirmation_id"],
+                            "dietary_assessment": assessment, "summary": recovery_summary}
+            gate = self._dietary_checkout_gate(gate_pending, request)
+            if gate:
+                return {**gate, "confirmation_id": child["confirmation_id"],
+                        "summary": recovery_summary}
+
+            dispatch_claimed = False
+
+            def before_click():
+                nonlocal dispatch_claimed
+                if self._checkout_recovery_target(pending, deadline) != child["order_id"]:
+                    raise HouseholdError("Recovery merchant target changed")
+                if self._checkout_dietary(pending["summary"], deadline) != child["dietary_assessment"]:
+                    raise HouseholdError("Recovery dietary findings changed; prepare a new review")
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) != canonical(pending):
+                        raise HouseholdError("Recovery state changed before payment")
+                    if self._now() >= datetime.fromisoformat(child["expires_at"]):
+                        raise HouseholdError("Recovery confirmation expired before payment")
+                    self._pending_scheduler_guard(state, pending)
+                    state["pending_checkout"]["recovery"]["status"] = "clicking"
+                dispatch_claimed = True
+
+            try:
+                self.browser.submit_payment_recovery(pending["cart"], child["browser_review"], before_click, deadline=deadline)
+            except CheckoutPreconditionError:
+                # This exception guarantees no final click. Discard only the
+                # recovery review; the original uncertain purchase stays intact.
+                with self.store.locked() as state:
+                    current = state.get("pending_checkout")
+                    expected = deepcopy(pending)
+                    if dispatch_claimed:
+                        expected["recovery"]["status"] = "clicking"
+                    if canonical(current) == canonical(expected):
+                        current.pop("recovery")
+                raise
+            return self._checkout_reconcile_unlocked(deadline, child["confirmation_id"])
+
     def _checkout_confirm(self, deadline: float | None = None, confirmation_id: str = "", *, request=None) -> dict[str, Any]:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
@@ -2262,6 +2407,11 @@ class OrderOperations:
             current_payment = deepcopy(state["checkout_payment"])
         if recovered:
             return recovered
+        if pending and pending.get("recovery"):
+            if confirmation_id == pending["recovery"]["confirmation_id"]:
+                return self._checkout_recovery_confirm(pending, deadline, request)
+            if confirmation_id == pending["confirmation_id"]:
+                return self._checkout_reconcile(deadline, confirmation_id)
         if not pending or pending["status"] != "awaiting_confirmation":
             raise HouseholdError("no fresh checkout confirmation is pending")
         if not pending.get("order_change"):
@@ -2507,7 +2657,8 @@ class OrderOperations:
             recovered = self._read_protected_result(state, confirmation_id, "checkout") if confirmation_id else None
         if recovered:
             return recovered
-        if confirmation_id and isinstance(pending, Mapping) and pending.get("confirmation_id") != confirmation_id:
+        if confirmation_id and isinstance(pending, Mapping) and confirmation_id not in {
+                pending.get("confirmation_id"), (pending.get("recovery") or {}).get("confirmation_id")}:
             raise HouseholdError("checkout reconciliation does not match the pending attempt")
         if not pending:
             raise HouseholdError("no checkout attempt is pending")
@@ -2610,6 +2761,15 @@ class OrderOperations:
                 except ValueError:
                     expires_at = None
             expired_unpaid = expires_at is not None and expires_at.tzinfo is not None and self._now() >= expires_at
+        unpaid_matches = (
+            self.provider in {"oda", "mathem"} and order is not None
+            and candidate_id == details_id == tracking_id and tracking_status == "unpaid_order"
+            and order_matches_checkout(
+                order if "deliveryAddress" in order or "delivery_address" in order else {
+                    **order, "deliveryAddress": (pending["summary"].get("delivery") or {}).get("address")},
+                pending["summary"], provider=self.provider)
+        )
+        recovery_dispatched = pending.get("recovery") and pending["recovery"].get("status") != "awaiting_confirmation"
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("checkout state changed while reconciling the order")
@@ -2619,7 +2779,8 @@ class OrderOperations:
                 self._record_order_snapshot(state, pending, order_id)
                 terminal = {
                     "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
-                    "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
+                    "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
+                    **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
                     "payment": self._payment_evidence(tracking_status),
                     "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
                     "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
@@ -2630,6 +2791,9 @@ class OrderOperations:
                     state, pending["confirmation_id"], "checkout", terminal,
                     target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]),
                 )
+                if pending.get("recovery"):
+                    self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
+                        target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
             elif expired_unpaid or undispatched_retryable:
                 state["pending_checkout"] = None
             else:
@@ -2643,13 +2807,25 @@ class OrderOperations:
             "retry_allowed": expired_unpaid or undispatched_retryable,
             **({"payment_dispatched": False} if undispatched_retryable else {}),
             **({"payment_followup_required": True,
+                "payment_method": (pending["recovery"]["browser_review"]["payment_choice"]
+                                   if recovery_dispatched else pending["checkout_payment"])["method"]}
+               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed else {}),
+            **({"unpaid_order_id": candidate_id, "tracking_status": tracking_status,
+                "recovery_preparation_available": True,
+                "next": "The original merchant order is unpaid. Inspect its supported retry review with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment."}
+               if unpaid_matches and not recovery_dispatched else {}),
+            **({"tracking_status": tracking_status,
+                "recovery_payment_unconfirmed": True,
+                "next": "Recovery payment was dispatched but is not confirmed. Preserve that payment and reconcile this same attempt; the earlier failure does not authorize another payment."}
+               if not confirmed and recovery_dispatched else {}),
+            **({"payment_followup_required": True,
                 "payment_method": "vipps",
                 "next": "The original Oda/Vipps payment is not confirmed. Check its original payment page and complete any requested approval, then reconcile this same attempt. Do not submit again."}
-               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed else {}),
+               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched else {}),
             **({"tracking_status": tracking_status or None,
                 "payment": self._payment_evidence(tracking_status or None),
                 "next": "The original Mathem payment is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}
-               if self.provider == "mathem" and not confirmed else {}),
+               if self.provider == "mathem" and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched else {}),
         }
 
     def _order_change_reconcile(self, pending: Mapping[str, Any], deadline: float | None = None) -> dict[str, Any]:
