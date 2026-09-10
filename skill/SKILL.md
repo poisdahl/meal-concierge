@@ -84,7 +84,8 @@ the same attempt. Do not claim a phone request was delivered, payment succeeded,
 or a retry is safe. Oda Vipps support here is for new orders; existing-order
 changes retain their separate saved-card flow.
 
-If reconciliation identifies an unpaid Oda/Mathem new order, use checkout
+If reconciliation returns `recovery_preparation_available` for an unpaid
+Oda/Mathem new order or an explicitly failed Mathem addition, use checkout
 `prepare` with `recovery=true` to review the merchant's existing payment. This
 does not restage goods or send payment. It preserves the original attempt and
 checks its goods, account/address, delivery, total and fee rows. The default
@@ -96,8 +97,15 @@ reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
 timeout. The earlier failure never authorizes another payment. Report the
 method that actually completed recovery; saved-card recovery is not a completed
-Vipps payment. Existing-order addition recovery still needs its merchant
-change-to-goods binding and is not enabled by this new-order path.
+Vipps payment. Mathem addition recovery retains the original submit's merchant
+order/change target and frozen goods; it never rebuilds the cart or derives
+that target from a later arbitrary retry page. If the review returns
+`merchant_summary_total`, show that overview separately from `summary.total`,
+the actual amount due on the payment button. Both are rechecked before payment;
+the original goods and payable must remain unchanged. A required notice also
+includes this distinction. Missing original target evidence preserves the
+uncertain attempt for reconciliation. If the owner completes payment manually,
+reconcile it and attribute that payment to the owner.
 
 For MENY, explain persistent browser login, home delivery, locally configured
 Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its

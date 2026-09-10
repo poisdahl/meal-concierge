@@ -18,7 +18,7 @@ import sys
 import time
 from typing import Any, Callable, Mapping
 import unicodedata
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, validate_delivery_slot
 
@@ -150,6 +150,7 @@ def _oda_checkout_amount_script(
     provider: str = "oda",
     vipps: bool = False,
     retry: bool = False,
+    addition_retry: bool = False,
 ) -> str:
     """Build the shared read/final-click parser from observed retailer rows."""
 
@@ -192,7 +193,7 @@ def _oda_checkout_amount_script(
    other_fee:rowState(amountLabels.other_fee),
    provider_total:rowState(amountLabels.provider_total),
  };
- const required=[states.product_subtotal,states.delivery_price,states.provider_total,...(RETRY?[]:[states.discounted_subtotal])];
+ const required=[states.product_subtotal,states.provider_total,...(ADDITION_RETRY?[]:[states.delivery_price]),...(RETRY?[]:[states.discounted_subtotal])];
  let summaryRoot=null;
  if(required.every(row=>row.state==='value')){
    summaryRoot=required[0].root;
@@ -221,8 +222,12 @@ def _oda_checkout_amount_script(
  const signsValid=required.every(row=>row.value>=0)&&[states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
  const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(states.discounts.value||0);
- const totalValid=amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
- const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&amounts.provider_total===TOTAL;
+ // On addition retry the overview gross total and the payment calculation are
+ // separate merchant values. The final button is the calculated amount due.
+ const totalValid=ADDITION_RETRY
+   ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent')
+   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
+ const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  if(!CLICK_MODE)return JSON.stringify({amounts,amounts_valid:amountsValid});
  const expectedAmounts=EXPECTED_AMOUNTS;
  const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|CURRENCY_CODE)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
@@ -246,6 +251,7 @@ def _oda_checkout_amount_script(
         .replace("CURRENCY_CODE", "SEK" if provider == "mathem" else "NOK")
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
+        .replace("ADDITION_RETRY", "true" if addition_retry else "false")
         .replace("RETRY", "true" if retry else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
         .replace(
@@ -738,12 +744,15 @@ class OdaBrowser:
         with self._checkout_operation(deadline):
             return self._review_checkout(cart, payment=payment, select_payment=True) if payment is not None else self._review_checkout(cart)
 
-    def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, deadline=None):
+    def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, deadline=None, addition=None):
         """Review the merchant's existing unpaid order, without recreating its cart."""
         with self._checkout_operation(deadline, preserve_session=True):
             binding = require_order_binding(expected_binding)
             self._order_url(order_id)
-            expected = self._cart_expectation(cart)
+            if addition is not None and self.checkout_provider != "mathem":
+                raise HouseholdError("Addition payment recovery is unavailable for this provider")
+            bound_cart = self._order_cart(cart, order_id, addition["before"]["order"], binding) if addition else cart
+            expected = self._cart_expectation(bound_cart)
             # Keep the original payment page intact while the merchant decides
             # whether this exact outstanding order has a retry review.
             label = "meal-concierge-payment-recovery"
@@ -759,6 +768,8 @@ class OdaBrowser:
                     or self._verify_checkout_account(binding["receipt_address"]) != binding["account_reference_digest"]):
                 raise HouseholdError("Recovery account/address differs from the original checkout")
             url = _retail_store_url(self.checkout_provider) + "checkout/retry/?orderNumber=" + quote(order_id, safe="")
+            if addition:
+                url += "&orderChangeId=" + quote(addition["order_change_id"], safe="")
             self._open(url)
             # The retry heading renders before the asynchronous payment methods.
             selected = False
@@ -782,21 +793,24 @@ class OdaBrowser:
                     or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider)):
                 raise HouseholdError("The merchant recovery review differs from the original order")
             amounts = self._eval(_oda_checkout_amount_script(expected["total_minor"],
-                expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True))
+                expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True,
+                addition_retry=bool(addition)))
             if amounts.get("amounts_valid") is not True:
                 raise HouseholdError("The merchant recovery amounts differ from the original order")
             return {"order_id": order_id, "binding": dict(binding), "payment_choice": dict(payment),
                     "payment_display": surface["payment_display"], "surface": surface,
                     "amounts_minor": amounts["amounts"]}
 
-    def submit_payment_recovery(self, cart, review, before_click, *, deadline=None):
+    def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None):
         with self._checkout_operation(deadline, preserve_session=True):
             try:
                 current = self.review_payment_recovery(cart, review["order_id"],
-                    payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline)
+                    payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline,
+                    **({"addition": addition} if addition else {}))
                 if current != dict(review):
                     raise HouseholdError("Recovery changed after its confirmation")
-                expected = self._cart_expectation(cart)
+                bound_cart = self._order_cart(cart, review["order_id"], addition["before"]["order"], review["binding"]) if addition else cart
+                expected = self._cart_expectation(bound_cart)
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 before_click()
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
@@ -804,7 +818,8 @@ class OdaBrowser:
                 click = _oda_checkout_amount_script(expected["total_minor"],
                     expected_product_count=expected["product_count"], provider=self.checkout_provider,
                     expected_amounts=review["amounts_minor"], expected_url=review["surface"]["url"],
-                    vipps=review["payment_choice"].get("method") == "vipps", retry=True).strip()
+                    vipps=review["payment_choice"].get("method") == "vipps", retry=True,
+                    addition_retry=bool(addition)).strip()
                 script = ("(() => {const actual=JSON.parse(" + surface
                           + "),expected=" + json.dumps(review["surface"], ensure_ascii=False)
                           + ";const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;"
@@ -2117,6 +2132,9 @@ class MathemBrowser(OdaBrowser):
                 if current != dict(review):
                     raise HouseholdError("Mathem addition changed after confirmation")
                 expected = self._addition_expectation(cart, order_id, order, review["binding"])
+                tabs = self._invoke("tab", "list").get("tabs", [])
+                active = [tab["tabId"] for tab in tabs if tab.get("active") is True]
+                dispatch_tab = active[0] if len(active) == 1 else None
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 if before_click:
                     before_click()
@@ -2129,6 +2147,49 @@ class MathemBrowser(OdaBrowser):
             # Transport failure here may follow the click. Leave it uncertain.
             if self._eval(script) != {"clicked": True}:
                 raise CheckoutPreconditionError("Mathem addition changed before the final click")
+            return self._capture_addition_failure(order_id, dispatch_tab)
+
+    def _capture_addition_failure(self, order_id, dispatch_tab):
+        """Retain this submit's failed target before releasing the owned browser.
+
+        A later arbitrary retry page cannot supply the original goods binding.
+        Missing/late results remain uncertain and never authorize another click.
+        """
+        if dispatch_tab is None:
+            return None
+        read_failures = 0
+        for _ in range(60):
+            try:
+                tabs = self._invoke("tab", "list").get("tabs", [])
+                active = [tab for tab in tabs if tab.get("active") is True]
+                if len(active) != 1 or active[0]["tabId"] != dispatch_tab:
+                    return None
+                page = self._eval(r"""JSON.stringify({url:location.href,failed:[...document.querySelectorAll('article')].some(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&/Din betalning gick inte igenom/i.test(e.innerText||'')})})""")
+                url = urlsplit(page.get("url", ""))
+                if url.scheme != "https" or url.netloc != "www.mathem.se":
+                    return None
+                if url.path == "/se/checkout/success/":
+                    return None
+                if url.path == "/se/checkout/retry/" and page.get("failed") is True:
+                    params = parse_qs(url.query, keep_blank_values=True)
+                    change_ids = params.get("orderChangeId", [])
+                    if (url.fragment or set(params) != {"orderNumber", "orderChangeId"}
+                            or params["orderNumber"] != [order_id] or len(change_ids) != 1
+                            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", change_ids[0]) is None):
+                        return None
+                    return {"payment_failed": True, "order_id": order_id, "order_change_id": change_ids[0]}
+                self._settle(0.5)
+            except HouseholdError:
+                # Navigation can destroy an evaluation context after the click.
+                # Retry that read once, never the payment or a pre-click result.
+                read_failures += 1
+                if read_failures > 1:
+                    return None
+                try:
+                    self._settle(0.5)
+                except HouseholdError:
+                    return None
+        return None
 
     def _navigate_delivery_change(self, order_id, expected, slot):
         # The existing-order route can already retain the selected review. Open

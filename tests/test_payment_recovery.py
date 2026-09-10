@@ -271,6 +271,170 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(replay["notice"]["dispatch"])
 
 
+class MathemAdditionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.merchant = Merchant()
+        self.merchant.provider = "mathem"
+        self.merchant.status = "unpaid_order_change"
+        self.merchant.order = {"orderNumber": "order-1", "currency": "SEK", "grossAmount": 124.50,
+            "products": [{"product_id": "4904", "quantity": 1}], "deliveryDate": "2026-09-13",
+            "deliverySlotDisplay": "Sön 13. sep 14:00 - 16:00"}
+        self.before = deepcopy(self.merchant.order)
+        self.browser = MerchantBrowser(self.merchant)
+        self.browser.order_followup = lambda *a, **kw: {}
+        self.amounts = {key: None for key in AMOUNTS}
+        self.amounts.update(product_subtotal=18.50, provider_total=18.50)
+        self.settings = {"provider": "mathem", "household": "Synthetic", "checkout_payment": {"method": "saved_card"}}
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.now = datetime(2026, 9, 10, 7, tzinfo=timezone.utc)
+        self.app._now = lambda: self.now
+        self.binding = {"account_reference_digest": "a" * 64, "receipt_address": "Example street 1"}
+        cart = {"items": [{"product_id": "4904", "name": "Wholegrain pasta", "quantity": 1, "price": 18.50}],
+                "count": 1, "totalGrossAmount": 18.50, "deliverySlot": {"name": "Sön 13. sep 14:00 - 16:00"},
+                "deliveryAddress": "Example street 1"}
+        change = {"order_id": "order-1", "binding": self.binding,
+                  "before": {"order": deepcopy(self.before), "tracking": {"status": "paid_and_modifiable"}}}
+        with self.app.store.locked() as state:
+            state["order_change"] = deepcopy(change)
+            state["pending_checkout"] = {"confirmation_id": "original", "status": "uncertain",
+                "expires_at": "2026-09-09T22:00:00+00:00", "cart": cart, "summary": cart_summary(cart),
+                "orders_before": {"orders": [deepcopy(self.before)]}, "order_change": change,
+                "browser_review": {"binding": self.binding, "payment_display": "•••• 1234", "amounts": self.amounts},
+                "checkout_payment": deepcopy(state["checkout_payment"]),
+                "payment_failure": {"payment_failed": True, "order_id": "order-1", "order_change_id": "change-1"}}
+        self.original = self.app.store.read()["pending_checkout"]
+        self.review_change = None
+        self.options_seen = []
+        def review(cart, order_id, *, payment, expected_binding, addition, **kwargs):
+            self.options_seen.append(deepcopy(addition))
+            assert order_id == "order-1" and expected_binding == self.binding
+            assert addition["order_change_id"] == "change-1" and addition["before"]["order"] == self.before
+            amounts = _oda_checkout_amounts_minor(self.amounts, provider="mathem")
+            amounts.update(provider_total=1851, discount_breakdown={"product_discount": None, "delivery_discount": None})
+            result = {"order_id": order_id, "binding": deepcopy(expected_binding), "payment_choice": deepcopy(payment),
+                      "payment_display": "•••• 1234", "amounts_minor": amounts}
+            if self.review_change:
+                self.review_change(result)
+            return result
+        self.browser.review_payment_recovery = review
+        def submit(cart, review, before_click, *, addition, **kwargs):
+            assert addition["order_change_id"] == "change-1"
+            before_click()
+            self.browser.clicks += 1
+            if self.browser.lost_response:
+                raise HouseholdError("lost response after recovery click")
+            self.accept()
+        self.browser.submit_payment_recovery = submit
+
+    def accept(self):
+        self.merchant.status = "paid_and_modifiable"
+        self.merchant.order.update(grossAmount=143.00, products=[{"product_id": "4904", "quantity": 2}])
+
+    def call(self, action, **kwargs):
+        return self.app.handle({"operation": "checkout", "action": action, **kwargs})
+
+    def prepare(self):
+        return self.call("prepare", recovery=True)
+
+    def test_same_addition_review_preserves_goods_and_separate_overview_total(self):
+        prepared = self.prepare()
+        self.assertEqual(prepared["summary"]["total"], 18.50)
+        self.assertEqual(prepared["summary"]["merchant_summary_total"], 18.51)
+        self.assertEqual(prepared["summary"]["items"], self.original["summary"]["items"])
+        self.assertEqual(self.browser.clicks, 0)
+        self.assertFalse(self.call("confirm", confirmation_id="original")["confirmed"])
+        result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["changed_existing_order"])
+        self.assertEqual(result["original_confirmation_id"], "original")
+        self.assertEqual(self.browser.clicks, 1)
+        for cid in ("original", prepared["confirmation_id"]):
+            self.assertTrue(self.call("confirm", confirmation_id=cid)["idempotent"])
+            self.assertTrue(self.call("reconcile", confirmation_id=cid)["confirmed"])
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertIsNone(self.app.store.read()["order_change"])
+        self.assertNotIn("get_cart", self.merchant.calls)
+
+    def test_lost_response_restart_and_repeated_failure_never_pay_twice(self):
+        prepared = self.prepare()
+        self.browser.lost_response = True
+        with self.assertRaises(HouseholdError):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.now += timedelta(days=1)
+        self.app._now = lambda: self.now
+        for cid in ("original", prepared["confirmation_id"]):
+            result = self.call("confirm", confirmation_id=cid)
+            self.assertTrue(result["recovery_payment_unconfirmed"])
+            self.assertNotIn("recovery_preparation_available", result)
+        self.assertFalse(self.prepare()["confirmed"])
+        self.assertEqual(self.browser.clicks, 1)
+        self.accept()
+        self.assertTrue(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["confirmed"])
+        self.assertTrue(self.call("confirm", confirmation_id="original")["confirmed"])
+        self.assertEqual(self.browser.clicks, 1)
+
+    def test_missing_original_capture_or_changed_base_cannot_prepare(self):
+        with self.app.store.locked() as state:
+            state["pending_checkout"].pop("payment_failure")
+        with self.assertRaisesRegex(HouseholdError, "must be bound"):
+            self.prepare()
+        with self.app.store.locked() as state:
+            state["pending_checkout"] = deepcopy(self.original)
+        for change in ({"grossAmount": 125.00}, {"products": [{"product_id": "4904", "quantity": 2}]},
+                       {"deliverySlotDisplay": "Sön 13. sep 16:00 - 18:00"}, {"currency": "NOK"}):
+            self.merchant.order = {**deepcopy(self.before), **change}
+            with self.assertRaisesRegex(HouseholdError, "paid order changed"):
+                self.prepare()
+        self.assertEqual(self.browser.clicks, 0)
+        self.assertEqual(self.app.store.read()["pending_checkout"], self.original)
+
+    def test_paid_owner_race_is_reconciled_without_recovery_dispatch(self):
+        prepared = self.prepare()
+        self.accept()
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        result = self.call("reconcile", confirmation_id="original")
+        self.assertTrue(result["confirmed"])
+        self.assertNotIn("original_confirmation_id", result)
+        self.assertTrue(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["confirmed"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_recovery_notice_discloses_payable_and_overview_and_records_result_once(self):
+        self.app.confirmation_policy = "standing"
+        with self.app.store.locked() as state:
+            state["profile"]["diet"]["allergies_or_sensitivities"] = ["mustard"]
+        prepared = self.prepare()
+        with self.app.store.locked() as state:
+            state["profile"]["diet"]["uncertainty_permissions"] = [
+                {**{key: f[key] for key in ("kind", "term", "product_ref", "condition")}, "accepted": True, "notify": True}
+                for f in prepared["summary"]["dietary_assessment"]["findings"]]
+        prepared = self.prepare()
+        held = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(held["notification_required"])
+        message = held["notice"]["payload"]["message"]
+        self.assertIn("Payment due now: 18.50 SEK", message)
+        self.assertIn("overview separately shows 18.51 SEK", message)
+        self.call("notice_result", notice_token=held["notice"]["notice_token"], send_outcome="sent", sender_receipt="synthetic sender receipt")
+        result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["notice"]["dispatch"])
+        replay = self.call("confirm", confirmation_id="original")
+        self.assertEqual(result["notice"]["notice_token"], replay["notice"]["notice_token"])
+        self.assertFalse(replay["notice"]["dispatch"])
+        self.assertEqual(self.browser.clicks, 1)
+
+    def test_changed_payment_or_added_fee_never_prepares(self):
+        for change in (lambda r: r.update(payment_display="•••• 4321"),
+                       lambda r: r["amounts_minor"].update(bags=100)):
+            self.review_change = change
+            with self.assertRaises(HouseholdError):
+                self.prepare()
+        self.assertEqual(self.browser.clicks, 0)
+
+
 class RetryAmountTests(unittest.TestCase):
     def test_persisted_recovery_review_clicks_once_and_blocks_actual_drift(self):
         import json
@@ -346,6 +510,91 @@ class RetryAmountTests(unittest.TestCase):
         self.assertEqual(execute(click, url=url)["clicks"], ["PAY"])
         self.assertEqual(execute(click, url=url.replace("order-1", "order-2"))["clicks"], [])
         self.assertEqual(execute(click, url=url, button="Betal med 46,50 kr")["clicks"], [])
+
+
+class MathemRetryBrowserTests(unittest.TestCase):
+    def test_exact_dispatch_page_capture_and_missing_or_foreign_results(self):
+        from unittest import mock
+        from oda_browser import MathemBrowser
+        url = "https://www.mathem.se/se/checkout/retry/?orderNumber=order-1&orderChangeId=change-1"
+        browser = MathemBrowser.__new__(MathemBrowser)
+        browser._settle = mock.Mock()
+        browser._invoke = mock.Mock(return_value={"tabs": [{"tabId": "owned", "active": True}]})
+        browser._eval = mock.Mock(side_effect=[HouseholdError("navigation context destroyed"), {"url": url, "failed": True}])
+        result = browser._capture_addition_failure("order-1", "owned")
+        self.assertEqual(result, {"payment_failed": True, "order_id": "order-1", "order_change_id": "change-1"})
+        self.assertEqual(browser._eval.call_count, 2)
+        self.assertFalse(any(args.args[0] in {"open", "click"} for args in browser._invoke.call_args_list))
+        for wrong in (url.replace("order-1", "order-2"), url.replace("www.mathem.se", "example.com"),
+                      url + "&orderChangeId=change-2", url + "#other", url.replace("&orderChangeId=change-1", "")):
+            browser._eval = mock.Mock(return_value={"url": wrong, "failed": True})
+            self.assertIsNone(browser._capture_addition_failure("order-1", "owned"))
+        browser._eval = mock.Mock(return_value={"url": url, "failed": False})
+        self.assertIsNone(browser._capture_addition_failure("order-1", "owned"))
+        browser._invoke.return_value = {"tabs": [{"tabId": "different", "active": True}]}
+        browser._eval.reset_mock()
+        self.assertIsNone(browser._capture_addition_failure("order-1", "owned"))
+        browser._eval.assert_not_called()
+        self.assertIsNone(browser._capture_addition_failure("order-1", None))
+
+    def test_actual_addition_retry_scripts_bind_payable_overview_and_final_review(self):
+        import json
+        import shutil
+        import subprocess
+        from contextlib import nullcontext
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import MathemBrowser, _oda_checkout_surface_script, _oda_checkout_amount_script
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node executes the actual final browser script")
+        harness = PAYMENT_DOM.replace("Vi leverer varene dine", "Vi levererar din beställning")
+        expected = {"delivery_address": "Eksempelveien 1", "total_minor": 1850, "product_count": 1}
+        url = "https://www.mathem.se/se/checkout/retry/?orderNumber=order-1&orderChangeId=change-1"
+        rows = [["1 vara", "18,50 kr"], ["Totalt inkl. moms", "18,51 kr"]]
+        payment = {"method": "saved_card"}
+        def evaluate(script, **change):
+            config = {"url": url, "rows": rows, "selected": 2, "button": "Bekräfta och betala 18,50 kr", **change}
+            result = subprocess.run([node, "-e", harness], input=json.dumps({"script": script, "c": config}), text=True, capture_output=True, check=True)
+            return json.loads(result.stdout)
+        read = _oda_checkout_amount_script(1850, expected_product_count=1, provider="mathem", retry=True, addition_retry=True)
+        amounts = evaluate(read)["result"]
+        self.assertTrue(amounts["amounts_valid"])
+        self.assertEqual(amounts["amounts"]["provider_total"], 1851)
+        self.assertEqual(amounts["amounts"]["product_subtotal"], 1850)
+        self.assertFalse(evaluate(_oda_checkout_amount_script(1850, expected_product_count=1, provider="mathem", retry=True))["result"]["amounts_valid"])
+        surface = evaluate(_oda_checkout_surface_script(expected, payment, provider="mathem"))["result"]
+        review = json.loads(json.dumps({"order_id": "order-1", "binding": {}, "payment_choice": payment,
+                                       "surface": surface, "amounts_minor": amounts["amounts"]}, sort_keys=True))
+        changes = [{}, {"button": "Bekräfta och betala 18,51 kr"}, {"payDisabled": True}, {"selected": 0},
+                   {"url": url.replace("change-1", "change-2")},
+                   {"rows": [["1 vara", "18,50 kr"], ["Totalt inkl. moms", "18,52 kr"]]},
+                   {"rows": [["1 vara", "18,49 kr"], ["Totalt inkl. moms", "18,51 kr"]]},
+                   {"rows": [["2 varor", "18,50 kr"], ["Totalt inkl. moms", "18,51 kr"]]},
+                   {"rows": rows + [["Extra avgift", "1,00 kr"]]},
+                   {"rows": rows + [["Leverans", "1,00 kr"]]}]
+        for change in changes:
+            with self.subTest(change=change):
+                browser = MathemBrowser.__new__(MathemBrowser)
+                browser._checkout_deadline = None
+                browser._checkout_operation = lambda *a, **k: nullcontext()
+                browser._cart_expectation = lambda cart: expected
+                browser._order_cart = lambda cart, *a: cart
+                browser.review_payment_recovery = lambda *a, **k: deepcopy(review)
+                observed, callbacks = [], []
+                def final_eval(script):
+                    self.assertEqual(callbacks, [True])
+                    result = evaluate(script, **change)
+                    observed.append(result)
+                    return result["result"]
+                browser._eval = final_eval
+                def submit():
+                    browser.submit_payment_recovery({}, review, lambda: callbacks.append(True),
+                        addition={"before": {"order": {}}, "order_change_id": "change-1"})
+                if change:
+                    with self.assertRaises(CheckoutPreconditionError): submit()
+                else:
+                    submit()
+                self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
 
 
 if __name__ == "__main__":

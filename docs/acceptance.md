@@ -35,8 +35,13 @@ Later on 9 September, ordinary installed Hermes/MCP recovery paid the same
 unpaid Oda new order once with an authorized existing saved card, preserving
 its goods, NOK 246.40 total, delivery and original journal. A separate Mathem
 addition genuinely failed, but the retained response evidence did not bind its
-merchant change ID to the reviewed goods before recovery. Addition recovery
-remains disabled and unaccepted. See the [current recovery result](oda-mathem-parity.md#ordinary-oda-payment-recovery-and-retained-mathem-failure--2026-09-09).
+merchant change ID to the reviewed goods before recovery. On 10 September the
+owner completed that native retry; ordinary reconciliation confirmed the same
+two-package order at 143.00 SEK. The follow-up implements capture-bound Mathem
+addition recovery with original-submit/persistence/restart tests. Live
+product-driven failed-addition recovery remains unaccepted. A bounded ordinary
+trial with the fix paid one additional package once, confirming three packages
+at 161.50 SEK on that same order; it did not fail or exercise recovery. See the [current recovery result](oda-mathem-parity.md#ordinary-oda-payment-recovery-and-retained-mathem-failure--2026-09-09).
 The earlier initial-order, paid-addition, free-delivery and cancellation
 acceptance remains unchanged.
 

@@ -1633,6 +1633,55 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.shop.cart, staged)
         self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
 
+    def test_original_addition_dispatch_retains_target_and_prepares_after_restart(self):
+        self.shop.orders.append(self.order())
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.app._cart({'action': 'change', 'operations': [{'productId': 4904, 'quantity': 1}]})
+        amounts = {key: None for key in self.amounts}
+        amounts.update(product_subtotal=29.9, provider_total=29.9)
+        self.browser.review_order_change = mock.Mock(return_value={
+            'payment_display': '•••• 1234', 'binding': binding, 'amounts': amounts,
+            'order_amounts': {'original_minor': 12195, 'added_minor': 2990, 'payable_minor': 2990,
+                             'combined_minor': 15185, 'original_count': 1, 'added_count': 1, 'combined_count': 2}})
+        target = {'payment_failed': True, 'order_id': '123456', 'order_change_id': 'change-1'}
+        def failed_payment(cart, order_id, order, review, before_click, **kwargs):
+            before_click()
+            self.browser.checkout_clicks += 1
+            self.shop.tracking = 'unpaid_order_change'
+            self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+            return deepcopy(target)
+        self.browser.submit_order_change = failed_payment
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        result = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+        self.assertFalse(result['confirmed'])
+        self.assertTrue(result['payment_failed'])
+        self.assertTrue(result['recovery_preparation_available'])
+        pending = self.store.read()['pending_checkout']
+        self.assertEqual(pending['payment_failure'], target)
+        self.assertEqual(pending['summary']['items'], prepared['summary']['items'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(self.shop.orders, [self.order()])
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        def review_recovery(cart, order_id, *, payment, expected_binding, addition, **kwargs):
+            self.assertEqual(order_id, target['order_id'])
+            self.assertEqual(addition['order_change_id'], target['order_change_id'])
+            self.assertEqual(expected_binding, binding)
+            return {'order_id': order_id, 'binding': binding, 'payment_choice': payment,
+                    'payment_display': '•••• 1234', 'amounts_minor': {
+                        **_oda_checkout_amounts_minor(amounts, provider='mathem'), 'provider_total': 2991}}
+        self.browser.review_payment_recovery = review_recovery
+        before_calls = len(self.shop.calls)
+        recovery = restarted.handle({'operation': 'checkout', 'action': 'prepare', 'recovery': True})
+        self.assertEqual(recovery['summary']['total'], 29.90)
+        self.assertEqual(recovery['summary']['merchant_summary_total'], 29.91)
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertNotIn('get_cart', [name for name, _ in self.shop.calls[before_calls:]])
+        self.assertEqual({k: v for k, v in self.store.read()['pending_checkout'].items() if k != 'recovery'}, pending)
+
     def test_mathem_addition_without_cart_slot_recovers_one_dispatch(self):
         self.shop.orders.append(self.order())
         self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
@@ -2244,7 +2293,7 @@ process.stdout.write(eval(script));
         browser = MathemBrowser.__new__(MathemBrowser)
         browser._checkout_deadline = None
         binding = {'receipt_address': 'Exempelvägen 1', 'account_reference_digest': 'a' * 64}
-        browser._invoke = mock.Mock()
+        browser._invoke = mock.Mock(return_value={'tabs': []})
         order = self.order()
         order['grossAmount'] = 564.01
         order['products'][0]['quantity'] = 17
@@ -2304,6 +2353,15 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                 else:
                     with self.assertRaises(CheckoutPreconditionError): browser.submit_order_change(cart, '123456', order, review)
                 self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
+        browser._invoke = mock.Mock(return_value={'tabs': [{'tabId': 'owned', 'active': True}]})
+        def captured_eval(script):
+            if script.startswith('JSON.stringify({url:location.href,failed:'):
+                return {'url': 'https://www.mathem.se/se/checkout/retry/?orderNumber=123456&orderChangeId=change-1', 'failed': True}
+            return evaluate(script)['result']
+        browser._eval = captured_eval
+        captured = browser.submit_order_change(cart, '123456', order, review)
+        self.assertEqual(captured, {'payment_failed': True, 'order_id': '123456', 'order_change_id': 'change-1'})
+        browser._invoke = mock.Mock(return_value={'tabs': []})
         def expired(): raise HouseholdError('expired before dispatch')
         browser._eval = mock.Mock()
         with self.assertRaises(CheckoutPreconditionError): browser.submit_order_change(cart, '123456', order, review, expired)

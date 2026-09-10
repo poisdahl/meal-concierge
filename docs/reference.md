@@ -148,14 +148,24 @@ order using its existing saved card after a hosted Vipps timeout; the shared
 Mathem new-order route is implemented but not demonstrated live; the shared
 recovery logic has isolated coverage.
 
-For failed additions, a retry URL carrying an order number and merchant change
-ID, the same amount/card and a local frozen goods review do not by themselves
-bind that merchant change to those goods. The original Mathem review did not
-capture its merchant change ID; the later helper's successful receipt cannot
-repair that missing pre-payment evidence. Preserve original journals and use
-ordinary reconciliation; do not restage goods, retry through a helper or replace
-the pending attempt. The [recovery audit](oda-mathem-parity.md#failed-payment-recovery-audit--2026-09-09)
-records the evidence still needed before a supported product route can be enabled.
+Mathem addition recovery requires a retry target captured from the original
+revalidated payment dispatch: the same active browser tab must show the native
+payment-failed article and exact original order/change URL. That evidence is
+persisted with the original frozen addition. A later discovered retry URL alone
+cannot supply the missing binding. Fresh preparation also requires
+`unpaid_order_change`, unchanged paid base goods/total, the original account,
+address, delivery and card, and an unchanged native review. Missing capture,
+ambiguous outcome or an already dispatched recovery permits reconciliation only.
+
+The addition's goods amount and payment-button amount must equal the original
+payable. Mathem's overview total is a separate field; when it differs,
+`merchant_summary_total` discloses it in the review and required notice. Both
+amounts and all displayed fee rows are frozen and rechecked before payment.
+No rounding tolerance or inferred fee replaces the actual payment-button amount.
+If the owner has already completed the payment, ordinary reconciliation records
+that result and clears the original attempt; it does not submit again. The
+[recovery evidence](oda-mathem-parity.md) distinguishes this implemented route
+and automated coverage from live product-driven failed-addition acceptance.
 
 Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
 amount/account/card helper reads and read-only receipt address verification have
