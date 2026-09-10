@@ -6,6 +6,156 @@ change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
+## Paired payment investigation and bank approval — 2026-09-10
+
+Further owner-authorized, instrumented Application trials paid one Oda addition
+at NOK 16.70, producing two packages/NOK 263.10, and two Mathem additions at
+SEK 18.50 each, producing five packages/SEK 198.50. The first Mathem payment
+completed native 3D Secure device identification without a visible challenge;
+Oda returned payment success directly. A separately reviewed experiment failed
+exactly one transaction-bound hidden Mathem fingerprint request. That payment
+also succeeded, so fingerprint failure alone does not explain the earlier
+decline. These are real merchant payments through Application, not additional
+Hermes-conversation acceptance. The original decline's cause remains unknown.
+
+The shared implementation now retains the original payment tab and verification
+context while an issuer challenge is pending. A visible challenge requests user
+approval in the matching bank app or bank page; a hidden fingerprint frame does
+not claim that user action or an app request is required. Reconciliation checks
+the same attempt without another payment. Missing observation, restart or a
+lost response before the first observation retains an unknown outcome and
+blocks recovery dispatch. Original Oda additions correctly report saved-card
+payment even when the household's new-order preference is Vipps.
+
+A fresh Mathem base payment at SEK 124.50 displayed the issuer's actual choice
+between Bank Norwegian Appen and BankID. No method was selected before that
+challenge expired. Its original native payment GET subsequently reported a
+terminal retry for the same new unpaid order. Ordinary candidate reconciliation
+matched the original goods, amount and delivery, recorded only that terminal
+failure and retained the original authentication context. Missing observation
+alone still cannot enable another payment.
+
+Checkout `authenticate` now selects the supported Bank Norwegian Appen method
+once, bound to the current original or recovery confirmation. A durable marker
+precedes the click. An isolated real Chromium cross-origin fixture verified one
+app-method click, no BankID click and no password-field/text read; forms, changed
+frames and extra controls were rejected. Native DOM and persisted Application
+tests also cover hidden challenges, route changes, lost responses, recovery IDs
+and restart. Access to the exact dedicated bank page is separate from the
+general browser viewer.
+An optional national ID belongs in the verified bank UI, entered directly by
+the user. BankID passwords must never be accepted.
+
+The investigation also reproduced two ordinary navigation failures: selecting
+a new order used a different continuation label, and opening addition checkout
+populated the original delivery in an initially slotless cart. The fixes select
+the destination before its continuation control and freeze that delivery
+materialization only when goods, total, address and original window agree.
+
+With the old paid Mathem order still active, a new one-package checkout showed
+SEK 18.50 in both MCP and the native overview but SEK 124.50 on the settled
+payment control. Final validation stopped before any payment POST. Preparation
+now rejects that disagreement as well; absent fee rows are never invented.
+After ordinary cancellation of the old test order, the unchanged staged cart
+returned SEK 124.50 and a complete native breakdown: SEK 18.50 goods, SEK 99
+small-order fee, SEK 7 packaging, SEK 79 delivery and SEK -79 delivery discount.
+The exact selected delivery quote remained zero. This demonstrates an effect
+of the old-order context on the displayed prices, not a general merchant rule.
+
+The same failed order's retry review omitted both the SEK 79 delivery row and
+its SEK -79 delivery credit. Goods, packaging, small-order fee and SEK 124.50
+total remained identical. Recovery now accepts only this specific omission of
+a full cancelling delivery/credit pair, with no product discount and an
+original exact zero delivery quote. It still rejects any other amount change.
+The recovery summary shows the native retry rows as absent and preserves the
+original review and selected quote. Signed discount conversion is retained;
+a negative credit must not become an unknown amount.
+
+That same-order retry dispatched once and entered a new issuer challenge. It
+exposed a capture race: the old retry failure article remained briefly visible
+before the new payment redirect. Recovery now ignores that stale article and
+retains unresolved saved-card state until context or a confirmed outcome is
+available. The live issuer chooser also includes two invisible checkboxes and
+an `Avbryt` link. The helper now permits those untouched elements while still
+rejecting credential inputs, visible checkboxes, extra actions and changed
+frames. A real Chromium fixture verified this markup with zero BankID, cancel,
+checkbox or password-read events. The earlier live chooser stopped before any
+method click, and the challenge expired during diagnosis.
+
+After terminal failure of that attempt was independently verified, a separately
+reviewed diagnostic native retry of the same SEK 124.50 order selected Bank
+Norwegian Appen once. Ordinary Application reconciliation then confirmed one
+package and SEK 124.50 paid on the same order. This demonstrates live method
+handoff followed by merchant-confirmed payment. The helper performed that retry;
+it does not establish ordinary product-driven failed-addition recovery.
+
+A subsequent actual Hermes conversation used the installed MCP tools to prepare
+one SEK 18.50 addition to that paid base. Its first confirmation stopped for the
+required notice. After acknowledging independent delivery to the local test
+inbox, Hermes confirmed again, dispatching one payment, and called `authenticate`
+once on that same confirmation. The tool result reported
+`bank_app_method_chosen=true` and a retained challenge.
+Independent merchant reads still showed the original one-package/SEK 124.50 base
+and `unpaid_order_change`; this stage alone is not a successful addition or
+recovery result.
+
+The original addition subsequently reached a visible failed retry page. Its
+retained payment's native GET returned terminal `checkout-payment-retry` with
+the same order number and numeric change ID as that exact retry URL. Independent
+MCP reads still showed `unpaid_order_change` and the unchanged one-package/
+SEK 124.50 paid base. No user action or specific issuer-decline cause is inferred
+from this result. The late-failure resolver now also supports this original
+addition contract, preserving the original context and history and recording
+only the bound terminal failure after the paid-base checks.
+
+With that original failure recorded, actual Hermes/MCP prepared its supported
+recovery without restaging goods. A new required local notice disclosed SEK
+18.50 payable and the separate SEK 18.51 merchant overview. Hermes acknowledged
+the delivered notice, confirmed one recovery payment and selected Appen once
+on that recovery confirmation. This attempt also later returned terminal
+`checkout-payment-retry`: its own retained native payment GET matched the same
+original order/change, while independent MCP reads still showed the unchanged
+SEK 124.50 paid base and unpaid addition. No owner approval or specific decline
+cause is inferred. Ordinary reconciliation retained the attempt; no second
+payment was sent from its failed confirmation.
+
+That observed second failure exposed a missing continuation. The product now
+resolves a current Mathem addition recovery's own positive terminal failure,
+with exact original order/change and unchanged paid-base checks. After a fresh
+review succeeds, it archives the complete failed attempt privately and gives
+the replacement a new confirmation and required notice. Old confirmations
+permanently replay failure and cannot operate on a later payment. This does not
+enable a new-order retry cycle or an automatic payment loop. Merchant-confirmed
+ordinary failed-addition recovery remains unaccepted.
+
+The scoped follow-up preserved the full household state through deployment.
+An actual installed Hermes/MCP preparation then archived the failed recovery
+and returned a fresh review for the same one-package addition: SEK 18.50
+payable, SEK 18.51 overview, original account/address/card and unchanged
+dietary unknowns. It stopped before notice delivery, confirmation, bank-method
+selection or payment. The paid base remains active; the addition is unconfirmed
+and its cleanup remains pending. No new bank-dependent payment is dispatched
+until the owner is available to handle that exact request.
+
+Final source checks passed 43 focused recovery tests, 1,362 public tests with
+nine optional platform skips, and the canonical fleet profile including 543
+static checks. Both installed Oda and Mathem RPC health/status calls passed;
+all four deployed runtime sources matched the reviewed files in each of the
+three scoped services. A bank prompt or green tests alone do not complete the
+remaining live recovery criterion.
+
+The final review also identified a delayed-confirmation case: reaching the
+merchant success route can precede its paid tracking status. Original saved-card
+attempts now retain uncertainty until a bound context, a verified failure or a
+complete merchant confirmation resolves them. Restart tests reject another
+payment during that gap. Free delivery changes retain ordinary reconciliation
+without being presented as bank authentication.
+
+Both earlier paid test targets were cancelled once through ordinary Application
+cancellation and independently read as cancelled. No refund or authorization
+release is inferred from cancellation. The Oda household preference was restored
+to Vipps; dietary permissions and unrelated orders were preserved.
+
 ## Ordinary Oda payment recovery and retained Mathem failure — 2026-09-09
 
 The later owner authorization covered the necessary bounded live payments.
@@ -89,7 +239,7 @@ ordinary addition path, not a live failed-payment recovery.
 
 **The live product-driven failed-addition recovery criterion remains open.**
 
-The Oda and Mathem paid test orders remain active; neither was cancelled.
+The later paired investigation cancelled both paid test orders, as recorded above.
 The owner completed the originally failed Mathem addition. Isolated tests cover changed
 goods/fees/target, final DOM drift, method selection, lost response, reopening
 the journal and refusal of a second recovery dispatch. These tests and the

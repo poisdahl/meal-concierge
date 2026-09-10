@@ -126,6 +126,57 @@ missing or unreadable receipt keeps the attempt uncertain and never authorizes
 another payment. While unpaid, reconciliation leaves the payment/challenge
 page in place. Repeated confirmation/reconciliation uses the original journal.
 
+The original dispatch observes the native 3D Secure transition and retains its
+tab/payment identity privately with the pending attempt. A visible bank
+challenge returns `authentication_required=true`, `awaiting_user_payment=true`
+and `authentication_mode="bank_ui"`; the user approves in their own bank app or
+the existing bank page, then reconciles the same `confirmation_id`. Hidden
+fingerprinting alone does not establish a user action. `authentication_status`
+is `challenge`, `awaiting_outcome` or `unavailable`; all preserve an unconfirmed
+attempt and disable recovery preparation. Losing the tab, browser or observation
+does not authorize another payment. A recovery challenge retains its effective
+payment method and summary. Confirmed merchant goods, amount and tracking still
+determine success. No BankID password is accepted. National-ID entry, if needed,
+belongs directly in the verified bank UI and is not a tool/profile field. Access
+to that exact dedicated browser must be established separately; a general
+shopping-browser viewer is insufficient.
+
+Checkout `authenticate` takes the exact current authentication `confirmation_id`.
+It can select the observed Bank Norwegian Appen method once on the retained
+challenge, including a dispatched recovery. The user still approves in the app.
+The selection marker is saved before the click; crashes, lost responses and
+restarts never repeat it. This limited chooser uses Node.js's built-in WebSocket
+client and the existing browser's local CDP endpoint because native
+agent-browser 0.33.1 cannot select the observed cross-origin iframe. Missing
+Node or an unsupported chooser leaves the payment waiting for user action.
+The helper reads no input values or accessibility tree. It rejects credential
+fields, visible inputs and nested frames before reading chooser text. The
+observed invisible checkboxes and optional `Avbryt` link remain untouched.
+It performs no BankID or bank-account operation.
+
+Recovery capture ignores the old retry failure page while waiting for the new
+payment transition. A missing transition preserves the dispatched saved-card
+attempt as unresolved, including after restart; it never authorizes repayment.
+
+A late Mathem original-payment failure can be resolved on the retained tab.
+The visible failed retry page and original payment's native GET response must
+identify the same unpaid order. For a new order, its goods, amount and delivery
+must match the review. For an addition, the exact order and change IDs must agree
+in both sources, tracking must be `unpaid_order_change`, and the original paid
+base must remain unchanged. Only that terminal evidence enables a fresh recovery
+review. Delivery changes and new-order recovery attempts are excluded from this
+late-failure resolver. A current Mathem addition recovery can also resolve its
+own terminal failure, but only when its native order/change pair matches the
+original addition and the same unchanged paid-base checks pass.
+The authentication context and original history remain
+recorded; missing observation alone still leaves the outcome unknown.
+
+For Mathem new-order recovery, the retry can omit an original positive delivery
+row and its equal negative delivery credit only when the original selected
+quote was explicitly zero, no product discount exists, and all other amounts
+and the total remain identical. The recovery summary shows the actual retry
+rows; the original review remains intact. This does not permit a price change.
+
 Oda and Mathem retain an uncertain checkout/addition for reconciliation.
 For one identified unpaid **new order**, `checkout` with `action="prepare"`
 and `recovery=true` inspects the merchant's retry review without sending payment.
@@ -155,7 +206,13 @@ persisted with the original frozen addition. A later discovered retry URL alone
 cannot supply the missing binding. Fresh preparation also requires
 `unpaid_order_change`, unchanged paid base goods/total, the original account,
 address, delivery and card, and an unchanged native review. Missing capture,
-ambiguous outcome or an already dispatched recovery permits reconciliation only.
+ambiguous outcome or an unresolved dispatched recovery permits reconciliation only.
+A positively failed current addition recovery may receive another fresh review.
+Only after that review succeeds does Application archive the complete failed
+attempt privately and replace it with a new confirmation. Its old confirmation
+permanently replays a failed result and cannot confirm, authenticate or reconcile
+the newer payment. A fresh required notice is bound to the new confirmation;
+the original failed payment and any earlier notices do not authorize dispatch.
 
 The addition's goods amount and payment-button amount must equal the original
 payable. Mathem's overview total is a separate field; when it differs,

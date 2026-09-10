@@ -45,6 +45,35 @@ at 161.50 SEK on that same order; it did not fail or exercise recovery. See the 
 The earlier initial-order, paid-addition, free-delivery and cancellation
 acceptance remains unchanged.
 
+Further 10 September instrumented Application trials paid one Oda addition at
+NOK 16.70 and two Mathem additions at SEK 18.50 each. Failing one original,
+transaction-bound hidden Mathem 3DS fingerprint request still produced success;
+no visible issuer challenge or fresh merchant decline occurred in those trials.
+Both earlier test targets were cancelled through ordinary tools and independently
+read as cancelled. A fresh SEK 124.50 Mathem payment then displayed an actual
+Bank Norwegian Appen/BankID chooser and expired before method selection.
+Ordinary reconciliation subsequently bound its native terminal failure to the
+same unpaid order. A later diagnostic native retry selected Bank Norwegian Appen
+once and ordinary Application reconciliation confirmed that same SEK 124.50 order
+paid. This establishes the live method handoff followed by merchant-confirmed
+payment, but the diagnostic retry is not ordinary product-driven recovery.
+The implementation now preserves a pending bank challenge
+and the original attempt across reconciliation and restart, and rejects the
+observed new-order overview/payment-control disagreement during preparation.
+Tests cover these paths; product-driven Mathem failed-addition recovery remains
+unaccepted. Actual Hermes subsequently dispatched one supported recovery of an
+explicitly failed addition, including its fresh review, local notice and one
+Appen method choice. That recovery also failed before merchant acceptance.
+The current product can verify that attempt's own terminal failure, preserve
+its complete history and prepare a fresh recovery; this continuation was also
+demonstrated through installed Hermes/MCP without another payment. The prepared
+addition remains SEK 18.50, with the separate SEK 18.51 overview disclosed.
+The paid base remains active while payment completion and cleanup await the
+next authorized user-assisted bank step. Final validation passed 1,362 public
+tests (nine optional skips), the canonical fleet profile and health/status
+through both installed RPC connections. See the
+[paired investigation](oda-mathem-parity.md#paired-payment-investigation-and-bank-approval--2026-09-10).
+
 This matrix accounts for all 27 currently served MCP tools and the documented
 installer/CLI paths. Its historical conversation baseline is public source
 **82e64b8** on **2026-09-07**. A shared

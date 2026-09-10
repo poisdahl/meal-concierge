@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -193,7 +194,9 @@ def _oda_checkout_amount_script(
    other_fee:rowState(amountLabels.other_fee),
    provider_total:rowState(amountLabels.provider_total),
  };
- const required=[states.product_subtotal,states.provider_total,...(ADDITION_RETRY?[]:[states.delivery_price]),...(RETRY?[]:[states.discounted_subtotal])];
+ // The current Mathem new-order overview can omit a free delivery row.
+ // Retain that absence; the complete displayed arithmetic must still match.
+ const required=[states.product_subtotal,states.provider_total,...(RETRY?[]:[states.discounted_subtotal])];
  let summaryRoot=null;
  if(required.every(row=>row.state==='value')){
    summaryRoot=required[0].root;
@@ -218,8 +221,8 @@ def _oda_checkout_amount_script(
    provider_total:states.provider_total.value,
    ...(MATHEM_BREAKDOWN?{discount_breakdown:{product_discount:states.discounts.value,delivery_discount:states.delivery_discount.value}}:{}),
  };
- const optionalValid=[states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
- const signsValid=required.every(row=>row.value>=0)&&[states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
+ const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
+ const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
  const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(states.discounts.value||0);
  // On addition retry the overview gross total and the payment calculation are
@@ -228,10 +231,13 @@ def _oda_checkout_amount_script(
    ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent')
    : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
- if(!CLICK_MODE)return JSON.stringify({amounts,amounts_valid:amountsValid});
+ if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,amounts_valid:amountsValid});
  const expectedAmounts=EXPECTED_AMOUNTS;
  const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|CURRENCY_CODE)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
  const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|CURRENCY_CODE)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||''))).filter(x=>{const values=money(x.innerText||x.getAttribute('aria-label')||'');return values.length===1&&values[0]===TOTAL;});
+ // Mathem's default cart overview and explicit new-order payment calculation
+ // are separate sources. Do not offer a confirmation when they disagree.
+ if(!CLICK_MODE)return JSON.stringify({amounts,amounts_valid:amountsValid&&labels.length===1});
  const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;
  const ready=location.href===EXPECTED_URL&&labels.length===1&&amountsValid&&JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts));
  if(!ready)return JSON.stringify({clicked:false});
@@ -251,6 +257,7 @@ def _oda_checkout_amount_script(
         .replace("CURRENCY_CODE", "SEK" if provider == "mathem" else "NOK")
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
+        .replace("VERIFY_READ_PAYMENT", "true" if provider == "mathem" and not retry else "false")
         .replace("ADDITION_RETRY", "true" if addition_retry else "false")
         .replace("RETRY", "true" if retry else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
@@ -330,8 +337,8 @@ def _mathem_checkout_payment_script(expected_url: str = "https://www.mathem.se/s
 """.replace("EXPECTED_URL", json.dumps(expected_url))
 
 
-def _mathem_addition_amount_script(expected: Mapping[str, Any], *, submit: bool = False) -> str:
-    """Observed Swedish existing-order overview; charge only the reviewed delta.
+def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool = False, provider: str = "mathem") -> str:
+    """Observed Oda/Mathem addition overview; charge only the reviewed delta.
 
     These four rows report the original order, added goods, amount due now and
     combined order. They do not supply the new-order fee/discount breakdown.
@@ -368,7 +375,15 @@ def _mathem_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
  if(SUBMIT){controls[0].click();return JSON.stringify({clicked:true});}
  return JSON.stringify({amounts_valid:true,order_amounts:values});
 })()
-""".replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False)).replace("SUBMIT", "true" if submit else "false")
+""".replace("SUBMIT", "true" if submit else "false").replace(
+        "Ursprunglig beställning", "Opprinnelig bestilling" if provider == "oda" else "Ursprunglig beställning",
+    ).replace("Varor tillagda i efterhand", "Nye varer lagt til" if provider == "oda" else "Varor tillagda i efterhand").replace(
+        "Att betala nu", "Å betale" if provider == "oda" else "Att betala nu",
+    ).replace("Totalsumma för beställning", "Ny totalsum" if provider == "oda" else "Totalsumma för beställning").replace(
+        "Bekräfta och betala", "Bekreft og betal" if provider == "oda" else "Bekräfta och betala",
+    ).replace("SEK", "NOK" if provider == "oda" else "SEK").replace(
+        "(vara|varor)", "(vare|varer)" if provider == "oda" else "(vara|varor)",
+    ).replace("==='vara'", "==='vare'" if provider == "oda" else "==='vara'").replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False))
 
 def _receipt_address_script(order_id: str, address: str, *, provider: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None or not address.strip():
@@ -609,6 +624,53 @@ def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[s
 """.replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("CURRENCY", "SEK" if provider == "mathem" else "NOK").replace("DELIVERY_HEADING", json.dumps("Vi levererar din beställning" if provider == "mathem" else "Vi leverer varene dine")).replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Confirm and pay").replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
 
 
+_BANK_APP_CHOICE_SCRIPT = r"""
+import {createInterface} from 'node:readline';
+const input=createInterface({input:process.stdin})[Symbol.asyncIterator]();
+const cfg=JSON.parse((await input.next()).value);
+const emit=value=>process.stdout.write(JSON.stringify(value)+'\n');
+const require=value=>{if(!value)throw Error('Bank app choice unavailable')};
+const ws=new WebSocket(cfg.endpoint);
+await new Promise((ok,bad)=>{ws.addEventListener('open',ok,{once:true});ws.addEventListener('error',bad,{once:true})});
+let id=0,parent,issuer;const pending=new Map();
+ws.addEventListener('message',event=>{const m=JSON.parse(event.data),p=pending.get(m.id);if(!p)return;pending.delete(m.id);clearTimeout(p.timer);m.error?p.bad(Error('Browser request failed')):p.ok(m.result)});
+const send=(method,params={},sessionId)=>new Promise((ok,bad)=>{const n=++id,timer=setTimeout(()=>{pending.delete(n);bad(Error('Browser timeout'))},5000);pending.set(n,{ok,bad,timer});ws.send(JSON.stringify({id:n,method,params,...(sessionId?{sessionId}:{})}))});
+const evaluate=async(session,expression,returnByValue=true)=>{const v=await send('Runtime.evaluate',{expression,returnByValue},session);require(!v.exceptionDetails);return v.result};
+const visible=`e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false}const r=e.getBoundingClientRect();return r.width>0&&r.height>0}`;
+const frameExpression=`(()=>{if(location.href!==${JSON.stringify(cfg.url)})return null;const visible=${visible};const c=[...document.querySelectorAll('.adyen-checkout__threeds2__challenge')].filter(visible);const f=c.length===1?[...c[0].querySelectorAll('iframe[name="threeDSIframe"]')].filter(visible):[];return f.length===1?f[0]:null})()`;
+try{
+ const pages=(await send('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.url===cfg.url);require(pages.length===1);
+ parent=(await send('Target.attachToTarget',{targetId:pages[0].targetId,flatten:true})).sessionId;
+ const frameId=async()=>{const obj=await evaluate(parent,frameExpression,false);require(obj.objectId);const d=await send('DOM.describeNode',{objectId:obj.objectId},parent);require(d.node.frameId);return d.node.frameId};
+ const frame=await frameId();
+ const targets=(await send('Target.getTargets')).targetInfos.filter(t=>t.type==='iframe'&&t.targetId===frame);require(targets.length===1);
+ const issuerUrl=targets[0].url;require(new URL(issuerUrl).protocol==='https:');
+ issuer=(await send('Target.attachToTarget',{targetId:frame,flatten:true})).sessionId;
+ const chooser=`(()=>{
+  if(location.href!==${JSON.stringify(issuerUrl)}||document.readyState!=='complete')return null;
+  const visible=${visible},norm=v=>(v||'').replace(/\\s+/g,' ').trim();
+  if(document.querySelector('textarea,select,[contenteditable]:not([contenteditable="false"]),iframe,frame')||
+     [...document.querySelectorAll('input')].some(e=>e.type!=='hidden'&&(e.type!=='checkbox'||visible(e))))return null;
+  const controls=[...document.querySelectorAll('button,a[href],[role=\"button\"],[role=\"link\"]')].filter(visible);
+  const buttons=controls.filter(e=>e.tagName==='BUTTON'&&!e.disabled&&e.getAttribute('aria-disabled')!=='true');
+  const cancel=controls.filter(e=>e.tagName==='A'&&norm(e.innerText)==='Avbryt');
+  const app=buttons.filter(e=>norm(e.innerText)==='Bank Norwegian Appen'),bankid=buttons.filter(e=>norm(e.innerText)==='BankID');
+  const heading=[...document.querySelectorAll('h1,h2,h3')].filter(e=>visible(e)&&norm(e.innerText)==='Bekreft din identitet');
+  if(cancel.length>1||controls.length!==2+cancel.length||buttons.length!==2||app.length!==1||bankid.length!==1||heading.length!==1||/utløpt|utgått|tidsavbrudd|tidsgräns|expired|timed out|avbrutt|cancelled|canceled/i.test(document.body.innerText))return null;
+  return app[0];
+ })()`;
+ require((await evaluate(issuer,`Boolean(${chooser})`)).value===true);
+ emit({ready:true});
+ const authorization=await input.next();require(!authorization.done&&authorization.value==='choose_bank_app_once');
+ require(await frameId()===frame);
+ const result=await evaluate(issuer,`(()=>{const button=${chooser};if(!button)return false;button.click();return true})()`);
+ require(result.value===true);emit({chosen:true});
+}catch{emit({chosen:false});process.exitCode=1}
+finally{if(issuer)await send('Target.detachFromTarget',{sessionId:issuer}).catch(()=>{});if(parent)await send('Target.detachFromTarget',{sessionId:parent}).catch(()=>{});ws.close()}
+process.exit(process.exitCode||0);
+"""
+
+
 class OdaBrowser:
     checkout_provider = "oda"
     checkout_url = CHECKOUT_URL
@@ -812,6 +874,7 @@ class OdaBrowser:
                 bound_cart = self._order_cart(cart, review["order_id"], addition["before"]["order"], review["binding"]) if addition else cart
                 expected = self._cart_expectation(bound_cart)
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
+                dispatch_tab = self._checkout_dispatch_tab()
                 before_click()
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 surface = _oda_checkout_surface_script(expected, review["payment_choice"], provider=self.checkout_provider).strip()
@@ -828,21 +891,39 @@ class OdaBrowser:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if self._eval(script) != {"clicked": True}:
                 raise CheckoutPreconditionError("Recovery changed before the final payment click")
+            return self._capture_checkout_payment(dispatch_tab,
+                authentication_expected=review["payment_choice"]["method"] == "saved_card",
+                capture_failure=False)
 
     def _order_cart(self, cart, order_id, order, binding):
         binding = require_order_binding(binding)
         original = self._order_expectation(order_id, order)
         return {**cart, "deliverySlot": {"name": original["delivery_text"]}, "deliveryAddress": binding["receipt_address"]}
 
+    def _addition_expectation(self, cart, order_id, order, binding):
+        self._order_url(order_id)
+        original = self._order_expectation(order_id, order)
+        original_count = self._order_product_count(order)
+        # An addition cart has no new delivery reservation. It inherits the
+        # independently verified original receipt address and delivery window.
+        bound = self._order_cart(cart, order_id, order, binding)
+        expected = self._cart_expectation(bound)
+        expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
+                        original_minor=original["total_minor"], original_count=original_count)
+        if order.get("currency") != ("SEK" if self.checkout_provider == "mathem" else "NOK") or delivery_signature(expected["delivery_text"], provider=self.checkout_provider) is None:
+            raise HouseholdError("Retail original order currency or delivery is unavailable")
+        return expected
+
     def review_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
             binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
             bound_cart = self._order_cart(cart, order_id, order, binding)
-            review = self._review_checkout(bound_cart, order_id=order_id, delivery_text=self._order_expectation(order_id, order)["delivery_text"])
+            review = self._review_checkout(bound_cart, order_id=order_id, delivery_text=self._order_expectation(order_id, order)["delivery_text"],
+                addition_expectation=self._addition_expectation(cart, order_id, order, binding))
             review["binding"] = binding
             return review
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False) -> dict[str, Any]:
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None) -> dict[str, Any]:
         expected = self._cart_expectation(cart)
         account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
         if delivery_text is not None:
@@ -897,9 +978,17 @@ class OdaBrowser:
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
             raise OdaCheckoutMismatchError("Oda checkout does not match the reviewed cart")
-        result["amounts"] = self._read_checkout_amounts(
-            expected["total_minor"], expected["product_count"],
-        )
+        if addition_expectation is not None:
+            amounts = self._eval(_retail_addition_amount_script(addition_expectation, provider=self.checkout_provider))
+            if amounts.get("amounts_valid") is not True:
+                raise OdaCheckoutMismatchError("Oda original, added and combined order amounts do not match")
+            result["order_amounts"] = amounts["order_amounts"]
+            result["amounts"] = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
+            result["amounts"].update(product_subtotal=expected["total_minor"] / 100, provider_total=expected["total_minor"] / 100)
+        else:
+            result["amounts"] = self._read_checkout_amounts(
+                expected["total_minor"], expected["product_count"],
+            )
         if not (payment and payment.get("method") == "vipps" and result.get("payment_display") == "Vipps") and re.fullmatch(r"•••• \d{4}", str(result.get("payment_display") or "")) is None:
             raise HouseholdError("Oda checkout payment identity is unavailable")
         if payment is not None:
@@ -1114,16 +1203,21 @@ class OdaBrowser:
  const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
  if(unavailable.test(norm(document.body?.innerText||''))||dialogs.some(root=>unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
  if(location.href===MODIFY){
-   // Oda defaults to an existing order here. Bind the new-order radio before advancing.
+   // Bind the requested destination; Oda initially selects an existing order.
    const main=document.querySelector('main');
-   if(ORDER!==null||!main||!visible(main)||dialogs.length||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
+   if(!main||!visible(main)||dialogs.length||document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
    const radios=[...main.querySelectorAll('input[type="radio"]')];
    const selected=radios.filter(x=>x.checked);
-   const candidates=radios.filter(x=>enabled(x)&&[...x.labels].filter(label=>visible(label)&&label.contains(x)&&label.querySelectorAll('input[type="radio"]').length===1&&/^Lag en ny bestilling(?:\s|$)/.test(norm(label.innerText))).length===1);
+   const existing=ORDER!==null;
+   const candidates=radios.filter(x=>enabled(x)&&[...x.labels].filter(label=>{
+     if(!visible(label)||!label.contains(x)||label.querySelectorAll('input[type="radio"]').length!==1)return false;
+     const text=norm(label.innerText);
+     return existing?/^Legg til i eksisterende bestilling(?:\s|$)/.test(text)&&text.split(/[^A-Za-z0-9_-]+/).filter(token=>token===ORDER).length===1:/^Lag en ny bestilling(?:\s|$)/.test(text);
+   }).length===1);
    if(candidates.length!==1||selected.length!==1||radios.some(x=>!visible(x)))return JSON.stringify({action:'blocked'});
    const target=candidates[0];
-   if(!target.checked){target.setAttribute('data-oda-household-action','new-order');return JSON.stringify({action:'new_order'});}
-   const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Fortsett');
+   if(!target.checked){target.setAttribute('data-oda-household-action',existing?'previous-order':'new-order');return JSON.stringify({action:existing?'previous_order':'new_order'});}
+   const payment=[...main.querySelectorAll('button')].filter(enabled).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===(existing?'Gå til betaling':'Fortsett'));
    if(payment.length!==1)return JSON.stringify({action:'blocked'});
    payment[0].setAttribute('data-oda-household-action','payment');
    return JSON.stringify({action:'payment'});
@@ -1208,9 +1302,195 @@ class OdaBrowser:
             self._settle(0.5)
         raise HouseholdError("Oda checkout navigation timed out")
 
-    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
+    def _checkout_dispatch_tab(self):
+        try:
+            result = self._invoke("tab", "list")
+        except HouseholdError:
+            return None
+        tabs = result.get("tabs") if isinstance(result, Mapping) else None
+        if not isinstance(tabs, list):
+            return None
+        active = [tab.get("tabId") for tab in tabs if isinstance(tab, Mapping) and tab.get("active") is True]
+        return active[0] if len(active) == 1 else None
+
+    def _checkout_payment_observation(self, dispatch_tab):
+        if dispatch_tab is None or self._checkout_dispatch_tab() != dispatch_tab:
+            return None
+        page = self._eval(r"""(() => {
+ const visible=e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
+ const containers=[...document.querySelectorAll('.adyen-checkout__threeds2__challenge')].filter(visible);
+ const frames=containers.length===1?[...containers[0].querySelectorAll('iframe[name="threeDSIframe"]')].filter(visible):[];
+ return JSON.stringify({url:location.href,challenge:containers.length===1&&frames.length===1,
+  failed:[...document.querySelectorAll('article')].some(e=>visible(e)&&/Din betalning gick inte igenom/i.test(e.innerText||''))});
+})()""")
+        parsed = urlsplit(page.get("url", ""))
+        store = urlsplit(_retail_store_url(self.checkout_provider))
+        if parsed.scheme != store.scheme or parsed.netloc != store.netloc:
+            return None
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        payment_id = params.get("paymentId", [])
+        if (parsed.path == store.path + "checkout/threeDS/" and not parsed.fragment
+                and set(params) == {"paymentId"} and len(payment_id) == 1
+                and re.fullmatch(r"[1-9][0-9]{0,19}", payment_id[0])):
+            page["authentication_context"] = {"tab_id": dispatch_tab, "payment_id": payment_id[0]}
+        return page
+
+    def checkout_payment_authentication(self, context, *, deadline=None):
+        """Observe only the retained payment; never navigate to an auth URL."""
+        if not isinstance(context, Mapping) or set(context) != {"tab_id", "payment_id"}:
+            return None
+        try:
+            with self._checkout_operation(deadline, preserve_session=True):
+                page = self._checkout_payment_observation(context["tab_id"])
+        except HouseholdError:
+            return None
+        if not page or page.get("authentication_context") != dict(context):
+            return None
+        return {"active": True, "challenge": page.get("challenge") is True}
+
+    def checkout_payment_failure(self, context, *, expected_order_id=None, deadline=None):
+        """Resolve a late original failure through its retained native payment."""
+        if self.checkout_provider != "mathem" or not isinstance(context, Mapping) or set(context) != {"tab_id", "payment_id"}:
+            return None
+        try:
+            with self._checkout_operation(deadline, preserve_session=True):
+                page = self._checkout_payment_observation(context["tab_id"])
+                if not page or page.get("failed") is not True:
+                    return None
+                parsed = urlsplit(page["url"])
+                store = urlsplit(_retail_store_url(self.checkout_provider))
+                params = parse_qs(parsed.query, keep_blank_values=True)
+                orders = params.get("orderNumber", [])
+                changes = params.get("orderChangeId", [])
+                addition = expected_order_id is not None
+                if (parsed.scheme != store.scheme or parsed.netloc != store.netloc
+                        or parsed.path != store.path + "checkout/retry/" or parsed.fragment
+                        or set(params) != ({"orderNumber", "orderChangeId"} if addition else {"orderNumber"})
+                        or len(orders) != 1
+                        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", orders[0]) is None):
+                    return None
+                if addition and (orders != [expected_order_id] or len(changes) != 1
+                        or re.fullmatch(r"[1-9][0-9]{0,15}", changes[0]) is None):
+                    return None
+                endpoint = "/api/v1/payments/adyen/three-ds/" + quote(str(context["payment_id"]), safe="") + "/"
+                script = r"""(async()=>{
+ const expected=EXPECTED;
+ if(location.href!==expected.page)return JSON.stringify({});
+ const response=await fetch(expected.endpoint,{method:'GET',credentials:'same-origin',redirect:'error'});
+ if(!response.ok)return JSON.stringify({});
+ const result=await response.json(),p=result.params;
+ if(location.href!==expected.page||result.type!=='checkout-payment-retry'||!p||
+    Object.keys(p).sort().join(',')!=='order_change_id,order_number'||
+    typeof p.order_number!=='string'||p.order_number!==expected.order)return JSON.stringify({});
+ if(expected.change===null){if(p.order_change_id!==null)return JSON.stringify({});}
+ else if(!Number.isSafeInteger(p.order_change_id)||p.order_change_id<=0||
+         String(p.order_change_id)!==expected.change)return JSON.stringify({});
+ return JSON.stringify({payment_failed:true,order_id:expected.order,
+  ...(expected.change===null?{}:{order_change_id:expected.change})});
+})()""".replace("EXPECTED", json.dumps({"page": page["url"], "endpoint": endpoint, "order": orders[0],
+                                        "change": changes[0] if addition else None}))
+                result = self._eval(script)
+                if self._checkout_dispatch_tab() != context["tab_id"]:
+                    return None
+                return result if result.get("payment_failed") is True else None
+        except HouseholdError:
+            return None
+
+    def choose_checkout_bank_app(self, context, before_choice, *, deadline=None):
+        """Choose the observed issuer's app method once, without reading inputs."""
+        node = shutil.which("node")
+        if node is None:
+            return {"chosen": False}
+        with self._checkout_operation(deadline, preserve_session=True):
+            page = self._checkout_payment_observation(context["tab_id"])
+            if not page or page.get("authentication_context") != context or page.get("challenge") is not True:
+                return {"chosen": False}
+            endpoint = self._invoke("get", "cdp-url").get("cdpUrl")
+            parsed = urlsplit(str(endpoint or ""))
+            if parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+                return {"chosen": False}
+            # Native agent-browser 0.33.1 cannot select this OOPIF by CSS.
+            # Attach directly to its DOM-bound target; never obtain an AX tree.
+            process = subprocess.Popen(
+                [node, "--input-type=module", "-e", _BANK_APP_CHOICE_SCRIPT],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, env={"PATH": os.environ.get("PATH", os.defpath)},
+            )
+            try:
+                process.stdin.write(json.dumps({"endpoint": endpoint, "url": page["url"]}) + "\n")
+                process.stdin.flush()
+                if not select.select([process.stdout], [], [], 10)[0]:
+                    return {"chosen": False}
+                if json.loads(process.stdout.readline()) != {"ready": True}:
+                    return {"chosen": False}
+                current = self._checkout_payment_observation(context["tab_id"])
+                if not current or current.get("authentication_context") != context or current.get("challenge") is not True:
+                    return {"chosen": False}
+                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                before_choice()
+                output, _ = process.communicate("choose_bank_app_once\n", timeout=10)
+                return {"chosen": process.returncode == 0 and json.loads(output) == {"chosen": True}}
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                raise HouseholdError("Bank app method selection could not be confirmed; reconcile the original payment") from exc
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+
+    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True):
+        # Bind 3DS to this dispatch's tab and native payment identity. Only a
+        # visible issuer challenge establishes user action. Continue observing
+        # so a terminal failure still retains its ID.
+        unresolved = {"authentication_unresolved": True} if authentication_expected else None
+        if dispatch_tab is None:
+            return unresolved
+        context = None
+        read_failures = 0
+        store_path = urlsplit(_retail_store_url(self.checkout_provider)).path
+        for _ in range(60):
+            try:
+                page = self._checkout_payment_observation(dispatch_tab)
+                if not page:
+                    break
+                parsed = urlsplit(page["url"])
+                if parsed.path == store_path + "checkout/success/":
+                    return None
+                observed = page.get("authentication_context")
+                if observed:
+                    if context is not None and context != observed:
+                        break
+                    context = observed
+                # Recovery starts on a failure page that can remain visible
+                # after the click, before the new payment redirects to 3DS.
+                if (capture_failure and self.checkout_provider == "mathem"
+                        and parsed.path == store_path + "checkout/retry/" and page.get("failed") is True):
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    if order_id is None:
+                        orders = params.get("orderNumber", [])
+                        if (not parsed.fragment and set(params) == {"orderNumber"} and len(orders) == 1
+                                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", orders[0])):
+                            return {"payment_failed": True, "order_id": orders[0]}
+                        break
+                    change_ids = params.get("orderChangeId", [])
+                    if (parsed.fragment or set(params) != {"orderNumber", "orderChangeId"}
+                            or params["orderNumber"] != [order_id] or len(change_ids) != 1
+                            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", change_ids[0]) is None):
+                        break
+                    return {"payment_failed": True, "order_id": order_id, "order_change_id": change_ids[0]}
+                self._settle(0.5)
+            except HouseholdError:
+                read_failures += 1
+                if read_failures > 1:
+                    break
+                try:
+                    self._settle(0.5)
+                except HouseholdError:
+                    break
+        return {"authentication_context": context} if context else unresolved
+
+    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None):
         with self._checkout_operation(deadline):
-            self._submit_checkout(cart, review, before_click)
+            return self._submit_checkout(cart, review, before_click)
 
     def submit_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
@@ -1222,13 +1502,14 @@ class OdaBrowser:
             if current != dict(review):
                 raise CheckoutPreconditionError("Oda order change changed after confirmation")
             expected_cart = self._cart_expectation(self._order_cart(cart, order_id, order, binding))
-            self._click_checkout_submit(
+            return self._click_checkout_submit(
                 expected_cart["total_minor"],
                 f"{CHECKOUT_URL}?orderNumber={order_id}",
                 before_click,
                 expected_product_count=expected_cart["product_count"],
                 expected_amounts=review.get("amounts"),
                 review_surface=(_oda_checkout_surface_script(expected_cart), review["surface"]),
+                addition_expectation=self._addition_expectation(cart, order_id, order, binding),
             )
 
     def review_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
@@ -1342,13 +1623,14 @@ class OdaBrowser:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
                 raise CheckoutPreconditionError("Oda delivery change changed after confirmation")
-            self._click_checkout_submit(
+            return self._click_checkout_submit(
                 int(round(float(review["summary"]["total"]) * 100)),
                 f"{CHECKOUT_URL}?orderNumber={order_id}",
                 before_click,
                 expected_product_count=self._order_product_count(order),
                 expected_amounts=review["summary"].get("amounts"),
                 review_surface=(surface_script, review["surface"]),
+                authentication_expected=False,
             )
 
     def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None) -> None:
@@ -1366,13 +1648,14 @@ class OdaBrowser:
             self._require_checkout_time(FINAL_CLICK_MARGIN)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
-        self._click_checkout_submit(
+        return self._click_checkout_submit(
             expected_cart["total_minor"],
             CHECKOUT_URL,
             before_click,
             expected_product_count=expected_cart["product_count"],
             expected_amounts=review.get("amounts"),
             review_surface=(_oda_checkout_surface_script(expected_cart, review.get("payment_choice")), review["surface"]),
+            authentication_expected=review.get("payment_choice", {}).get("method", "saved_card") == "saved_card",
         )
 
     def _click_checkout_submit(
@@ -1384,11 +1667,14 @@ class OdaBrowser:
         expected_product_count: int,
         expected_amounts: Any,
         review_surface: tuple[str, Mapping[str, Any]] | None = None,
+        addition_expectation: Mapping[str, Any] | None = None,
+        authentication_expected: bool = True,
     ) -> None:
         try:
             self._require_checkout_time(FINAL_CLICK_MARGIN)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
+        dispatch_tab = self._checkout_dispatch_tab()
         if before_click:
             try:
                 before_click()
@@ -1409,6 +1695,8 @@ class OdaBrowser:
             expected_url=expected_url,
             vipps=review_surface is not None and review_surface[1].get("payment_display") == "Vipps",
         )
+        if addition_expectation is not None:
+            script = _retail_addition_amount_script(addition_expectation, submit=True, provider=self.checkout_provider)
         if review_surface is not None:
             surface_script, expected_surface = review_surface
             # The review and amount checks run in the same browser turn as the
@@ -1420,6 +1708,7 @@ class OdaBrowser:
                       + "return JSON.stringify({clicked:false});return " + script.strip() + ";})()")
         if self._eval(script) != {"clicked": True}:
             raise CheckoutPreconditionError("Oda checkout button changed before click")
+        return self._capture_checkout_payment(dispatch_tab, authentication_expected=authentication_expected)
 
     def review_cancellation(self, order_id: str, order: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         with self._cancellation_operation(deadline):
@@ -2034,10 +2323,16 @@ class MathemBrowser(OdaBrowser):
  const radios=[...document.querySelectorAll('input[type="radio"]')].filter(e=>!e.disabled&&[...e.labels].some(visible));
  const rows=radios.map(e=>({element:e,text:norm([...e.labels].filter(visible).map(l=>l.innerText).join(' '))}));
  const wanted=rows.filter(r=>EXISTING?r.text.startsWith('Lägg till i din nuvarande beställning '):r.text==='Skapa en ny beställning Du väljer leveranstid i nästa steg.');
- const next=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)==='Fortsätt till betalning');
- if(wanted.length!==1||next.length!==1)return JSON.stringify({waiting:true});
- wanted[0].element.setAttribute('data-mathem-destination','true');next[0].setAttribute('data-mathem-destination-next','true');
- return JSON.stringify({text:wanted[0].text,checked:wanted[0].element.checked,selected_count:radios.filter(e=>e.checked).length});
+ if(wanted.length!==1)return JSON.stringify({waiting:true});
+ const checked=wanted[0].element.checked,selected_count=radios.filter(e=>e.checked).length;
+ wanted[0].element.setAttribute('data-mathem-destination','true');
+ if(checked&&selected_count===1){
+  const label=EXISTING?'Fortsätt till betalning':'Fortsätt';
+  const next=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)===label);
+  if(next.length!==1)return JSON.stringify({waiting:true});
+  next[0].setAttribute('data-mathem-destination-next','true');
+ }
+ return JSON.stringify({text:wanted[0].text,checked,selected_count});
 })()
 """.replace("EXISTING", "true" if expected else "false"))
             if choice.get("blocked"):
@@ -2071,6 +2366,7 @@ class MathemBrowser(OdaBrowser):
             if hashlib.sha256(str(reference).encode()).hexdigest() != review["account_reference_digest"]:
                 raise HouseholdError("Mathem selected account changed before the final click")
             self._require_checkout_time(FINAL_CLICK_MARGIN)
+            dispatch_tab = self._checkout_dispatch_tab()
             if before_click:
                 before_click()
             self._require_checkout_time(FINAL_CLICK_MARGIN)
@@ -2092,22 +2388,9 @@ class MathemBrowser(OdaBrowser):
             raise CheckoutPreconditionError(str(exc)) from exc
         if self._eval(script) != {"clicked": True}:
             raise CheckoutPreconditionError("Mathem checkout changed before the final click")
+        return self._capture_checkout_payment(dispatch_tab)
 
 
-
-    def _addition_expectation(self, cart, order_id, order, binding):
-        self._order_url(order_id)
-        original = self._order_expectation(order_id, order)
-        original_count = self._order_product_count(order)
-        # An addition cart has no new delivery reservation. It inherits the
-        # independently verified original receipt address and delivery window.
-        bound = self._order_cart(cart, order_id, order, binding)
-        expected = self._cart_expectation(bound)
-        expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
-                        original_minor=original["total_minor"], original_count=original_count)
-        if order.get("currency") != "SEK" or delivery_signature(expected["delivery_text"], provider="mathem") is None:
-            raise HouseholdError("Mathem original order currency or delivery is unavailable")
-        return expected
 
     def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
         with self._checkout_operation(deadline):
@@ -2115,7 +2398,7 @@ class MathemBrowser(OdaBrowser):
             expected = self._addition_expectation(cart, order_id, order, binding)
             self._navigate_to_checkout(order_id, expected=expected)
             result = self._review_mathem_surface(expected)
-            amounts = self._eval(_mathem_addition_amount_script(expected))
+            amounts = self._eval(_retail_addition_amount_script(expected))
             if amounts.get("amounts_valid") is not True:
                 raise HouseholdError("Mathem original, added and combined order amounts do not match")
             result.update(binding=binding, account_reference_digest=binding["account_reference_digest"],
@@ -2141,7 +2424,7 @@ class MathemBrowser(OdaBrowser):
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 surface_script = self._checkout_surface_script(expected).strip()
                 wanted = {key: review[key] for key in ("url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls")}
-                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _mathem_addition_amount_script(expected, submit=True).strip() + ";})()"
+                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _retail_addition_amount_script(expected, submit=True).strip() + ";})()"
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             # Transport failure here may follow the click. Leave it uncertain.
@@ -2150,46 +2433,7 @@ class MathemBrowser(OdaBrowser):
             return self._capture_addition_failure(order_id, dispatch_tab)
 
     def _capture_addition_failure(self, order_id, dispatch_tab):
-        """Retain this submit's failed target before releasing the owned browser.
-
-        A later arbitrary retry page cannot supply the original goods binding.
-        Missing/late results remain uncertain and never authorize another click.
-        """
-        if dispatch_tab is None:
-            return None
-        read_failures = 0
-        for _ in range(60):
-            try:
-                tabs = self._invoke("tab", "list").get("tabs", [])
-                active = [tab for tab in tabs if tab.get("active") is True]
-                if len(active) != 1 or active[0]["tabId"] != dispatch_tab:
-                    return None
-                page = self._eval(r"""JSON.stringify({url:location.href,failed:[...document.querySelectorAll('article')].some(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0&&/Din betalning gick inte igenom/i.test(e.innerText||'')})})""")
-                url = urlsplit(page.get("url", ""))
-                if url.scheme != "https" or url.netloc != "www.mathem.se":
-                    return None
-                if url.path == "/se/checkout/success/":
-                    return None
-                if url.path == "/se/checkout/retry/" and page.get("failed") is True:
-                    params = parse_qs(url.query, keep_blank_values=True)
-                    change_ids = params.get("orderChangeId", [])
-                    if (url.fragment or set(params) != {"orderNumber", "orderChangeId"}
-                            or params["orderNumber"] != [order_id] or len(change_ids) != 1
-                            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", change_ids[0]) is None):
-                        return None
-                    return {"payment_failed": True, "order_id": order_id, "order_change_id": change_ids[0]}
-                self._settle(0.5)
-            except HouseholdError:
-                # Navigation can destroy an evaluation context after the click.
-                # Retry that read once, never the payment or a pre-click result.
-                read_failures += 1
-                if read_failures > 1:
-                    return None
-                try:
-                    self._settle(0.5)
-                except HouseholdError:
-                    return None
-        return None
+        return self._capture_checkout_payment(dispatch_tab, order_id=order_id)
 
     def _navigate_delivery_change(self, order_id, expected, slot):
         # The existing-order route can already retain the selected review. Open
@@ -2293,7 +2537,7 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
 
     def _read_delivery_change_review(self, order_id, delivery, binding, expected):
         result = self._review_mathem_surface(expected)
-        amounts = self._eval(_mathem_addition_amount_script(expected))
+        amounts = self._eval(_retail_addition_amount_script(expected))
         if amounts.get("amounts_valid") is not True:
             raise HouseholdError("Mathem delivery change must retain original goods and total with zero payable")
         result.update(binding=binding, account_reference_digest=binding["account_reference_digest"],
@@ -2322,7 +2566,7 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 surface_script = self._checkout_surface_script(expected).strip()
                 wanted = {key: review[key] for key in ("url", "authenticated", "available", "items", "delivery_roots", "address_matches", "payment_display", "submit_controls")}
-                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _mathem_addition_amount_script(expected, submit=True).strip() + ";})()"
+                script = "(() => {const actual=JSON.parse(" + surface_script + ");if(JSON.stringify(actual)!==JSON.stringify(" + json.dumps(wanted, ensure_ascii=False) + "))return JSON.stringify({clicked:false});return " + _retail_addition_amount_script(expected, submit=True).strip() + ";})()"
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if self._eval(script) != {"clicked": True}:
