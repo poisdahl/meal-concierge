@@ -257,6 +257,7 @@ class PaymentBrowserTests(unittest.TestCase):
                            *([{"options": ["Vipps", "Nytt kort", "•••• 5678"]}] if method == "saved_card" else [])]:
                 with self.subTest(method=method, change=change):
                     browser = OdaBrowser.__new__(OdaBrowser)
+                    browser._checkout_dispatch_tab = lambda: None
                     browser._checkout_deadline = None
                     observed, callbacks = [], []
                     def evaluate(final):

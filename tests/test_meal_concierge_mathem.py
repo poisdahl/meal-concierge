@@ -50,6 +50,61 @@ class SharedRetailCartNavigationTests(unittest.TestCase):
         browser._click_action = mock.Mock()
         return browser
 
+    @unittest.skipUnless(shutil.which('node'), 'Node executes native destination transition')
+    def test_mathem_destination_selects_radio_before_its_continuation_label(self):
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,disabled:false,checked:false,attrs:{},
+ getAttribute(k){return this.attrs[k]??null;},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},
+ getBoundingClientRect:()=>({width:10,height:10})});
+const old=node('Lägg till i din nuvarande beställning 123456 Lör 12. sep 09:00 - 12:00 Exempelvägen 1');
+const fresh=node('Skapa en ny beställning Du väljer leveranstid i nästa steg.');
+for(const r of [old,fresh])r.labels=[r];old.checked=input.selected;fresh.checked=!input.selected;
+const next=node(input.selected?'Fortsätt till betalning':'Fortsätt');
+const buttons=input.duplicate?[next,node(next.innerText)]:[next];
+const location={href:'https://www.mathem.se/se/checkout/modify/'};
+const document={querySelector:()=>null,querySelectorAll:s=>s==='input[type="radio"]'?[old,fresh]:s==='button'?buttons:[]};
+const getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),
+ radioMarked:[old,fresh].filter(r=>r.attrs['data-mathem-destination']).map(r=>r===old),
+ nextMarked:buttons.filter(r=>r.attrs['data-mathem-destination-next']).length}));
+"""
+        expected = {'order_id': '123456', 'delivery_text': 'Lör 12. sep 09:00 - 12:00',
+                    'delivery_address': 'Exempelvägen 1'}
+        for existing_order, initially_existing, duplicate in ((False, True, False), (False, False, False),
+                (True, False, False), (True, True, False), (False, True, True), (True, False, True)):
+            with self.subTest(existing=existing_order, initial=initially_existing, duplicate=duplicate):
+                browser = self.browser(MathemBrowser)
+                selected = initially_existing
+                observed = None
+                calls = []
+                def evaluate(script):
+                    nonlocal observed
+                    run = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({
+                        'script': script, 'selected': selected, 'duplicate': duplicate}),
+                        text=True, capture_output=True, check=True, timeout=10)
+                    observed = json.loads(run.stdout)
+                    return observed['value']
+                def click(action, selector):
+                    nonlocal selected
+                    self.assertEqual(action, 'click')
+                    calls.append(selector)
+                    if selector == '[data-mathem-destination="true"]':
+                        self.assertEqual(observed['radioMarked'], [existing_order])
+                        selected = existing_order
+                    else:
+                        self.assertEqual(selected, existing_order)
+                        self.assertEqual(observed['nextMarked'], 1)
+                browser._eval = evaluate
+                browser._invoke = click
+                if duplicate:
+                    with self.assertRaises(HouseholdError):
+                        browser._choose_checkout_destination(expected if existing_order else None)
+                else:
+                    browser._choose_checkout_destination(expected if existing_order else None)
+                self.assertEqual(calls.count('[data-mathem-destination="true"]'), int(initially_existing != existing_order))
+                self.assertEqual(calls.count('[data-mathem-destination-next="true"]'), int(not duplicate))
+
     def test_both_providers_use_one_cart_continue_after_reload(self):
         for cls, origin in ((existing.OdaBrowser, 'https://oda.com/no/'), (MathemBrowser, 'https://www.mathem.se/se/')):
             with self.subTest(provider=cls.checkout_provider):
@@ -359,7 +414,7 @@ global.getComputedStyle=()=>({display:'block',visibility:'visible'});global.loca
 const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;
 const item=new E('article','',[new E('p',change==='item'?'Ris':'Pasta'),new E('p','500 g, Sopps'),new E('label','Antall'),quantity]);
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00'),new E('p',['address','spoof'].includes(change)?'Annen vei 2':'Eksempelveien 1')]);
-const rows=[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
+const rows=url.includes('orderNumber=')?[['Opprinnelig bestilling','1 vare','100,00 kr'],['Nye varer lagt til','1 vare','45,50 kr'],['Å betale',change==='amount'?'46,50 kr':'45,50 kr'],['Ny totalsum','2 varer','145,50 kr']]:[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button','Bekreft og betal 45,50 kr');pay.disabled=change==='disabled';
 const card=new E('input');card.type='radio';card.checked=change!=='selection';
@@ -388,6 +443,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     browser=OdaBrowser.__new__(OdaBrowser);browser._checkout_deadline=None
                     browser._invoke=mock.Mock();browser._account_reference=lambda address:123
                     browser._cart_expectation=lambda cart:expected;browser._order_cart=lambda *args:{}
+                    browser._addition_expectation=lambda *args:{**expected,'checkout_url':url,'original_minor':10000,'original_count':1}
                     browser.review_checkout=lambda cart:deepcopy(review)
                     browser.review_order_change=lambda *a,**kw:deepcopy(review)
                     callback=[];observed=[]
@@ -528,6 +584,7 @@ class OdaPreparedDeliveryTests(unittest.TestCase):
         from oda_browser import OdaBrowser, _oda_delivery_change_surface_script, CHECKOUT_URL
         from core import CheckoutPreconditionError
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser._checkout_dispatch_tab = lambda: None
         browser._checkout_deadline = None
         browser._open_order = mock.Mock(side_effect=AssertionError('confirm must not navigate'))
         current_page = None
@@ -821,6 +878,30 @@ process.stdout.write(JSON.stringify(result));
                    "deposits": None, "bags": 700,
                    "other_fees": {"Avgift för liten varukorg": 9900}, "provider_total": 12195,
                    "discount_breakdown": {"product_discount": None, "delivery_discount": -5900}}
+        # Actual 2026-09-10 overview omits a delivery row when no fee is shown.
+        # Keep None, and still bind every displayed row and the exact total.
+        absent_delivery = {key: None for key in amounts}
+        absent_delivery.update(product_subtotal=1850, provider_total=1850,
+                               discount_breakdown={"product_discount": None, "delivery_discount": None})
+        for change in (None, "explicit_zero", "duplicate", "negative", "fee", "discount_without_delivery", "unknown"):
+            rows = [["1 vara", "18,50 kr"], ["Delsumma", "18,50 kr"], ["Totalt inkl. moms", "18,50 kr"]]
+            if change == "explicit_zero": rows.append(["Leverans", "0,00 kr"])
+            if change == "duplicate": rows.extend([["Leverans", "0,00 kr"], ["Leverans", "0,00 kr"]])
+            if change == "negative": rows.append(["Leverans", "−1,00 kr"])
+            if change == "fee": rows.append(["Leverans", "1,00 kr"])
+            if change == "discount_without_delivery": rows.append(["Gratis leverans", "−1,00 kr"])
+            if change == "unknown": rows.append(["Okänd avgift", "1,00 kr"])
+            cases.append({"name": f"absent_delivery_{change}", "rows": rows,
+                "valid": change in {None, "explicit_zero"}, "click_valid": change is None,
+                "total": 1850, "count": 1, "amounts": absent_delivery})
+        cases.append({"name": "native_overview_and_payment_disagree", "rows": [
+            ["1 vara", "18,50 kr"], ["Delsumma", "18,50 kr"], ["Totalt inkl. moms", "18,50 kr"]],
+            "valid": False, "total": 1850, "button_total": 12450, "amounts": absent_delivery})
+        cases.append({"name": "fully_displayed_new_order_fees", "rows": [
+            ["1 vara", "18,50 kr"], ["Delsumma", "18,50 kr"], ["Leverans", "0,00 kr"],
+            ["Avgift för liten varukorg", "99,00 kr"], ["Lådor", "7,00 kr"], ["Totalt inkl. moms", "124,50 kr"]],
+            "valid": True, "total": 12450, "amounts": {**absent_delivery, "delivery_price": 0,
+                "bags": 700, "other_fees": {"Avgift för liten varukorg": 9900}, "provider_total": 12450}})
         # Authenticated read-only observation on 2026-09-08; no inferred fees.
         discounted_rows = [["17 varor", "482,52 kr"], ["Du sparar", "−24,51 kr"],
             ["Delsumma", "458,01 kr"], ["Avgift för liten varukorg", "99,00 kr"],
@@ -864,7 +945,7 @@ global.location={href:'https://www.mathem.se/se/checkout/confirm/'};
 const output=[];
 for(const test of payload.cases){
  const summary=new Element('section','',test.rows.map(([label,amount])=>new Element('div','',[new Element('span',label),new Element('span',amount)])));
- const button=new Element('button','Bekräfta och betala '+((test.total||12195)/100).toFixed(2).replace('.',',')+' kr');
+ const button=new Element('button','Bekräfta och betala '+((test.button_total||test.total||12195)/100).toFixed(2).replace('.',',')+' kr');
  global.document=new Element('document','',[summary,button]);
  const read=JSON.parse(eval(test.read));
  const submit=JSON.parse(eval(test.click));
@@ -1633,6 +1714,111 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.shop.cart, staged)
         self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
 
+    def test_new_card_dispatch_lost_before_observation_cannot_prepare_another_payment(self):
+        def lost_payment(cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.checkout_clicks += 1
+            self.shop.orders.append(self.order())
+            self.shop.tracking = 'unpaid_order'
+            self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+            raise HouseholdError('lost before first payment observation')
+        self.browser.submit_checkout = lost_payment
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        with self.assertRaisesRegex(HouseholdError, 'lost before first'):
+            self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+        pending = self.store.read()['pending_checkout']
+        self.assertTrue(pending['authentication_unresolved'])
+        self.assertNotIn('authentication_context', pending)
+        self.browser.review_payment_recovery = mock.Mock(side_effect=AssertionError('must not navigate or retry'))
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        for action, args in [('reconcile', {'confirmation_id': prepared['confirmation_id']}), ('prepare', {'recovery': True})]:
+            result = restarted.handle({'operation': 'checkout', 'action': action, **args})
+            self.assertFalse(result['recovery_preparation_available'])
+            self.assertEqual(result['authentication_status'], 'unavailable')
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.browser.review_payment_recovery.assert_not_called()
+
+    def test_new_card_success_page_waits_for_merchant_confirmation_without_repayment(self):
+        def payment_success_page(cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.checkout_clicks += 1
+            self.shop.orders.append(self.order())
+            self.shop.tracking = 'unpaid_order'
+            self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+            return None
+        self.browser.submit_checkout = payment_success_page
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        result = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+        self.assertFalse(result['confirmed'])
+        self.assertFalse(result['recovery_preparation_available'])
+        self.assertTrue(self.store.read()['pending_checkout']['authentication_unresolved'])
+        self.browser.review_payment_recovery = mock.Mock(side_effect=AssertionError('must not navigate or retry'))
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        with self.assertRaisesRegex(HouseholdError, 'no fresh checkout confirmation'):
+            restarted.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+        for action, args in [('reconcile', {'confirmation_id': prepared['confirmation_id']}), ('prepare', {'recovery': True})]:
+            waiting = restarted.handle({'operation': 'checkout', 'action': action, **args})
+            self.assertFalse(waiting['recovery_preparation_available'])
+            self.assertFalse(waiting['retry_allowed'])
+        self.browser.read_order_binding = mock.Mock(side_effect=lambda *a, expected_binding, **kw: expected_binding)
+        self.shop.tracking = 'paid_and_modifiable'
+        self.assertTrue(restarted.handle({'operation': 'checkout', 'action': 'reconcile',
+                                        'confirmation_id': prepared['confirmation_id']})['confirmed'])
+        self.assertIsNone(self.store.read()['pending_checkout'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.browser.review_payment_recovery.assert_not_called()
+
+    def test_original_addition_bank_challenge_is_persisted_and_reconciled_after_restart(self):
+        self.shop.orders.append(self.order())
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.app._cart({'action': 'change', 'operations': [{'productId': 4904, 'quantity': 1}]})
+        amounts = {key: None for key in self.amounts}
+        amounts.update(product_subtotal=29.9, provider_total=29.9)
+        self.browser.review_order_change = mock.Mock(return_value={
+            'payment_display': '•••• 1234', 'binding': binding, 'amounts': amounts,
+            'order_amounts': {'original_minor': 12195, 'added_minor': 2990, 'payable_minor': 2990,
+                             'combined_minor': 15185, 'original_count': 1, 'added_count': 1, 'combined_count': 2}})
+        context = {'tab_id': 'owned', 'payment_id': '123456'}
+        def challenge_payment(cart, order_id, order, review, before_click, **kwargs):
+            before_click()
+            self.browser.checkout_clicks += 1
+            self.shop.tracking = 'unpaid_order_change'
+            self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+            return {'authentication_context': context}
+        self.browser.submit_order_change = challenge_payment
+        self.browser.checkout_payment_authentication = mock.Mock(return_value={'active': True, 'challenge': True})
+        self.browser.checkout_payment_failure = mock.Mock(return_value=None)
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        result = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+        self.assertTrue(result['authentication_required'])
+        self.assertEqual(result['payment_method'], 'saved_card')
+        self.assertFalse(result['retry_allowed'])
+        self.assertFalse(result['recovery_preparation_available'])
+        self.assertEqual(self.store.read()['pending_checkout']['authentication_context'], context)
+        self.browser.read_order_binding.reset_mock()
+        restarted = Application(StateStore(self.store.path.parent, {
+            **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
+        self.browser.checkout_payment_authentication.return_value = None
+        for action, arguments in [('reconcile', {'confirmation_id': prepared['confirmation_id']}),
+                                  ('prepare', {'recovery': True})]:
+            result = restarted.handle({'operation': 'checkout', 'action': action, **arguments})
+            self.assertEqual(result['authentication_status'], 'unavailable')
+            self.assertFalse(result['recovery_preparation_available'])
+        self.browser.read_order_binding.assert_not_called()
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.shop.orders[0]['products'].append({'product_id': 4904, 'quantity': 1})
+        self.shop.orders[0]['grossAmount'] = 151.85
+        self.shop.tracking = 'paid_and_modifiable'
+        result = restarted.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertIsNone(self.store.read()['pending_checkout'])
+
     def test_original_addition_dispatch_retains_target_and_prepares_after_restart(self):
         self.shop.orders.append(self.order())
         self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
@@ -1681,6 +1867,52 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 1)
         self.assertNotIn('get_cart', [name for name, _ in self.shop.calls[before_calls:]])
         self.assertEqual({k: v for k, v in self.store.read()['pending_checkout'].items() if k != 'recovery'}, pending)
+
+    def test_addition_prepare_freezes_original_delivery_populated_by_checkout(self):
+        self.shop.orders.append(self.order())
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
+        self.browser.read_order_binding = mock.Mock(return_value=binding)
+        self.app._orders({'action': 'change_begin', 'order_id': '123456'})
+        self.app._cart({'action': 'change', 'operations': [{'productId': 4904, 'quantity': 1}]})
+        amounts = {key: None for key in self.amounts}
+        amounts.update(product_subtotal=29.9, provider_total=29.9)
+        slotless = deepcopy(self.shop.cart)
+        def checkout_populates_delivery(*args, **kwargs):
+            self.shop.cart['deliverySlot'] = deepcopy(self.cart['deliverySlot'])
+            self.shop.cart['deliveryAddress'] = binding['receipt_address']
+            return {'payment_display': '•••• 1234', 'binding': binding, 'amounts': amounts,
+                    'order_amounts': {'original_minor': 12195, 'added_minor': 2990, 'payable_minor': 2990,
+                                     'combined_minor': 15185, 'original_count': 1, 'added_count': 1, 'combined_count': 2}}
+        def changed_checkout(mutate):
+            def review(*args, **kwargs):
+                result = checkout_populates_delivery(*args, **kwargs)
+                mutate(self.shop.cart)
+                return result
+            return review
+        # Only the independently bound original delivery may appear during review.
+        changes = [lambda c: c.update(subtotal=30),
+                   lambda c: c['items'][0].update(quantity=2),
+                   lambda c: c.update(deliveryAddress='Annan väg 2'),
+                   lambda c: c['deliverySlot'].update(name='Hemleverans mellan 14 och 16, 13. sep')]
+        for mutate in changes:
+            with self.subTest(mutate=mutate):
+                self.shop.cart = deepcopy(slotless)
+                self.browser.review_order_change = changed_checkout(mutate)
+                with self.assertRaises(HouseholdError):
+                    self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+                self.assertIsNone(self.store.read()['pending_checkout'])
+                self.assertEqual(self.browser.checkout_clicks, 0)
+        self.shop.cart = deepcopy(slotless)
+        self.browser.review_order_change = checkout_populates_delivery
+        prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+        self.assertEqual(self.store.read()['pending_checkout']['cart'], self.shop.cart)
+        result = self.app.handle({'operation': 'checkout', 'action': 'confirm',
+                                  'confirmation_id': prepared['confirmation_id']})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertEqual(len(self.shop.orders), 1)
+        self.assertEqual(self.shop.orders[0]['grossAmount'], 151.85)
 
     def test_mathem_addition_without_cart_slot_recovers_one_dispatch(self):
         self.shop.orders.append(self.order())
@@ -1757,6 +1989,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         request = {'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'one-delivery-change'}
         with self.assertRaises(HouseholdError): self.app.handle(request)
         self.assertEqual(self.browser.checkout_clicks, 1)
+        self.assertNotIn('authentication_unresolved', self.store.read()['pending_checkout'])
         restarted = Application(StateStore(self.store.path.parent, {
             **existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'}), self.shop, self.browser)
         self.browser.read_order_binding.reset_mock()
@@ -2220,6 +2453,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
     def test_slow_account_read_cannot_outlive_checkout_confirmation(self):
         import hashlib
         native = MathemBrowser.__new__(MathemBrowser)
+        native._checkout_dispatch_tab = lambda: None
         native._checkout_deadline = None
         review = {**self.browser.review_checkout(self.cart),
                   'account_reference_digest': hashlib.sha256(b'123').hexdigest(),
@@ -2288,7 +2522,7 @@ process.stdout.write(eval(script));
 
     @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
     def test_addition_final_turn_binds_original_added_combined_and_exact_destination(self):
-        from oda_browser import _mathem_addition_amount_script
+        from oda_browser import _retail_addition_amount_script
         from core import CheckoutPreconditionError
         browser = MathemBrowser.__new__(MathemBrowser)
         browser._checkout_deadline = None
@@ -2317,7 +2551,7 @@ class E {
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:'https://www.mathem.se/se/checkout/confirm/'+(change==='new_order'?'':'?orderNumber='+(change==='order'?'999999':'123456'))};
 const quantity=new E('input');quantity.type='number';quantity.value=change==='quantity'?2:1;quantity.labels=[new E('label','Antal')];
-const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Barilla'),quantity]);
+const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Barilla'),new E('label','Antal'),quantity]);
 const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
 const radio=new E('input');radio.type='radio';radio.checked=true;
 const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
@@ -2330,11 +2564,20 @@ const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':'18
 global.document=new E('document','',[new E('body','',[item,delivery,label,summary,pay])]);document.body=document.children[0];
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
-        def evaluate(script, change=None):
-            value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
+        def evaluate(script, change=None, provider='mathem'):
+            localized = harness
+            if provider == 'oda':
+                for before, after in [('https://www.mathem.se/se/', 'https://oda.com/no/'),
+                        ('Antal', 'Antall'), ('Vi levererar din beställning', 'Vi leverer varene dine'),
+                        ('Ursprunglig beställning', 'Opprinnelig bestilling'),
+                        ('Varor tillagda i efterhand', 'Nye varer lagt til'), ('Att betala nu', 'Å betale'),
+                        ('Totalsumma för beställning', 'Ny totalsum'), ('Bekräfta och betala', 'Bekreft og betal'),
+                        ('varor', 'varer'), ('1 vara', '1 vare'), ('564,01 NOK', '564,01 SEK')]:
+                    localized = localized.replace(before, after)
+            value = subprocess.run([shutil.which('node'), '-e', localized], input=json.dumps({'script': script, 'change': change}),
                                    capture_output=True, text=True, check=True, timeout=10)
             return json.loads(value.stdout)
-        read = evaluate(_mathem_addition_amount_script(expected))
+        read = evaluate(_retail_addition_amount_script(expected))
         self.assertEqual(read['clicks'], 0)
         self.assertTrue(read['result']['amounts_valid'])
         self.assertEqual(read['result']['order_amounts']['payable_minor'], 1850)
@@ -2355,7 +2598,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                 self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
         browser._invoke = mock.Mock(return_value={'tabs': [{'tabId': 'owned', 'active': True}]})
         def captured_eval(script):
-            if script.startswith('JSON.stringify({url:location.href,failed:'):
+            if 'const containers=' in script:
                 return {'url': 'https://www.mathem.se/se/checkout/retry/?orderNumber=123456&orderChangeId=change-1', 'failed': True}
             return evaluate(script)['result']
         browser._eval = captured_eval
@@ -2370,9 +2613,39 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         with self.assertRaises(HouseholdError) as failure: browser.submit_order_change(cart, '123456', order, review)
         self.assertNotIsInstance(failure.exception, CheckoutPreconditionError)
 
+        # The observed Norwegian addition uses the same four-row arithmetic,
+        # and the real Oda submit method must check it in its final browser turn.
+        from oda_browser import OdaBrowser, _oda_checkout_surface_script, ODA_CHECKOUT_AMOUNT_KEYS
+        oda = OdaBrowser.__new__(OdaBrowser); oda._checkout_deadline = None
+        oda._invoke = mock.Mock(return_value={})
+        order['currency'] = 'NOK'
+        expected = oda._addition_expectation(cart, '123456', order, binding)
+        read = evaluate(_retail_addition_amount_script(expected, provider='oda'), provider='oda')
+        self.assertTrue(read['result']['amounts_valid'])
+        surface = evaluate(_oda_checkout_surface_script(expected), provider='oda')['result']
+        self.assertTrue(surface['total_matches'])
+        self.assertEqual(len(surface['items']), 1)
+        amounts = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
+        amounts.update(product_subtotal=18.5, provider_total=18.5)
+        review = {'binding': binding, 'surface': surface, 'amounts': amounts,
+                  'order_amounts': read['result']['order_amounts']}
+        oda.review_order_change = lambda *a, **kw: deepcopy(review)
+        for change in (None, 'new_order', 'order', 'quantity', 'delivery', 'card', 'original', 'count',
+                       'payable', 'combined', 'duplicate', 'missing', 'currency', 'button', 'disabled'):
+            with self.subTest(provider='oda', change=change):
+                observed = []
+                def final_eval(script):
+                    value = evaluate(script, change, provider='oda'); observed.append(value); return value['result']
+                oda._eval = final_eval
+                if change is None:
+                    oda.submit_order_change(cart, '123456', order, review)
+                else:
+                    with self.assertRaises(CheckoutPreconditionError): oda.submit_order_change(cart, '123456', order, review)
+                self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
+
     @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
     def test_free_delivery_final_turn_binds_original_goods_total_card_and_destination(self):
-        from oda_browser import _mathem_addition_amount_script
+        from oda_browser import _retail_addition_amount_script
         from core import CheckoutPreconditionError
         browser = MathemBrowser.__new__(MathemBrowser)
         browser._checkout_deadline = None
@@ -2420,7 +2693,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
             value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
                                    capture_output=True, text=True, check=True, timeout=10)
             return json.loads(value.stdout)
-        read = evaluate(_mathem_addition_amount_script(expected))
+        read = evaluate(_retail_addition_amount_script(expected))
         self.assertEqual(read['clicks'], 0)
         self.assertTrue(read['result']['amounts_valid'])
         self.assertEqual(read['result']['order_amounts']['payable_minor'], 0)
@@ -2498,6 +2771,7 @@ process.stdout.write(JSON.stringify({first,second,clicks}));
         import hashlib
         from core import CheckoutPreconditionError
         browser = MathemBrowser.__new__(MathemBrowser)
+        browser._checkout_dispatch_tab = lambda: None
         browser._checkout_deadline = None
         browser._account_reference = lambda address: 123
         expected = browser._cart_expectation(self.cart)

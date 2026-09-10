@@ -84,6 +84,25 @@ the same attempt. Do not claim a phone request was delivered, payment succeeded,
 or a retry is safe. Oda Vipps support here is for new orders; existing-order
 changes retain their separate saved-card flow.
 
+For Oda/Mathem card payments, `authentication_required=true` means the retained
+payment is showing a visible 3D Secure bank challenge. Call checkout
+`authenticate` with that exact confirmation once to select the supported
+Bank Norwegian Appen method if its chooser is present. This selects the method;
+it does not establish that a phone notification arrived or approve payment.
+`bank_app_choice_attempted=true` means continue with user approval and
+reconciliation, never repeat the selection. If the chooser is unavailable,
+explain that the existing bank page needs the user's attention. Tell the user to approve
+the matching payment in their bank's own app or the existing secure bank page,
+then reconcile the returned `confirmation_id`. Keep that payment page open;
+never start another payment while its outcome is unknown. An `awaiting_outcome`
+or `unavailable` authentication status does not establish that an app prompt was
+sent or that the payment failed. Reconcile the same attempt even after restart.
+Never request, accept, read or fill a BankID password. If the bank asks for a
+national ID, the user may enter it directly in the verified bank UI; do not put
+it in chat, tool arguments, profiles or logs. A general shopping-browser viewer
+does not establish access to the dedicated payment browser. If the user cannot
+reach the required bank UI, preserve the attempt and explain the missing access.
+
 If reconciliation returns `recovery_preparation_available` for an unpaid
 Oda/Mathem new order or an explicitly failed Mathem addition, use checkout
 `prepare` with `recovery=true` to review the merchant's existing payment. This
@@ -106,6 +125,14 @@ the original goods and payable must remain unchanged. A required notice also
 includes this distinction. Missing original target evidence preserves the
 uncertain attempt for reconciliation. If the owner completes payment manually,
 reconcile it and attribute that payment to the owner.
+
+If a Mathem addition recovery itself fails, another review is available only
+when reconciliation positively verifies that current attempt's own terminal
+failure for the same order/change and unchanged paid base. Use the returned
+`recovery_preparation_available`, then prepare a fresh recovery and review its
+new confirmation and notice. The failed confirmation remains failed and cannot
+act on a newer payment. Missing observation, timeout or user absence never
+authorizes another attempt; do not run an automatic payment retry loop.
 
 For MENY, explain persistent browser login, home delivery, locally configured
 Vipps phone number and approval in Vipps on the user's phone. For Mathem, use its
@@ -623,8 +650,8 @@ that every item can be removed, replaced or refunded. Preserve an unconfirmed
 Mathem attempt and its payment page; neither an empty cart nor an unchanged
 original order authorizes restaging or another payment. A merchant-reported
 failure is distinct from unknown effect and from an explicit platform approval.
-The product has no verified automatic failed-addition payment recovery yet;
-retain the original attempt and do not use an external helper as a substitute.
+Use the supported recovery review above only when the product verifies its
+binding; retain the original attempt and do not use an external helper as a substitute.
 
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as

@@ -1668,7 +1668,10 @@ class OrderOperations:
                         message='User-directed additions use the original order and another protected checkout. Cancellation requires a fresh available cancellation review. Moving delivery requires a fresh available free-window review, unchanged goods/order total and zero additional payment. Removal, replacement, refund and payment release are not promised.')
                     followup_deadline = time.monotonic() + 90
                     with self._browser_operation(followup_deadline):
-                        followup = self.browser.order_followup(order_id, current['order'], deadline=followup_deadline)
+                        # A terminal-result replay may run while a newer
+                        # checkout owns the browser, including a bank challenge.
+                        followup = ({} if self.store.read().get('pending_checkout') else
+                                    self.browser.order_followup(order_id, current['order'], deadline=followup_deadline))
                     options.update(followup)
                     if followup.get('deadline_text'):
                         options.update(deadline_status='provider_reported_text', deadline_source='mathem_order_page')
@@ -1795,6 +1798,8 @@ class OrderOperations:
             return {**result, "confirmation_id": prepared["confirmation_id"], "authorized_summary": prepared["summary"], "order_change": prepared.get("order_change")}
         if action == "reconcile":
             return self._checkout_reconcile(deadline, str(request.get("confirmation_id") or ""))
+        if action == "authenticate":
+            return self._checkout_authenticate(deadline, str(request.get("confirmation_id") or ""))
         if action == "auto":
             occurrence = str(request.get("occurrence") or "")
             state = self.store.read()
@@ -2157,6 +2162,33 @@ class OrderOperations:
                     summary = deepcopy(dict(stable_summary))
                 else:
                     raise HouseholdError("MENY checkout summary did not settle")
+            elif retail_addition:
+                # Native checkout can populate the original order's delivery
+                # in a previously slotless addition cart. Freeze that result,
+                # while keeping the reviewed goods and inherited delivery fixed.
+                refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
+                original_cart_summary = cart_summary(cart)
+                refreshed_summary = cart_summary(refreshed_cart)
+                before_delivery = original_cart_summary.pop("delivery")
+                after_delivery = refreshed_summary.pop("delivery")
+                if canonical(original_cart_summary) != canonical(refreshed_summary):
+                    raise HouseholdError("Addition cart changed while preparing checkout; prepare a new summary")
+                binding = require_order_binding(order_change.get("binding"))
+                normalize_address = lambda value: unicodedata.normalize("NFC", " ".join(value.split())) if isinstance(value, str) else None
+                expected_address = normalize_address(binding["receipt_address"])
+                for source in (cart, refreshed_cart):
+                    address = source.get("deliveryAddress")
+                    if address is not None and normalize_address(address) != expected_address:
+                        raise HouseholdError("Addition cart address differs from the original order")
+                if before_delivery is not None and canonical(before_delivery) != canonical(after_delivery):
+                    raise HouseholdError("Addition delivery changed while preparing checkout")
+                if after_delivery is not None:
+                    expected_window = oda_delivery_signature(order_change["before"]["order"]["deliverySlotDisplay"], provider=self.provider)
+                    if (expected_window is None
+                            or oda_delivery_signature(after_delivery.get("display"), provider=self.provider) != expected_window
+                            or normalize_address(after_delivery.get("address")) != expected_address):
+                        raise HouseholdError("Addition delivery differs from the original order")
+                cart = refreshed_cart
             elif not order_change:
                 refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 refreshed_summary = cart_summary(refreshed_cart)
@@ -2185,7 +2217,7 @@ class OrderOperations:
                 if self.provider == "oda" and not order_change:
                     summary["payment_method"] = checkout_payment["method"]
             if retail_addition:
-                if self.provider == "mathem":
+                if self.provider == "mathem" or isinstance(review.get("order_amounts"), Mapping):
                     summary["order_amounts"] = deepcopy(review["order_amounts"])
             elif delivery_binding is None:
                 delivery_binding = self._current_delivery_choice(
@@ -2301,6 +2333,8 @@ class OrderOperations:
         if len(candidates) != 1:
             raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
         order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
+        if pending.get("payment_failure") and pending["payment_failure"]["order_id"] != order_id:
+            raise HouseholdError("The unpaid order differs from the original payment failure")
         order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
         tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
         if (str(order.get("orderNumber") or order.get("order_number") or "") != order_id
@@ -2326,11 +2360,22 @@ class OrderOperations:
         return {"addition": {**pending["order_change"],
                              "order_change_id": pending["payment_failure"]["order_change_id"]}}
 
-    @staticmethod
-    def _recovery_summary(pending, review, assessment):
+    def _recovery_summary(self, pending, review, assessment):
         summary = {**deepcopy(pending["summary"]), "dietary_assessment": assessment,
                    "payment": review["payment_display"],
                    "payment_method": review["payment_choice"]["method"]}
+        if self.provider == "mathem" and not pending.get("order_change"):
+            # Show the retry's actual rows, including absent delivery/credit
+            # rows, while preserving the original review in the journal.
+            summary["amounts"] = {
+                key: ({label: amount / 100 for label, amount in value.items()} if isinstance(value, Mapping)
+                      else value / 100 if value is not None else None)
+                for key, value in review["amounts_minor"].items() if key != "discount_breakdown"
+            }
+            summary["discount_breakdown"] = {
+                key: value / 100 if value is not None else None
+                for key, value in review["amounts_minor"]["discount_breakdown"].items()
+            }
         overview = review["amounts_minor"]["provider_total"]
         if pending.get("order_change") and overview != money_cents(summary["total"]):
             summary["merchant_summary_total"] = overview / 100
@@ -2342,7 +2387,15 @@ class OrderOperations:
             raise HouseholdError("No original dispatched checkout is pending recovery")
         child = pending.get("recovery")
         if child and child.get("status") != "awaiting_confirmation":
-            return self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
+            result = self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
+            pending = deepcopy(self.store.read().get("pending_checkout"))
+            child = (pending or {}).get("recovery")
+            if (not result.get("recovery_preparation_available") or not child
+                    or not child.get("payment_failure")):
+                return result
+        authentication = self._checkout_authentication_wait(pending, deadline)
+        if authentication:
+            return authentication
         order_id = self._checkout_recovery_target(pending, deadline)
         binding = require_order_binding(pending["order_change"]["binding"] if pending.get("order_change") else {
             "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
@@ -2355,6 +2408,25 @@ class OrderOperations:
         if checkout_payment is None and review["payment_display"] != pending["browser_review"]["payment_display"]:
             raise HouseholdError("Recovery payment differs from the original reviewed method")
         expected_amounts = _oda_checkout_amounts_minor(pending["browser_review"]["amounts"], provider=self.provider)
+        expected_breakdown = None
+        if self.provider == "mathem" and not pending.get("order_change"):
+            breakdown = pending["browser_review"].get("discount_breakdown")
+            if not isinstance(breakdown, Mapping):
+                raise HouseholdError("Recovery discount rows differ from the original review")
+            expected_breakdown = {key: round(value * 100) if value is not None else None for key, value in breakdown.items()}
+            delivery = expected_amounts["delivery_price"]
+            current = review["amounts_minor"]
+            slot = (pending["summary"].get("delivery") or {}).get("slot") or {}
+            # Mathem's retry omits the gross delivery row and its full credit
+            # for an explicitly free slot. No payable component changes.
+            if (delivery is not None and delivery > 0
+                    and expected_amounts["discounts"] == -delivery
+                    and expected_breakdown == {"product_discount": None, "delivery_discount": -delivery}
+                    and slot.get("price_kind") == "exact" and slot.get("price_ore") == 0
+                    and current["delivery_price"] is None and current["discounts"] is None
+                    and current.get("discount_breakdown") == {"product_discount": None, "delivery_discount": None}):
+                expected_amounts.update(delivery_price=None, discounts=None)
+                expected_breakdown = {"product_discount": None, "delivery_discount": None}
         if pending.get("order_change"):
             # The retry overview total is not the calculated payable shown by
             # the final button. Freeze it separately without inventing a fee.
@@ -2362,10 +2434,7 @@ class OrderOperations:
         if {key: review["amounts_minor"].get(key) for key in expected_amounts} != expected_amounts:
             raise HouseholdError("Recovery fees differ from the original reviewed amounts")
         if self.provider == "mathem" and not pending.get("order_change"):
-            breakdown = pending["browser_review"].get("discount_breakdown")
-            if not isinstance(breakdown, Mapping) or {
-                    key: money_cents(value) if value is not None else None for key, value in breakdown.items()
-            } != review["amounts_minor"].get("discount_breakdown"):
+            if expected_breakdown != review["amounts_minor"].get("discount_breakdown"):
                 raise HouseholdError("Recovery discount rows differ from the original review")
         assessment = self._checkout_dietary(pending["summary"], deadline)
         child = {"confirmation_id": secrets.token_urlsafe(24),
@@ -2375,6 +2444,17 @@ class OrderOperations:
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("The pending checkout changed during recovery preparation")
+            previous = pending.get("recovery")
+            if previous and previous.get("payment_failure"):
+                # Only a positively failed payment can be replaced. Keep its
+                # complete private evidence outside the replayed result.
+                self._store_protected_result(state, previous["confirmation_id"], "checkout", {
+                    "confirmed": False, "payment_failed": True, "retry_allowed": False,
+                    "confirmation_id": previous["confirmation_id"],
+                    "original_confirmation_id": pending["confirmation_id"], "order_id": previous["order_id"],
+                    "next": "This payment failed and was superseded by a fresh recovery review. Use the current confirmation; never resend this payment.",
+                }, target_id=previous["order_id"])
+                state["protected_results"][previous["confirmation_id"]]["failed_attempt"] = deepcopy(previous)
             state["pending_checkout"]["recovery"] = child
         return {"confirmed": False, "recovery": True, "order_id": order_id,
                 "confirmation_id": child["confirmation_id"], "original_confirmation_id": pending["confirmation_id"],
@@ -2395,6 +2475,9 @@ class OrderOperations:
             child = pending["recovery"]
             if child["status"] != "awaiting_confirmation":
                 return self._checkout_reconcile_unlocked(deadline, child["confirmation_id"])
+            authentication = self._checkout_authentication_wait(pending, deadline)
+            if authentication:
+                return authentication
             if self._now() >= datetime.fromisoformat(child["expires_at"]):
                 raise HouseholdError("Recovery confirmation expired; prepare recovery again for the original order")
             if self.store.read()["checkout_payment"] != pending["checkout_payment"]:
@@ -2411,6 +2494,10 @@ class OrderOperations:
                         "summary": recovery_summary}
 
             dispatch_claimed = False
+            dispatched = deepcopy(pending)
+            dispatched["recovery"]["status"] = "clicking"
+            if child["browser_review"]["payment_choice"]["method"] == "saved_card":
+                dispatched["recovery"]["authentication_unresolved"] = True
 
             def before_click():
                 nonlocal dispatch_claimed
@@ -2424,20 +2511,29 @@ class OrderOperations:
                     if self._now() >= datetime.fromisoformat(child["expires_at"]):
                         raise HouseholdError("Recovery confirmation expired before payment")
                     self._pending_scheduler_guard(state, pending)
-                    state["pending_checkout"]["recovery"]["status"] = "clicking"
+                    state["pending_checkout"]["recovery"] = deepcopy(dispatched["recovery"])
                 dispatch_claimed = True
 
             try:
-                self.browser.submit_payment_recovery(pending["cart"], child["browser_review"], before_click,
+                submit_result = self.browser.submit_payment_recovery(pending["cart"], child["browser_review"], before_click,
                     deadline=deadline, **self._recovery_browser_options(pending))
+                context = submit_result.get("authentication_context") if isinstance(submit_result, Mapping) else None
+                unresolved = isinstance(submit_result, Mapping) and submit_result.get("authentication_unresolved") is True
+                with self.store.locked() as state:
+                    if not dispatch_claimed or canonical(state.get("pending_checkout")) != canonical(dispatched):
+                        raise HouseholdError("Recovery changed after its payment dispatch")
+                    current = state["pending_checkout"]["recovery"]
+                    if context:
+                        current.pop("authentication_unresolved", None)
+                        current["authentication_context"] = deepcopy(context)
+                    if unresolved:
+                        current["authentication_unresolved"] = True
             except CheckoutPreconditionError:
                 # This exception guarantees no final click. Discard only the
                 # recovery review; the original uncertain purchase stays intact.
                 with self.store.locked() as state:
                     current = state.get("pending_checkout")
-                    expected = deepcopy(pending)
-                    if dispatch_claimed:
-                        expected["recovery"]["status"] = "clicking"
+                    expected = dispatched if dispatch_claimed else pending
                     if canonical(current) == canonical(expected):
                         current.pop("recovery")
                 raise
@@ -2516,6 +2612,13 @@ class OrderOperations:
                         raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
                     self._pending_scheduler_guard(state, pending)
                     state["pending_checkout"]["status"] = "clicking"
+                    if (self.provider in {"oda", "mathem"}
+                            and not pending_change.get("requested_delivery")
+                            and (pending_change or pending["checkout_payment"]["method"] == "saved_card")):
+                        # Persist before browser dispatch so a crash or lost
+                        # first response cannot enable an overlapping payment.
+                        state["pending_checkout"]["authentication_unresolved"] = True
+                        pending["authentication_unresolved"] = True
 
                 def before_click() -> None:
                     # MENY's provider client is this same locked browser tab;
@@ -2634,13 +2737,24 @@ class OrderOperations:
                         "retry_allowed": False,
                         "next": "Approve this exact MENY payment in Vipps, then call checkout reconcile. Do not submit again.",
                     }
-                if (self.provider == "mathem" and pending_change and not pending_change.get("requested_delivery")
-                        and isinstance(submit_result, Mapping) and submit_result.get("payment_failed") is True
-                        and submit_result.get("order_id") == pending_change["order_id"]):
+                evidence = {}
+                if self.provider in {"oda", "mathem"} and isinstance(submit_result, Mapping):
+                    if submit_result.get("authentication_context"):
+                        evidence["authentication_context"] = deepcopy(submit_result["authentication_context"])
+                    if submit_result.get("authentication_unresolved") is True:
+                        evidence["authentication_unresolved"] = True
+                    if (submit_result.get("payment_failed") is True and self.provider == "mathem"
+                            and (not pending_change or (not pending_change.get("requested_delivery")
+                                 and submit_result.get("order_id") == pending_change["order_id"]))):
+                        evidence["payment_failure"] = {key: submit_result[key] for key in
+                            (("payment_failed", "order_id", "order_change_id") if pending_change else ("payment_failed", "order_id"))}
+                if evidence or pending.get("authentication_unresolved"):
                     with self.store.locked() as state:
                         if canonical(state.get("pending_checkout")) != canonical({**pending, "status": "clicking"}):
                             raise HouseholdError("Checkout changed after the original payment dispatch")
-                        state["pending_checkout"]["payment_failure"] = deepcopy(dict(submit_result))
+                        if evidence.get("authentication_context") or evidence.get("payment_failure"):
+                            state["pending_checkout"].pop("authentication_unresolved", None)
+                        state["pending_checkout"].update(evidence)
                 return self._checkout_reconcile_unlocked(deadline)
         except CheckoutPreconditionError:
             with self.store.locked() as state:
@@ -2696,6 +2810,94 @@ class OrderOperations:
         if isinstance(current, Mapping) and current.get("menu_id") == snapshot.get("menu_id") and current.get("digest") == snapshot.get("digest"):
             state["menu"] = deepcopy(snapshot)
         OrderOperations._prune_order_snapshots(state, keep_order_id=order_id)
+
+    def _checkout_authentication_wait(self, pending, deadline):
+        if self.provider not in {"oda", "mathem"}:
+            return {}
+        child = pending.get("recovery")
+        attempt = child if child and child.get("status") != "awaiting_confirmation" else pending
+        context = attempt.get("authentication_context")
+        if attempt.get("payment_failure"):
+            return {}
+        if not context and attempt.get("authentication_unresolved") is not True:
+            return {}
+        observed = self.browser.checkout_payment_authentication(context, deadline=deadline) if context else None
+        change = pending.get("order_change") or {}
+        if (not observed and context and (attempt is pending or change) and self.provider == "mathem"
+                and not change.get("requested_delivery")):
+            failure = self.browser.checkout_payment_failure(context, deadline=deadline,
+                **({"expected_order_id": change["order_id"]} if change else {}))
+            if failure:
+                if attempt is child and (failure != pending.get("payment_failure")
+                        or failure.get("order_id") != child["order_id"]):
+                    raise HouseholdError("Recovery bank verification resolved to another merchant change")
+                candidate = {**pending, "payment_failure": failure} if change and attempt is pending else pending
+                if failure["order_id"] != self._checkout_recovery_target(candidate, deadline):
+                    raise HouseholdError("The original bank verification resolved to another merchant order")
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) != canonical(pending):
+                        raise HouseholdError("The pending checkout changed while resolving bank verification")
+                    current = state["pending_checkout"]["recovery"] if attempt is child else state["pending_checkout"]
+                    current["payment_failure"] = deepcopy(failure)
+                    attempt["payment_failure"] = deepcopy(failure)
+                return {}
+        observed = observed or {}
+        active = observed.get("active") is True
+        challenge = active and observed.get("challenge") is True
+        recovery = attempt is child
+        summary = (self._recovery_summary(pending, child["browser_review"], child["dietary_assessment"])
+                   if recovery else deepcopy(pending["summary"]))
+        method = (child["browser_review"]["payment_choice"]["method"] if recovery else
+                  "saved_card" if pending.get("order_change") else pending["checkout_payment"]["method"])
+        return {
+            "confirmed": False, "confirmation_id": attempt["confirmation_id"],
+            **({"original_confirmation_id": pending["confirmation_id"]} if recovery else {}),
+            "summary": summary, "payment_method": method, "retry_allowed": False,
+            "recovery_preparation_available": False, "payment_followup_required": True,
+            "awaiting_user_payment": challenge, "authentication_required": challenge,
+            "authentication_status": "challenge" if challenge else "awaiting_outcome" if active else "unavailable",
+            "bank_app_choice_attempted": attempt.get("bank_app_choice_attempted") is True,
+            **({"authentication_mode": "bank_ui"} if challenge else {}),
+            "next": (
+                ("Use authenticate with this confirmation to select a supported bank-app method if the payment page asks for one. "
+                 if not attempt.get("bank_app_choice_attempted") else "")
+                + "Complete the matching payment approval in your bank's own app or payment page, then reconcile this same confirmation. "
+                "Do not send a BankID password to the assistant. Keep the existing payment page open and do not submit again."
+                if challenge else
+                "The original bank verification has no confirmed outcome. Preserve its payment page and reconcile this same confirmation; do not submit again."
+                if active else
+                "The original bank verification can no longer be observed. Its outcome remains unknown. Reconcile this same confirmation; do not start another payment."
+            ),
+        }
+
+    def _checkout_authenticate(self, deadline, confirmation_id):
+        if self.provider not in {"oda", "mathem"} or not confirmation_id:
+            raise HouseholdError("Bank-app authentication requires the original Oda or Mathem confirmation")
+        with self._browser_operation(deadline):
+            result = self._checkout_reconcile_unlocked(deadline, confirmation_id)
+            if result.get("authentication_required") is not True:
+                return result
+            pending = deepcopy(self.store.read().get("pending_checkout"))
+            child = pending.get("recovery")
+            attempt = child if child and child.get("status") != "awaiting_confirmation" else pending
+            if attempt["confirmation_id"] != confirmation_id:
+                raise HouseholdError("Use the current payment authentication confirmation")
+            if attempt.get("payment_failure") or attempt.get("bank_app_choice_attempted"):
+                return result
+            context = attempt.get("authentication_context")
+            if not context:
+                return result
+
+            def before_choice():
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) != canonical(pending):
+                        raise HouseholdError("The pending payment changed before selecting its bank app")
+                    current = state["pending_checkout"]["recovery"] if attempt is child else state["pending_checkout"]
+                    current["bank_app_choice_attempted"] = True
+
+            choice = self.browser.choose_checkout_bank_app(context, before_choice, deadline=deadline)
+            return {**self._checkout_reconcile_unlocked(deadline, confirmation_id),
+                    "bank_app_method_chosen": choice.get("chosen") is True}
 
     def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
         with self._browser_operation(deadline):
@@ -2820,6 +3022,7 @@ class OrderOperations:
                 pending["summary"], provider=self.provider)
         )
         recovery_dispatched = pending.get("recovery") and pending["recovery"].get("status") != "awaiting_confirmation"
+        authentication = self._checkout_authentication_wait(pending, deadline) if not confirmed else {}
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("checkout state changed while reconciling the order")
@@ -2856,6 +3059,7 @@ class OrderOperations:
             "tracking": tracking if confirmed else None,
             "retry_allowed": expired_unpaid or undispatched_retryable,
             **({"payment_dispatched": False} if undispatched_retryable else {}),
+            **({"payment_failed": True} if pending.get("payment_failure") and not confirmed and not recovery_dispatched else {}),
             **({"payment_followup_required": True,
                 "payment_method": (pending["recovery"]["browser_review"]["payment_choice"]
                                    if recovery_dispatched else pending["checkout_payment"])["method"]}
@@ -2863,7 +3067,7 @@ class OrderOperations:
             **({"unpaid_order_id": candidate_id, "tracking_status": tracking_status,
                 "recovery_preparation_available": True,
                 "next": "The original merchant order is unpaid. Inspect its supported retry review with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment."}
-               if unpaid_matches and not recovery_dispatched else {}),
+               if unpaid_matches and not recovery_dispatched and not authentication else {}),
             **({"tracking_status": tracking_status,
                 "recovery_payment_unconfirmed": True,
                 "next": "Recovery payment was dispatched but is not confirmed. Preserve that payment and reconcile this same attempt; the earlier failure does not authorize another payment."}
@@ -2876,6 +3080,7 @@ class OrderOperations:
                 "payment": self._payment_evidence(tracking_status or None),
                 "next": "The original Mathem payment is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}
                if self.provider == "mathem" and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched else {}),
+            **authentication,
         }
 
     def _order_change_reconcile(self, pending: Mapping[str, Any], deadline: float | None = None) -> dict[str, Any]:
@@ -2937,6 +3142,7 @@ class OrderOperations:
             matched = oda_order_matches_addition(change["before"]["order"], current["order"], pending["summary"], provider=self.provider)
             fulfillable = status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
         confirmed = current_id == tracking_id == order_id and matched and fulfillable
+        authentication = self._checkout_authentication_wait(pending, deadline) if not confirmed else {}
         if self.provider in {"oda", "mathem"} and confirmed:
             # An unpaid change may still be completing in the checkout page or
             # showing a bank challenge. Do not navigate away for receipt binding
@@ -2966,15 +3172,17 @@ class OrderOperations:
                         target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
             else:
                 state["pending_checkout"]["status"] = "uncertain"
-        recovery_available = (self.provider == "mathem" and not recovery_dispatched and status == "unpaid_order_change"
-                              and (pending.get("payment_failure") or {}).get("payment_failed") is True)
+        recovery_failed = bool(recovery_dispatched and pending["recovery"].get("payment_failure"))
+        recovery_available = (self.provider == "mathem" and (not recovery_dispatched or recovery_failed) and status == "unpaid_order_change"
+                              and (pending.get("payment_failure") or {}).get("payment_failed") is True and not authentication)
         return {**(terminal if confirmed else {}), "confirmed": confirmed, "changed_existing_order": confirmed, "order": current["order"] if confirmed else None, "tracking": current["tracking"] if confirmed else None, "retry_allowed": False,
                 **({"tracking_status": status, "payment": self._payment_evidence(status),
                     "next": "The original Mathem change is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}
                    if self.provider == "mathem" and not confirmed else {}),
                 **({"payment_failed": True, "recovery_preparation_available": True,
-                    "next": "The merchant rejected the original addition payment. Use checkout prepare recovery=true to review its retained order/change and original goods; do not restage the cart or resubmit the original confirmation."}
+                    "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
+                    "next": "The merchant rejected this addition payment. Use checkout prepare recovery=true for a fresh review of its retained order/change and original goods; do not restage the cart or resubmit the failed confirmation."}
                    if not confirmed and recovery_available else {}),
                 **({"recovery_payment_unconfirmed": True,
                     "next": "Recovery payment was dispatched but is not confirmed. Reconcile this same attempt; the earlier failure never authorizes another payment."}
-                   if not confirmed and recovery_dispatched else {})}
+                   if not confirmed and recovery_dispatched and not recovery_failed else {}), **authentication}

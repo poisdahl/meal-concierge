@@ -1502,6 +1502,7 @@ class CoreTestsBase:
 
     def test_oda_final_click_rechecks_every_protected_amount_component(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser._checkout_dispatch_tab = lambda: None
         browser._checkout_deadline = None
         scripts = []
         browser._eval = lambda script: scripts.append(script) or {"clicked": True}
@@ -2077,6 +2078,12 @@ const inner=node('inner');inner.contains=x=>x===fresh;inner.querySelectorAll=()=
 const invisible=node('invisible','Lag en ny bestilling');invisible.hidden=true;
 invisible.contains=()=>false;invisible.querySelectorAll=()=>[];
 fresh.labels=[outer,inner,invisible];old.labels=[];
+if(c.existingLabel){
+ const label=node('old-label','Legg til i eksisterende bestilling '+(c.wrongOrder?'1230':'123'));
+ label.contains=x=>x===old;label.querySelectorAll=()=>[old];old.labels=[label];
+ if(c.duplicateExistingLabel)old.labels.push(label);
+ old.disabled=!!c.disabledOld;
+}
 if(c.duplicateLabel)fresh.labels.push(outer);
 const radios=c.noRadios?[]:[old,fresh];
 if(c.duplicateCandidate){const duplicate={...fresh,id:'duplicate',checked:false};
@@ -2123,6 +2130,18 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
                 self.assertEqual(evaluate(script, case), {"value": {"action": "blocked"}, "marked": []})
         browser._advance_checkout_path("123")
         self.assertEqual(evaluate(scripts[-1], {}), {"value": {"action": "blocked"}, "marked": []})
+        existing_script = scripts[-1]
+        for case, action in [({"existingLabel": True}, "payment"),
+                             ({"existingLabel": True, "newSelected": True}, "previous_order")]:
+            result = evaluate(existing_script, case)
+            self.assertEqual(result["value"], {"action": action})
+            self.assertEqual(result["marked"], [{"id": "old" if action == "previous_order" else "payment",
+                                                "action": action.replace("_", "-")}])
+        for key in ("wrongOrder", "duplicateExistingLabel", "disabledOld", "doubleSelection", "noSelection",
+                    "duplicatePayment", "disabledPayment", "noPayment"):
+            with self.subTest(existing_rejected=key):
+                self.assertEqual(evaluate(existing_script, {"existingLabel": True, key: True}),
+                                 {"value": {"action": "blocked"}, "marked": []})
 
         for selection_takes_effect in (True, False):
             with self.subTest(selection_takes_effect=selection_takes_effect):
@@ -2265,6 +2284,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
     def test_checkout_read_only_preclick_failure_is_not_uncertain(self):
         import hashlib
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser._checkout_dispatch_tab = lambda: None
         browser.review_checkout = lambda _cart: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
         browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1, "delivery_address": "Eksempelveien 1"}
         browser._account_reference = lambda address: 123
