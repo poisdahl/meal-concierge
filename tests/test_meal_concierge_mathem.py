@@ -607,7 +607,8 @@ class OdaPreparedDeliveryTests(unittest.TestCase):
         order = {'orderNumber': '123456', 'currency': 'NOK', 'grossAmount': '948.05',
                  'deliverySlotDisplay': 'Hjemlevering mellom kl 14 og 16, 13. sep',
                  'products': [{'quantity': 2}]}
-        delivery = {'slot_id': 77, 'display': 'Hjemlevering mellom kl 09 og 12, 12. sep'}
+        delivery = {'slot_id': 77, 'display': 'Hjemlevering mellom kl 09 og 12, 12. sep',
+                    'slot': existing.FakeOda().delivery_slots['slots'][1]}
         # Synthetic Oda DOM exercises control flow and guards. It is not a
         # claim about the currently logged-out account's live payment layout.
         harness = r"""
@@ -618,7 +619,7 @@ class E {
  getBoundingClientRect(){return {width:100,height:20};}
  getAttribute(){return null;}
  contains(n){return this===n||this.children.some(c=>c.contains(n));}
- matches(s){return s==='*'||s===this.tag;}
+ matches(s){return s==='*'||s===this.tag||(s===`input[type="${this.type}"]`&&this.tag==='input');}
  querySelectorAll(s){return this.children.flatMap(c=>[...(s.split(',').some(x=>c.matches(x))?[c]:[]),...c.querySelectorAll(s)]);}
  querySelector(s){return this.querySelectorAll(s)[0]||null;}
  closest(s){return s.split(',').some(x=>this.matches(x))?this:this.parentElement?.closest(s)||null;}
@@ -627,10 +628,12 @@ class E {
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:'https://oda.com/no/checkout/confirm/?orderNumber='+(change==='order'?'999999':'123456')};
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00')]);
-const rows=[['2 varer','0,00 kr'],['Delsum','0,00 kr'],['Levering',change==='amount'?'20,00 kr':'19,00 kr'],['Total inkl. MVA','19,00 kr']];
+const rows=[['Opprinnelig bestilling','2 varer','948,05 kr'],['Å betale','19,00 kr'],['Ny totalsum','2 varer',change==='amount'?'967,06 kr':'967,05 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button','Bekreft og betal 19,00 kr');pay.disabled=change==='disabled';
-global.document=new E('document','',[new E('body','',[delivery,new E('p',change==='card'?'•••• 5678':'•••• 1234'),summary,pay])]);document.body=document.children[0];
+const radio=new E('input');radio.type='radio';radio.checked=change!=='unselected';
+const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
+global.document=new E('document','',[new E('body','',[delivery,new E('p','Unrelated card •••• 1234'),label,summary,pay])]);document.body=document.children[0];
 if(change==='login'){const old=document.querySelector.bind(document);document.querySelector=s=>s==='input[type="password"]'?{}:old(s);}
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
@@ -641,10 +644,11 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         surface = evaluate(_oda_delivery_change_surface_script(CHECKOUT_URL + '?orderNumber=123456'))['result']
         binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Eksempelveien 1'}
         browser._read_order_binding = mock.Mock(return_value=binding)
+        browser._eval = lambda script: evaluate(script)['result']
         review = browser._delivery_change_review('123456', order, delivery, surface, binding)
         # Real state serialization reorders dict keys. Values still match.
         review = json.loads(json.dumps(review, sort_keys=True))
-        for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login'):
+        for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login', 'unselected'):
             with self.subTest(drift=drift):
                 after_callback = False
                 calls = []
@@ -671,7 +675,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         with self.assertRaises(CheckoutPreconditionError):
             browser.submit_delivery_change('123456', order, delivery, review, callback)
         callback.assert_not_called()
-        browser._eval = mock.Mock(side_effect=[surface, HouseholdError('lost response after final eval')])
+        browser._eval = mock.Mock(side_effect=[surface, {'amounts_valid': True, 'order_amounts': review['order_amounts']}, HouseholdError('lost response after final eval')])
         with self.assertRaises(HouseholdError) as lost:
             browser.submit_delivery_change('123456', order, delivery, review)
         self.assertNotIsInstance(lost.exception, CheckoutPreconditionError)
@@ -2658,7 +2662,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     'slot': normalize_retail_delivery_slots({**SLOTS, 'slots': [{**SLOTS['slots'][0], 'price': '0,00 kr'}]}, provider='mathem')['slots'][0]}
         expected = browser._delivery_change_expectation('123456', order, delivery, binding)
         harness = r"""
-const {script,change}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const {script,change,pricing,provider}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 class E {
  constructor(tag,text='',children=[]){this.tag=tag;this.tagName=tag.toUpperCase();this.text=text;this.children=children;for(const child of children)child.parentElement=this;}
  get innerText(){return this.text||this.children.map(e=>e.innerText).join('\n');}
@@ -2679,18 +2683,24 @@ const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Bari
 const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
 const radio=new E('input');radio.type='radio';radio.checked=true;
 const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
-const rows=[['Ursprunglig beställning',change==='count'?'19 varor':'18 varor',change==='original'?'582,52 kr':'582,51 kr'],['Att betala nu',change==='payable'?'582,51 kr':'0,00 kr'],['Totalsumma för beställning','18 varor',change==='combined'?'582,52 kr':'582,51 kr']];
+const amount=n=>(n/100).toFixed(2).replace('.',',');
+const rows=[['Ursprunglig beställning',change==='count'?'19 varor':'18 varor',change==='original'?'582,52 kr':'582,51 kr'],['Att betala nu',change==='payable'?'582,51 kr':amount(pricing.payable)+' kr'],['Totalsumma för beställning','18 varor',change==='combined'?amount(pricing.final+1)+' kr':amount(pricing.final)+' kr']];
 if(change==='added')rows.push(['Varor tillagda i efterhand','1 vara','18,50 kr']);
 if(change==='duplicate')rows.push(['Att betala nu','0,00 kr']);
 if(change==='missing')rows.pop();
 if(change==='currency')rows[0][2]='582,51 NOK';
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(text=>new E('span',text)))));
-const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':'0,00')+' kr');pay.disabled=change==='disabled';
+const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':amount(pricing.payable))+' kr');pay.disabled=change==='disabled';
 global.document=new E('document','',[new E('body','',[...(change==='quantity'?[item]:[]),delivery,label,summary,pay])]);document.body=document.children[0];
+if(provider==='oda'){
+ location.href=location.href.replace('www.mathem.se/se','oda.com/no');
+ const labels=[['Ursprunglig beställning','Opprinnelig bestilling'],['Att betala nu','Å betale'],['Totalsumma för beställning','Ny totalsum'],['Varor tillagda i efterhand','Nye varer lagt til'],['Bekräfta och betala','Bekreft og betal'],['varor','varer'],['vara','vare']];
+ for(const e of document.querySelectorAll('*'))for(const [a,b] of labels)e.text=e.text.replaceAll(a,b);
+}
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
-        def evaluate(script, change=None):
-            value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change}),
+        def evaluate(script, change=None, pricing=None, provider="mathem"):
+            value = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps({'script': script, 'change': change, 'pricing': pricing or {'final': 58251, 'payable': 0}, 'provider': provider}),
                                    capture_output=True, text=True, check=True, timeout=10)
             return json.loads(value.stdout)
         read = evaluate(_retail_addition_amount_script(expected))
@@ -2721,6 +2731,25 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         browser._eval = mock.Mock(side_effect=HouseholdError('lost browser reply after click'))
         with self.assertRaises(HouseholdError) as failure: browser.submit_delivery_change('123456', order, delivery, review)
         self.assertNotIsInstance(failure.exception, CheckoutPreconditionError)
+
+        # Same, decreased and increased full totals use the same actual DOM
+        # reader/final script for both retailers. Payment is a separate value.
+        for provider in ('oda', 'mathem'):
+            for final, payable in ((58251, 0), (57000, 0), (60000, 1749), (58251, 500)):
+                with self.subTest(provider=provider, final=final, payable=payable):
+                    pricing = {'final': final, 'payable': payable}
+                    expectation = deepcopy(expected)
+                    expectation['checkout_url'] = ('https://oda.com/no/' if provider == 'oda' else 'https://www.mathem.se/se/') + 'checkout/confirm/?orderNumber=123456'
+                    observed = evaluate(_retail_addition_amount_script(expectation, provider=provider), pricing=pricing, provider=provider)
+                    self.assertTrue(observed['result']['amounts_valid'])
+                    values = observed['result']['order_amounts']
+                    self.assertEqual((values['original_minor'], values['combined_minor'], values['payable_minor']), (58251, final, payable))
+                    expectation['order_amounts'] = values
+                    for drift in (None, 'combined', 'original', 'missing', 'added', 'button', 'duplicate'):
+                        confirmed = evaluate(_retail_addition_amount_script(expectation, submit=True, provider=provider), drift, pricing, provider)
+                        self.assertEqual(confirmed['clicks'], 1 if drift is None else 0)
+                    unbound = {k: v for k, v in expectation.items() if k != 'order_amounts'}
+                    self.assertEqual(evaluate(_retail_addition_amount_script(unbound, submit=True, provider=provider), pricing=pricing, provider=provider)['clicks'], 0)
 
     @unittest.skipUnless(shutil.which('node'), 'Node executes the observed collapsed summary')
     def test_zero_payable_collapsed_review_still_expands_original_order_amount(self):

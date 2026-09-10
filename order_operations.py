@@ -46,6 +46,41 @@ from service_common import (
 
 
 class OrderOperations:
+    def _delivery_price_review(self, summary, change):
+        """One authorization rule; adapters supply actual full-order totals."""
+        requested = change.get("requested_delivery") if change else None
+        if not requested:
+            return None
+        original = change["before"]["order"]
+        currency = "SEK" if self.provider == "mathem" else "NOK"
+        before = money_cents(original.get("order_total") if self.provider == "meny" else original.get("grossAmount"))
+        payable = money_cents(summary.get("total"))
+        if self.provider == "meny":
+            after = payable
+            # Reopened MENY orders pay the whole new total. Compare the actual
+            # original goods, not the amount of this new payment reservation.
+            unchanged = {**summary, "total": original.get("grossAmount"),
+                         "delivery": {"display": original.get("deliverySlotDisplay")}}
+            if not meny_order_matches_checkout(original, unchanged):
+                raise HouseholdError("A delivery-only change must preserve the original MENY goods")
+        else:
+            amounts = summary.get("order_amounts")
+            keys = ("original_minor", "original_count", "combined_minor", "combined_count", "payable_minor")
+            if not isinstance(amounts, Mapping) or any(type(amounts.get(k)) is not int or amounts[k] < 0 for k in keys):
+                raise HouseholdError("Delivery change requires verified original, final and payable order totals")
+            if (original.get("currency") != currency or amounts["original_minor"] != before
+                    or amounts["payable_minor"] != payable or amounts["original_count"] != amounts["combined_count"]):
+                raise HouseholdError("Delivery change amounts or original goods do not match")
+            after = amounts["combined_minor"]
+        if before is None or after is None or payable is None:
+            raise HouseholdError("Delivery change requires exact full order totals, including fees and discounts")
+        maximum = requested.get("max_total_ore")
+        covered = after <= before or (maximum is not None and after <= maximum)
+        return {"currency": currency, "original_total_ore": before, "new_total_ore": after,
+                "difference_ore": after - before, "payable_ore": payable,
+                "max_total_ore": maximum, "confirmation_required": not covered,
+                "authorization": "requested_window" if after <= before else "price_limit" if covered else "required"}
+
     @staticmethod
     def _payment_evidence(tracking_status=None):
         # Merchant fulfillment status is not bank authorization/capture evidence.
@@ -615,6 +650,10 @@ class OrderOperations:
             "selection_origin": binding["origin"],
         })
         result["delivery"] = delivery
+        if result.get("delivery_change"):
+            # The slot quote is displayed above; it is not a missing fee row in
+            # the merchant's final original/new order overview.
+            return result
         if provider == "mathem" and discount_breakdown is not None:
             result["discount_breakdown"] = deepcopy(dict(discount_breakdown))
         amounts = result.get("amounts")
@@ -924,6 +963,11 @@ class OrderOperations:
                 change = deepcopy(state.get("order_change"))
                 if change and change.get("status") != "editing":
                     raise HouseholdError("the order change is still starting")
+                maximum = request.get("max_total_ore")
+                if maximum is not None and (not change or type(maximum) is not int or not 0 <= maximum <= 100_000_000):
+                    raise HouseholdError("max_total_ore requires an existing-order change and an explicit nonnegative integer price limit in the provider currency")
+                if maximum is not None and self.provider == "meny" and not change.get("delivery_only"):
+                    raise HouseholdError("Begin the exact MENY change with delivery_only=true before authorizing a delivery price limit")
                 if self.provider in {"oda", "mathem"}:
                     if change:
                         cart = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
@@ -971,6 +1015,7 @@ class OrderOperations:
                             "slot_id": normalized["provider_slot_id"],
                             "display": display.strip(),
                             "slot": normalized,
+                            "max_total_ore": maximum,
                         }
                         with self.store.locked() as locked:
                             if canonical(locked.get("order_change")) != canonical(change):
@@ -996,7 +1041,7 @@ class OrderOperations:
                     if change:
                         response.update({
                             "staged_for_order": change["order_id"],
-                            "next": "Prepare checkout, review the exact new window and any payment difference, then ask for confirmation.",
+                            "next": "Prepare a fresh review of the exact window and full original/new totals. An unchanged or lower total is authorized by the requested window; an increase needs a covering price limit or one approval.",
                         })
                     return response
                 if self.provider == "meny":
@@ -1011,15 +1056,20 @@ class OrderOperations:
                         change.get("code") if change else None,
                         deadline=deadline,
                     )
-                    if change:
-                        with self.store.locked() as locked:
-                            if canonical(locked.get("order_change")) != canonical(change):
-                                raise HouseholdError("order change state changed while selecting delivery")
-                            locked["order_change"]["kind"] = "full_order"
                     selected = result.get("selected") if isinstance(result, Mapping) else None
                     normalized = validate_delivery_slot(selected)
                     if normalized["slot_ref"] != slot_ref or normalized["selected"] is not True:
                         raise HouseholdError("MENY selected delivery does not match the requested slot")
+                    if change:
+                        with self.store.locked() as locked:
+                            if canonical(locked.get("order_change")) != canonical(change):
+                                raise HouseholdError("order change state changed while selecting delivery")
+                            if change.get("delivery_only"):
+                                locked["order_change"].update(kind="delivery", requested_delivery={
+                                    "slot": normalized, "slot_id": normalized["provider_slot_id"],
+                                    "max_total_ore": maximum})
+                            else:
+                                locked["order_change"]["kind"] = "full_order"
                     self._record_scheduled_effect(request.get("_scheduler_context"), "resolved", normalized)
                     with self.store.locked() as current_state:
                         self._guard_scheduled_context(current_state, request.get("_scheduler_context"))
@@ -1038,6 +1088,8 @@ class OrderOperations:
 
     def _orders(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
+        if "delivery_only" in request and (type(request["delivery_only"]) is not bool or action != "change_begin"):
+            raise HouseholdError("delivery_only is a boolean for beginning an exact delivery-only order change")
         if self.provider in {"oda", "mathem"} and action == "change_begin" and self.browser is None:
             raise HouseholdError(f"{self.provider.title()} order changes require the dedicated logged-in browser")
         if self.provider == "mathem" and action.startswith("cancel_") and self.browser is None:
@@ -1106,6 +1158,15 @@ class OrderOperations:
                         "order": dict(order),
                         "tracking": {"order_id": order_id, "status": str(order.get("status") or "unknown")},
                     }
+                    quantities = None
+                    if request.get("delivery_only"):
+                        try:
+                            quantities, _names = self._cart_lines(cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline)))
+                        except Exception as exc:
+                            # The merchant has already reopened this exact order.
+                            # Preserve its edit for recovery; never start it again.
+                            raise MenyOrderChangeDispatchError(order_id, code, order,
+                                "MENY order was reopened but its original cart could not be read; recover or abort the same change") from exc
                 else:
                     current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
                     status = str((current.get("tracking") or {}).get("status") or "").casefold()
@@ -1134,7 +1195,9 @@ class OrderOperations:
                     "started_at": reservation["started_at"],
                     **({"code": code} if code else {}),
                     **({"binding": started["binding"]} if self.provider in {"oda", "mathem"} else {}),
-                    **({"expected_cart_quantities": quantities, "starting_cart_quantities": quantities} if self.provider in {"oda", "mathem"} else {}),
+                    **({"delivery_only": True} if request.get("delivery_only") else {}),
+                    **({"starting_cart_quantities": quantities} if quantities is not None else {}),
+                    **({"expected_cart_quantities": quantities} if self.provider in {"oda", "mathem"} else {}),
                 }
                 with self.store.locked() as state:
                     if canonical(state.get("order_change")) != canonical(reservation):
@@ -1158,7 +1221,7 @@ class OrderOperations:
                     if canonical(state.get("order_change")) == canonical(reservation):
                         state["order_change"] = None
                 raise
-            return {**started, **change, "next": "Use cart ensure for minimum quantities (Oda and Mathem include goods already ordered), or change for explicit extra quantities. If no additions are needed, abort the empty edit. Otherwise prepare/submit checkout for this exact order; provider permission is rechecked, never infer a fixed cutoff."}
+            return {**started, **change, "next": "Select the exact requested delivery window, preserve the goods and prepare its full-total review." if request.get("delivery_only") else "Use cart ensure for minimum quantities (Oda and Mathem include goods already ordered), or change for explicit extra quantities. If no additions are needed, abort the empty edit. Otherwise prepare/submit checkout for this exact order; provider permission is rechecked, never infer a fixed cutoff."}
         if action == "change_abort":
             with self.store.locked() as state:
                 change = deepcopy(state.get("order_change"))
@@ -1695,6 +1758,8 @@ class OrderOperations:
 
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
+            raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
             raise HouseholdError("Mathem checkout is manual; use prepare for the cart summary and finish at https://www.mathem.se/se/cart/")
         deadline = time.monotonic() + (MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240)
@@ -1730,12 +1795,16 @@ class OrderOperations:
         if action == "confirm":
             return self._checkout_confirm(deadline, str(request.get("confirmation_id") or ""), request=request)
         if action == "submit":
-            if self.confirmation_policy != "standing":
-                raise HouseholdError("standing authorization is not configured; prepare checkout and ask for confirmation")
             idempotency_key = self._idempotency_key(request.get("idempotency_key"), "checkout")
             with self.store.locked() as state:
                 pending = deepcopy(state.get("pending_checkout"))
                 protected_request = deepcopy(self._protected_request(state, "checkout", idempotency_key))
+            if self.confirmation_policy != "standing" and not ((pending or {}).get("order_change") or {}).get("requested_delivery"):
+                if protected_request and isinstance(protected_request.get("result"), Mapping):
+                    return {**self._protected_result_view(protected_request["result"], "checkout"), "idempotent": True}
+                if protected_request and (not pending or pending.get("status") != "awaiting_confirmation"):
+                    return self._checkout_reconcile(deadline, str(protected_request.get("confirmation_id") or ""))
+                raise HouseholdError("standing authorization is not configured; prepare checkout and ask for confirmation")
             if protected_request:
                 if isinstance(protected_request.get("result"), Mapping):
                     return {**self._protected_result_view(protected_request["result"], "checkout"), "idempotent": True}
@@ -2038,10 +2107,12 @@ class OrderOperations:
                 raise HouseholdError("Configured Oda Vipps payment supports new orders only; finish this existing-order change in Oda")
             if order_change.get("provider") != self.provider or order_change.get("status") != "editing":
                 raise HouseholdError("the order change is not ready for checkout; abort or recover it first")
-        if order_change and self.provider in {"oda", "mathem"}:
+            if order_change.get("delivery_only") and not order_change.get("requested_delivery"):
+                raise HouseholdError("Select the exact requested window before preparing a delivery-only change")
+        if order_change and (self.provider in {"oda", "mathem"} or order_change.get("requested_delivery")):
             fresh_target = self._orders({"action": "get", "order_id": order_change["order_id"], "_deadline": deadline})
             if canonical(fresh_target) != canonical(order_change["before"]):
-                raise HouseholdError("the target Oda order changed; begin the order change again")
+                raise HouseholdError("the target order changed; begin the order change again")
         cart = self.provider_client.call("get_cart", {}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
         summary = cart_summary(cart)
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
@@ -2053,6 +2124,8 @@ class OrderOperations:
                 return cart_gate
             cart_plan_baseline = deepcopy(self.store.read().get("cart_plan"))
         delivery_change = bool(order_change and order_change.get("requested_delivery"))
+        if delivery_change and self.provider == "meny" and self._cart_lines(summary)[0] != order_change.get("starting_cart_quantities"):
+            raise HouseholdError("A delivery-only change must preserve the original MENY cart products and quantities")
         retail_addition = self.provider in {"oda", "mathem"} and bool(order_change) and not delivery_change
         if retail_addition:
             summary["delivery"] = {
@@ -2232,6 +2305,9 @@ class OrderOperations:
                     allow_recovery=allow_recovery,
                     scope_cart=cart,
                 )
+            price_review = self._delivery_price_review(summary, order_change)
+            if price_review is not None:
+                summary["delivery_change"] = price_review
             if not retail_addition:
                 summary = self._bind_delivery_summary(summary, delivery_binding, provider=self.provider,
                                                       discount_breakdown=review.get("discount_breakdown"))
@@ -2288,13 +2364,17 @@ class OrderOperations:
         return {
             "confirmation_id": confirmation_id,
             "confirmation_policy": self.confirmation_policy,
-            "confirmation_required": self.confirmation_policy == "fresh",
+            "confirmation_required": price_review["confirmation_required"] if price_review else self.confirmation_policy == "fresh",
             "summary": {
                 **deepcopy(summary),
                 **({"payment": payment_display} if self.provider in {"oda", "mathem"} else {}),
             },
             "order_change": {"order_id": order_change["order_id"], "kind": order_change.get("kind")} if order_change else None,
             "next": (
+                "Show the exact window, original/new full totals, difference and payable amount. Ask once to approve this higher total, then confirm this exact confirmation_id with delivery_price_approved=true."
+                if price_review and price_review["confirmation_required"] else
+                "The requested window and applicable price limit authorize this unchanged-goods delivery change. Show the fresh original/new totals and payable amount, then confirm this confirmation_id without another price question. Provider/device approval still applies."
+                if price_review else
                 "Ask once for an explicit final confirmation of this unchanged cart, total, delivery and target order, then pass this confirmation_id unchanged."
                 if self.confirmation_policy == "fresh"
                 else "Standing authorization is configured. If the current request explicitly asks to order, pay or check out, call checkout confirm now with this confirmation_id; do not ask again."
@@ -2564,6 +2644,16 @@ class OrderOperations:
                 if canonical(state.get("pending_checkout")) == canonical(pending):
                     state["pending_checkout"] = None
             raise HouseholdError("checkout confirmation expired")
+        price_review = self._delivery_price_review(pending["summary"], pending.get("order_change"))
+        if price_review is not None:
+            if price_review != pending["summary"].get("delivery_change"):
+                raise HouseholdError("Delivery price review changed or is missing; prepare a fresh review")
+            if price_review["confirmation_required"] and not (request or {}).get("delivery_price_approved"):
+                return {"confirmed": False, "confirmation_required": True, "confirmation_id": confirmation_id,
+                        "summary": deepcopy(pending["summary"]),
+                        "next": "The new full total exceeds the original and any authorized price limit. Obtain one approval of this exact window, difference and total, then confirm this ID with delivery_price_approved=true."}
+        elif (request or {}).get("delivery_price_approved"):
+            raise HouseholdError("Delivery price approval cannot authorize a different checkout operation")
         try:
             reprepared = self._revalidate_checkout_delivery(pending, deadline=deadline)
         except HouseholdError:
@@ -2613,7 +2703,7 @@ class OrderOperations:
                     self._pending_scheduler_guard(state, pending)
                     state["pending_checkout"]["status"] = "clicking"
                     if (self.provider in {"oda", "mathem"}
-                            and not pending_change.get("requested_delivery")
+                            and (not pending_change.get("requested_delivery") or money_cents(pending["summary"].get("total")) > 0)
                             and (pending_change or pending["checkout_payment"]["method"] == "saved_card")):
                         # Persist before browser dispatch so a crash or lost
                         # first response cannot enable an overlapping payment.
@@ -3095,6 +3185,12 @@ class OrderOperations:
         status = str((current.get("tracking") or {}).get("status") or "").casefold()
         if self.provider == "meny":
             matched = confirmation_order_id == order_id and meny_order_matches_checkout(current["order"], pending["summary"])
+            if change.get("requested_delivery"):
+                total = money_cents(current["order"].get("order_total"))
+                expected = (pending["summary"].get("delivery_change") or {}).get("new_total_ore")
+                matched = (confirmation_order_id == order_id and current["order"].get("code") == change.get("code")
+                           and total is not None and total == expected
+                           and meny_order_matches_checkout({**current["order"], "grossAmount": total / 100}, pending["summary"]))
             fulfillable = status in {"confirmed", "delivered"}
         elif change.get("requested_delivery"):
             expected_delivery = str(change["requested_delivery"].get("display") or "")
@@ -3119,7 +3215,12 @@ class OrderOperations:
             current_quantities = oda_order_quantities(current["order"])
             before_total = money_cents(change["before"]["order"].get("grossAmount"))
             current_total = money_cents(current["order"].get("grossAmount"))
-            authorized_delta = money_cents(pending["summary"].get("total"))
+            price_review = pending["summary"].get("delivery_change") or {}
+            expected_total = price_review.get("new_total_ore")
+            # Legacy already-dispatched free reviews remain reconciliation-only.
+            # They cannot authorize a new dispatch or a changed-price outcome.
+            if not price_review and money_cents(pending["summary"].get("total")) == 0:
+                expected_total = before_total
             matched = (
                 expected_signature is not None
                 and expected_signature == actual_signature
@@ -3131,8 +3232,8 @@ class OrderOperations:
                 and before_quantities == current_quantities
                 and before_total is not None
                 and current_total is not None
-                and authorized_delta is not None
-                and current_total == before_total + authorized_delta
+                and type(expected_total) is int
+                and current_total == expected_total
             )
             currency = "SEK" if self.provider == "mathem" else "NOK"
             matched = (matched and change["before"]["order"].get("currency") == current["order"].get("currency") == currency

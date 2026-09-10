@@ -113,9 +113,10 @@ it must not create a new delivery reservation or fall back to a new order.
 The review binds original/added/combined quantities and SEK amounts. It reports
 unavailable fee components as unknown instead of using new-order fee rules.
 Cancellation separately verifies the same order, receipt, current modifiability
-and Swedish confirmation dialog. Available free delivery changes use the bound
-original-order checkout, with unchanged goods and order total and zero payable.
-Paid or refund-dependent changes and unavailable dates require manual handling.
+and Swedish confirmation dialog. Delivery changes use the bound original-order
+checkout and the shared full-total authorization rule below. The selected slot
+price alone never establishes the final order price or payment due. Missing
+original/final totals or unavailable dates stop the change.
 Native outcomes and remaining gates are recorded in [acceptance](acceptance.md).
 
 Mathem MCP receipts omit the address. Reconciliation therefore reads the exact
@@ -1858,11 +1859,42 @@ active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
 
 The [Oda/Mathem evidence matrix](oda-mathem-parity.md) distinguishes earlier
-assisted acceptance from ordinary flows still requiring demonstration. Mathem
-delivery edits currently require zero payable and unchanged order total as a
-local implementation limit, not an established store restriction. Do not retry
-a failed or uncertain addition payment through a separate helper and describe
-that as product recovery.
+assisted acceptance from ordinary flows still requiring demonstration. The
+same/lower/higher-total delivery criterion remains open until separately
+demonstrated through installed Hermes and independent merchant evidence. Do not
+retry a failed or uncertain addition payment through a separate helper and
+describe that as product recovery.
+
+### Delivery-only changes and price authority
+
+Begin the exact original order with `orders(action="change_begin",
+delivery_only=true)`, then select the user's exact dated window. Optional
+`delivery(action="select", max_total_ore=...)` records an explicitly authorized
+maximum final order total in the provider currency's minor units, scoped to
+that window and order. It is not a slot-fee limit or a household-policy change.
+
+Fresh review preserves the original order, account and goods, and reports
+`summary.delivery_change`: original/new full totals, their difference, the
+separate payable amount, currency, price limit and `confirmation_required`.
+Totals include the merchant's fees and discounts. Oda/Mathem require independent
+original/final/payable overview values; MENY compares the original receipt's
+exact `Totalsum` with the reopened checkout total, not its reserved-card amount.
+An unavailable full total stops review rather than substituting a slot quote.
+
+The requested window authorizes an unchanged or lower verified final total.
+A higher total is authorized only within that explicit maximum, or after one
+new approval of this exact review: `checkout(action="confirm",
+confirmation_id=..., delivery_price_approved=true)`. Without that approval,
+confirmation returns the price gate without submitting, even under standing
+checkout policy. A stale or changed review must be prepared again. Ordinary
+new orders and item additions keep their existing authorization rules.
+
+Before dispatch the provider rechecks the frozen window, goods, account,
+payment choice and amounts. Reconciliation matches the actual final total,
+not original total plus payable; MENY may reserve/pay the whole revised order.
+An uncertain result retains the original journal and cannot dispatch twice.
+Bank-app approval remains external. Lower merchant totals do not by themselves
+prove a bank refund or reservation release.
 
 Oda and Mathem bind checkout accounts and original order receipts through the
 same reader with separate origins and receipt labels. Existing-order review and

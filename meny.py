@@ -2471,6 +2471,11 @@ __DELIVERY_BINDING__
   const totalText = valueAfter('Betalt beløp (kort)') || valueAfter('Reservert beløp (kort)') || valueAfter('Reservert beløp') || valueAfter('Totalsum');
   const money = totalText?.match(/(\d+(?:[ .]\d{3})*),([0-9]{2})/);
   const total = money ? Number(`${money[1].replace(/[ .]/g,'')}.${money[2]}`) : null;
+  // A payment reservation is not the full order total used to authorize a
+  // delivery change. Keep that separately observed value, or leave it unknown.
+  const orderTotalText = lines.filter(line => line === 'Totalsum').length === 1 ? valueAfter('Totalsum') : null;
+  const orderTotalMoney = orderTotalText?.match(/^(\d+(?:[ .]\d{3})*),([0-9]{2})\s*(?:kr)?$/i);
+  const orderTotal = orderTotalMoney ? Number(`${orderTotalMoney[1].replace(/[ .]/g,'')}.${orderTotalMoney[2]}`) : null;
   const deliveredDatePattern = /^(?:0?[1-9]|[12]\d|3[01])\.(?:\s+(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\.?\s+\d{4}|\d{2}\.\d{4})$/i;
   const deliveredDates = lines.flatMap((line, index) => /\blevert$/i.test(line) && deliveredDatePattern.test(lines[index + 1] || '') ? [lines[index + 1]] : []);
   const delivery = valueAfter('Varene leveres') || (deliveredDates.length === 1 ? deliveredDates[0] : null);
@@ -2501,7 +2506,7 @@ __DELIVERY_BINDING__
   if (expand) buttons[0].setAttribute('data-meal-concierge-action', 'order-items');
   const orderPaths = [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`];
   const baseReady = actual === expected && orderPaths.includes(location.pathname) && heading.length === 1 && Number.isFinite(total) && Boolean(delivery) && Number.isInteger(itemCount) && itemCount > 0;
-  return JSON.stringify({ready:baseReady && rowsReady, expand:baseReady && expand, authenticated:true, order_number:actual, code, status, total, delivery, item_count:itemCount, products});
+  return JSON.stringify({ready:baseReady && rowsReady, expand:baseReady && expand, authenticated:true, order_number:actual, code, status, total, order_total:orderTotal, delivery, item_count:itemCount, products});
 })()
 """.replace("EXPECTED", json.dumps(order_id))
         result: dict[str, Any] = {}
@@ -2527,6 +2532,7 @@ __DELIVERY_BINDING__
             "code": result.get("code"),
             "status": provider_status or result["status"],
             "grossAmount": result["total"],
+            **({"order_total": result["order_total"]} if result.get("order_total") is not None else {}),
             "deliverySlotDisplay": result["delivery"],
             "productQuantityCount": result["item_count"],
             "products": result["products"],
@@ -2836,6 +2842,10 @@ __DELIVERY_BINDING__
             raise HouseholdError("select a MENY delivery slot before checkout")
         target_order_id = str(order_change.get("order_id") or "") if order_change else ""
         target_code = str(order_change.get("code") or "") if order_change else ""
+        if order_change and order_change.get("requested_delivery"):
+            original = self._get_order(target_order_id)
+            if original != order_change["before"]["order"] or original.get("code") != target_code:
+                raise HouseholdError("The original MENY order changed before delivery review")
         self._verify_order_change(target_order_id or None, target_code or None)
         self._open(CHECKOUT_URL)
         self._sleep(0.8)

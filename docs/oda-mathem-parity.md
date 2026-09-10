@@ -546,14 +546,15 @@ action is exposed. The original payment failure's cause remains undetermined:
 merchant failure text was observed, but a required card/device challenge was not
 established. Missing cause alone does not authorize another payment.
 
-Mathem's zero-payable guard is **an implementation limit**, not a proven shop rule.
+At that checkpoint, Mathem's zero-payable guard was **an implementation limit**,
+not a proven shop rule.
 [Mathem describes variable delivery fees](https://support.mathem.se/sv/article/384bf5)
 and [delivery discounts](https://www.mathem.se/se/about/gratis-leverans/).
 [Oda describes delivery edits with payment of a difference](https://hjelp.oda.com/no/article/89b454).
-Removing Mathem's guard requires an actual supported changed-price review,
-original/combined/payable reconciliation and applicable payment authorization.
-The current single-date free-slot observation cannot justify deleting it or
-claiming paid edits are unavailable everywhere.
+The shared final-total implementation described below replaces that limit with
+verified original/final/payable amounts and applicable price authorization.
+Its changed-price merchant acceptance still requires a supported live review.
+Free-slot observations cannot establish that paid edits are unavailable everywhere.
 
 ## Shared binding verification after Oda login
 
@@ -600,6 +601,49 @@ complete, with their separate evidence above. Any future fix still requires
 verification on its exactly authorized runtime/client targets. No new general
 order, payment, deployment or recipient authorization follows from historical
 one-shot tests.
+
+### Shared final-total delivery rule — 2026-09-10
+
+The candidate uses one authorization rule for Oda, Mathem and MENY: an exact
+requested window covers the same or lower verified full order total; an increase
+requires an explicitly scoped maximum or one approval of the fresh review.
+Original and new totals include merchant fees/discounts. Payable is recorded
+separately and is never used to derive the new full total. Ordinary additions,
+payment recovery and scheduler policy retain their existing behavior. See the
+[tool contract](reference.md#delivery-only-changes-and-price-authority).
+
+Application tests exercise all three providers under fresh and standing policy,
+including same/lower/higher totals, limits, fresh approval, goods drift and lost
+dispatch/restart replay. Oda/Mathem DOM tests independently parse original,
+final and payable values and recheck them at the final control; selected-card
+drift also stops Oda. These are synthetic checks, not changed-price acceptance.
+
+On 10 September, the existing Bob Oda conversation used his installed skill and
+MCP to read status, orders, products and delivery slots without opening an edit.
+It found no modifiable future order and a 500 g pasta package at NOK 16.70;
+12–13 September slot quotes varied, including NOK 9/19/29. These are slot
+quotes, not verified changed-order totals. Private household state and Bob's
+global Oda route remained unchanged.
+
+The separate Bob Mathem conversation used the existing dedicated socket and
+installed skill/MCP to read status, orders, products and slots, including exact
+order reads. Its persisted final reply reported no modifiable order, a 500 g
+pasta package at SEK 18.50 and zero-price slots. The CLI later exited 134;
+retain that failure rather than describing a clean process pass. Household
+state and global routing remained unchanged. Separate adapter reads confirmed
+both providers' order statuses and date-specific slot prices. Neither
+conversation prepared or submitted checkout.
+
+The current Bob installation exposes Oda and isolated Mathem sockets; it has no
+MENY service/socket. Earlier authenticated MENY adapter reads do not establish
+an installed Bob/MENY checkout path. A lack of test installation or nonzero slot
+quotes is not evidence that a merchant cannot support the requested change.
+
+Live acceptance remains pending: authorized test orders, an installed Bob path
+for each provider, actual same/lower/higher reviewed totals where offered, one
+dispatch per approved intent and independent order/receipt/tracking readback.
+No new purchases, payments, delivery edits or cancellations were authorized by
+the implementation task, and no changed-price outcome is claimed here.
 
 ### Earlier ordinary acceptance — 2026-09-08
 
