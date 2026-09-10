@@ -4,8 +4,21 @@ The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
 recovery-assisted addition and UI-prepared delivery results below do not
 demonstrate the complete ordinary product flows. The [current Oda/Mathem
 matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
-fixes, the completed Oda review and the still-open failed-addition recovery and changed-price criteria. Bank reconciliation
-is outside this acceptance.
+fixes, the completed Oda review and failed-addition recovery, and the still-open
+changed-price delivery criterion. Bank reconciliation is outside this acceptance.
+
+On 10 September, installed public `61ca1cb5` completed ordinary Mathem
+failed-addition recovery through actual Hermes, skill, MCP and Application.
+After a positively bound failure and fresh review, one SEK 18.50 recovery
+payment retained the original merchant change, goods, account/address/card and
+delivery. The required notice separately disclosed the SEK 18.51 overview.
+Hermes selected the bank-app method once; the owner approved in the bank app.
+Ordinary reconciliation confirmed two packages/SEK 143.00, matching original
+and successful recovery results, cleared pending state and an empty cart.
+Failed attempts remain preserved. The exact result notice was acknowledged,
+and the test order was cancelled once through ordinary tools. Independent
+reads confirmed cancellation, an empty cart and no pending operations. See the
+[ordinary recovery result](oda-mathem-parity.md#ordinary-mathem-failed-addition-recovery--2026-09-10).
 
 After owner login, Oda and Mathem separately passed the shared account/receipt
 reader on their original cancelled orders, with frozen-reference rejection and
@@ -24,7 +37,7 @@ cancellation, empty cart, cleared pending operations and unchanged earlier order
 Linux skips), published-archive verification and all 151 source files in each
 of the three approved runtime services; both installed SDK connections expose
 27 tools, with original state/configuration preserved. The later Oda prepare-only review passed as recorded below; failed-payment
-recovery and supported changed-price review remain open;
+recovery and supported changed-price review remained open at that checkpoint;
 see the current matrix for source hashes, normal update and retained failures.
 
 The 9 September original-journal audit confirms that the earlier helper's
@@ -39,7 +52,7 @@ merchant change ID to the reviewed goods before recovery. On 10 September the
 owner completed that native retry; ordinary reconciliation confirmed the same
 two-package order at 143.00 SEK. The follow-up implements capture-bound Mathem
 addition recovery with original-submit/persistence/restart tests. Live
-product-driven failed-addition recovery remains unaccepted. A bounded ordinary
+product-driven failed-addition recovery was still unaccepted then. A bounded ordinary
 trial with the fix paid one additional package once, confirming three packages
 at 161.50 SEK on that same order; it did not fail or exercise recovery. See the [current recovery result](oda-mathem-parity.md#ordinary-oda-payment-recovery-and-retained-mathem-failure--2026-09-09).
 The earlier initial-order, paid-addition, free-delivery and cancellation
@@ -60,16 +73,17 @@ payment, but the diagnostic retry is not ordinary product-driven recovery.
 The implementation now preserves a pending bank challenge
 and the original attempt across reconciliation and restart, and rejects the
 observed new-order overview/payment-control disagreement during preparation.
-Tests cover these paths; product-driven Mathem failed-addition recovery remains
-unaccepted. Actual Hermes subsequently dispatched one supported recovery of an
+Tests cover these paths; product-driven Mathem failed-addition recovery was still
+unaccepted at that stage. Actual Hermes subsequently dispatched one supported recovery of an
 explicitly failed addition, including its fresh review, local notice and one
 Appen method choice. That recovery also failed before merchant acceptance.
 The current product can verify that attempt's own terminal failure, preserve
 its complete history and prepare a fresh recovery; this continuation was also
 demonstrated through installed Hermes/MCP without another payment. The prepared
 addition remains SEK 18.50, with the separate SEK 18.51 overview disclosed.
-The paid base remains active while payment completion and cleanup await the
-next authorized user-assisted bank step. Final validation passed 1,362 public
+At that checkpoint the paid base remained active while payment completion and
+cleanup awaited the next authorized user-assisted bank step. The later ordinary
+result above records the completed recovery. Final validation passed 1,362 public
 tests (nine optional skips), the canonical fleet profile and health/status
 through both installed RPC connections. See the
 [paired investigation](oda-mathem-parity.md#paired-payment-investigation-and-bank-approval--2026-09-10).
