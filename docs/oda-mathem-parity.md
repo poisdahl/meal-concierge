@@ -6,6 +6,44 @@ change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
 is outside this work and is not a completion gate.
 
+## Ordinary Mathem failed-addition recovery — 2026-09-10
+
+**The ordinary failed-addition recovery criterion is now demonstrated.** The
+installed public `61ca1cb5` release completed the same captured merchant change
+through actual Hermes, its maintained skill, MCP and Application. The owner
+performed the required Bank Norwegian app approval; no helper paid or wrote
+protected checkout history on the product's behalf.
+
+After the owner returned, an authorized recovery still failed. Its retained
+native payment GET positively matched the original order/change, and independent
+MCP reads confirmed the unchanged one-package/SEK 124.50 paid base and unpaid
+addition. Ordinary Hermes reconciliation recorded that current attempt's own
+failure. A fresh ordinary preparation archived it intact and preserved the
+original addition, earlier failed history, account/address/card, delivery and
+dietary permissions. The new review and required local notice disclosed the
+same SEK 18.50 payable and separate SEK 18.51 overview; absent fee rows remained
+absent. No goods were restaged.
+
+Following the owner's explicit request, Hermes acknowledged the exact delivered
+notice, confirmed one payment and selected Appen once on that new confirmation.
+Bob then sent the requested Signal notification to the existing owner contact.
+After the owner approved in the bank app, ordinary Hermes reconciliation returned
+`confirmed=true`, `changed_existing_order=true` and `retry_allowed=false`.
+Independent merchant reads confirmed two packages/SEK 143.00 and
+`paid_and_modifiable`, with an empty cart and cleared checkout/change state.
+The original and successful recovery confirmations resolve to the same confirmed
+result; failed confirmations retain their separate failed history.
+
+The exact local result notice was delivered and acknowledged. That notice's
+CLI process exited 134 after its successful tool result and final reply were
+persisted; it was not resent. Hermes then prepared and confirmed cancellation
+of only this test order once. Independent merchant reads confirmed `cancelled`,
+an empty cart, both notices acknowledged and no pending checkout, cart change,
+order change or cancellation. The reads preserved the full product state.
+No bank settlement, refund or authorization release is inferred from the
+merchant result. The separate changed-delivery-price criterion
+remains open; earlier ordinary Oda recovery and #60 acceptance are unchanged.
+
 ## Paired payment investigation and bank approval — 2026-09-10
 
 Further owner-authorized, instrumented Application trials paid one Oda addition
@@ -126,23 +164,24 @@ review succeeds, it archives the complete failed attempt privately and gives
 the replacement a new confirmation and required notice. Old confirmations
 permanently replay failure and cannot operate on a later payment. This does not
 enable a new-order retry cycle or an automatic payment loop. Merchant-confirmed
-ordinary failed-addition recovery remains unaccepted.
+ordinary failed-addition recovery remained unaccepted at that point; the later
+ordinary result above completes that criterion.
 
 The scoped follow-up preserved the full household state through deployment.
 An actual installed Hermes/MCP preparation then archived the failed recovery
 and returned a fresh review for the same one-package addition: SEK 18.50
 payable, SEK 18.51 overview, original account/address/card and unchanged
 dietary unknowns. It stopped before notice delivery, confirmation, bank-method
-selection or payment. The paid base remains active; the addition is unconfirmed
-and its cleanup remains pending. No new bank-dependent payment is dispatched
-until the owner is available to handle that exact request.
+selection or payment. At that checkpoint the paid base remained active and
+the addition unconfirmed while awaiting owner availability. The later ordinary
+recovery above records the completed payment.
 
 Final source checks passed 43 focused recovery tests, 1,362 public tests with
 nine optional platform skips, and the canonical fleet profile including 543
 static checks. Both installed Oda and Mathem RPC health/status calls passed;
 all four deployed runtime sources matched the reviewed files in each of the
-three scoped services. A bank prompt or green tests alone do not complete the
-remaining live recovery criterion.
+three scoped services. These source checks alone did not establish the later
+merchant-confirmed ordinary recovery.
 
 The final review also identified a delayed-confirmation case: reaching the
 merchant success route can precede its paid tracking status. Original saved-card
@@ -237,7 +276,8 @@ acknowledged through the ordinary tool. The initial payment succeeded, so no
 recovery or further test purchase was attempted. This demonstrates the deployed
 ordinary addition path, not a live failed-payment recovery.
 
-**The live product-driven failed-addition recovery criterion remains open.**
+**At that checkpoint, live product-driven failed-addition recovery remained open.**
+The completed ordinary recovery is recorded above.
 
 The later paired investigation cancelled both paid test orders, as recorded above.
 The owner completed the originally failed Mathem addition. Isolated tests cover changed
@@ -283,7 +323,8 @@ the delivery-slot state rather than an unpaid-change payload; that is not a
 general claim about the merchant's capabilities. No recovery payment, helper write to protected product journals, cancellation,
 runtime change or restart was performed. At that checkpoint the unpaid
 order and original timeout page were preserved; the later recovery is recorded
-above. **#50 failed-addition recovery remains open.**
+above. **Failed-addition recovery remained open at that checkpoint; its later
+ordinary completion is recorded above.**
 
 ## Ordinary Oda review — 2026-09-09
 
@@ -331,9 +372,9 @@ The earlier 18 CI errors were fixed by using the household timezone in test
 fixtures, with all 18 reproduced as passing under UTC while Oslo's date differed.
 Production scheduler behavior and CI configuration were unchanged.
 
-The bounded #60 review criterion is complete. #50 remains open for supported
-failed-payment recovery and the provider-independent same/lower/higher-final-total
-delivery-change criteria. This test adds no payment or delivery-change authority.
+The bounded #60 review criterion is complete. Following the ordinary recovery
+recorded above, #50 remains open for provider-independent same/lower/higher-final-total
+delivery-change acceptance. This earlier review adds no payment or delivery-change authority.
 
 ## Failed-payment recovery audit — 2026-09-09
 
@@ -392,9 +433,9 @@ reconciliation. MENY's proven no-dispatch/expiry retry rules do not establish an
 Oda/Mathem failed-change contract. Ten existing isolated tests passed for retained
 uncertainty, lost responses, restart/expiry, binding rejection, notice replay,
 pre-click failure and Oda payment follow-up. No recovery code or new ordinary
-Hermes recovery conversation is claimed. The criterion remains **open** for
-verified merchant binding and an authorized ordinary installed product recovery;
-static code and synthetic tests cannot complete it. The already accepted order,
+Hermes recovery conversation was claimed by that audit. Its recovery criterion
+remained **open** until the later bound ordinary run recorded above; static code
+and synthetic tests alone could not complete it. The already accepted order,
 addition, free delivery, cancellation and #60 review remain accepted.
 
 ## Observations and source binding
@@ -425,10 +466,13 @@ No credentials, cookies or authentication logs were exported.
 | `get_delivery_slots` | For 13 September, Oda returned 20 available slots with exact prices 19–79 NOK; Mathem returned 19 at zero SEK. Both returned dated timestamps with offsets | Shared slot normalization; Oslo/Stockholm provider binding. One date's free Mathem slots do not establish a store-wide restriction |
 | Browser account/receipt | After owner Oda login, both exact cancelled receipts and their own MCP address references matched independently on 8 September. Oda uses `Total inkl. MVA`; Mathem uses `Totalt inkl. moms` | Shared reader with provider origins/labels verified separately; frozen-reference mismatch rejected for both. This is read acceptance, not payment acceptance |
 | Cart writes and slot selection | Ordinary Mathem turns staged the original and added package under their own authority. The later bounded Oda #60 conversation staged one 500 g package and selected 12 September 07–13 Oslo at exact NOK 19 | Separate live write/readback evidence for both; Oda remains prepare-only, with no purchase |
-| Addition/payment | Earlier addition required helper recovery. New ordinary candidate flow paid one extra package once and later reconciled two packages/143 SEK | Ordinary paid addition demonstrated; failed-payment recovery remains unverified |
+| Addition/payment | Earlier addition required helper recovery. New ordinary candidate flow paid one extra package once and later reconciled two packages/143 SEK | Ordinary paid addition demonstrated at this checkpoint; the later ordinary failed-payment recovery is recorded above |
 | Delivery change | Earlier acceptance followed UI preparation. New ordinary candidate flow began with a closed browser, prepared 10 September14–16, submitted once and reconciled unchanged two packages/143 SEK | Ordinary free change demonstrated; paid review remains unverified and the zero limit remains local |
 
 ## Established Oda candidate and retained differences
+
+This section records the 8 September candidate checkpoint. Later ordinary Oda
+and Mathem review, payment and recovery results are recorded above.
 
 Before changing browser control flow, an isolated, network-free Oda navigation
 candidate rebound the origin, locale, routes, currency and provider defaults to
@@ -550,10 +594,14 @@ edit behavior or a permanent store restriction.
 
 ## Remaining acceptance
 
-Required and still open: any supported recovery
-through the product with original-change/goods binding; supported price-changing
-review/authorization; affected Oda native flow checks after the now-verified browser/account/receipt reads; verification of each subsequent fix on exactly authorized runtime/client targets. No new general order, payment, deployment
-or recipient authorization follows from historical one-shot tests.
+The supported price-changing delivery review/authorization criterion remains
+open. Ordinary failed-addition recovery and the affected Oda #60 review are
+complete, with their separate evidence above. Any future fix still requires
+verification on its exactly authorized runtime/client targets. No new general
+order, payment, deployment or recipient authorization follows from historical
+one-shot tests.
+
+### Earlier ordinary acceptance — 2026-09-08
 
 On 8 September the owner approved one bounded Mathem order, its addition,
 delivery change and cancellation, plus the exact Bob/Oda and dedicated Mathem

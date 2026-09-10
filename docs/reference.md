@@ -221,8 +221,12 @@ amounts and all displayed fee rows are frozen and rechecked before payment.
 No rounding tolerance or inferred fee replaces the actual payment-button amount.
 If the owner has already completed the payment, ordinary reconciliation records
 that result and clears the original attempt; it does not submit again. The
-[recovery evidence](oda-mathem-parity.md) distinguishes this implemented route
-and automated coverage from live product-driven failed-addition acceptance.
+[recovery evidence](oda-mathem-parity.md#ordinary-mathem-failed-addition-recovery--2026-09-10)
+records successful ordinary installed Hermes/MCP recovery of a positively failed
+Mathem addition: fresh bound review and required notice, one payment and one
+bank-app method selection, owner bank approval, then merchant-confirmed
+reconciliation. Earlier helper-assisted results and isolated failure/restart
+tests remain separately identified.
 
 Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
 amount/account/card helper reads and read-only receipt address verification have
