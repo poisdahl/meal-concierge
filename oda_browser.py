@@ -350,7 +350,7 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
  const visible=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
  const failed=()=>JSON.stringify(SUBMIT?{clicked:false}:{amounts_valid:false});
  if(location.href!==expected.checkout_url||document.querySelector('input[type="password"]'))return failed();
- const money='(\\d+(?:[ .]\\d{3})*),(\\d{2})\\s*(?:kr|SEK)';
+ const money='([−-]?)(\\d+(?:[ .]\\d{3})*),(\\d{2})\\s*(?:kr|SEK)';
  const values={},nodes=[...document.querySelectorAll('*')].filter(visible);
  const specs=[['original','Ursprunglig beställning',true],['added','Varor tillagda i efterhand',true],['payable','Att betala nu',false],['combined','Totalsumma för beställning',true]].filter(([key])=>!expected.delivery_change||key!=='added');
  if(expected.delivery_change&&(expected.product_count!==0||nodes.some(e=>norm(e.innerText)==='Varor tillagda i efterhand')))return failed();
@@ -361,13 +361,15 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
   let row=labels[0].parentElement,match=null;
   while(row&&row!==document.body){match=norm(row.innerText).match(pattern);if(match)break;row=row.parentElement;}
   if(!match)return failed();
-  const offset=counted?3:1,minor=Number(match[offset].replace(/[ .]/g,''))*100+Number(match[offset+1]);
-  if(!Number.isSafeInteger(minor)||minor<0)return failed();
+  const offset=counted?3:1,unsigned=Number(match[offset+1].replace(/[ .]/g,''))*100+Number(match[offset+2]);
+  const minor=match[offset]?-unsigned:unsigned;
+  if(!Number.isSafeInteger(minor)||(minor<0&&(!expected.delivery_change||key!=='payable')))return failed();
   values[key+'_minor']=minor;
   if(counted){const count=Number(match[1]);if(!Number.isSafeInteger(count)||count>1000000||(count===1)!==(match[2]==='vara'))return failed();values[key+'_count']=count;}
  }
  // Delivery changes read the merchant's full new total independently of the
- // amount payable now. A decrease can have zero payable without being free.
+ // signed amount displayed as payable now. A negative adjustment does not
+ // establish a bank refund; it is preserved exactly through the final click.
  const wanted=expected.delivery_change
   ? {original_minor:expected.original_minor,original_count:expected.original_count,combined_count:expected.original_count,...(expected.order_amounts||{})}
   : {original_minor:expected.original_minor,original_count:expected.original_count,added_minor:expected.total_minor,added_count:expected.product_count,payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
@@ -376,7 +378,7 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
  const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s/.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
  if(controls.length!==1)return failed();
  const pay=norm(controls[0].innerText||controls[0].getAttribute('aria-label')||'').match(new RegExp('^Bekräfta och betala '+money+'$','i'));
- if(!pay||Number(pay[1].replace(/[ .]/g,''))*100+Number(pay[2])!==values.payable_minor)return failed();
+ if(!pay||(pay[1]?-1:1)*(Number(pay[2].replace(/[ .]/g,''))*100+Number(pay[3]))!==values.payable_minor)return failed();
  if(SUBMIT){controls[0].click();return JSON.stringify({clicked:true});}
  return JSON.stringify({amounts_valid:true,order_amounts:values});
 })()
@@ -561,7 +563,7 @@ def _oda_delivery_change_surface_script(expected_url: str) -> str:
  const final=controls.filter(x=>/^(Bekreft og betal|Confirm and pay)(\b|\s)/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
  if(location.href!==URL||final.length!==1||document.querySelector('input[type="password"]'))return JSON.stringify({action:'wait'});
  {
-   const money=[...norm(final[0].innerText||final[0].getAttribute('aria-label')||'').matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(m=>Number(m[1].replace(/[ .]/g,''))*100+Number(m[2]));
+   const money=[...norm(final[0].innerText||final[0].getAttribute('aria-label')||'').matchAll(/(?:^|\s)([−-]?)(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(m=>(m[1]?-1:1)*(Number(m[2].replace(/[ .]/g,''))*100+Number(m[3])));
    const roots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText)==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean).map(x=>norm(x.innerText));
    const payment=JSON.parse(PAYMENT);
    return JSON.stringify({action:'ready',amounts:money,delivery_roots:roots,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:final.length});
@@ -1517,71 +1519,105 @@ class OdaBrowser:
                 addition_expectation=self._addition_expectation(cart, order_id, order, binding),
             )
 
+    def _navigate_delivery_change(self, order_id, expected, slot):
+        mathem = self.checkout_provider == "mathem"
+        provider_name = "Mathem" if mathem else "Oda"
+        home = _retail_store_url(self.checkout_provider)
+        menu_label = "Visa möjliga åtgärder" if mathem else "Vis mulige handlinger"
+        entry_label = "Ändra leveranstid" if mathem else "Endre leveringstid"
+        dialog_label = "Ändra leveranstid" if mathem else "Bytt leveringstid"
+        zone = ZoneInfo("Europe/Stockholm" if mathem else "Europe/Oslo")
+        # The existing-order route can already retain the selected review. Open
+        # its exact URL first; never use the new-order cart destination.
+        self._open(expected["checkout_url"])
+        for _ in range(20):
+            surface = self._eval((self._checkout_surface_script(expected) if mathem else _oda_delivery_change_surface_script(expected["checkout_url"])))
+            if checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider):
+                return
+            self._settle(0.25)
+        self._open(home)
+        menu_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!==HOME)return JSON.stringify({opened:false});
+const links=[...document.querySelectorAll('a')].filter(vis).filter(e=>e.href===ORDER_URL);if(links.length!==1)return JSON.stringify({opened:false});
+const card=links[0].closest('article');if(!card)return JSON.stringify({opened:false});
+const buttons=[...card.querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&norm(e.innerText||e.getAttribute('aria-label'))===MENU_LABEL&&e.getAttribute('aria-haspopup')==='menu'&&e.getAttribute('aria-expanded')==='false');
+if(buttons.length!==1)return JSON.stringify({opened:false});buttons[0].setAttribute('data-retail-delivery-menu','');return JSON.stringify({opened:true});
+})()""".replace("ORDER_URL", json.dumps(self._order_url(order_id))).replace("HOME", json.dumps(home)).replace("MENU_LABEL", json.dumps(menu_label))
+        for _ in range(20):
+            if self._eval(menu_script) == {"opened": True}:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError(f"{provider_name} does not expose delivery changes for this order")
+        self._invoke("click", "[data-retail-delivery-menu]")
+        entry_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!==HOME)return JSON.stringify({bound:false});
+const menus=[...document.querySelectorAll('[role="menu"]')].filter(vis);if(menus.length!==1)return JSON.stringify({bound:false});
+const links=[...menus[0].querySelectorAll('a[role="menuitem"]')].filter(vis).filter(e=>norm(e.innerText)===ENTRY_LABEL);if(links.length!==1)return JSON.stringify({bound:false});
+const u=new URL(links[0].href);if(u.origin!==ORIGIN||u.pathname!==CHECKOUT_PATH||u.hash||u.username||u.password||u.searchParams.get('orderNumber')!==ORDER_ID||JSON.stringify([...u.searchParams.keys()].sort())!==JSON.stringify(['modal','modal-id','modal-screen','orderNumber']))return JSON.stringify({bound:false});
+links[0].setAttribute('data-retail-delivery-entry','');return JSON.stringify({bound:true,url:u.href});
+})()""".replace("ORDER_ID", json.dumps(order_id)).replace("HOME", json.dumps(home)).replace("ENTRY_LABEL", json.dumps(entry_label)).replace("ORIGIN", json.dumps(home.rstrip("/").rsplit("/", 1)[0])).replace("CHECKOUT_PATH", json.dumps("/se/checkout/confirm/" if mathem else "/no/checkout/confirm/"))
+        for _ in range(20):
+            entry = self._eval(entry_script)
+            if entry.get("bound"):
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError(f"{provider_name} delivery-change destination cannot be bound to this order")
+        self._invoke("click", "[data-retail-delivery-entry]")
+        start = datetime.fromisoformat(slot["start_at"].replace("Z", "+00:00")).astimezone(zone)
+        end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00")).astimezone(zone)
+        today = datetime.now(zone).date()
+        if start.date() < today or (start.date() - today).days > 31 or start.minute or end.minute:
+            raise HouseholdError(f"{provider_name} delivery date cannot be identified in the visible calendar")
+        if start.date() == today:
+            header = "i dag"
+        elif (start.date() - today).days == 1:
+            header = "i morgon" if mathem else "i morgen"
+        else:
+            weekdays = ("mån", "tis", "ons", "tors", "fre", "lör", "sön") if mathem else ("man", "tir", "ons", "tor", "fre", "lør", "søn")
+            months = ("jan", "feb", "mars", "apr", "maj", "juni", "juli", "aug", "sep", "okt", "nov", "dec") if mathem else ("jan", "feb", "mars", "apr", "mai", "juni", "juli", "aug", "sep", "okt", "nov", "des")
+            header = (f"{weekdays[start.weekday()]} {start.day} {months[start.month - 1]}." if mathem else
+                      f"{weekdays[start.weekday()]}. {start.day}. {months[start.month - 1]}.")
+        slot_script = r"""(() => {
+const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
+if(location.href!==EXPECTED_URL)return JSON.stringify({ready:false});
+const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(vis);if(dialogs.length!==1)return JSON.stringify({ready:false});const d=dialogs[0];
+if(![...d.querySelectorAll('h1,h2,h3,h4')].some(e=>norm(e.innerText)===DIALOG_LABEL))return JSON.stringify({ready:false});
+const tables=[...d.querySelectorAll('table')].filter(vis);if(tables.length!==1)return JSON.stringify({ready:false});const table=tables[0];
+const headers=[...table.querySelectorAll('th')];const wanted=headers.filter(e=>norm(e.innerText)===HEADER);if(wanted.length!==1)return JSON.stringify({ready:false});
+const index=wanted[0].cellIndex;const rows=[...table.querySelectorAll('tr')].filter(r=>r.cells.length>index&&norm(r.cells[0].innerText)===TIME_ROW);if(rows.length!==1)return JSON.stringify({ready:false});
+const buttons=[...rows[0].cells[index].querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&new RegExp(PRICE_PATTERN).test(norm(e.innerText)));if(buttons.length!==1)return JSON.stringify({ready:false});
+buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({ready:true});
+})()""".replace("EXPECTED_URL", json.dumps(entry["url"])).replace("HEADER", json.dumps(header)).replace("TIME_ROW", json.dumps(f"{start.hour:02d} - {end.hour:02d}")).replace("DIALOG_LABEL", json.dumps(dialog_label)).replace("PRICE_PATTERN", json.dumps(r"^\d+(?:[ .]\d{3})*(?:,\d{2})?\s*kr$" if mathem else r"^kr\s*\d+(?:[ .]\d{3})*(?:,\d{2})?$"))
+        for _ in range(20):
+            if self._eval(slot_script) == {"ready": True}:
+                break
+            self._settle(0.25)
+        else:
+            raise HouseholdError(f"{provider_name} does not expose that exact delivery window in the visible calendar")
+        self._invoke("click", "[data-retail-delivery-slot]")
+        # No repeated selection when a response is lost or the page fails to
+        # advance. The caller must inspect the original selection before retry.
+        for _ in range(30):
+            if self._eval("JSON.stringify({ready:location.href===" + json.dumps(expected["checkout_url"]) + "&&!document.querySelector('[role=dialog]')})") == {"ready": True}:
+                return
+            self._settle(0.25)
+        raise HouseholdError(f"{provider_name} delivery selection has not reached review; inspect it before selecting again")
+
     def review_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
         with self._checkout_operation(deadline):
             binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
-            expected_order = self._order_expectation(order_id, order)
-            expected_product_count = self._order_product_count(order)
-            target = str(delivery.get("display") or "")
-            signature = delivery_signature(target)
-            if signature is None:
-                raise HouseholdError("Oda delivery slot identity is unavailable")
-            signature_value = [*signature[:5], {name: index for index, name in enumerate(("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des"), 1)}[signature[5]]]
-            self._open_order(order_id)
-            opened = self._eval(r"""
-(() => {
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
- document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
- const buttons=[...document.querySelectorAll('main button')].filter(enabled).filter(x=>/^(Endre levering(?:stid)?|Endre tidspunkt|Flytt levering)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
- if(buttons.length!==1)return JSON.stringify({ready:false});
- buttons[0].setAttribute('data-oda-household-action','delivery-change-open');
- return JSON.stringify({ready:true});
-})()
-""")
-            if opened != {"ready": True}:
-                raise HouseholdError("Oda does not currently expose delivery changes for this order")
-            self._invoke("click", '[data-oda-household-action="delivery-change-open"]')
-            selected = False
-            dispatched: set[str] = set()
-            expected_url = f"{CHECKOUT_URL}?orderNumber={order_id}"
-            for _ in range(50):
-                surface = self._eval(r"""
-(() => {
- const wanted=SIGNATURE;
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
- const months={jan:1,januar:1,feb:2,februar:2,mar:3,mars:3,apr:4,april:4,mai:5,jun:6,juni:6,jul:7,juli:7,aug:8,august:8,sep:9,september:9,okt:10,oktober:10,nov:11,november:11,des:12,desember:12};
- const signature=text=>{const value=norm(text).toLocaleLowerCase('nb-NO'),d=value.match(/\b(\d{1,2})\.?\s*(jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\b/i),t=value.match(/\b(\d{1,2})(?::(\d{2}))?\s*(?:-|–|og|til)\s*(\d{1,2})(?::(\d{2}))?\b/i);return d&&t?[Number(t[1]),Number(t[2]||0),Number(t[3]),Number(t[4]||0),Number(d[1]),months[d[2]]]:null};
- document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
- const controls=[...document.querySelectorAll('button,a,[role="radio"]')].filter(enabled);
- const review=JSON.parse(REVIEW);if(review.action==='ready')return JSON.stringify(review);
- const slots=controls.filter(x=>{const found=signature(x.innerText||x.getAttribute('aria-label')||'');return found&&JSON.stringify(found)===JSON.stringify(wanted)});
- if(!SELECTED){if(slots.length!==1)return JSON.stringify({action:'wait'});slots[0].setAttribute('data-oda-household-action','delivery-change-slot');return JSON.stringify({action:'slot'});}
- const next=controls.filter(x=>/^(Fortsett|Bekreft(?: levering)?|Gå til betaling)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
- if(next.length!==1)return JSON.stringify({action:'wait'});
- next[0].setAttribute('data-oda-household-action','delivery-change-next');
- return JSON.stringify({action:'next'});
-})()
-""".replace("REVIEW", _oda_delivery_change_surface_script(expected_url).strip()).replace("SIGNATURE", json.dumps(signature_value)).replace("URL", json.dumps(expected_url)).replace("SELECTED", "true" if selected else "false"))
-                action = surface.get("action")
-                if action == "ready":
-                    return self._delivery_change_review(order_id, order, delivery, surface, binding)
-                if action == "slot":
-                    if "slot" in dispatched:
-                        raise HouseholdError("Oda delivery slot selection did not advance")
-                    dispatched.add("slot")
-                    self._invoke("click", '[data-oda-household-action="delivery-change-slot"]')
-                    selected = True
-                elif action == "next":
-                    if "next" in dispatched:
-                        raise HouseholdError("Oda delivery change payment step did not advance")
-                    dispatched.add("next")
-                    self._invoke("click", '[data-oda-household-action="delivery-change-next"]')
-                self._settle(0.5)
-            raise HouseholdError("Oda delivery change navigation timed out")
+            expected = self._delivery_change_expectation(order_id, order, delivery, binding)
+            self._navigate_delivery_change(order_id, expected, delivery["slot"])
+            for _ in range(20):
+                surface = self._eval(_oda_delivery_change_surface_script(expected["checkout_url"]))
+                if surface.get("action") == "ready":
+                    break
+                self._settle(0.25)
+            return self._delivery_change_review(order_id, order, delivery, surface, binding)
 
     def _delivery_change_expectation(self, order_id, order, delivery, binding):
         slot = validate_delivery_slot(delivery.get("slot"))
@@ -1708,19 +1744,22 @@ class OdaBrowser:
             self._require_checkout_time(FINAL_CLICK_MARGIN)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
-        try:
-            amounts_minor = _oda_checkout_amounts_minor(expected_amounts)
-        except HouseholdError as exc:
-            raise CheckoutPreconditionError(str(exc)) from exc
-        script = _oda_checkout_amount_script(
-            expected_total,
-            expected_product_count=expected_product_count,
-            expected_amounts=amounts_minor,
-            expected_url=expected_url,
-            vipps=review_surface is not None and review_surface[1].get("payment_display") == "Vipps",
-        )
         if addition_expectation is not None:
+            # Existing-order reviews bind their own original/final totals and
+            # signed adjustment; new-order fee validation does not apply.
             script = _retail_addition_amount_script(addition_expectation, submit=True, provider=self.checkout_provider)
+        else:
+            try:
+                amounts_minor = _oda_checkout_amounts_minor(expected_amounts)
+            except HouseholdError as exc:
+                raise CheckoutPreconditionError(str(exc)) from exc
+            script = _oda_checkout_amount_script(
+                expected_total,
+                expected_product_count=expected_product_count,
+                expected_amounts=amounts_minor,
+                expected_url=expected_url,
+                vipps=review_surface is not None and review_surface[1].get("payment_display") == "Vipps",
+            )
         if review_surface is not None:
             surface_script, expected_surface = review_surface
             # The review and amount checks run in the same browser turn as the
@@ -1982,7 +2021,7 @@ class OdaBrowser:
 
     def _open_order(self, order_id: str) -> None:
         expected = self._order_url(order_id)
-        data = self._invoke("open", f"https://oda.com/no/orders/{order_id}/", browser_args=CANCELLATION_BROWSER_ARGS)
+        data = self._invoke("open", f"https://oda.com/no/orders/{order_id}/")
         if str(data.get("url") or "").rstrip("/") != expected.rstrip("/"):
             raise HouseholdError("Oda browser left the requested order page")
 
@@ -2257,10 +2296,10 @@ class MathemBrowser(OdaBrowser):
  const escaped=norm(expected.delivery_address).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
  const address_matches=!!expected.delivery_address&&delivery.length===1&&new RegExp(`(?:^|[\\s,:])${escaped}(?=$|[\\s,])`,'i').test(norm(delivery[0].innerText));
  const payment=JSON.parse(PAYMENT);
- const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|SEK)$/i.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
+ const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s+PAYABLE_SIGN\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|SEK)$/i.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
  return JSON.stringify({url:location.href,authenticated:!document.querySelector('input[type="password"]'),available:!/inte tillgänglig|slut i lager|unavailable/i.test(text),items,delivery_roots:delivery.map(e=>norm(e.innerText)),address_matches,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:controls.length});
 })()
-""".replace("PAYMENT", _mathem_checkout_payment_script(expected.get("checkout_url", self.checkout_url)).strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False))
+""".replace("PAYMENT", _mathem_checkout_payment_script(expected.get("checkout_url", self.checkout_url)).strip()).replace("EXPECTED", json.dumps(expected, ensure_ascii=False)).replace("PAYABLE_SIGN", "[−-]?" if expected.get("delivery_change") else "")
 
     @staticmethod
     def _checked_surface(expected, surface):
@@ -2458,86 +2497,6 @@ class MathemBrowser(OdaBrowser):
 
     def _capture_addition_failure(self, order_id, dispatch_tab):
         return self._capture_checkout_payment(dispatch_tab, order_id=order_id)
-
-    def _navigate_delivery_change(self, order_id, expected, slot):
-        # The existing-order route can already retain the selected review. Open
-        # its exact URL first; never use the new-order cart destination.
-        self._open(expected["checkout_url"])
-        for _ in range(20):
-            surface = self._eval(self._checkout_surface_script(expected))
-            if checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider="mathem"):
-                return
-            self._settle(0.25)
-        self._open("https://www.mathem.se/se/")
-        menu_script = r"""(() => {
-const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
-if(location.href!=='https://www.mathem.se/se/')return JSON.stringify({opened:false});
-const links=[...document.querySelectorAll('a')].filter(vis).filter(e=>e.href===ORDER_URL);if(links.length!==1)return JSON.stringify({opened:false});
-const card=links[0].closest('article');if(!card)return JSON.stringify({opened:false});
-const buttons=[...card.querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&norm(e.innerText||e.getAttribute('aria-label'))==='Visa möjliga åtgärder'&&e.getAttribute('aria-haspopup')==='menu'&&e.getAttribute('aria-expanded')==='false');
-if(buttons.length!==1)return JSON.stringify({opened:false});buttons[0].setAttribute('data-mathem-delivery-menu','');return JSON.stringify({opened:true});
-})()""".replace("ORDER_URL", json.dumps(self._order_url(order_id)))
-        for _ in range(20):
-            if self._eval(menu_script) == {"opened": True}:
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Mathem does not expose delivery changes for this order")
-        self._invoke("click", "[data-mathem-delivery-menu]")
-        entry_script = r"""(() => {
-const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
-if(location.href!=='https://www.mathem.se/se/')return JSON.stringify({bound:false});
-const menus=[...document.querySelectorAll('[role="menu"]')].filter(vis);if(menus.length!==1)return JSON.stringify({bound:false});
-const links=[...menus[0].querySelectorAll('a[role="menuitem"]')].filter(vis).filter(e=>norm(e.innerText)==='Ändra leveranstid');if(links.length!==1)return JSON.stringify({bound:false});
-const u=new URL(links[0].href);if(u.origin!=='https://www.mathem.se'||u.pathname!=='/se/checkout/confirm/'||u.hash||u.username||u.password||u.searchParams.get('orderNumber')!==ORDER_ID||JSON.stringify([...u.searchParams.keys()].sort())!==JSON.stringify(['modal','modal-id','modal-screen','orderNumber']))return JSON.stringify({bound:false});
-links[0].setAttribute('data-mathem-delivery-entry','');return JSON.stringify({bound:true,url:u.href});
-})()""".replace("ORDER_ID", json.dumps(order_id))
-        for _ in range(20):
-            entry = self._eval(entry_script)
-            if entry.get("bound"):
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Mathem delivery-change destination cannot be bound to this order")
-        self._invoke("click", "[data-mathem-delivery-entry]")
-        start = datetime.fromisoformat(slot["start_at"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Stockholm"))
-        end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00")).astimezone(ZoneInfo("Europe/Stockholm"))
-        today = datetime.now(ZoneInfo("Europe/Stockholm")).date()
-        if start.date() < today or (start.date() - today).days > 31 or start.minute or end.minute:
-            raise HouseholdError("Mathem delivery date cannot be identified in the visible calendar")
-        if start.date() == today:
-            header = "i dag"
-        elif (start.date() - today).days == 1:
-            header = "i morgon"
-        else:
-            weekdays = ("mån", "tis", "ons", "tors", "fre", "lör", "sön")
-            months = ("jan", "feb", "mars", "apr", "maj", "juni", "juli", "aug", "sep", "okt", "nov", "dec")
-            header = f"{weekdays[start.weekday()]} {start.day} {months[start.month - 1]}."
-        slot_script = r"""(() => {
-const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();const vis=e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};
-if(location.href!==EXPECTED_URL)return JSON.stringify({ready:false});
-const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(vis);if(dialogs.length!==1)return JSON.stringify({ready:false});const d=dialogs[0];
-if(![...d.querySelectorAll('h1,h2,h3,h4')].some(e=>norm(e.innerText)==='Ändra leveranstid'))return JSON.stringify({ready:false});
-const tables=[...d.querySelectorAll('table')].filter(vis);if(tables.length!==1)return JSON.stringify({ready:false});const table=tables[0];
-const headers=[...table.querySelectorAll('th')];const wanted=headers.filter(e=>norm(e.innerText)===HEADER);if(wanted.length!==1)return JSON.stringify({ready:false});
-const index=wanted[0].cellIndex;const rows=[...table.querySelectorAll('tr')].filter(r=>r.cells.length>index&&norm(r.cells[0].innerText)===TIME_ROW);if(rows.length!==1)return JSON.stringify({ready:false});
-const buttons=[...rows[0].cells[index].querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&/^\d+(?:[ .]\d{3})*(?:,\d{2})?\s*kr$/.test(norm(e.innerText)));if(buttons.length!==1)return JSON.stringify({ready:false});
-buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({ready:true});
-})()""".replace("EXPECTED_URL", json.dumps(entry["url"])).replace("HEADER", json.dumps(header)).replace("TIME_ROW", json.dumps(f"{start.hour:02d} - {end.hour:02d}"))
-        for _ in range(20):
-            if self._eval(slot_script) == {"ready": True}:
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Mathem does not expose that exact delivery window in the visible calendar")
-        self._invoke("click", "[data-mathem-delivery-slot]")
-        # No repeated selection when a response is lost or the page fails to
-        # advance. The caller must inspect the original selection before retry.
-        for _ in range(30):
-            if self._eval("JSON.stringify({ready:location.href===" + json.dumps(expected["checkout_url"]) + "&&!document.querySelector('[role=dialog]')})") == {"ready": True}:
-                return
-            self._settle(0.25)
-        raise HouseholdError("Mathem delivery selection has not reached review; inspect it before selecting again")
 
     def review_delivery_change(self, order_id, order, delivery, *, deadline=None, expected_binding=None):
         with self._checkout_operation(deadline):

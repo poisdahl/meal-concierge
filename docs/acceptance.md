@@ -12,9 +12,13 @@ limit with exact original/new full totals and separate payable amounts. All
 three providers use the same rule: the requested window covers an unchanged or
 lower total; a higher total requires a scoped maximum or one fresh approval.
 Synthetic Application and Oda/Mathem browser checks cover the rule and retained
-journal. **Same/lower/higher delivery live acceptance is still pending**;
-the candidate's code coverage and Bob's read-only planning conversations do not
-complete it. See the [separate provider evidence and remaining test](oda-mathem-parity.md#shared-final-total-delivery-rule--2026-09-10).
+journal. **Oda now passes the live same/lower/higher delivery matrix** through
+ordinary installed Bob conversations, with independent merchant readback and
+verified cancellation of the owned test order. Mathem and MENY live acceptance
+remain pending: the new Mathem base payment failed after an actual bank-app
+challenge, and MENY has an existing unrelated cart requiring owner clarification.
+Their original state is preserved; synthetic coverage does not complete those
+provider gates. See the [separate provider evidence and remaining test](oda-mathem-parity.md#shared-final-total-delivery-rule--2026-09-10).
 
 On 10 September, installed public `61ca1cb5` completed ordinary Mathem
 failed-addition recovery through actual Hermes, skill, MCP and Application.

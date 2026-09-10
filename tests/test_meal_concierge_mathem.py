@@ -200,6 +200,111 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
             self.assertEqual(b._choose_checkout_destination.call_count, int(modified))
             b._invoke.assert_not_called()
 
+
+class SharedRetailDeliveryNavigationTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node executes observed retail calendar controls')
+    def test_bound_order_menu_and_exact_calendar_slot_for_both_stores(self):
+        from oda_browser import OdaBrowser
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=(text='')=>({innerText:text,disabled:false,attrs:{},getAttribute(k){return this.attrs[k]??null;},
+ setAttribute(k,v){this.attrs[k]=v;},getBoundingClientRect:()=>({width:10,height:10})});
+const getComputedStyle=()=>({display:'block',visibility:'visible'});
+const location={href:input.url}; const marked=[];
+const control=node(input.price);control.setAttribute=(k,v)=>marked.push(k);
+const menuButton=node(input.menu);menuButton.attrs={'aria-haspopup':'menu','aria-expanded':'false'};
+menuButton.setAttribute=(k,v)=>marked.push(k);
+const card={querySelectorAll:()=>[menuButton]};
+const orderLink={...node(),href:input.orderUrl,closest:()=>card};
+const entry={...node(input.entry),href:input.entryUrl,setAttribute:(k,v)=>marked.push(k)};
+const menu={...node(),querySelectorAll:()=>[entry]};
+const header={...node(input.header),cellIndex:1};
+const row={cells:[node('13 - 18'),{querySelectorAll:()=>[control]}]};
+const table={...node(),querySelectorAll:s=>s==='th'?[node(''),header]:[row]};
+const dialog={...node(),querySelectorAll:s=>s==='table'?[table]:[node(input.heading)]};
+const document={querySelector:s=>input.phase==='review'?null:dialog,
+ querySelectorAll:s=>s==='a'?[orderLink]:s==='[role="menu"]'?[menu]:s==='[role="dialog"]'?[dialog]:[]};
+process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
+"""
+        frozen = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+        for cls in (OdaBrowser, MathemBrowser):
+            for fault in ('', 'order', 'destination_order', 'origin', 'date', 'price', 'lost_click', 'unsettled'):
+                with self.subTest(provider=cls.checkout_provider, fault=fault):
+                    mathem = cls is MathemBrowser
+                    home = 'https://www.mathem.se/se/' if mathem else 'https://oda.com/no/'
+                    checkout = home + 'checkout/confirm/?orderNumber=123456'
+                    entry_url = checkout + '&modal=1&modal-id=delivery&modal-screen=calendar'
+                    expected = {'checkout_url': checkout, 'delivery_text': 'Lör 12. sep 13:00 - 18:00' if mathem else 'Lør 12. sep 13:00 - 18:00'}
+                    slot = {'start_at': '2026-09-12T13:00:00+02:00', 'end_at': '2026-09-12T18:00:00+02:00'}
+                    browser = cls.__new__(cls)
+                    browser._settle = mock.Mock()
+                    url = ''
+                    phase = 'initial'
+                    clicks = []
+                    cache = {}
+                    def opened(destination):
+                        nonlocal url, phase
+                        url = destination
+                        phase = 'menu' if url == home else 'initial'
+                    browser._open = opened
+                    def evaluate(script):
+                        if phase == 'initial':
+                            return {'delivery_roots': []}
+                        key = (script, phase, url)
+                        if key not in cache:
+                            data = {'script': script, 'url': url, 'phase': phase,
+                                'orderUrl': cls._order_url('999999' if fault == 'order' else '123456'),
+                                'menu': 'Visa möjliga åtgärder' if mathem else 'Vis mulige handlinger',
+                                'entry': 'Ändra leveranstid' if mathem else 'Endre leveringstid',
+                                'heading': 'Ändra leveranstid' if mathem else 'Bytt leveringstid',
+                                'entryUrl': entry_url.replace('123456', '999999') if fault == 'destination_order' else entry_url.replace('https://', 'https://other.') if fault == 'origin' else entry_url,
+                                'header': 'sön 13 sep.' if fault == 'date' else 'lör 12 sep.' if mathem else 'lør. 12. sep.',
+                                'price': 'Unavailable' if fault == 'price' else '19 kr' if mathem else 'kr 19'}
+                            result = subprocess.run([shutil.which('node'), '-e', harness], input=json.dumps(data), text=True, capture_output=True, check=True, timeout=10)
+                            cache[key] = json.loads(result.stdout)
+                        return cache[key]['value']
+                    browser._eval = evaluate
+                    def invoke(action, selector):
+                        nonlocal phase, url
+                        self.assertEqual(action, 'click')
+                        self.assertIn(selector[1:-1], cache[next(reversed(cache))]['marked'])
+                        clicks.append(selector)
+                        if selector.endswith('-menu]'):
+                            phase = 'entry'
+                        elif selector.endswith('-entry]'):
+                            phase, url = 'slot', entry_url
+                        else:
+                            if fault == 'lost_click':
+                                raise HouseholdError('transport lost after slot click')
+                            if fault != 'unsettled':
+                                phase, url = 'review', checkout
+                    browser._invoke = invoke
+                    with mock.patch('oda_browser.datetime') as clock:
+                        clock.now.return_value = frozen
+                        clock.fromisoformat.side_effect = datetime.fromisoformat
+                        if fault:
+                            with self.assertRaises(HouseholdError):
+                                browser._navigate_delivery_change('123456', expected, slot)
+                        else:
+                            browser._navigate_delivery_change('123456', expected, slot)
+                    self.assertEqual(clicks.count('[data-retail-delivery-slot]'), int(fault in ('', 'lost_click', 'unsettled')))
+                    if fault == 'order':
+                        self.assertEqual(clicks, [])
+                    if fault in ('destination_order', 'origin'):
+                        self.assertEqual(clicks, ['[data-retail-delivery-menu]'])
+
+    def test_existing_requested_review_is_reused_without_a_slot_click(self):
+        from oda_browser import OdaBrowser
+        for cls in (OdaBrowser, MathemBrowser):
+            browser = cls.__new__(cls)
+            browser._open = mock.Mock()
+            browser._eval = mock.Mock(return_value={'delivery_roots': []})
+            browser._invoke = mock.Mock()
+            with mock.patch('oda_browser.checkout_delivery_matches', return_value=True):
+                browser._navigate_delivery_change('123456', {'checkout_url': 'https://example.test/review', 'delivery_text': 'requested'}, {})
+            browser._open.assert_called_once_with('https://example.test/review')
+            browser._invoke.assert_not_called()
+
 class MathemDietaryDetailTests(unittest.TestCase):
     # Visible row labels from Mathem's public product 4694, 2026-09-07.
     HTML = ('<div>Ingredienser</div><div>PASTA AV DURUMVETE.</div>'
@@ -355,28 +460,34 @@ for(const [url,href,login] of [[page,link,false],[page,link.replace('/123/','/99
 
 
 class OdaFinalBindingTests(unittest.TestCase):
-    def test_cancellation_binding_first_open_keeps_cancellation_launch_flags(self):
-        from oda_browser import OdaBrowser, CANCELLATION_BROWSER_ARGS
-        browser=OdaBrowser(instance='synthetic',binary='/synthetic/browser',executable='/synthetic/chromium',
-            profile='/synthetic/profile',home='/synthetic/home',socket_directory='/synthetic/socket',uid=10001,gid=10002,
-            provider_client=mock.Mock(provider='oda'))
-        browser.provider_client.call.return_value={'result':[{'id':123,'address':'Eksempelveien 1'}]}
-        browser._clear_cancellation_cache=mock.Mock()
-        calls=[]
-        def run(command, **kw):
-            calls.append((command,kw['env']['AGENT_BROWSER_ARGS']))
-            if 'open' in command:
-                data={'url':command[-1]}
-            elif 'eval' in command:
-                key='address_verified' if 'address_verified' in kw['input'] else 'account_matches'
-                data={'result':json.dumps({key:True})}
-            else:data={}
-            return SimpleNamespace(returncode=0,stdout=json.dumps({'success':True,'data':data}))
-        with mock.patch('oda_browser.subprocess.run',side_effect=run):
-            with browser._cancellation_operation():
-                browser._read_order_binding('123456',{'orderNumber':'123456','currency':'NOK'},deadline=browser._cancellation_deadline)
-        self.assertEqual(len([cmd for cmd,args in calls if 'open' in cmd]),2)
-        self.assertTrue(all(args==CANCELLATION_BROWSER_ARGS for cmd,args in calls))
+    def test_order_navigation_keeps_the_current_operation_launch_flags(self):
+        from oda_browser import OdaBrowser, CANCELLATION_BROWSER_ARGS, DEFAULT_BROWSER_ARGS
+        for cancellation in (False, True):
+            with self.subTest(cancellation=cancellation):
+                browser=OdaBrowser(instance='synthetic',binary='/synthetic/browser',executable='/synthetic/chromium',
+                    profile='/synthetic/profile',home='/synthetic/home',socket_directory='/synthetic/socket',uid=10001,gid=10002,
+                    provider_client=mock.Mock(provider='oda'))
+                browser.provider_client.call.return_value={'result':[{'id':123,'address':'Eksempelveien 1'}]}
+                browser._clear_cancellation_cache=mock.Mock()
+                calls=[]
+                def run(command, **kw):
+                    calls.append((command,kw['env']['AGENT_BROWSER_ARGS']))
+                    if 'open' in command:
+                        data={'url':command[-1].replace('/no/orders/', '/no/account/orders/')}
+                    elif 'eval' in command:
+                        key='address_verified' if 'address_verified' in kw['input'] else 'account_matches'
+                        data={'result':json.dumps({key:True})}
+                    else:data={}
+                    return SimpleNamespace(returncode=0,stdout=json.dumps({'success':True,'data':data}))
+                operation=browser._cancellation_operation if cancellation else browser._checkout_operation
+                with mock.patch('oda_browser.subprocess.run',side_effect=run):
+                    with operation():
+                        browser._read_order_binding('123456',{'orderNumber':'123456','currency':'NOK'})
+                        browser._open_order('123456')
+                        browser._eval('JSON.stringify({account_matches:true})')
+                self.assertEqual(len([cmd for cmd,args in calls if 'open' in cmd]),3)
+                expected=CANCELLATION_BROWSER_ARGS if cancellation else DEFAULT_BROWSER_ARGS
+                self.assertTrue(all(args==expected for cmd,args in calls))
 
     def test_same_postal_address_changed_selected_reference_stops_new_checkout(self):
         from oda_browser import OdaBrowser
@@ -612,7 +723,7 @@ class OdaPreparedDeliveryTests(unittest.TestCase):
         # Synthetic Oda DOM exercises control flow and guards. It is not a
         # claim about the currently logged-out account's live payment layout.
         harness = r"""
-const {script,change}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const {script,change,payable}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 class E {
  constructor(tag,text='',children=[]){this.tag=tag;this.text=text;this.children=children;for(const c of children)c.parentElement=this;}
  get innerText(){return this.text||this.children.map(c=>c.innerText).join('\n');}
@@ -628,9 +739,10 @@ class E {
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 global.location={href:'https://oda.com/no/checkout/confirm/?orderNumber='+(change==='order'?'999999':'123456')};
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p',change==='delivery'?'12. september 12:00–15:00':'12. september 09:00–12:00')]);
-const rows=[['Opprinnelig bestilling','2 varer','948,05 kr'],['Å betale','19,00 kr'],['Ny totalsum','2 varer',change==='amount'?'967,06 kr':'967,05 kr']];
+const amount=n=>(n/100).toFixed(2).replace('.',',').replace('-','−')+' kr';
+const rows=[['Opprinnelig bestilling','2 varer','948,05 kr'],['Å betale',amount(payable)],['Ny totalsum','2 varer',amount(94805+payable+(change==='amount'?1:0))]];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
-const pay=new E('button','Bekreft og betal 19,00 kr');pay.disabled=change==='disabled';
+const pay=new E('button','Bekreft og betal '+amount(change==='sign'?-payable:payable));pay.disabled=change==='disabled';
 const radio=new E('input');radio.type='radio';radio.checked=change!=='unselected';
 const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
 global.document=new E('document','',[new E('body','',[delivery,new E('p','Unrelated card •••• 1234'),label,summary,pay])]);document.body=document.children[0];
@@ -639,46 +751,48 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
 """
         def evaluate(script, change=None):
             result = subprocess.run([shutil.which('node'), '-e', harness],
-                input=json.dumps({'script': script, 'change': change}), capture_output=True, text=True, check=True, timeout=10)
+                input=json.dumps({'script': script, 'change': change, 'payable': payable}), capture_output=True, text=True, check=True, timeout=10)
             return json.loads(result.stdout)
-        surface = evaluate(_oda_delivery_change_surface_script(CHECKOUT_URL + '?orderNumber=123456'))['result']
-        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Eksempelveien 1'}
-        browser._read_order_binding = mock.Mock(return_value=binding)
-        browser._eval = lambda script: evaluate(script)['result']
-        review = browser._delivery_change_review('123456', order, delivery, surface, binding)
-        # Real state serialization reorders dict keys. Values still match.
-        review = json.loads(json.dumps(review, sort_keys=True))
-        for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login', 'unselected'):
-            with self.subTest(drift=drift):
-                after_callback = False
-                calls = []
-                def before_click():
-                    nonlocal after_callback
-                    after_callback = True
-                def evaluate_current(script):
-                    self.assertEqual(current_page, CHECKOUT_URL + '?orderNumber=123456')
-                    result = evaluate(script, drift if after_callback else None)
-                    calls.append(result)
-                    return result['result']
-                browser._eval = evaluate_current
-                if drift:
-                    with self.assertRaises(CheckoutPreconditionError):
+        for payable in (1900, -1000):
+            surface = evaluate(_oda_delivery_change_surface_script(CHECKOUT_URL + '?orderNumber=123456'))['result']
+            self.assertEqual(surface['amounts'], [payable])
+            binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Eksempelveien 1'}
+            browser._read_order_binding = mock.Mock(return_value=binding)
+            browser._eval = lambda script: evaluate(script)['result']
+            review = browser._delivery_change_review('123456', order, delivery, surface, binding)
+            # Real state serialization reorders dict keys. Values still match.
+            review = json.loads(json.dumps(review, sort_keys=True))
+            for drift in (None, 'order', 'delivery', 'card', 'amount', 'disabled', 'login', 'unselected', 'sign'):
+                with self.subTest(drift=drift):
+                    after_callback = False
+                    calls = []
+                    def before_click():
+                        nonlocal after_callback
+                        after_callback = True
+                    def evaluate_current(script):
+                        self.assertEqual(current_page, CHECKOUT_URL + '?orderNumber=123456')
+                        result = evaluate(script, drift if after_callback else None)
+                        calls.append(result)
+                        return result['result']
+                    browser._eval = evaluate_current
+                    if drift:
+                        with self.assertRaises(CheckoutPreconditionError):
+                            browser.submit_delivery_change('123456', order, delivery, review, before_click)
+                    else:
                         browser.submit_delivery_change('123456', order, delivery, review, before_click)
-                else:
-                    browser.submit_delivery_change('123456', order, delivery, review, before_click)
-                self.assertEqual(sum(call['clicks'] for call in calls), 0 if drift else 1)
-                self.assertTrue(after_callback)
-                browser._open_order.assert_not_called()
-                browser._open.assert_called_with(CHECKOUT_URL + '?orderNumber=123456')
-        browser._eval = mock.Mock(return_value={'action': 'wait'})
-        callback = mock.Mock()
-        with self.assertRaises(CheckoutPreconditionError):
-            browser.submit_delivery_change('123456', order, delivery, review, callback)
-        callback.assert_not_called()
-        browser._eval = mock.Mock(side_effect=[surface, {'amounts_valid': True, 'order_amounts': review['order_amounts']}, HouseholdError('lost response after final eval')])
-        with self.assertRaises(HouseholdError) as lost:
-            browser.submit_delivery_change('123456', order, delivery, review)
-        self.assertNotIsInstance(lost.exception, CheckoutPreconditionError)
+                    self.assertEqual(sum(call['clicks'] for call in calls), 0 if drift else 1)
+                    self.assertTrue(after_callback)
+                    browser._open_order.assert_not_called()
+                    browser._open.assert_called_with(CHECKOUT_URL + '?orderNumber=123456')
+            browser._eval = mock.Mock(return_value={'action': 'wait'})
+            callback = mock.Mock()
+            with self.assertRaises(CheckoutPreconditionError):
+                browser.submit_delivery_change('123456', order, delivery, review, callback)
+            callback.assert_not_called()
+            browser._eval = mock.Mock(side_effect=[surface, {'amounts_valid': True, 'order_amounts': review['order_amounts']}, HouseholdError('lost response after final eval')])
+            with self.assertRaises(HouseholdError) as lost:
+                browser.submit_delivery_change('123456', order, delivery, review)
+            self.assertNotIsInstance(lost.exception, CheckoutPreconditionError)
 
 
 class MathemOrderIdentityTests(unittest.TestCase):
@@ -2648,7 +2762,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                 self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
 
     @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')
-    def test_free_delivery_final_turn_binds_original_goods_total_card_and_destination(self):
+    def test_delivery_final_turn_binds_original_goods_total_card_and_destination(self):
         from oda_browser import _retail_addition_amount_script
         from core import CheckoutPreconditionError
         browser = MathemBrowser.__new__(MathemBrowser)
@@ -2683,14 +2797,14 @@ const item=new E('article','',[new E('p','Pasta Fusilli'),new E('p','500 g, Bari
 const delivery=new E('section','',[new E('h2','Vi levererar din beställning'),new E('p',change==='delivery'?'Lör 12. sep 10:00 - 12:00':'Lör 12. sep 09:00 - 12:00'),new E('p','Exempelvägen 1')]);
 const radio=new E('input');radio.type='radio';radio.checked=true;
 const label=new E('label','',[new E('span',change==='card'?'•••• 5678':'•••• 1234'),radio]);radio.labels=[label];
-const amount=n=>(n/100).toFixed(2).replace('.',',');
+const amount=n=>(n/100).toFixed(2).replace('.',',').replace('-','−');
 const rows=[['Ursprunglig beställning',change==='count'?'19 varor':'18 varor',change==='original'?'582,52 kr':'582,51 kr'],['Att betala nu',change==='payable'?'582,51 kr':amount(pricing.payable)+' kr'],['Totalsumma för beställning','18 varor',change==='combined'?amount(pricing.final+1)+' kr':amount(pricing.final)+' kr']];
 if(change==='added')rows.push(['Varor tillagda i efterhand','1 vara','18,50 kr']);
 if(change==='duplicate')rows.push(['Att betala nu','0,00 kr']);
 if(change==='missing')rows.pop();
 if(change==='currency')rows[0][2]='582,51 NOK';
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(text=>new E('span',text)))));
-const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':amount(pricing.payable))+' kr');pay.disabled=change==='disabled';
+const pay=new E('button','Bekräfta och betala '+(change==='button'?'582,51':amount(change==='sign'?-pricing.payable:pricing.payable))+' kr');pay.disabled=change==='disabled';
 global.document=new E('document','',[new E('body','',[...(change==='quantity'?[item]:[]),delivery,label,summary,pay])]);document.body=document.children[0];
 if(provider==='oda'){
  location.href=location.href.replace('www.mathem.se/se','oda.com/no');
@@ -2735,7 +2849,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         # Same, decreased and increased full totals use the same actual DOM
         # reader/final script for both retailers. Payment is a separate value.
         for provider in ('oda', 'mathem'):
-            for final, payable in ((58251, 0), (57000, 0), (60000, 1749), (58251, 500)):
+            for final, payable in ((58251, 0), (57000, -1251), (57000, 0), (60000, 1749), (58251, 500)):
                 with self.subTest(provider=provider, final=final, payable=payable):
                     pricing = {'final': final, 'payable': payable}
                     expectation = deepcopy(expected)
@@ -2744,10 +2858,18 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     self.assertTrue(observed['result']['amounts_valid'])
                     values = observed['result']['order_amounts']
                     self.assertEqual((values['original_minor'], values['combined_minor'], values['payable_minor']), (58251, final, payable))
+                    if provider == 'mathem':
+                        surface = evaluate(browser._checkout_surface_script(expectation), pricing=pricing)['result']
+                        self.assertEqual(browser._checked_surface(expectation, surface)['submit_controls'], 1)
+                        if payable < 0:
+                            ordinary = {**expectation, 'delivery_change': False}
+                            self.assertEqual(evaluate(browser._checkout_surface_script(ordinary), pricing=pricing)['result']['submit_controls'], 0)
                     expectation['order_amounts'] = values
                     for drift in (None, 'combined', 'original', 'missing', 'added', 'button', 'duplicate'):
                         confirmed = evaluate(_retail_addition_amount_script(expectation, submit=True, provider=provider), drift, pricing, provider)
                         self.assertEqual(confirmed['clicks'], 1 if drift is None else 0)
+                    if payable:
+                        self.assertEqual(evaluate(_retail_addition_amount_script(expectation, submit=True, provider=provider), 'sign', pricing, provider)['clicks'], 0)
                     unbound = {k: v for k, v in expectation.items() if k != 'order_amounts'}
                     self.assertEqual(evaluate(_retail_addition_amount_script(unbound, submit=True, provider=provider), pricing=pricing, provider=provider)['clicks'], 0)
 

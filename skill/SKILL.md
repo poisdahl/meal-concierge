@@ -665,7 +665,8 @@ For an existing-order delivery change at any provider, the user's concrete
 requested window authorizes unchanged goods at a verified unchanged or lower
 full order total, even with `confirmation_policy=fresh`. Display
 `summary.delivery_change`: original and new totals, signed difference and
-payable amount, in its currency. These full totals include fees and discounts;
+signed payable amount, in its currency. A negative amount is the merchant's
+reported order adjustment, not proof of a bank refund. These full totals include fees and discounts;
 the slot quote and payment/reservation amount are separate facts. Unknown or
 from-prices never establish an unchanged/lower total. Never infer a refund from
 a decrease or cancellation.
