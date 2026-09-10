@@ -1,6 +1,6 @@
 # Oda and Mathem: current evidence and open ordinary flows
 
-As of 2026-09-09, #50 is **incomplete for ordinary end-to-end parity**. Its earlier
+As of 2026-09-10, #50 is **incomplete for ordinary end-to-end parity**. Its earlier
 closure accepted a recovery-assisted addition and a UI-prepared free delivery
 change. Those results remain valid within that scope; neither demonstrates the
 whole product sequence requested in the resumed acceptance. Bank reconciliation
@@ -48,21 +48,49 @@ but no product IDs or quantities. The receipt showed only the original paid
 goods. The original payment response body was no longer retained. The available
 React Query entry was written by the later retry-page confirmation request,
 so it cannot prove that the original dispatch assigned this change ID to the
-frozen goods. The retry payable was SEK 18.51, including SEK 18.50 goods; it must
-not be silently substituted for the original SEK 18.50 review.
+frozen goods. The earlier report incorrectly called SEK 18.51 the payable:
+the native payment button actually showed SEK 18.50, while SEK 18.51 was the
+separate merchant overview total. The payment button receives the merchant's
+remaining amount; the overview total is not a substitute for it.
 
-Addition recovery remains disabled. Its missing evidence is a retained causal
-binding from the original dispatch to the merchant change and reviewed goods,
-or an authoritative merchant change-to-goods response. A merchant change ID
-actually returned by the original, revalidated dispatch could supply that
-binding; a second goods endpoint is not inherently required. This is a limit
-of the evidence retained for this attempt, not proof that Mathem cannot support
-recovery. No helper retry, second payment or journal repair was performed.
-The uncertain attempt and original retry page are preserved. **The requested
-#50 failed-addition recovery criterion remains open.**
+On 10 September the owner pressed the native retry button and immediately saw
+“Tack för din beställning”. Fresh merchant reads confirmed the same order now
+contained two packages and totaled SEK 143.00. Ordinary Hermes checkout
+reconciliation then confirmed the owner-completed addition and cleared the
+pending checkout/change. Its exact required result notice was delivered to the
+existing local test inbox and acknowledged through the ordinary tool. No helper
+payment or protected-journal edit was used. The original decline's cause remains
+unknown; the successful owner retry does not demonstrate product-driven recovery.
 
-The Oda paid test order and Mathem paid base order remain active; neither was
-cancelled. The added Mathem goods remain unpaid. Isolated tests cover changed
+The follow-up implementation captures the original failed dispatch's exact
+order/change target in its active tab and persists it with the reviewed goods.
+It allows one fresh `checkout prepare recovery=true` for that Mathem addition
+only while the paid base remains unchanged and merchant tracking reports
+`unpaid_order_change`. Original goods and actual payment-button amount must
+match; the separate overview total is disclosed and frozen, and added fees
+stop recovery.
+Original/recovery aliases reconcile the same attempt after response loss or
+restart, and an uncertain recovery never enables another payment. Missing
+original capture remains reconciliation-only. Automated tests exercise the
+original guarded submit through persisted state and restarted Application,
+review drift, owner-payment races, required notices and one recovery dispatch.
+A bounded 10 September ordinary Hermes trial added one more package to that
+same paid order with the installed fix. Its first confirmation stopped before
+notification or payment because checkout navigation populated the original
+order's delivery slot in the cart. A fresh prepare reviewed identical commercial
+terms. After its exact required local notice was delivered and acknowledged,
+one payment dispatch confirmed three packages and SEK 161.50, with the same
+account/address/card and 13 September 14:00–16:00 delivery. The process exited
+134 after the confirmed tool result and final reply were saved; it was not
+repeated. The exact result notice was delivered to the local test inbox and
+acknowledged through the ordinary tool. The initial payment succeeded, so no
+recovery or further test purchase was attempted. This demonstrates the deployed
+ordinary addition path, not a live failed-payment recovery.
+
+**The live product-driven failed-addition recovery criterion remains open.**
+
+The Oda and Mathem paid test orders remain active; neither was cancelled.
+The owner completed the originally failed Mathem addition. Isolated tests cover changed
 goods/fees/target, final DOM drift, method selection, lost response, reopening
 the journal and refusal of a second recovery dispatch. These tests and the
 Oda live result do not satisfy the missing Mathem acceptance.
