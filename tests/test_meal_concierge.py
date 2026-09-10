@@ -202,10 +202,17 @@ class FakeBrowser:
         target["grossAmount"] = float(target["grossAmount"]) + float(cart["subtotal"])
 
     def review_delivery_change(self, order_id, order, delivery, *, deadline=None, expected_binding=None):
+        original = int(round(float(order["grossAmount"]) * 100))
+        final = getattr(self, "delivery_final_total", original)
+        payable = getattr(self, "delivery_payable", max(0, final - original))
+        count = sum(item["quantity"] for item in order["products"])
+        amounts = {"original_minor": original, "combined_minor": final, "payable_minor": payable,
+                   "original_count": count, "combined_count": count}
         return {
             "binding": self.read_order_binding(order_id, order, expected_binding=expected_binding),
             "page_digest": "c" * 64,
-            "summary": {"items": [], "count": 0, "total": 0.0, "delivery": deepcopy(delivery), "payment": "•••• 1234"},
+            "summary": {"items": [], "count": 0, "total": payable / 100, "delivery": deepcopy(delivery), "payment": "•••• 1234", "order_amounts": amounts},
+            "order_amounts": amounts,
             "target_order_id": order_id,
         }
 
@@ -216,6 +223,7 @@ class FakeBrowser:
         target = next(item for item in self.oda.orders if str(item.get("orderNumber")) == order_id)
         target["deliverySlotDisplay"] = delivery["display"]
         target["deliveryDate"] = "2026-09-12"
+        target["grossAmount"] = review["order_amounts"]["combined_minor"] / 100
 
     def checkout_confirmation_order_id(self, *, deadline=None):
         return self.confirmation_order_id
@@ -8526,6 +8534,210 @@ class FlowTests(unittest.TestCase):
             self.app.handle({"operation": "checkout", "action": "auto", "occurrence": "2026-W36"})
 
         self.assertEqual(self.store.read()["occurrences"]["2026-W36"]["status"], "needs_input")
+
+
+class DeliveryPriceAuthorizationTests(unittest.TestCase):
+    @contextmanager
+    def flow(self, provider, policy, final=10000, payable=None, maximum=None, delivery_only=True):
+        with tempfile.TemporaryDirectory() as directory:
+            shop = FakeMeny() if provider == 'meny' else FakeOda()
+            browser = shop if provider == 'meny' else FakeBrowser()
+            browser.oda = shop
+            browser.delivery_final_total = final
+            browser.delivery_payable = max(0, final - 10000) if payable is None else payable
+            currency = 'SEK' if provider == 'mathem' else 'NOK'
+            order = {'orderNumber': '99990001', 'currency': currency, 'grossAmount': 100,
+                     'deliveryDate': '2026-09-05', 'deliverySlotDisplay': 'Lør 5. sep 09:00 - 12:00',
+                     'deliveryAddressId': 7,
+                     'products': [{'product': {'id': 10, 'name': 'Pasta'}, 'quantity': 1, 'totalGrossAmount': '35.00'}]}
+            for slot in shop.delivery_slots['slots']:
+                slot['slot_ref'] = slot['slot_ref'].replace('oda:', provider + ':')
+                # A free quote must not bypass an increase in the full total.
+                slot['price_ore'] = 0
+            shop.delivery_displays = {key.replace('oda:', provider + ':'): value for key, value in shop.delivery_displays.items()}
+            if provider == 'meny':
+                order.update(code='TEST-CODE-1', status='confirmed', order_total=100,
+                             productQuantityCount=1, deliverySlotDisplay='torsdag 3. september Kl. 07:00-09:00',
+                             products=[{'identity': 'Brokkoli 400g', 'quantity': 1}])
+                for slot in shop.delivery_slots['slots']:
+                    slot['start_at'] = slot['start_at'].replace('2026-09-05', '2026-09-03').replace('2026-09-12', '2026-09-03')
+                    slot['end_at'] = slot['end_at'].replace('2026-09-05', '2026-09-03').replace('2026-09-12', '2026-09-03')
+                shop.delivery_slots['slots'] = [shop.delivery_slots['slots'][1]]
+                shop.delivery_displays = {s['slot_ref']: 'torsdag 3. september Kl. 09:00-12:00' for s in shop.delivery_slots['slots']}
+                original_review = shop.review_checkout
+                def review(*args, **kwargs):
+                    result = original_review(*args, **kwargs)
+                    result['summary']['total'] = final / 100
+                    return result
+                shop.review_checkout = review
+                original_call = shop.call
+                def call(tool, arguments, **kwargs):
+                    if tool == 'select_delivery_slot':
+                        arguments = {**arguments, 'delivery_slot_id': 77}
+                    return original_call(tool, arguments, **kwargs)
+                shop.call = call
+            else:
+                shop.cart = {'items': [], 'count': 0, 'subtotal': 0, 'delivery': None}
+                if provider == 'mathem':
+                    original_call = shop.call
+                    def call(tool, arguments, **kwargs):
+                        result = original_call(tool, arguments, **kwargs)
+                        if tool == 'select_delivery_slot':
+                            shop.cart['delivery']['display'] = 'Lör 12. sep 09:00 - 12:00'
+                        return result
+                    shop.call = call
+            shop.orders = [order]
+            store = StateStore(Path(directory), {**CONFIG, 'provider': provider, 'confirmation_policy': policy})
+            app = Application(store, shop, browser)
+            app._now = lambda: ODA_FIXTURE_NOW
+            app.handle({'operation': 'setup', 'action': 'apply', 'keep_current': True})
+            app.handle({'operation': 'orders', 'action': 'change_begin', 'order_id': order['orderNumber'], 'delivery_only': delivery_only})
+            selection = {'operation': 'delivery', 'action': 'select', 'slot_ref': provider + ':2026-09-12:77'}
+            if maximum is not None:
+                selection['max_total_ore'] = maximum
+            app.handle(selection)
+            yield app, store, shop, browser
+
+    def finish(self, app, shop, browser, prepared, *, approve=False):
+        result = app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id'],
+                             **({'delivery_price_approved': True} if approve else {})})
+        if app.provider == 'meny' and result.get('awaiting_user_payment'):
+            # Synthetic external Vipps completion, followed by ordinary read-only reconciliation.
+            shop.orders[0].update(order_total=prepared['summary']['total'], grossAmount=prepared['summary']['total'],
+                                  deliverySlotDisplay=prepared['summary']['delivery']['display'])
+            browser.confirmation_order_id = shop.orders[0]['orderNumber']
+            result = app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
+        return result
+
+    def test_same_lower_and_higher_totals_share_one_rule_for_all_three_providers(self):
+        for provider in ('oda', 'mathem', 'meny'):
+            for policy in ('fresh', 'standing'):
+                for final, maximum, required in ((10000, None, False), (9000, None, False),
+                                                  (11000, None, True), (11000, 11000, False),
+                                                  (11000, 10999, True)):
+                    with self.subTest(provider=provider, policy=policy, final=final, maximum=maximum):
+                        with self.flow(provider, policy, final, maximum=maximum) as (app, store, shop, browser):
+                            prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+                            price = prepared['summary']['delivery_change']
+                            self.assertEqual((price['original_total_ore'], price['new_total_ore'], price['difference_ore']), (10000, final, final - 10000))
+                            self.assertEqual(prepared['confirmation_required'], required)
+                            if required:
+                                blocked = self.finish(app, shop, browser, prepared)
+                                self.assertTrue(blocked['confirmation_required'])
+                                blocked_submit = app.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'same-price-intent'})
+                                self.assertTrue(blocked_submit['confirmation_required'])
+                                self.assertEqual(browser.checkout_clicks, 0)
+                            result = self.finish(app, shop, browser, prepared, approve=required)
+                            self.assertTrue(result['confirmed'])
+                            self.assertEqual(browser.checkout_clicks, 1)
+                            self.assertEqual(len(shop.orders), 1)
+                            self.assertIsNone(store.read()['pending_checkout'])
+                            replay = app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+                            self.assertTrue(replay['confirmed'])
+                            self.assertEqual(browser.checkout_clicks, 1)
+
+    def test_payable_is_separate_from_final_total_and_lost_dispatch_is_not_repeated(self):
+        for provider in ('oda', 'mathem'):
+            for final, payable in ((9000, 0), (10000, 500), (11000, 1000)):
+                with self.subTest(provider=provider, final=final, payable=payable):
+                    with self.flow(provider, 'fresh', final, payable, maximum=12000) as (app, store, shop, browser):
+                        prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+                        self.assertEqual(prepared['summary']['delivery_change']['payable_ore'], payable)
+                        original_submit = browser.submit_delivery_change
+                        def lost(*args, **kwargs):
+                            original_submit(*args, **kwargs)
+                            raise HouseholdError('lost response after delivery dispatch')
+                        browser.submit_delivery_change = lost
+                        request = {'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'delivery-one'}
+                        with self.assertRaisesRegex(HouseholdError, 'lost response'):
+                            app.handle(request)
+                        self.assertEqual(browser.checkout_clicks, 1)
+                        pending = store.read()['pending_checkout']
+                        self.assertEqual(bool(pending.get('authentication_unresolved')), payable > 0)
+                        restarted = Application(StateStore(store.path.parent, {**CONFIG, 'provider': provider, 'confirmation_policy': 'fresh'}), shop, browser)
+                        restarted._now = lambda: ODA_FIXTURE_NOW
+                        for _ in range(2):
+                            self.assertTrue(restarted.handle(request)['confirmed'])
+                            self.assertEqual(browser.checkout_clicks, 1)
+
+    def test_unknown_full_total_and_changed_goods_cannot_use_window_authority(self):
+        for provider in ('oda', 'mathem', 'meny'):
+            with self.subTest(provider=provider):
+                with self.flow(provider, 'standing') as (app, store, shop, browser):
+                    if provider == 'meny':
+                        shop.orders[0].pop('order_total')
+                        with store.locked() as state:
+                            state['order_change']['before']['order'].pop('order_total')
+                    else:
+                        original = browser.review_delivery_change
+                        def unknown(*args, **kwargs):
+                            review = original(*args, **kwargs)
+                            review['summary']['order_amounts'].pop('combined_minor')
+                            return review
+                        browser.review_delivery_change = unknown
+                    with self.assertRaisesRegex(HouseholdError, 'full order totals|verified original'):
+                        app.handle({'operation': 'checkout', 'action': 'prepare'})
+                    self.assertEqual(browser.checkout_clicks, 0)
+
+                with self.flow(provider, 'standing') as (app, store, shop, browser):
+                    if provider == 'meny':
+                        shop.cart['items'][0]['quantity'] = 2
+                    else:
+                        shop.orders[0]['products'][0]['quantity'] = 2
+                    with self.assertRaises(HouseholdError):
+                        app.handle({'operation': 'checkout', 'action': 'prepare'})
+                    self.assertEqual(browser.checkout_clicks, 0)
+
+    def test_meny_reopened_order_is_retained_when_original_cart_read_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shop = FakeMeny()
+            shop.orders = [{'orderNumber': '99990001', 'code': 'TEST-CODE-1', 'status': 'confirmed'}]
+            original_call = shop.call
+            def call(tool, arguments, **kwargs):
+                if tool == 'get_cart':
+                    raise HouseholdError('read failed after merchant reopened the order')
+                return original_call(tool, arguments, **kwargs)
+            shop.call = call
+            store = StateStore(Path(directory), {**CONFIG, 'provider': 'meny'})
+            app = Application(store, shop, shop)
+            request = {'operation': 'orders', 'action': 'change_begin', 'order_id': '99990001', 'delivery_only': True}
+            with self.assertRaises(MenyOrderChangeDispatchError):
+                app.handle(request)
+            change = store.read()['order_change']
+            self.assertEqual((change['status'], change['order_id'], change['code']), ('uncertain', '99990001', 'TEST-CODE-1'))
+            self.assertEqual(change['before']['order'], shop.orders[0])
+            with self.assertRaisesRegex(HouseholdError, 'another order change'):
+                app.handle(request)
+            self.assertEqual(shop.change_begins, 1)
+
+    def test_meny_full_order_addition_keeps_its_policy_after_delivery_selection(self):
+        with self.flow('meny', 'standing', delivery_only=False) as (app, store, shop, browser):
+            shop.cart['items'][0]['quantity'] = 2
+            shop.cart['count'] = 2
+            prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+            self.assertNotIn('delivery_change', prepared['summary'])
+            self.assertEqual(prepared['order_change']['kind'], 'full_order')
+            self.assertFalse(prepared['confirmation_required'])
+            result = app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
+            self.assertTrue(result['awaiting_user_payment'])
+            self.assertEqual(browser.checkout_clicks, 1)
+
+    def test_old_idempotency_record_cannot_dispatch_other_checkout_after_policy_revocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            shop, browser = FakeOda(), FakeBrowser()
+            browser.oda = shop
+            store = StateStore(Path(directory), {**CONFIG, 'confirmation_policy': 'standing'})
+            app = Application(store, shop, browser)
+            app._now = lambda: ODA_FIXTURE_NOW
+            prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+            # An interrupted standing submit has bound its key but has not clicked.
+            with store.locked() as state:
+                app._bind_protected_request(state, 'checkout', 'old-standing-intent', prepared['confirmation_id'])
+            restarted = Application(StateStore(Path(directory), {**CONFIG, 'confirmation_policy': 'fresh'}), shop, browser)
+            restarted._now = lambda: ODA_FIXTURE_NOW
+            with self.assertRaisesRegex(HouseholdError, 'standing authorization is not configured'):
+                restarted.handle({'operation': 'checkout', 'action': 'submit', 'idempotency_key': 'old-standing-intent'})
+            self.assertEqual(browser.checkout_clicks, 0)
 
 if __name__ == "__main__":
     unittest.main()

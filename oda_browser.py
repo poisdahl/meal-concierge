@@ -353,7 +353,7 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
  const money='(\\d+(?:[ .]\\d{3})*),(\\d{2})\\s*(?:kr|SEK)';
  const values={},nodes=[...document.querySelectorAll('*')].filter(visible);
  const specs=[['original','Ursprunglig beställning',true],['added','Varor tillagda i efterhand',true],['payable','Att betala nu',false],['combined','Totalsumma för beställning',true]].filter(([key])=>!expected.delivery_change||key!=='added');
- if(expected.delivery_change&&(expected.total_minor!==0||expected.product_count!==0||nodes.some(e=>norm(e.innerText)==='Varor tillagda i efterhand')))return failed();
+ if(expected.delivery_change&&(expected.product_count!==0||nodes.some(e=>norm(e.innerText)==='Varor tillagda i efterhand')))return failed();
  for(const [key,label,counted] of specs){
   const labels=nodes.filter(e=>norm(e.innerText)===label).filter(e=>![...e.children].some(c=>visible(c)&&norm(c.innerText)===label));
   if(labels.length!==1)return failed();
@@ -366,7 +366,12 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
   values[key+'_minor']=minor;
   if(counted){const count=Number(match[1]);if(!Number.isSafeInteger(count)||count>1000000||(count===1)!==(match[2]==='vara'))return failed();values[key+'_count']=count;}
  }
- const wanted={original_minor:expected.original_minor,original_count:expected.original_count,...(expected.delivery_change?{}:{added_minor:expected.total_minor,added_count:expected.product_count}),payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
+ // Delivery changes read the merchant's full new total independently of the
+ // amount payable now. A decrease can have zero payable without being free.
+ const wanted=expected.delivery_change
+  ? {original_minor:expected.original_minor,original_count:expected.original_count,combined_count:expected.original_count,...(expected.order_amounts||{})}
+  : {original_minor:expected.original_minor,original_count:expected.original_count,added_minor:expected.total_minor,added_count:expected.product_count,payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
+ if(SUBMIT&&expected.delivery_change&&!expected.order_amounts)return failed();
  if(Object.keys(wanted).some(key=>values[key]!==wanted[key]))return failed();
  const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s/.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
  if(controls.length!==1)return failed();
@@ -558,11 +563,11 @@ def _oda_delivery_change_surface_script(expected_url: str) -> str:
  {
    const money=[...norm(final[0].innerText||final[0].getAttribute('aria-label')||'').matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|NOK)\b/gi)].map(m=>Number(m[1].replace(/[ .]/g,''))*100+Number(m[2]));
    const roots=[...document.querySelectorAll('h1,h2,h3,h4')].filter(visible).filter(x=>norm(x.innerText)==='Vi leverer varene dine').map(x=>x.closest('section,article,.k-card')).filter(Boolean).map(x=>norm(x.innerText));
-   const text=norm(document.body?.innerText||''),payment=text.match(/(?:[*•·xX]{2,}\s*|slutter på\s*|slutar på\s*|ending in\s*)(\d{4})\b/i);
-   return JSON.stringify({action:'ready',amounts:money,delivery_roots:roots,payment_display:payment?`•••• ${payment[1]}`:null,submit_controls:final.length});
+   const payment=JSON.parse(PAYMENT);
+   return JSON.stringify({action:'ready',amounts:money,delivery_roots:roots,payment_display:payment.verified===true?payment.payment_display:null,submit_controls:final.length});
  }
 })()
-""".replace("URL", json.dumps(expected_url))
+""".replace("URL", json.dumps(expected_url)).replace("PAYMENT", _oda_checkout_payment_script().strip())
 
 
 def _oda_checkout_payment_script(payment: Mapping[str, Any] | None = None, *, select: bool = False, expected_url: str | None = None) -> str:
@@ -1578,10 +1583,23 @@ class OdaBrowser:
                 self._settle(0.5)
             raise HouseholdError("Oda delivery change navigation timed out")
 
+    def _delivery_change_expectation(self, order_id, order, delivery, binding):
+        slot = validate_delivery_slot(delivery.get("slot"))
+        if not slot["slot_ref"].startswith(self.checkout_provider + ":") or slot["provider_slot_id"] != delivery.get("slot_id"):
+            raise HouseholdError("Delivery change does not identify the requested provider window")
+        original = self._order_expectation(order_id, order)
+        if (order.get("currency") != ("SEK" if self.checkout_provider == "mathem" else "NOK")
+                or delivery_signature(str(delivery.get("display") or ""), provider=self.checkout_provider) is None):
+            raise HouseholdError("Original order currency or requested delivery is unavailable")
+        return {"order_id": order_id, "checkout_url": self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
+                "lines": [], "product_count": 0, "original_minor": original["total_minor"],
+                "original_count": self._order_product_count(order), "delivery_change": True,
+                "delivery_text": delivery["display"], "delivery_address": binding["receipt_address"]}
+
     def _delivery_change_review(self, order_id, order, delivery, surface, binding):
         binding = require_order_binding(binding)
         expected_order = self._order_expectation(order_id, order)
-        expected_product_count = self._order_product_count(order)
+        expected = self._delivery_change_expectation(order_id, order, delivery, binding)
         target = str(delivery.get("display") or "")
         if surface.get("action") != "ready":
             raise HouseholdError("Oda prepared delivery review is unavailable; prepare it again")
@@ -1591,9 +1609,12 @@ class OdaBrowser:
         if not isinstance(amounts, list) or len(amounts) != 1 or not checkout_delivery_matches(target, roots) or re.fullmatch(r"•••• \d{4}", payment_display) is None or surface.get("submit_controls") != 1:
             raise HouseholdError("Oda delivery change review does not match the requested slot")
         self._expand_checkout_amount_summary()
-        checkout_amounts = self._read_checkout_amounts(
-            amounts[0], expected_product_count,
-        )
+        observed = self._eval(_retail_addition_amount_script(expected, provider=self.checkout_provider))
+        if observed.get("amounts_valid") is not True or observed["order_amounts"]["payable_minor"] != amounts[0]:
+            raise HouseholdError("Oda delivery change has no verified original, final and payable totals")
+        order_amounts = observed["order_amounts"]
+        checkout_amounts = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
+        checkout_amounts["provider_total"] = amounts[0] / 100
         summary = {
             "items": [],
             "count": 0,
@@ -1601,8 +1622,9 @@ class OdaBrowser:
             "delivery": {"slot_id": delivery.get("slot_id"), "display": target, "address": binding["receipt_address"]},
             "payment": payment_display,
             "amounts": checkout_amounts,
+            "order_amounts": order_amounts,
         }
-        return {"binding": binding, "page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"], "surface": surface}
+        return {"binding": binding, "page_digest": hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest(), "summary": summary, "order_amounts": order_amounts, "target_order_id": order_id, "before_delivery": expected_order["delivery_text"], "surface": surface}
 
     def submit_delivery_change(self, order_id: str, order: Mapping[str, Any], delivery: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
@@ -1630,7 +1652,9 @@ class OdaBrowser:
                 expected_product_count=self._order_product_count(order),
                 expected_amounts=review["summary"].get("amounts"),
                 review_surface=(surface_script, review["surface"]),
-                authentication_expected=False,
+                addition_expectation={**self._delivery_change_expectation(order_id, order, delivery, binding),
+                                      "order_amounts": review["order_amounts"]},
+                authentication_expected=review["order_amounts"]["payable_minor"] > 0,
             )
 
     def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None) -> None:
@@ -2497,7 +2521,7 @@ if(![...d.querySelectorAll('h1,h2,h3,h4')].some(e=>norm(e.innerText)==='Ändra l
 const tables=[...d.querySelectorAll('table')].filter(vis);if(tables.length!==1)return JSON.stringify({ready:false});const table=tables[0];
 const headers=[...table.querySelectorAll('th')];const wanted=headers.filter(e=>norm(e.innerText)===HEADER);if(wanted.length!==1)return JSON.stringify({ready:false});
 const index=wanted[0].cellIndex;const rows=[...table.querySelectorAll('tr')].filter(r=>r.cells.length>index&&norm(r.cells[0].innerText)===TIME_ROW);if(rows.length!==1)return JSON.stringify({ready:false});
-const buttons=[...rows[0].cells[index].querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&norm(e.innerText)==='0 kr');if(buttons.length!==1)return JSON.stringify({ready:false});
+const buttons=[...rows[0].cells[index].querySelectorAll('button')].filter(vis).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&/^\d+(?:[ .]\d{3})*(?:,\d{2})?\s*kr$/.test(norm(e.innerText)));if(buttons.length!==1)return JSON.stringify({ready:false});
 buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({ready:true});
 })()""".replace("EXPECTED_URL", json.dumps(entry["url"])).replace("HEADER", json.dumps(header)).replace("TIME_ROW", json.dumps(f"{start.hour:02d} - {end.hour:02d}"))
         for _ in range(20):
@@ -2505,7 +2529,7 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
                 break
             self._settle(0.25)
         else:
-            raise HouseholdError("Mathem does not expose that exact free delivery window in the visible calendar")
+            raise HouseholdError("Mathem does not expose that exact delivery window in the visible calendar")
         self._invoke("click", "[data-mathem-delivery-slot]")
         # No repeated selection when a response is lost or the page fails to
         # advance. The caller must inspect the original selection before retry.
@@ -2514,19 +2538,6 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
                 return
             self._settle(0.25)
         raise HouseholdError("Mathem delivery selection has not reached review; inspect it before selecting again")
-
-    def _delivery_change_expectation(self, order_id, order, delivery, binding):
-        slot = validate_delivery_slot(delivery.get("slot"))
-        if slot["price_kind"] != "exact" or slot["price_ore"] != 0 or slot["provider_slot_id"] != delivery.get("slot_id"):
-            raise HouseholdError("Mathem automated delivery changes currently require an exact free window")
-        original = self._order_expectation(order_id, order)
-        count = self._order_product_count(order)
-        if order.get("currency") != "SEK" or delivery_signature(str(delivery.get("display") or ""), provider="mathem") is None:
-            raise HouseholdError("Mathem original order currency or requested delivery is unavailable")
-        return {"order_id": order_id, "checkout_url": self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
-                "lines": [], "product_count": 0, "total_minor": 0, "total_text": "0,00",
-                "original_minor": original["total_minor"], "original_count": count, "delivery_change": True,
-                "delivery_text": delivery["display"], "delivery_address": binding["receipt_address"]}
 
     def review_delivery_change(self, order_id, order, delivery, *, deadline=None, expected_binding=None):
         with self._checkout_operation(deadline):
@@ -2539,12 +2550,13 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
         result = self._review_mathem_surface(expected)
         amounts = self._eval(_retail_addition_amount_script(expected))
         if amounts.get("amounts_valid") is not True:
-            raise HouseholdError("Mathem delivery change must retain original goods and total with zero payable")
+            raise HouseholdError("Mathem delivery change has no verified original, final and payable totals")
         result.update(binding=binding, account_reference_digest=binding["account_reference_digest"],
                       target_order_id=order_id, order_amounts=amounts["order_amounts"])
         result["amounts"] = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
-        result["amounts"]["provider_total"] = 0.0
-        result["summary"] = {"items": [], "count": 0, "total": 0.0,
+        payable = amounts["order_amounts"]["payable_minor"] / 100
+        result["amounts"]["provider_total"] = payable
+        result["summary"] = {"items": [], "count": 0, "total": payable,
                              "delivery": {"slot_id": delivery["slot_id"], "display": delivery["display"], "address": binding["receipt_address"]},
                              "payment": result["payment_display"], "order_amounts": amounts["order_amounts"]}
         return result
@@ -2554,12 +2566,14 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
             try:
                 binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=review["binding"])
                 expected = self._delivery_change_expectation(order_id, order, delivery, binding)
+                expected["order_amounts"] = review["order_amounts"]
                 # Confirmation only rereads the prepared route. It never selects
                 # another slot or replays a potentially uncertain reservation.
                 self._open(expected["checkout_url"])
                 current = self._read_delivery_change_review(order_id, delivery, binding, expected)
                 if current != dict(review):
                     raise HouseholdError("Mathem delivery change changed after confirmation")
+                dispatch_tab = self._checkout_dispatch_tab()
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 if before_click:
                     before_click()
@@ -2571,6 +2585,8 @@ buttons[0].setAttribute('data-mathem-delivery-slot','');return JSON.stringify({r
                 raise CheckoutPreconditionError(str(exc)) from exc
             if self._eval(script) != {"clicked": True}:
                 raise CheckoutPreconditionError("Mathem delivery changed before the final click")
+            return self._capture_checkout_payment(dispatch_tab,
+                authentication_expected=review["order_amounts"]["payable_minor"] > 0, capture_failure=False)
 
 
 

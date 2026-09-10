@@ -25,10 +25,10 @@ address/delivery and reviews the original, added and combined amounts in SEK.
 Cancellation uses its own fresh exact-order review. Pass both its exact
 `order_id` and `confirmation_id` to `orders cancel_confirm`; an uncertain result
 uses `cancel_reconcile` with that same confirmation ID. For a delivery change, begin
-the exact order edit with an empty cart, select an exact available free window,
-then prepare and confirm its zero-payable review. Goods and order total must
-remain unchanged. This is the current implementation limit, not a proven store
-restriction. Unavailable windows and paid/refund-bearing changes stay manual. Weekly auto-checkout requires the same configured
+the exact order edit with `delivery_only=true` and an empty addition cart, select the requested available
+window, then prepare its fresh original/final-total review under the shared
+rule below. Unavailable merchant controls or unverified full totals require a
+manual handoff. Weekly auto-checkout requires the same configured
 browser, standing/fresh policy, dietary permissions and amount/delivery guards.
 A missing or changed prerequisite stops the attempt. Confirm purchase only when
 its bound submit/reconcile returns `confirmed=true`; Mathem receipt reconciliation
@@ -643,8 +643,8 @@ Recovery returns dispatch=false for already claimed notices. Keep the actual
 supported correction options and verified deadline; unknown deadlines/edits stay
 unknown. Oda and Mathem additions require a currently modifiable order; MENY
 editing can require new checkout/Vipps. Mathem cancellation requires a fresh
-review. Moving delivery requires a fresh available free-window review with
-unchanged goods/order total and zero additional payment. A provider-reported textual
+review. Moving delivery uses the shared final-total authorization rule below
+with unchanged goods and the exact requested window. A provider-reported textual
 deadline is retained verbatim; do not invent an ISO date or year. Never promise
 that every item can be removed, replaced or refunded. Preserve an unconfirmed
 Mathem attempt and its payment page; neither an empty cart nor an unchanged
@@ -659,7 +659,31 @@ returned; “fra 0” is not free. Preserve explicit or provider-external select
 Cheapest delivery requires exact prices for every eligible candidate. Checkout
 revalidates the selected slot and provider totals before final dispatch.
 
-Follow `confirmation_policy` and explain it in ordinary language: fresh means
+Begin a delivery-only request with `orders change_begin delivery_only=true`;
+MENY full-order additions retain their existing checkout policy.
+For an existing-order delivery change at any provider, the user's concrete
+requested window authorizes unchanged goods at a verified unchanged or lower
+full order total, even with `confirmation_policy=fresh`. Display
+`summary.delivery_change`: original and new totals, signed difference and
+payable amount, in its currency. These full totals include fees and discounts;
+the slot quote and payment/reservation amount are separate facts. Unknown or
+from-prices never establish an unchanged/lower total. Never infer a refund from
+a decrease or cancellation.
+
+An increase needs an expressly covering price/budget limit or one new approval.
+When selecting the requested window, pass `max_total_ore` only for an existing
+user-authorized maximum full total in that provider's currency. The limit is
+bound to this exact order/window; never invent it from generic standing policy.
+If prepare returns `confirmation_required=true`, show the exact new window,
+difference and new total and ask once. After that approval, confirm its unchanged
+`confirmation_id` with `delivery_price_approved=true`. Without an increase or
+within the bound limit, confirm the fresh review without another question.
+Changed goods/account/order or stale review stop; reprepare changed amounts.
+MENY retains its full-order checkout and phone approval. Keep every uncertain
+submission under its original confirmation/key and reconcile without another
+dispatch. Do not reselect an uncertain window.
+
+For other protected operations, follow `confirmation_policy` and explain it in ordinary language: fresh means
 "show the final order or cancellation summary and ask before submitting";
 standing permits submit/cancel_submit for an explicit current order/pay/cancel
 request without another agent question. Keep the configured policy unless the
