@@ -66,10 +66,12 @@ class OrderOperations:
         else:
             amounts = summary.get("order_amounts")
             keys = ("original_minor", "original_count", "combined_minor", "combined_count", "payable_minor")
-            if not isinstance(amounts, Mapping) or any(type(amounts.get(k)) is not int or amounts[k] < 0 for k in keys):
+            if not isinstance(amounts, Mapping) or any(type(amounts.get(k)) is not int or (k != "payable_minor" and amounts[k] < 0) for k in keys):
                 raise HouseholdError("Delivery change requires verified original, final and payable order totals")
+            payable = amounts["payable_minor"]
             if (original.get("currency") != currency or amounts["original_minor"] != before
-                    or amounts["payable_minor"] != payable or amounts["original_count"] != amounts["combined_count"]):
+                    or isinstance(summary.get("total"), bool) or summary.get("total") != payable / 100
+                    or amounts["original_count"] != amounts["combined_count"]):
                 raise HouseholdError("Delivery change amounts or original goods do not match")
             after = amounts["combined_minor"]
         if before is None or after is None or payable is None:
@@ -2274,12 +2276,15 @@ class OrderOperations:
                 cart = refreshed_cart
                 summary = refreshed_summary
             if self.provider in {"oda", "mathem"} and isinstance(review.get("amounts"), Mapping):
-                amount_cart = dict(cart)
-                amount_cart["amounts"] = deepcopy(dict(review["amounts"]))
-                reviewed_amounts = cart_summary(amount_cart).get("amounts")
-                if not isinstance(reviewed_amounts, Mapping):
-                    raise HouseholdError("Oda checkout returned no verified amounts")
-                summary["amounts"] = deepcopy(dict(reviewed_amounts))
+                if delivery_change:
+                    summary["amounts"] = deepcopy(dict(review["amounts"]))
+                else:
+                    amount_cart = dict(cart)
+                    amount_cart["amounts"] = deepcopy(dict(review["amounts"]))
+                    reviewed_amounts = cart_summary(amount_cart).get("amounts")
+                    if not isinstance(reviewed_amounts, Mapping):
+                        raise HouseholdError("Oda checkout returned no verified amounts")
+                    summary["amounts"] = deepcopy(dict(reviewed_amounts))
             payment_display = None
             if self.provider in {"oda", "mathem"}:
                 payment_display = str((review.get("summary") or {}).get("payment") or review.get("payment_display") or "")
@@ -2703,7 +2708,7 @@ class OrderOperations:
                     self._pending_scheduler_guard(state, pending)
                     state["pending_checkout"]["status"] = "clicking"
                     if (self.provider in {"oda", "mathem"}
-                            and (not pending_change.get("requested_delivery") or money_cents(pending["summary"].get("total")) > 0)
+                            and (not pending_change.get("requested_delivery") or price_review["payable_ore"] > 0)
                             and (pending_change or pending["checkout_payment"]["method"] == "saved_card")):
                         # Persist before browser dispatch so a crash or lost
                         # first response cannot enable an overlapping payment.

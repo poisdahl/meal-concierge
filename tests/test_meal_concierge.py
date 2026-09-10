@@ -1219,7 +1219,7 @@ class CoreTestsBase:
 
         browser._open_order("test-oda-order")
 
-        self.assertEqual(calls, [(("open", "https://oda.com/no/orders/test-oda-order/"), CANCELLATION_BROWSER_ARGS)])
+        self.assertEqual(calls, [(("open", "https://oda.com/no/orders/test-oda-order/"), None)])
         browser._invoke = lambda *_arguments, **_kwargs: {"url": "https://oda.com/no/account/orders/other/"}
         with self.assertRaisesRegex(HouseholdError, "left the requested order page"):
             browser._open_order("test-oda-order")
@@ -8638,9 +8638,16 @@ class DeliveryPriceAuthorizationTests(unittest.TestCase):
 
     def test_payable_is_separate_from_final_total_and_lost_dispatch_is_not_repeated(self):
         for provider in ('oda', 'mathem'):
-            for final, payable in ((9000, 0), (10000, 500), (11000, 1000)):
+            for final, payable in ((9000, -1000), (9000, 0), (10000, 500), (11000, 1000)):
                 with self.subTest(provider=provider, final=final, payable=payable):
                     with self.flow(provider, 'fresh', final, payable, maximum=12000) as (app, store, shop, browser):
+                        original_review = browser.review_delivery_change
+                        def with_actual_amounts(*args, **kwargs):
+                            value = original_review(*args, **kwargs)
+                            value['amounts'] = {key: None for key in ('product_subtotal', 'delivery_price', 'discounts', 'deposits', 'bags', 'other_fees', 'provider_total')}
+                            value['amounts']['provider_total'] = payable / 100
+                            return value
+                        browser.review_delivery_change = with_actual_amounts
                         prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
                         self.assertEqual(prepared['summary']['delivery_change']['payable_ore'], payable)
                         original_submit = browser.submit_delivery_change

@@ -634,16 +634,75 @@ state and global routing remained unchanged. Separate adapter reads confirmed
 both providers' order statuses and date-specific slot prices. Neither
 conversation prepared or submitted checkout.
 
-The current Bob installation exposes Oda and isolated Mathem sockets; it has no
-MENY service/socket. Earlier authenticated MENY adapter reads do not establish
+At that read-only checkpoint Bob exposed Oda and isolated Mathem sockets,
+without an active MENY service/socket. Earlier authenticated MENY adapter reads do not establish
 an installed Bob/MENY checkout path. A lack of test installation or nonzero slot
 quotes is not evidence that a merchant cannot support the requested change.
 
-Live acceptance remains pending: authorized test orders, an installed Bob path
-for each provider, actual same/lower/higher reviewed totals where offered, one
-dispatch per approved intent and independent order/receipt/tracking readback.
-No new purchases, payments, delivery edits or cancellations were authorized by
-the implementation task, and no changed-price outcome is claimed here.
+The owner subsequently granted explicit full live-test authority, including
+new test orders, payments, delivery changes, cleanup and the retained MENY
+setup. The following results supersede the earlier authorization blocker.
+
+#### Ordinary Oda delivery outcomes
+
+The same-total outcome used installed `issue50-live-completion-20260910`, based
+on public `112e939d` plus the delivery navigation fix. The lower/higher outcomes
+used the subsequent `issue50-live-completion-20260910-signed` candidate, which
+also preserves signed delivery adjustments. Bob used his ordinary installed
+skill/MCP/Application conversation throughout.
+One 500 g fullkornsspaghetti package remained unchanged on the same owned order.
+
+| Requested 12 September window (Oslo) | Original full total | Reviewed final total | Signed payable | Observed result |
+|---|---:|---:|---:|---|
+| 13–18 | 246.40 NOK | 246.40 NOK | 0.00 NOK | No cap or additional approval; one confirmation and same-attempt reconciliation; independent merchant read matched |
+| 16–21 | 246.40 NOK | 236.40 NOK | −10.00 NOK | No cap or additional approval; one confirmation and same-attempt reconciliation; independent merchant read matched |
+| 04–09 | 236.40 NOK | 256.40 NOK | 20.00 NOK | Prepare required approval and left the merchant order unchanged; one explicit approval of that frozen confirmation, one submission and reconciliation; independent merchant read matched |
+
+The final higher-total proof SHA256 is
+`eb90a7e1667458f5e116c9e63167de35fb6690a2f4fa58623eb81dfa8256ac6e`.
+All four price-test conversations exited normally without an abort or watchdog
+exit. The lower adjustment originally stopped safely because its sign was lost
+in browser parsing; the corrected review and final-control checks preserve
+negative delivery payable while original/final totals remain nonnegative.
+Initial navigation failures also remain retained: the correction shares the
+verified homepage order-card/calendar sequence and active browser context.
+
+Bob then cancelled only the owned order once, reconciled that cancellation and
+restored the original Vipps preference through ordinary setup. An independent
+merchant read confirmed cancellation and no protected pending operation remained
+(proof SHA256 `3c4dde3d4845bc30b754f052679369c723055be41b65c6c63f620207aa75ce87`).
+Merchant adjustments and cancellation do not establish bank settlement, refund
+or reservation release. Current Mathem and MENY delivery outcomes remain pending.
+
+#### Remaining Mathem and MENY delivery trials
+
+A new ordinary Bob/Mathem test prepared one 500 g pasta package at SEK 124.50
+for 12 September 06–11 and dispatched its original payment once. The provider
+presented a Bank Norwegian challenge; Bob selected the app method once.
+Same-attempt reconciliation later positively identified payment failure and the
+same unpaid order, with supported recovery preparation available. The cause of
+failure is not established. No recovery payment has been sent, and the original
+pending attempt remains preserved while owner bank-app participation is awaited.
+This does not demonstrate a delivery change. Current zero-price slot quotes
+alone do not establish availability of equal/lower/higher final-order totals.
+
+The retained MENY setup was temporarily selected after Oda cleanup. Direct
+browser egress returned a blocked page. Using the existing approved Bob proxy
+with the same dedicated profile restored access; no cookies or credentials were
+copied. A stale Chromium lock from the replaced container was removed only after
+exclusive stopped-profile ownership was verified. Ordinary installed Bob status,
+cart, order, delivery and catalog reads then succeeded with native CLI exit 0,
+and all three provider state files remained unchanged. The readiness proof
+SHA256 is `7edabf020e251ae3b979a492c375aedcd4dc8e47baa44175b7d00f1806977907`.
+
+MENY contained an existing five-line cart belonging to earlier work and no
+upcoming modifiable order. That cart was preserved without a test checkout;
+owner clarification is required before using it for the trial. The 13 September
+windows displayed “from 0 kr”, which does not verify final delivery fees or
+changed-order totals. No MENY delivery outcome is claimed. The original Oda
+provider configuration and service route are restored after the bounded probe.
+Both remaining provider gates keep #50 open; completed payment recovery and the
+Oda delivery matrix are retained.
 
 ### Earlier ordinary acceptance — 2026-09-08
 

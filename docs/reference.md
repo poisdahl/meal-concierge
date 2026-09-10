@@ -1875,10 +1875,13 @@ that window and order. It is not a slot-fee limit or a household-policy change.
 
 Fresh review preserves the original order, account and goods, and reports
 `summary.delivery_change`: original/new full totals, their difference, the
-separate payable amount, currency, price limit and `confirmation_required`.
+separate signed payable amount, currency, price limit and `confirmation_required`.
 Totals include the merchant's fees and discounts. Oda/Mathem require independent
 original/final/payable overview values; MENY compares the original receipt's
 exact `Totalsum` with the reopened checkout total, not its reserved-card amount.
+Oda can display a negative `Å betale` amount on both the overview and final
+button when reducing delivery cost. Preserve that sign through review and
+submission; only a positive payable amount anticipates new payment approval.
 An unavailable full total stops review rather than substituting a slot quote.
 
 The requested window authorizes an unchanged or lower verified final total.
