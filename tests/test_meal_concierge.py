@@ -41,6 +41,8 @@ from oda_browser import (  # noqa: E402
     _oda_checkout_amount_script,
     _oda_checkout_payment_script,
     _oda_checkout_surface_script,
+    _oda_vipps_gateway_script,
+    _oda_vipps_phone_fill_script,
     cancellation_delivery_matches,
     cancellation_total_matches,
     clear_cancellation_cache,
@@ -2418,6 +2420,101 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         self.assertEqual(calls[0][0], "scrollintoview")
         self.assertEqual(calls[1][:2], ("get", "box"))
         self.assertEqual([call[:2] for call in calls[2:]], [("mouse", "move"), ("mouse", "down"), ("mouse", "up")])
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes hosted Vipps DOM contract")
+    def test_oda_vipps_gateway_accepts_a_fillable_phone_field_then_requires_the_exact_phone(self):
+        harness = r"""
+const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,readOnly:false,hidden:false,
+ getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
+const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
+const remember=node();const next=node('Next');
+const text='Continue to pay with Vipps Oda NOK 256.50';
+global.location=new URL('https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
+global.getComputedStyle=()=>({display:'block',visibility:'visible',opacity:'1'});
+const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:s==='button'?[next]:[];
+global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
+process.stdout.write(eval(script));
+"""
+
+        def evaluate(phone):
+            result = subprocess.run(
+                [shutil.which("node"), "-e", harness],
+                input=json.dumps({"script": _oda_vipps_gateway_script(25650, "90000000"), "c": {"phone": phone}}),
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode:
+                self.fail(result.stderr)
+            return json.loads(result.stdout)
+
+        self.assertEqual(evaluate(""), {
+            "identity": True, "ready": False, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": False,
+        })
+        self.assertEqual(evaluate("90000000"), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+
+    def test_oda_vipps_request_fills_the_phone_before_next(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._settle = mock.Mock()
+        browser._require_checkout_time = mock.Mock()
+        gateway = "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"
+
+        def invoke(action, *args, **_kwargs):
+            if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
+                return {"x": 10, "y": 20, "width": 30, "height": 40}
+            if (action, args) == ("get", ("url",)):
+                return {"url": gateway}
+            if (action, args) == ("network", ("requests", "--filter", "/checkout/pay/")):
+                return {"requests": [{"requestId": "pay-1", "method": "POST", "status": 200,
+                                      "url": "https://oda.com/no/api/v1/checkout/pay/"}]}
+            if (action, args) == ("network", ("request", "pay-1")):
+                return {"responseBody": json.dumps({"type": "payments-providers-vipps", "url": gateway,
+                                                     "params": {"orderNumber": "new-order"}})}
+            return {}
+
+        browser._invoke = mock.Mock(side_effect=invoke)
+        browser._eval = mock.Mock(side_effect=[
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"filled": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": False, "sent": True, "expired": False, "fillable": False, "phone_matches": False},
+        ])
+
+        browser._complete_oda_vipps_request("tab-1", 25650)
+
+        self.assertEqual(browser._invoke.call_args_list[-3:], [
+            mock.call("mouse", "move", "25", "40"),
+            mock.call("mouse", "down"),
+            mock.call("mouse", "up"),
+        ])
+
+    def test_oda_vipps_phone_is_sent_to_browser_over_stdin_not_process_argv(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.binary = Path("/shared/agent-browser-native")
+        browser.executable = Path("/usr/bin/chromium")
+        browser.profile = Path("/profile")
+        browser.home = Path("/home")
+        browser.socket_directory = Path("/run/browser")
+        browser.session = "test"
+        browser.uid = 10001
+        browser.gid = 10002
+        browser._checkout_deadline = None
+        completed = mock.Mock(returncode=0, stdout='{"success":true,"data":{"result":"{\\"filled\\":true}"}}')
+
+        with mock.patch("oda_browser.subprocess.run", return_value=completed) as run:
+            result = browser._eval(_oda_vipps_phone_fill_script("90000000"))
+
+        self.assertEqual(result, {"filled": True})
+        self.assertNotIn("90000000", run.call_args.args[0])
+        self.assertIn("90000000", run.call_args.kwargs["input"])
+        self.assertEqual(run.call_args.args[0][-2:], ["eval", "--stdin"])
 
 
 class MenyClientTests(unittest.TestCase):
