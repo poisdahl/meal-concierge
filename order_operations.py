@@ -1785,15 +1785,23 @@ class OrderOperations:
         if "checkout_payment" in request and not (action == "prepare" and request.get("recovery")):
             raise HouseholdError("checkout_payment override is available only for recovery preparation")
         if "vipps_request_not_received" in request and not (
-            action == "prepare" and request.get("recovery")
-            and request.get("order_id") is not None
-            and request.get("vipps_request_not_received") is True
+            request.get("vipps_request_not_received") is True
+            and (
+                (action == "prepare" and request.get("recovery")
+                 and request.get("order_id") is not None)
+                or action == "reconcile"
+            )
         ):
-            raise HouseholdError("vipps_request_not_received is true only for exact Oda recovery preparation")
+            raise HouseholdError(
+                "vipps_request_not_received is true only for exact Oda recovery preparation or reconciliation"
+            )
         if "vipps_approval_completed" in request and not (
             action == "reconcile" and request.get("vipps_approval_completed") is True
         ):
             raise HouseholdError("vipps_approval_completed is true only for exact Oda recovery reconciliation")
+        if (request.get("vipps_request_not_received") is True
+                and request.get("vipps_approval_completed") is True):
+            raise HouseholdError("Vipps approval and no-request evidence cannot describe the same reconciliation")
         if (action == "prepare" and request.get("recovery") and request.get("order_id") is not None
                 and (
                     request.get("vipps_request_not_received") is not True
@@ -1923,6 +1931,7 @@ class OrderOperations:
                 deadline,
                 str(request.get("confirmation_id") or ""),
                 vipps_approval_completed=request.get("vipps_approval_completed") is True,
+                vipps_request_not_received=request.get("vipps_request_not_received") is True,
             )
         if action == "authenticate":
             return self._checkout_authenticate(deadline, str(request.get("confirmation_id") or ""))
@@ -3296,11 +3305,13 @@ class OrderOperations:
                     "bank_app_method_chosen": choice.get("chosen") is True}
 
     def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "", *,
-                            vipps_approval_completed: bool = False) -> dict[str, Any]:
+                            vipps_approval_completed: bool = False,
+                            vipps_request_not_received: bool = False) -> dict[str, Any]:
         with self._browser_operation(deadline):
             return self._checkout_reconcile_unlocked(
                 deadline, confirmation_id,
                 vipps_approval_completed=vipps_approval_completed,
+                vipps_request_not_received=vipps_request_not_received,
             )
 
     def _meny_confirmation_before_navigation(self, pending, deadline):
@@ -3331,7 +3342,8 @@ class OrderOperations:
         return observed, updated
 
     def _checkout_reconcile_unlocked(self, deadline: float | None = None, confirmation_id: str = "", *,
-                                     vipps_approval_completed: bool = False) -> dict[str, Any]:
+                                     vipps_approval_completed: bool = False,
+                                     vipps_request_not_received: bool = False) -> dict[str, Any]:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout") if confirmation_id else None
@@ -3346,6 +3358,41 @@ class OrderOperations:
             raise HouseholdError("checkout has not reached reconciliation")
         if pending.get("order_change"):
             return self._order_change_reconcile(pending, deadline)
+        if vipps_request_not_received:
+            child = pending.get("recovery")
+            if not (
+                self.provider == "oda"
+                and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+                and isinstance(child, Mapping)
+                and confirmation_id == child.get("confirmation_id")
+                and child.get("status") in {"clicking", "uncertain", "awaiting_user_payment"}
+                and (child.get("browser_review") or {}).get("payment_choice", {}).get("method") == "vipps"
+                and child.get("order_id") == pending.get("unpaid_order_id")
+                and child.get("vipps_request_status") is None
+                and child.get("vipps_request_context") is None
+                and child.get("vipps_request_attempted_at") is None
+                and child.get("payment_requested_at") is None
+                and child.get("owner_vipps_approval_completed_at") is None
+            ):
+                raise HouseholdError(
+                    "vipps_request_not_received does not match a contextless exact Oda recovery"
+                )
+            # Re-open only the exact unpaid order after Oda exposes its retry
+            # surface again. The missing pre-request journal fence plus the
+            # owner's current phone observation are both required.
+            self._checkout_recovery_target(pending, deadline, child["order_id"])
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("checkout state changed while recording the missing Vipps request")
+                current = state["pending_checkout"]["recovery"]
+                current["vipps_request_status"] = "not_sent"
+                current["owner_reported_no_vipps_request_after_attempt_at"] = self._now().isoformat()
+                current["payment_failure"] = {
+                    "payment_failed": True,
+                    "order_id": safe_order_id(child["order_id"]),
+                    "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
+                }
+                pending = deepcopy(state["pending_checkout"])
         if vipps_approval_completed:
             child = pending.get("recovery")
             context = child.get("vipps_request_context") if isinstance(child, Mapping) else None
@@ -3400,7 +3447,7 @@ class OrderOperations:
                 oda_vipps_observation = str((observed or {}).get("status") or "unknown")
             elif request_status == "expired":
                 oda_vipps_observation = "expired"
-            elif request_status == "verifying" and oda_vipps_bound:
+            elif request_status in {"verifying", "not_sent"} and oda_vipps_bound:
                 oda_vipps_observation = "not_sent"
                 oda_vipps_not_sent = True
             else:

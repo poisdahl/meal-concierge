@@ -201,6 +201,13 @@ identifies the target; provider evidence must independently make it unique and
 matching. A user report alone is insufficient, and an active or explicitly
 unknown recorded Vipps request remains locked.
 Recovery does not create another order.
+If an exact recovery stops before recording any Vipps request context,
+attempt timestamp or sent marker, the owner may report the still-absent phone
+request with `action="reconcile"`, that recovery's fresh `confirmation_id` and
+`vipps_request_not_received=true`. This classifies the attempt as not sent only
+when tracking still says `unpaid_order` and the browser again verifies the exact
+same-order retry surface. Any dispatch context, attempted-request timestamp,
+sent marker, paid status or missing retry surface keeps the attempt locked.
 After that exact recovery sends a Vipps request, a conflicting Oda paid status
 does not by itself confirm the order. Reconcile with
 `vipps_approval_completed=true` only after the owner reports completing that
