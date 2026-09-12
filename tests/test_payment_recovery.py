@@ -90,6 +90,14 @@ class RecoveryTests(unittest.TestCase):
                 "summary": {**cart_summary(CART), "payment_method": "vipps"}, "orders_before": {"orders": []},
                 "browser_review": {"account_reference_digest": "a" * 64, "payment_display": "Vipps", "amounts": deepcopy(AMOUNTS)},
                 "checkout_payment": deepcopy(state["checkout_payment"]), "order_change": None,
+                "vipps_request_status": "expired",
+                "unpaid_order_id": "order-1",
+                "unpaid_order_binding_source": "oda_checkout_pay_response",
+            }
+            state["pending_checkout"]["summary"]["delivery"]["slot"] = {
+                "slot_ref": "oda:2026-09-12:70", "provider_slot_id": 70,
+                "start_at": "2026-09-12T05:00:00Z", "end_at": "2026-09-12T11:00:00Z",
+                "price_kind": "exact", "price_ore": 1900, "selected": True,
             }
         self.original = self.app.store.read()["pending_checkout"]
 
@@ -98,6 +106,51 @@ class RecoveryTests(unittest.TestCase):
 
     def prepare(self):
         return self.call("prepare", recovery=True)
+
+    def prepare_saved_card_to_vipps_recovery(self):
+        with self.app.store.locked() as state:
+            state["checkout_payment"] = {"method": "saved_card"}
+            pending = state["pending_checkout"]
+            pending["checkout_payment"] = {"method": "saved_card"}
+            pending["browser_review"]["payment_display"] = "•••• 1234"
+            pending.pop("vipps_request_status", None)
+            pending.pop("unpaid_order_binding_source", None)
+        prepared = self.call("prepare", recovery=True, checkout_payment={"method": "vipps"})
+
+        def submit(_cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.clicks += 1
+            context = {
+                "tab_id": "vipps-tab", "expected_total": 24640,
+                "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
+            }
+            kwargs["before_vipps_request"](context)
+            return {"vipps_request_sent": True, "vipps_request_context": context}
+
+        self.browser.submit_payment_recovery = submit
+        self.browser.checkout_vipps_request_state = lambda *args, **kwargs: {"status": "sent"}
+        waiting = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(waiting["payment_request_sent"])
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["recovery"]["vipps_request_context"]["order_id"],
+            "order-1",
+        )
+        return prepared
+
+    def test_saved_card_to_vipps_recovery_confirms_the_response_bound_order(self):
+        prepared = self.prepare_saved_card_to_vipps_recovery()
+        self.merchant.status = "paid_and_modifiable"
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["order_id"], "order-1")
+
+    def test_saved_card_to_vipps_recovery_accepts_positive_expiry(self):
+        prepared = self.prepare_saved_card_to_vipps_recovery()
+        self.browser.checkout_vipps_request_state = lambda *args, **kwargs: {"status": "expired"}
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["payment_request_expired"])
+        self.assertTrue(result["payment_failed"])
+        self.assertTrue(result["recovery_preparation_available"])
 
     def test_same_order_recovery_and_both_confirmation_replays(self):
         prepared = self.prepare()
@@ -277,6 +330,7 @@ class RecoveryTests(unittest.TestCase):
             pending["browser_review"]["amounts"] = amounts
             pending["browser_review"]["discount_breakdown"] = breakdown
             pending["summary"]["payment_method"] = "saved_card"
+            pending["summary"]["delivery"]["slot"]["slot_ref"] = "mathem:2026-09-12:70"
         before = self.app.store.read()["pending_checkout"]
         failure = {"payment_failed": True, "order_id": "order-1"}
         self.browser.checkout_payment_authentication = mock.Mock(return_value=None)
@@ -288,6 +342,13 @@ class RecoveryTests(unittest.TestCase):
         self.app = Application(StateStore(root, self.settings), self.merchant, self.browser)
         self.browser.checkout_payment_failure.reset_mock()
         self.assertTrue(self.call("authenticate", confirmation_id="original")["payment_failed"])
+        original_call = self.merchant.call
+        unrelated = {**deepcopy(self.merchant.order), "orderNumber": "order-2"}
+        def exact_failure_outside_order_page(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": [deepcopy(unrelated)]}
+            return original_call(name, arguments, **kwargs)
+        self.merchant.call = exact_failure_outside_order_page
         prepared = self.prepare()
         self.assertEqual(prepared["order_id"], "order-1")
         self.browser.checkout_payment_failure.assert_not_called()
@@ -343,6 +404,7 @@ class RecoveryTests(unittest.TestCase):
         self.merchant.order["currency"] = "SEK"
         with self.app.store.locked() as state:
             state["pending_checkout"]["authentication_context"] = {"tab_id": "owned", "payment_id": "123456"}
+            state["pending_checkout"]["summary"]["delivery"]["slot"]["slot_ref"] = "mathem:2026-09-12:70"
         self.browser.checkout_payment_authentication = lambda *a, **kw: None
         before = self.app.store.read()["pending_checkout"]
         self.browser.checkout_payment_failure = lambda *a, **kw: {"payment_failed": True, "order_id": "another"}
@@ -366,7 +428,11 @@ class RecoveryTests(unittest.TestCase):
         pending = deepcopy(self.original)
         pending["cart"]["totalGrossAmount"] = 227.40
         pending["summary"] = cart_summary(pending["cart"])
-        pending["summary"]["delivery"]["slot"] = {"price_kind": "exact", "price_ore": 0}
+        pending["summary"]["delivery"]["slot"] = {
+            "slot_ref": "mathem:2026-09-12:70", "provider_slot_id": 70,
+            "start_at": "2026-09-12T05:00:00Z", "end_at": "2026-09-12T11:00:00Z",
+            "price_kind": "exact", "price_ore": 0, "selected": True,
+        }
         pending["checkout_payment"] = deepcopy(self.app.store.read()["checkout_payment"])
         amounts = {**AMOUNTS, "delivery_price": 79.0, "discounts": -79.0,
                    "other_fees": {"Avgift för liten varukorg": 199.0}, "provider_total": 227.40}
@@ -567,7 +633,8 @@ class RecoveryTests(unittest.TestCase):
         self.app._browser_operation = another_confirm_won
         result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
         self.assertFalse(result["confirmed"])
-        self.assertTrue(result["recovery_payment_unconfirmed"])
+        self.assertTrue(result["awaiting_user_payment"])
+        self.assertEqual(result["payment_request_state"], "unknown")
         self.assertNotIn("recovery_preparation_available", result)
         self.assertEqual(self.browser.clicks, 0)
         self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["status"], "clicking")
@@ -1004,12 +1071,15 @@ class RetryAmountTests(unittest.TestCase):
                            {"rows": [["1 vare", "25,50 kr"], ["Levering", "20,00 kr"], ["Total inkl. MVA", "45,50 kr"]]}]:
                 with self.subTest(method=method, change=change):
                     browser = OdaBrowser.__new__(OdaBrowser)
+                    browser.vipps_phone_number = "90000000"
                     browser._checkout_dispatch_tab = lambda: None
                     browser.checkout_provider = "oda"
                     browser._checkout_deadline = None
                     browser._checkout_operation = lambda *a, **k: nullcontext()
                     browser._cart_expectation = lambda cart: expected
                     browser.review_payment_recovery = lambda *a, **k: deepcopy(review)
+                    browser._invoke = lambda *a, **k: {}
+                    browser._capture_checkout_payment = lambda *a, **k: None
                     observed, callbacks = [], []
                     def final_eval(script):
                         self.assertEqual(callbacks, [True])

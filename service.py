@@ -410,7 +410,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 **masked_status(self.store.read(), self.integration),
                 "confirmation_policy": self.confirmation_policy,
                 "workflow": workflow_status(self.store.read()),
-                "store_readiness": self._store_readiness(),
+                "store_readiness": self._store_readiness(state.get("checkout_payment")),
                 **({"currency": "SEK", "checkout": "guarded_saved_card" if self.browser is not None else "manual", "store_url": "https://www.mathem.se/se/"} if self.provider == "mathem" else {}),
             }
         if operation == "setup":
@@ -521,7 +521,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return {"email_recipient": mask_email(email)}
         raise HouseholdError("unknown profile action")
 
-    def _store_readiness(self) -> dict[str, Any]:
+    def _store_readiness(self, checkout_payment: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Explain known configuration without navigating or testing checkout."""
         connected = self.integration.get("status") == "ready"
         connection_status = (
@@ -534,7 +534,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 "store_url": "https://oda.com/no/",
                 "account": "Use your own Oda account with complete contact and delivery details in a supported delivery area.",
                 "connection": "Complete standalone Oda OAuth and log the dedicated browser into the same intended Oda account and address.",
-                "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
+                "payment": "Choose saved_card or vipps in setup checkout_payment. During new-order preparation Oda automatically selects the configured method. Vipps requires the intended phone number in local private configuration. Saved-card checkout needs a usable saved card. Check Payment in your Oda profile; choose remember/save card when entering a card during manual payment. First-card setup is not verified for every account; ask Oda if no supported add-card option is available.",
             },
             "meny": {
                 "store_url": "https://meny.no/",
@@ -551,9 +551,17 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         }[self.provider]
         payment_status = "unknown"
         payment_action = "Verify the payment method in the store's own app or website."
-        if self.provider == "meny" and not getattr(self.provider_client, "vipps_phone_number", None):
+        configured_payment = checkout_payment or {}
+        missing_vipps_phone = (
+            self.provider == "meny" and not getattr(self.provider_client, "vipps_phone_number", None)
+        ) or (
+            self.provider == "oda"
+            and configured_payment.get("method") == "vipps"
+            and re.fullmatch(r"[0-9]{8}", str(getattr(self.browser, "vipps_phone_number", "") or "")) is None
+        )
+        if missing_vipps_phone:
             payment_status = "not_configured"
-            payment_action = "Configure the intended Vipps phone number locally before MENY checkout."
+            payment_action = f"Configure the intended Vipps phone number locally before {self.provider.upper()} checkout."
         browser_status = (
             "not_configured" if self.provider in {"oda", "mathem"} and self.browser is None else "unknown"
         )
@@ -607,7 +615,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "configuration_required": required,
             "configuration_status": (state.get("setup") or {}).get("status"),
             "current": self._setup_summary(state),
-            "store_readiness": self._store_readiness(),
+            "store_readiness": self._store_readiness(state.get("checkout_payment")),
             "question": "Keep all current/default Meal Concierge settings? Answer once, or provide only the values you want to change." if required else None,
             "next": "Call meal_concierge_setup action=apply with keep_current=true, or keep_current=false and only the requested changes." if required else "Use action=rerun to review this configuration again.",
         }
@@ -919,7 +927,11 @@ def run(args) -> None:
         available = shutil.which(str(args.browser_binary)) and shutil.which(str(args.browser_executable))
         checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments) if available else None
     else:
-        checkout_browser = OdaBrowser(provider_client=provider_client, **browser_arguments)
+        checkout_browser = OdaBrowser(
+            provider_client=provider_client,
+            vipps_phone_number=settings.get("vipps_phone_number"),
+            **browser_arguments,
+        )
     app = Application(
         StateStore(args.state, settings),
         provider_client,

@@ -2688,6 +2688,12 @@ process.stdout.write(eval(script));
     def test_swedish_receipt_requires_currency_address_and_exact_window(self):
         from service_common import order_matches_checkout
         summary = cart_summary(self.cart)
+        summary['delivery']['slot'] = {
+            'slot_ref': 'mathem:2026-09-12:77', 'provider_slot_id': 77,
+            'start_at': '2026-09-12T09:00:00+02:00',
+            'end_at': '2026-09-12T12:00:00+02:00',
+            'price_ore': 0, 'price_kind': 'exact', 'selected': True,
+        }
         self.assertTrue(order_matches_checkout(self.order(), summary, provider='mathem'))
         for change in ({'currency': 'NOK'}, {'deliveryAddress': None}, {'deliveryAddress': 'Annan väg 2'},
                        {'deliverySlotDisplay': 'Lör 12. sep 10:00 - 12:00'}, {'grossAmount': 122.95}):

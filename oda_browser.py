@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import calendar
 import hashlib
@@ -77,6 +77,59 @@ def _checkout_amount_labels(provider: str) -> dict[str, str]:
     if provider == "mathem":
         return MATHEM_CHECKOUT_AMOUNT_LABELS
     raise HouseholdError("Unsupported checkout provider")
+
+
+def oda_checkout_pay_request_id(value: Any) -> str:
+    """Return the one completed Oda checkout-payment request."""
+
+    if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
+        raise HouseholdError("Oda checkout payment request log changed")
+    matches = []
+    for request in value["requests"]:
+        if not isinstance(request, Mapping):
+            raise HouseholdError("Oda checkout payment request log changed")
+        parsed = urlsplit(str(request.get("url") or ""))
+        status = request.get("status")
+        request_id = request.get("requestId")
+        if (
+            str(request.get("method") or "").upper() == "POST"
+            and not isinstance(status, bool)
+            and isinstance(status, int)
+            and 200 <= status < 300
+            and parsed.scheme == "https"
+            and parsed.netloc == "oda.com"
+            and re.fullmatch(r"/(?:no/)?api/v1/checkout/pay/", parsed.path) is not None
+            and not parsed.query
+            and not parsed.fragment
+            and isinstance(request_id, str)
+            and request_id
+        ):
+            matches.append(request_id)
+    if len(matches) != 1:
+        raise HouseholdError("Oda checkout payment response is missing or ambiguous; do not send payment")
+    return matches[0]
+
+
+def oda_checkout_pay_order_id(value: Any, gateway_url: str) -> str:
+    """Bind a hosted payment redirect to Oda's exact checkout response order."""
+
+    if not isinstance(value, Mapping) or not isinstance(value.get("responseBody"), str):
+        raise HouseholdError("Oda checkout payment response changed; do not send payment")
+    try:
+        payload = json.loads(value["responseBody"])
+    except json.JSONDecodeError as exc:
+        raise HouseholdError("Oda checkout payment response changed; do not send payment") from exc
+    params = payload.get("params") if isinstance(payload, Mapping) else None
+    order_id = params.get("orderNumber") if isinstance(params, Mapping) else None
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("type") != "payments-providers-vipps"
+        or payload.get("url") != gateway_url
+        or not isinstance(order_id, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None
+    ):
+        raise HouseholdError("Oda checkout payment response changed; do not send payment")
+    return order_id
 
 
 def oda_checkout_amount_minor(label: Any, amount_text: Any, *, provider: str = "oda") -> int:
@@ -499,24 +552,47 @@ def delivery_signature(value: str, *, provider: str = "oda") -> tuple[int, int, 
     return start_hour, start_minute, end_hour, end_minute, day, month
 
 
-def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda") -> bool:
+def _relative_delivery_text(value: str, *, provider: str, today: date) -> str | None:
+    normalized = " ".join(unicodedata.normalize("NFC", value).lower().split())
+    relative_pattern = r"\bi\s?(?:dag|morgon)\b" if provider == "mathem" else r"\bi (?:dag|morgen)\b"
+    relative = re.findall(relative_pattern, normalized)
+    if len(relative) != 1 or delivery_signature(normalized, provider=provider) is not None:
+        return None
+    day = today + timedelta(days=0 if relative[0].replace(" ", "") == "idag" else 1)
+    months = (
+        "jan", "feb", "mar", "apr", "maj" if provider == "mathem" else "mai", "jun",
+        "jul", "aug", "sep", "okt", "nov", "dec" if provider == "mathem" else "des",
+    )
+    return re.sub(relative_pattern, f"{day.day} {months[day.month - 1]}", normalized)
+
+
+def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda", today: date | None = None) -> bool:
     if not expected:
         return True
+    zone = ZoneInfo("Europe/Stockholm" if provider == "mathem" else "Europe/Oslo")
+    local_today = today or datetime.now(zone).date()
+    relative_used = False
+    expected_normalized = " ".join(unicodedata.normalize("NFC", expected).lower().split())
+    expected_pattern = r"\bi\s?(?:dag|morgon)\b" if provider == "mathem" else r"\bi (?:dag|morgen)\b"
+    if re.findall(expected_pattern, expected_normalized):
+        relative_used = True
+        expected = _relative_delivery_text(expected, provider=provider, today=local_today)
+        if expected is None:
+            return False
     signature = delivery_signature(expected, provider=provider)
     if signature is None or not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
         return False
     observed = " ".join(unicodedata.normalize("NFC", roots[0]).lower().split())
-    relative_pattern = r"\bi\s?(?:dag|morgon)\b" if provider == "mathem" else r"\bi (?:dag|morgen)\b"
-    relative = re.findall(relative_pattern, observed)
-    if relative:
+    relative_pattern = expected_pattern
+    if re.findall(relative_pattern, observed):
+        relative_used = True
         # Retail checkout switches to relative dates at local midnight. Never
         # let a relative label override a numeric date or a second date label.
-        if len(relative) != 1 or delivery_signature(observed, provider=provider) is not None:
+        observed = _relative_delivery_text(roots[0], provider=provider, today=local_today)
+        if observed is None:
             return False
-        today = datetime.now(ZoneInfo("Europe/Stockholm" if provider == "mathem" else "Europe/Oslo")).date()
-        day = today + timedelta(days=0 if relative[0].replace(" ", "") == "idag" else 1)
-        months = ("jan", "feb", "mar", "apr", "maj" if provider == "mathem" else "mai", "jun", "jul", "aug", "sep", "okt", "nov", "dec" if provider == "mathem" else "des")
-        observed = re.sub(relative_pattern, f"{day.day} {months[day.month - 1]}", observed)
+    if relative_used and today is None and datetime.now(zone).date() != local_today:
+        return False
     return delivery_signature(observed, provider=provider) == signature
 
 
@@ -621,6 +697,47 @@ def _oda_checkout_payment_script(payment: Mapping[str, Any] | None = None, *, se
     ).replace("SELECTION_ACTION", "if(selected.length>1||matching.length!==1)return JSON.stringify(failure);matching[0].radio.click();return JSON.stringify({verified:false,observed,selected:true});" if select else "return JSON.stringify(failure);")
 
 
+def _oda_vipps_gateway_script(
+    expected_total: int,
+    expected_phone: str,
+    *,
+    expected_url: str | None = None,
+    require_hit: bool = False,
+    hit_x: float = 0,
+    hit_y: float = 0,
+) -> str:
+    """Verify the exact hosted Vipps request page without returning phone data."""
+
+    return r"""
+(() => {
+ const norm=value=>(value||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
+ const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true';
+ document.querySelectorAll('[data-oda-household-vipps-next]').forEach(e=>e.removeAttribute('data-oda-household-vipps-next'));
+ const identity=location.origin==='https://pay.vipps.no'&&location.pathname==='/dwo-api-application/v1/deeplink/vippsgateway'&&(!EXPECTED_URL||location.href===EXPECTED_URL);
+ const roots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
+ const root=roots.length===1?roots[0]:null;
+ const text=norm(root?.innerText||'');
+ const amounts=[...text.matchAll(/(?:\bNOK\s*(\d+(?:[ .]\d{3})*)[,.](\d{2})\b|\b(\d+(?:[ .]\d{3})*)[,.](\d{2})\s*(?:kr|NOK)\b)/gi)].map(m=>Number((m[1]||m[3]).replace(/[ .]/g,''))*100+Number(m[2]||m[4]));
+ const merchant=/(?:^|\s)Oda(?:\s|$)/i.test(text);
+ const amountBound=amounts.length>0&&amounts.every(value=>value===EXPECTED_TOTAL);
+ const sent=identity&&merchant&&amountBound&&/We've sent a payment request to/i.test(text)&&/Open Vipps/i.test(text);
+ const expired=identity&&merchant&&amountBound&&/(?:payment timed out|betalingen (?:har )?(?:utløpt|gått ut))/i.test(text);
+ const phones=root?[...root.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible):[];
+ const national=phones.length===1?phones[0].value.replace(/\D/g,''):'';
+ const remember=root?[...root.querySelectorAll('input[type="checkbox"]')].filter(visible):[];
+ const buttons=root?[...root.querySelectorAll('button')].filter(enabled).filter(e=>norm(e.innerText||e.getAttribute('aria-label')||'')==='Next'):[];
+ const exact=identity&&!sent&&!expired&&/Continue to pay with Vipps/i.test(text)&&merchant&&amountBound&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE)&&!phones[0].disabled&&!phones[0].readOnly&&remember.length===1&&remember[0].checked===false&&buttons.length===1;
+ const target=exact?buttons[0]:null;
+ if(target)target.setAttribute('data-oda-household-vipps-next','');
+ const hit=REQUIRE_HIT?document.elementFromPoint(HIT_X,HIT_Y):target;
+ return JSON.stringify({identity,ready:Boolean(target&&hit&&(hit===target||target.contains(hit))),sent,expired});
+})()
+""".replace("EXPECTED_TOTAL", str(expected_total)).replace("EXPECTED_PHONE", json.dumps(expected_phone)).replace(
+        "EXPECTED_URL", json.dumps(expected_url),
+    ).replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
+
+
 def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[str, Any] | None = None, *, provider: str = "oda") -> str:
     return r"""
 (() => {
@@ -710,6 +827,7 @@ class OdaBrowser:
         uid: int,
         gid: int,
         provider_client: Any = None,
+        vipps_phone_number: str | None = None,
     ):
         self.provider_client = provider_client
         self.instance = instance
@@ -720,6 +838,7 @@ class OdaBrowser:
         self.socket_directory = Path(socket_directory)
         self.uid = uid
         self.gid = gid
+        self.vipps_phone_number = vipps_phone_number
         self.session = f"oda-household-{instance}"
         self._checkout_deadline: float | None = None
         self._cancellation_deadline: float | None = None
@@ -886,8 +1005,11 @@ class OdaBrowser:
                     "payment_display": surface["payment_display"], "surface": surface,
                     "amounts_minor": amounts["amounts"]}
 
-    def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None):
+    def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None, before_vipps_request=None):
         with self._checkout_operation(deadline, preserve_session=True):
+            if (review.get("payment_choice", {}).get("method") == "vipps"
+                    and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
+                raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
             try:
                 current = self.review_payment_recovery(cart, review["order_id"],
                     payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline,
@@ -898,6 +1020,9 @@ class OdaBrowser:
                 expected = self._cart_expectation(bound_cart)
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 dispatch_tab = self._checkout_dispatch_tab()
+                vipps = review["payment_choice"]["method"] == "vipps"
+                if vipps:
+                    self._invoke("network", "requests", "--clear")
                 before_click()
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 surface = _oda_checkout_surface_script(expected, review["payment_choice"], provider=self.checkout_provider).strip()
@@ -916,7 +1041,10 @@ class OdaBrowser:
                 raise CheckoutPreconditionError("Recovery changed before the final payment click")
             return self._capture_checkout_payment(dispatch_tab,
                 authentication_expected=review["payment_choice"]["method"] == "saved_card",
-                capture_failure=False)
+                capture_failure=False,
+                vipps_expected_total=(expected["total_minor"]
+                                      if vipps else None),
+                before_vipps_request=before_vipps_request)
 
     def _order_cart(self, cart, order_id, order, binding):
         binding = require_order_binding(binding)
@@ -1460,13 +1588,128 @@ class OdaBrowser:
                     process.kill()
                 process.wait()
 
-    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True):
+    def _complete_oda_vipps_request(self, dispatch_tab: str, expected_total: int, before_request=None) -> dict[str, Any]:
+        """Send one verified hosted Vipps request for the already-created Oda order."""
+
+        if self.checkout_provider != "oda" or re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None:
+            raise HouseholdError("An exact private Vipps phone number is required before Oda checkout")
+        observed: dict[str, Any] = {}
+        for _ in range(40):
+            if self._checkout_dispatch_tab() != dispatch_tab:
+                raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
+            observed = self._eval(_oda_vipps_gateway_script(expected_total, self.vipps_phone_number))
+            if observed.get("sent") is True:
+                raise HouseholdError("The Oda/Vipps request was already sent before its bound control was verified; reconcile the same order")
+            if observed.get("identity") is True and (observed.get("ready") is True or observed.get("expired") is True):
+                break
+            self._settle(0.25)
+        if observed.get("expired") is True:
+            raise HouseholdError("The Oda/Vipps payment expired before a mobile request was sent; reconcile the same order")
+        if observed.get("identity") is not True or observed.get("ready") is not True:
+            raise HouseholdError("The Oda/Vipps payment page could not be verified; the outcome is uncertain; do not retry")
+        selector = "[data-oda-household-vipps-next]"
+        gateway_url = str(self._invoke("get", "url").get("url") or "")
+        parsed_gateway = urlsplit(gateway_url)
+        if (parsed_gateway.scheme != "https" or parsed_gateway.hostname != "pay.vipps.no"
+                or parsed_gateway.path != "/dwo-api-application/v1/deeplink/vippsgateway"
+                or not parsed_gateway.query or parsed_gateway.fragment):
+            raise HouseholdError("The exact Oda/Vipps transaction URL is unavailable; do not send or retry payment")
+        payment_request_id = oda_checkout_pay_request_id(
+            self._invoke("network", "requests", "--filter", "/checkout/pay/")
+        )
+        payment_response: Mapping[str, Any] = {}
+        for attempt in range(8):
+            response = self._invoke("network", "request", payment_request_id)
+            payment_response = response if isinstance(response, Mapping) else {}
+            if isinstance(payment_response.get("responseBody"), str):
+                break
+            if attempt < 7:
+                self._settle(0.25)
+        order_id = oda_checkout_pay_order_id(payment_response, gateway_url)
+        self._invoke("scrollintoview", selector)
+        box = self._find_box(self._invoke("get", "box", selector))
+        if not box or box["width"] <= 0 or box["height"] <= 0:
+            raise HouseholdError("The Oda/Vipps request control is not clickable; the outcome is uncertain; do not retry")
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        if (self._checkout_dispatch_tab() != dispatch_tab
+                or self._eval(_oda_vipps_gateway_script(
+                    expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    require_hit=True, hit_x=x, hit_y=y,
+                )) != {"identity": True, "ready": True, "sent": False, "expired": False}):
+            raise HouseholdError("The Oda/Vipps request control changed or is obscured; the outcome is uncertain; do not retry")
+        self._require_checkout_time(FINAL_CLICK_MARGIN)
+        request_context = {
+            "tab_id": dispatch_tab,
+            "expected_total": expected_total,
+            "gateway_url_digest": hashlib.sha256(gateway_url.encode()).hexdigest(),
+            "order_id": order_id,
+        }
+        if before_request:
+            before_request(request_context)
+        current_gateway_url = str(self._invoke("get", "url").get("url") or "")
+        if (self._checkout_dispatch_tab() != dispatch_tab or current_gateway_url != gateway_url
+                or self._eval(_oda_vipps_gateway_script(
+                    expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    require_hit=True, hit_x=x, hit_y=y,
+                )) != {"identity": True, "ready": True, "sent": False, "expired": False}):
+            raise HouseholdError("The fenced Oda/Vipps request changed before Next; reconcile it without retrying")
+        self._invoke("mouse", "move", str(round(x)), str(round(y)))
+        self._invoke("mouse", "down")
+        self._invoke("mouse", "up")
+        for _ in range(40):
+            if self._checkout_dispatch_tab() != dispatch_tab:
+                break
+            result = self._eval(_oda_vipps_gateway_script(
+                expected_total, self.vipps_phone_number, expected_url=gateway_url,
+            ))
+            if result.get("sent") is True:
+                return request_context
+            self._settle(0.25)
+        raise HouseholdError("Vipps did not confirm the Oda mobile payment request; the outcome is uncertain; do not retry")
+
+    def checkout_vipps_request_state(self, context, *, deadline=None):
+        """Observe the retained Oda/Vipps page without causing another request."""
+
+        if (not isinstance(context, Mapping)
+                or set(context) != {"tab_id", "expected_total", "gateway_url_digest", "order_id"}
+                or not isinstance(context.get("tab_id"), str)
+                or type(context.get("expected_total")) is not int
+                or context["expected_total"] < 0
+                or re.fullmatch(r"[0-9a-f]{64}", str(context.get("gateway_url_digest") or "")) is None
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", str(context.get("order_id") or "")) is None
+                or re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
+            return {"status": "unknown"}
+        with self._checkout_operation(deadline, preserve_session=True):
+            if self._checkout_dispatch_tab() != context["tab_id"]:
+                return {"status": "unknown"}
+            try:
+                current_url = str(self._invoke("get", "url").get("url") or "")
+                if hashlib.sha256(current_url.encode()).hexdigest() != context["gateway_url_digest"]:
+                    return {"status": "unknown"}
+                observed = self._eval(_oda_vipps_gateway_script(
+                    context["expected_total"], self.vipps_phone_number, expected_url=current_url,
+                ))
+            except HouseholdError:
+                return {"status": "unknown"}
+        if observed.get("sent") is True:
+            return {"status": "sent"}
+        if observed.get("expired") is True:
+            return {"status": "expired"}
+        return {"status": "unknown"}
+
+    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True, vipps_expected_total=None, before_vipps_request=None):
         # Bind 3DS to this dispatch's tab and native payment identity. Only a
         # visible issuer challenge establishes user action. Continue observing
         # so a terminal failure still retains its ID.
         unresolved = {"authentication_unresolved": True} if authentication_expected else None
         if dispatch_tab is None:
             return unresolved
+        if vipps_expected_total is not None:
+            if type(vipps_expected_total) is not int or vipps_expected_total < 0:
+                raise HouseholdError("The Oda/Vipps payment amount is invalid")
+            context = self._complete_oda_vipps_request(dispatch_tab, vipps_expected_total, before_vipps_request)
+            return {"vipps_request_sent": True, "vipps_request_context": context}
         context = None
         read_failures = 0
         store_path = urlsplit(_retail_store_url(self.checkout_provider)).path
@@ -1511,9 +1754,10 @@ class OdaBrowser:
                     break
         return {"authentication_context": context} if context else unresolved
 
-    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None):
-        with self._checkout_operation(deadline):
-            return self._submit_checkout(cart, review, before_click)
+    def submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None, before_vipps_request=None):
+        vipps = review.get("payment_choice", {}).get("method") == "vipps"
+        with self._checkout_operation(deadline, preserve_session=vipps):
+            return self._submit_checkout(cart, review, before_click, before_vipps_request=before_vipps_request)
 
     def submit_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
         with self._checkout_operation(deadline):
@@ -1709,9 +1953,13 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                 authentication_expected=review["order_amounts"]["payable_minor"] > 0,
             )
 
-    def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None) -> None:
+    def _submit_checkout(self, cart: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, before_vipps_request=None) -> None:
+        if (review.get("payment_choice", {}).get("method") == "vipps"
+                and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
+            raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
         try:
-            current = self._review_checkout(cart, payment=review["payment_choice"]) if "payment_choice" in review else self.review_checkout(cart)
+            current = (self._review_checkout(cart, payment=review["payment_choice"], select_payment=True)
+                       if "payment_choice" in review else self.review_checkout(cart))
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         if current != dict(review):
@@ -1732,6 +1980,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             expected_amounts=review.get("amounts"),
             review_surface=(_oda_checkout_surface_script(expected_cart, review.get("payment_choice")), review["surface"]),
             authentication_expected=review.get("payment_choice", {}).get("method", "saved_card") == "saved_card",
+            before_vipps_request=before_vipps_request,
         )
 
     def _click_checkout_submit(
@@ -1745,12 +1994,16 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         review_surface: tuple[str, Mapping[str, Any]] | None = None,
         addition_expectation: Mapping[str, Any] | None = None,
         authentication_expected: bool = True,
+        before_vipps_request=None,
     ) -> None:
         try:
             self._require_checkout_time(FINAL_CLICK_MARGIN)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         dispatch_tab = self._checkout_dispatch_tab()
+        vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
+        if vipps:
+            self._invoke("network", "requests", "--clear")
         if before_click:
             try:
                 before_click()
@@ -1774,7 +2027,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                 expected_product_count=expected_product_count,
                 expected_amounts=amounts_minor,
                 expected_url=expected_url,
-                vipps=review_surface is not None and review_surface[1].get("payment_display") == "Vipps",
+                vipps=vipps,
             )
         if review_surface is not None:
             surface_script, expected_surface = review_surface
@@ -1787,7 +2040,12 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                       + "return JSON.stringify({clicked:false});return " + script.strip() + ";})()")
         if self._eval(script) != {"clicked": True}:
             raise CheckoutPreconditionError("Oda checkout button changed before click")
-        return self._capture_checkout_payment(dispatch_tab, authentication_expected=authentication_expected)
+        return self._capture_checkout_payment(
+            dispatch_tab,
+            authentication_expected=authentication_expected,
+            vipps_expected_total=(expected_total if vipps else None),
+            before_vipps_request=before_vipps_request,
+        )
 
     def review_cancellation(self, order_id: str, order: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         with self._cancellation_operation(deadline):

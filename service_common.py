@@ -615,7 +615,65 @@ def order_matches_checkout(order: Mapping[str, Any], summary: Mapping[str, Any],
         return False
     if observed_date is not None and not isinstance(observed_date, str):
         return False
+    def bound_slot_signature(value: Any) -> tuple[date, tuple[str, str]] | None:
+        if not isinstance(value, Mapping):
+            return None
+        try:
+            slot = validate_delivery_slot(value)
+            zone = ZoneInfo("Europe/Stockholm" if provider == "mathem" else "Europe/Oslo")
+            start = datetime.fromisoformat(slot["start_at"].replace("Z", "+00:00")).astimezone(zone)
+            end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00")).astimezone(zone)
+        except (HouseholdError, TypeError, ValueError):
+            return None
+        if start.date() != end.date():
+            return None
+        if slot["slot_ref"] != f"{provider}:{start.date().isoformat()}:{slot['provider_slot_id']}":
+            return None
+        return (
+            start.date(),
+            (f"{start.hour:02d}:{start.minute:02d}", f"{end.hour:02d}:{end.minute:02d}"),
+        )
+
     expected_signature = delivery_signature(expected_delivery)
+    raw_slot = summary_delivery.get("slot") if isinstance(summary_delivery, Mapping) else None
+    slot_was_bound = isinstance(summary_delivery, Mapping) and "slot" in summary_delivery
+    bound_signature = bound_slot_signature(raw_slot)
+    if not slot_was_bound or bound_signature is None:
+        return False
+    if bound_signature is not None:
+        bound_date, bound_times = bound_signature
+        yearless_bound = ((bound_date.month, bound_date.day), bound_times)
+        if expected_signature is None:
+            normalized_expected = " ".join(unicodedata.normalize("NFC", expected_delivery).lower().split())
+            relative_pattern = r"\bi\s?(?:dag|morgon)\b" if provider == "mathem" else r"\bi (?:dag|morgen)\b"
+            if len(re.findall(relative_pattern, normalized_expected)) != 1:
+                return False
+            months = (
+                ("jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec")
+                if provider == "mathem"
+                else ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")
+            )
+            replacement = (
+                f"{bound_date.day}. {months[bound_date.month - 1]}"
+                if provider == "oda"
+                else f"{bound_date.day} {months[bound_date.month - 1]}"
+            )
+            resolved = re.sub(relative_pattern, replacement, normalized_expected)
+            expected_signature = delivery_signature(resolved)
+        if expected_signature != yearless_bound:
+            return False
+        try:
+            if date.fromisoformat(observed_date or "") != bound_date:
+                return False
+            embedded_dates = {
+                date.fromisoformat(value)
+                for value in re.findall(r"\b\d{4}-\d{2}-\d{2}\b", expected_delivery + " " + observed_delivery)
+            }
+        except ValueError:
+            return False
+        if embedded_dates and embedded_dates != {bound_date}:
+            return False
+        expected_signature = yearless_bound
     observed_signature = delivery_signature(observed_delivery, observed_date or "")
     observed_total = money_cents(observed.get("total"))
     expected_total = money_cents(summary.get("total"))
