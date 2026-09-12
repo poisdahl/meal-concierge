@@ -408,10 +408,45 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(child["payment_failure"]["order_id"], "order-1")
         self.assertIn("owner_reported_no_vipps_request_after_attempt_at", child)
 
-        fresh = self.call("prepare", recovery=True, order_id="order-1")
+        recorded_at = child["owner_reported_no_vipps_request_after_attempt_at"]
+        replayed = self.app.handle({
+            "operation": "checkout", "action": "reconcile",
+            "confirmation_id": prepared["confirmation_id"],
+            "vipps_request_not_received": True,
+        })
+        self.assertTrue(replayed["recovery_preparation_available"])
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["recovery"]
+            ["owner_reported_no_vipps_request_after_attempt_at"],
+            recorded_at,
+        )
+
+        fresh = self.app.handle({
+            "operation": "checkout", "action": "prepare", "recovery": True,
+        })
         self.assertNotEqual(fresh["confirmation_id"], prepared["confirmation_id"])
         self.assertEqual(fresh["order_id"], "order-1")
+        fresh_child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertTrue(fresh_child["owner_reported_no_vipps_request"])
+        self.assertEqual(fresh_child["original_confirmation_id"], "original")
         self.assertEqual(self.browser.clicks, 0)
+
+        def submit(_cart, _review, before_click, **kwargs):
+            before_click()
+            self.browser.clicks += 1
+            kwargs["before_vipps_request"]({
+                "tab_id": "vipps-tab", "expected_total": 24640,
+                "gateway_url_digest": "a" * 64, "order_id": "order-1",
+            })
+            return {"vipps_request_sent": True}
+
+        self.browser.submit_payment_recovery = submit
+        waiting = self.app.handle({
+            "operation": "checkout", "action": "confirm",
+            "confirmation_id": fresh["confirmation_id"], "dietary_review": [],
+        })
+        self.assertTrue(waiting["payment_request_sent"])
+        self.assertEqual(self.browser.clicks, 1)
 
     def test_owner_no_request_report_cannot_override_dispatch_evidence(self):
         prepared = self.contextless_exact_retry_attempt()
