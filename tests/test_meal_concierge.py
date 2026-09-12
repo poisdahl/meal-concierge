@@ -787,10 +787,50 @@ class CoreTestsBase:
             )["date"],
             "2027-01-02",
         )
+        relative_cart = {
+            "slot_id": 1653997,
+            "display": "Hjemlevering mellom kl 07 og 13, i morgen",
+        }
+        self.assertEqual(
+            oda_cart_delivery_window(relative_cart, today=date(2026, 9, 12)),
+            {"slot_id": 1653997, "date": "2026-09-13", "start": "07:00", "end": "13:00"},
+        )
+        self.assertTrue(
+            retail_cart_delivery_matches_slot(
+                relative_cart,
+                {
+                    "slot_ref": "oda:2026-09-13:1653997",
+                    "provider_slot_id": 1653997,
+                    "start_at": "2026-09-13T05:00:00Z",
+                    "end_at": "2026-09-13T11:00:00Z",
+                    "price_ore": 1900,
+                    "price_kind": "exact",
+                    "selected": True,
+                },
+                today=date(2026, 9, 12),
+            )
+        )
+        local_today = date(2026, 12, 1)
+        self.assertTrue(
+            retail_cart_delivery_matches_slot(
+                {"slot_id": 1, "display": "Hjemlevering mellom kl 07 og 13, i dag"},
+                {
+                    "slot_ref": f"oda:{local_today.isoformat()}:1",
+                    "provider_slot_id": 1,
+                    "start_at": f"{local_today.isoformat()}T06:00:00Z",
+                    "end_at": f"{local_today.isoformat()}T12:00:00Z",
+                    "price_ore": 0,
+                    "price_kind": "exact",
+                    "selected": True,
+                },
+                today=local_today,
+            )
+        )
         for changed in (
             {"slot_id": 1651235, "display": "Wednesday 9 September 04:00-09:00"},
             {"slot_id": "1651235", "display": cart_delivery["display"]},
             {"slot_id": 1651235, "display": "Hjemlevering mellom kl 04 og 09, 31. feb"},
+            {"slot_id": 1653997, "display": "Hjemlevering mellom kl 07 og 13, i overmorgen"},
         ):
             with self.subTest(changed=changed), self.assertRaisesRegex(HouseholdError, "selected cart delivery changed"):
                 oda_cart_delivery_window(changed, today=date(2026, 9, 2))

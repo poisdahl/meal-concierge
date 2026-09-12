@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import fcntl
 import hashlib
 import json
@@ -43,7 +43,8 @@ ODA_EXACT_PRICE = re.compile(r"kr\u00a0(0|[1-9]\d{0,6})")
 ODA_SLOT_REF = re.compile(r"oda:(\d{4}-\d{2}-\d{2}):(0|[1-9]\d*)")
 ODA_CART_DELIVERY = re.compile(
     r"Hjemlevering mellom kl (?P<start>[01]\d|2[0-3]) og (?P<end>[01]\d|2[0-3]), "
-    r"(?P<day>0?[1-9]|[12]\d|3[01])\. (?P<month>jan|feb|mar|apr|mai|jun|jul|aug|sep|okt|nov|des)"
+    r"(?:(?P<relative>i dag|i morgen)|"
+    r"(?P<day>0?[1-9]|[12]\d|3[01])\. (?P<month>jan|feb|mar|apr|mai|jun|jul|aug|sep|okt|nov|des))"
 )
 ODA_MONTHS = {
     name: index for index, name in enumerate(
@@ -100,13 +101,16 @@ def oda_cart_delivery_window(value: Any, *, today: date | None = None) -> dict[s
     if match is None:
         raise HouseholdError("Oda selected cart delivery changed")
     current = today or datetime.now(ZoneInfo("Europe/Oslo")).date()
-    month = ODA_MONTHS[match["month"]]
-    day = int(match["day"])
-    year = current.year + (1 if (month, day) < (current.month, current.day) else 0)
-    try:
-        delivery_date = date(year, month, day)
-    except ValueError as exc:
-        raise HouseholdError("Oda selected cart delivery changed") from exc
+    if match["relative"] is not None:
+        delivery_date = current + timedelta(days=0 if match["relative"] == "i dag" else 1)
+    else:
+        month = ODA_MONTHS[match["month"]]
+        day = int(match["day"])
+        year = current.year + (1 if (month, day) < (current.month, current.day) else 0)
+        try:
+            delivery_date = date(year, month, day)
+        except ValueError as exc:
+            raise HouseholdError("Oda selected cart delivery changed") from exc
     return {
         "slot_id": slot_id,
         "date": delivery_date.isoformat(),
@@ -137,7 +141,16 @@ def retail_cart_delivery_matches_slot(
     end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00")).astimezone(
         ZoneInfo("Europe/Oslo")
     )
-    cart_window = oda_cart_delivery_window(cart_delivery, today=today or start.date())
+    cart_today = today
+    if cart_today is None:
+        display = cart_delivery.get("display") if isinstance(cart_delivery, Mapping) else None
+        parsed_display = ODA_CART_DELIVERY.fullmatch(display) if isinstance(display, str) else None
+        cart_today = (
+            datetime.now(ZoneInfo("Europe/Oslo")).date()
+            if parsed_display is not None and parsed_display["relative"] is not None
+            else start.date()
+        )
+    cart_window = oda_cart_delivery_window(cart_delivery, today=cart_today)
     return (
         cart_window["slot_id"] == slot["provider_slot_id"]
         and cart_window["date"] == start.date().isoformat()
