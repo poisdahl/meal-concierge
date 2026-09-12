@@ -1,11 +1,13 @@
 # Acceptance matrix
 
-The resumed #50 acceptance on 2026-09-08 remains **incomplete**. Earlier
-recovery-assisted addition and UI-prepared delivery results below do not
-demonstrate the complete ordinary product flows. The [current Oda/Mathem
-matrix](oda-mathem-parity.md) records separate live contracts, bounded shared
-fixes, the completed Oda review and failed-addition recovery, and the still-open
-changed-price delivery criterion. Bank reconciliation is outside this acceptance.
+The remaining #50 delivery-price criterion is complete within the separately
+observed provider capabilities. The [current Oda/Mathem matrix](oda-mathem-parity.md)
+records ordinary Oda and MENY same/lower/higher-total changes and Mathem's
+unchanged-total result; Mathem exposed no distinct priced alternative in the
+bounded trial. Owned test orders are cancelled, and the original MENY cart is
+restored. Earlier assisted results remain identified separately, including the
+operator reconciliation required during final cart cleanup. Bank reconciliation
+is outside this acceptance.
 
 The 10 September shared delivery-price candidate replaces the local free-only
 limit with exact original/new full totals and separate payable amounts. All
@@ -14,11 +16,25 @@ lower total; a higher total requires a scoped maximum or one fresh approval.
 Synthetic Application and Oda/Mathem browser checks cover the rule and retained
 journal. **Oda now passes the live same/lower/higher delivery matrix** through
 ordinary installed Bob conversations, with independent merchant readback and
-verified cancellation of the owned test order. Mathem and MENY live acceptance
-remain pending: the new Mathem base payment failed after an actual bank-app
-challenge, and MENY has an existing unrelated cart requiring owner clarification.
-Their original state is preserved; synthetic coverage does not complete those
-provider gates. See the [separate provider evidence and remaining test](oda-mathem-parity.md#shared-final-total-delivery-rule--2026-09-10).
+verified cancellation of the owned test order. **Mathem demonstrates an unchanged
+full total** after one ordinary delivery change and independent merchant readback.
+A second full review was also unchanged; all 231 returned selectable slots
+quoted zero fees, with no distinct priced alternative. Lower/higher full-total
+outcomes were not demonstrated for Mathem. MENY's four-item NOK 545.90 base order
+is confirmed after owner-approved Vipps and a separately reported diagnostic
+restoration of its original receipt page. Its subsequent ordinary delivery change
+to 13 September 10–12 is independently confirmed at the same NOK 545.90 with
+unchanged goods. A subsequent ordinary change to 14 September 08–12 lowered
+the verified full total to NOK 525.90 without another price approval, with
+independent merchant readback and actual order-response/receipt evidence.
+The final ordinary change to 14 September 07–08 raised the full total to
+NOK 545.90 with one explicit +20.00 price approval, one confirmation and
+same-attempt reconciliation. Independent merchant readback and the actual
+order-response/receipt agree on the unchanged goods and new full total.
+**MENY now passes the live same/lower/higher matrix.** Its owned order was
+cancelled once through ordinary tools. Final cart cleanup is verified after
+separate operator reconciliation of a partial cart write and ordinary per-item
+restoration; the original Oda route is restored. See the [separate provider evidence](oda-mathem-parity.md#shared-final-total-delivery-rule--2026-09-10).
 
 On 10 September, installed public `61ca1cb5` completed ordinary Mathem
 failed-addition recovery through actual Hermes, skill, MCP and Application.

@@ -3397,6 +3397,7 @@ class MenyClientTests(unittest.TestCase):
             mock.call("network", "requests", "--clear"),
             mock.call("network", "requests", "--filter", "/api/order/"),
             mock.call("click", '[data-meal-concierge-action="order-items"]'),
+            mock.call("network", "requests", "--filter", "/api/order/"),
             mock.call("network", "request", "order-detail-1"),
         ])
         self.assertEqual(client._sleep.call_args_list, [mock.call(1.5), mock.call(0.25), mock.call(0.25)])
@@ -3408,50 +3409,145 @@ class MenyClientTests(unittest.TestCase):
         self.assertIn("/trumf-profil/nettbutikk/bestilling/", scripts[-1])
         self.assertIn("/profil/nettbutikk/bestilling/", scripts[-1])
 
-    def test_order_details_reload_a_cached_page_and_use_deleted_provider_status(self):
-        client = self.client()
-        client._open = mock.Mock()
-        client._sleep = mock.Mock()
-        ready = {
-            "ready": True,
-            "expand": False,
-            "authenticated": True,
-            "order_number": "99990001",
-            "code": "TEST-CODE-1",
-            "status": "confirmed",
-            "total": 123.45,
-            "delivery": "2. september 2026",
-            "item_count": 1,
-            "products": [{"identity": "Testprodukt", "name": "Testprodukt", "quantity": 1}],
-        }
-        completed = {"requests": [{
-            "requestId": "order-detail-2",
-            "method": "GET",
-            "status": 200,
-            "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001",
-        }]}
-        client._eval = mock.Mock(return_value=ready)
-        client._invoke = mock.Mock(side_effect=[
-            {},
-            *([{"requests": []}] * 4),
-            {},
-            completed,
-            {"responseBody": json.dumps({"status": 99, "statusDescription": "DELETED"})},
-        ])
+    def test_order_details_wait_for_a_late_response_or_reload_cache_and_use_deleted_status(self):
+        for empty_reads, reloaded in ((5, False), (40, True)):
+            with self.subTest(empty_reads=empty_reads, reloaded=reloaded):
+                client = self.client()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                ready = {
+                    "ready": True,
+                    "expand": False,
+                    "authenticated": True,
+                    "order_number": "99990001",
+                    "code": "TEST-CODE-1",
+                    "status": "confirmed",
+                    "total": 123.45,
+                    "delivery": "2. september 2026",
+                    "item_count": 1,
+                    "products": [{"identity": "Testprodukt", "name": "Testprodukt", "quantity": 1}],
+                }
+                completed = {"requests": [{
+                    "requestId": "order-detail-2",
+                    "method": "GET",
+                    "status": 200,
+                    "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001",
+                }]}
+                client._eval = mock.Mock(return_value=ready)
+                client._invoke = mock.Mock(side_effect=[
+                    {},
+                    *([{"requests": []}] * empty_reads),
+                    *([{}] if reloaded else []),
+                    completed,
+                    completed,
+                    {"responseBody": json.dumps({"status": 99, "statusDescription": "DELETED"})},
+                ])
 
-        order = client._get_order("99990001")
+                order = client._get_order("99990001")
 
-        self.assertEqual(order["status"], "cancelled")
-        self.assertEqual(client._invoke.call_args_list, [
-            mock.call("network", "requests", "--clear"),
-            *([mock.call("network", "requests", "--filter", "/api/order/")] * 4),
-            mock.call("reload"),
-            mock.call("network", "requests", "--filter", "/api/order/"),
-            mock.call("network", "request", "order-detail-2"),
-        ])
-        self.assertEqual(client._sleep.call_args_list, [
-            mock.call(0.25), mock.call(0.25), mock.call(0.25), mock.call(0.5), mock.call(1.5),
-        ])
+                self.assertEqual(order["status"], "cancelled")
+                self.assertEqual(client._invoke.call_args_list, [
+                    mock.call("network", "requests", "--clear"),
+                    *([mock.call("network", "requests", "--filter", "/api/order/")] * empty_reads),
+                    *([mock.call("reload")] if reloaded else []),
+                    mock.call("network", "requests", "--filter", "/api/order/"),
+                    mock.call("network", "requests", "--filter", "/api/order/"),
+                    mock.call("network", "request", "order-detail-2"),
+                ])
+                self.assertEqual(client._sleep.call_args_list, [
+                    *([mock.call(0.25)] * (empty_reads - 1 if reloaded else empty_reads)),
+                    *([mock.call(0.5)] if reloaded else []), mock.call(1.5),
+                ])
+
+    def test_order_details_wait_for_latest_response_body_without_using_stale_status(self):
+        old = {"requestId": "old", "method": "GET", "status": 200,
+               "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001"}
+        latest = {**old, "requestId": "latest"}
+        for final_body, succeeds in (({"responseBody": '{"statusDescription":"DELETED"}'}, True),
+                                     ({}, False), ({"responseBody": "invalid"}, False),
+                                     ({"responseBody": "[]"}, False)):
+            with self.subTest(final_body=final_body):
+                client = self.client()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                client._eval = mock.Mock(return_value={
+                    "ready": True, "authenticated": True, "order_number": "99990001",
+                    "code": "TEST-CODE-1", "status": "confirmed", "total": 123.45,
+                    "delivery": "2. september 2026", "item_count": 1,
+                    "products": [{"identity": "Testprodukt", "quantity": 1}],
+                })
+                reads = 0
+
+                def invoke(*args):
+                    nonlocal reads
+                    if args == ("network", "requests", "--clear"):
+                        return {}
+                    if args[:2] == ("network", "requests"):
+                        return {"requests": [old] if reads == 0 else [old, latest]}
+                    if args[:2] == ("network", "request"):
+                        reads += 1
+                        if args[2] == "old":
+                            # The first response is initially unavailable. Once
+                            # a newer request exists, its stale OPEN is unusable.
+                            return {} if reads == 1 else {"responseBody": '{"statusDescription":"OPEN"}'}
+                        return final_body if reads >= 3 else {}
+                    raise AssertionError(args)
+
+                client._invoke = mock.Mock(side_effect=invoke)
+                if succeeds:
+                    self.assertEqual(client._get_order("99990001")["status"], "cancelled")
+                else:
+                    with self.assertRaisesRegex(HouseholdError, "order response changed"):
+                        client._get_order("99990001")
+                body_reads = [call.args[2] for call in client._invoke.call_args_list
+                              if call.args[:2] == ("network", "request")]
+                self.assertEqual(body_reads[0], "old")
+                self.assertTrue(all(value == "latest" for value in body_reads[1:]))
+                self.assertLessEqual(len(body_reads), 8)
+                self.assertFalse(any(call.args[0] == "reload" for call in client._invoke.call_args_list))
+
+    def test_order_details_read_bound_full_total_separately_from_payment_reservation(self):
+        for identity, amount, dom_total, error in (
+            ("99990001", 545.9, None, None),
+            ("99990001", 545.9, 545.9, None),
+            ("99990001", None, None, None),
+            ("99990001", None, 545.9, None),
+            ("99990002", 545.9, None, "different order"),
+            ("99990001", 545.9, 500.0, "response and page"),
+            ("99990001", True, None, "invalid"),
+            ("99990001", 545.901, None, "invalid"),
+            ("99990001", float("inf"), None, "invalid"),
+        ):
+            with self.subTest(identity=identity, amount=amount, dom_total=dom_total):
+                client = self.client()
+                client._open = mock.Mock()
+                client._sleep = mock.Mock()
+                client._eval = mock.Mock(return_value={
+                    "ready": True, "authenticated": True, "order_number": "99990001",
+                    "code": "TEST-CODE-1", "status": "confirmed", "total": 600.0,
+                    "order_total": dom_total, "delivery": "13. september 2026 kl. 08:00-10:00",
+                    "item_count": 1, "products": [{"identity": "Testprodukt", "quantity": 1}],
+                })
+                completed = {"requests": [{"requestId": "current", "method": "GET", "status": 200,
+                    "url": "https://platform-rest-prod.ngdata.no/api/order/store/user/99990001"}]}
+                payload = {"ngOrderId": identity, "statusDescription": "OPEN",
+                           "totals": {"totalGrossAmount": amount, "calculatorTotal": 609.2,
+                                      "totalOfferDiscount": 175, "buffer": 43.8, "totalFees": 67.9},
+                           "payments": [{"reservedAmount": 600.0}]}
+                client._invoke = mock.Mock(side_effect=lambda *args: (
+                    completed if args[:2] == ("network", "requests") else
+                    {"responseBody": json.dumps(payload)} if args[:2] == ("network", "request") else {}
+                ))
+                if error:
+                    with self.assertRaisesRegex(HouseholdError, error):
+                        client._get_order("99990001")
+                else:
+                    order = client._get_order("99990001")
+                    self.assertEqual(order["grossAmount"], 600.0)
+                    if amount is None and dom_total is None:
+                        self.assertNotIn("order_total", order)
+                    else:
+                        self.assertEqual(order["order_total"], 545.9)
 
     def test_order_list_waits_for_the_completed_order_search_before_reading_dom(self):
         client = self.client()
@@ -3530,6 +3626,87 @@ class MenyClientTests(unittest.TestCase):
             mock.call("click", '[data-meal-concierge-action="change-abort-open"]'),
             mock.call("click", '[data-meal-concierge-action="change-abort-final"]'),
         ])
+
+    def test_retained_merchant_edit_can_be_adopted_and_aborted_through_application(self):
+        client = self.client()
+        order = {"orderNumber": "99990001", "code": "TEST-CODE", "status": "confirmed"}
+        client._get_order = mock.Mock(return_value=order)
+        client._verify_order_change = mock.Mock(return_value={"code": "TEST-CODE"})
+        client._sleep = mock.Mock()
+        client._eval = mock.Mock(side_effect=[
+            {"ready": True, "already_editing": True}, {"ready": True}, {"ready": True},
+        ])
+        client._invoke = mock.Mock(return_value={})
+        client.call = mock.Mock(return_value=FakeMeny().cart)
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            app = Application(store, client, None)
+            begun = app.handle({"operation": "orders", "action": "change_begin",
+                                "order_id": "99990001", "delivery_only": True})
+            self.assertTrue(begun["editing"])
+            self.assertEqual(store.read()["order_change"]["before"]["order"], order)
+            aborted = app.handle({"operation": "orders", "action": "change_abort",
+                                  "order_id": "99990001"})
+            self.assertTrue(aborted["aborted"])
+            self.assertEqual(aborted["order"], order)
+            self.assertIsNone(store.read()["order_change"])
+        client._verify_order_change.assert_has_calls([
+            mock.call("99990001", "TEST-CODE"), mock.call("99990001", "TEST-CODE"),
+        ])
+        self.assertEqual(client._invoke.call_args_list, [
+            mock.call("click", '[data-meal-concierge-action="change-abort-open"]'),
+            mock.call("click", '[data-meal-concierge-action="change-abort-final"]'),
+        ])
+
+    def test_retained_edit_with_unverified_cart_never_reopens_or_discards_it(self):
+        client = self.client()
+        client._get_order = mock.Mock(return_value={"code": "TEST-CODE"})
+        client._eval = mock.Mock(return_value={"ready": True, "already_editing": True})
+        client._verify_order_change = mock.Mock(side_effect=HouseholdError("wrong or missing cart edit"))
+        client._invoke = mock.Mock()
+        with self.assertRaisesRegex(HouseholdError, "wrong or missing cart edit"):
+            client.begin_order_change("99990001")
+        client._invoke.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the retained-edit DOM boundary")
+    def test_retained_edit_adoption_requires_one_exact_authenticated_order_control(self):
+        client = self.client()
+        client._get_order = mock.Mock(return_value={"code": "TEST-CODE"})
+        client._eval = mock.Mock(return_value={"ready": False})
+        with self.assertRaises(HouseholdError):
+            client.begin_order_change("99990001")
+        script = client._eval.call_args.args[0]
+        harness = r"""
+const {script,state}=JSON.parse(require('node:fs').readFileSync(0,'utf8')),marked=[];
+const node=(text,disabled=false)=>({innerText:text,disabled,getAttribute:()=>null,
+ getBoundingClientRect:()=>({width:1,height:1}),setAttribute:(k,v)=>marked.push(v)});
+const controls=state.labels.map(t=>node(t,state.disabled===t));
+const main=node('Ordrenummer\n'+state.order);main.querySelectorAll=()=>controls;
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={origin:state.origin,pathname:state.path};
+global.document={querySelectorAll:s=>s==='main'?[main]:s==='button'?
+ [...controls,...Array.from({length:state.auth},()=>node('Brukermeny'))]:[]};
+process.stdout.write(JSON.stringify({snapshot:JSON.parse(eval(script)),marked}));
+"""
+        base = {"labels": ["Avbryt endring"], "order": "99990001", "auth": 1,
+                "origin": "https://meny.no", "path": "/trumf-profil/nettbutikk/bestilling/99990001"}
+        cases = [({}, {"ready": True, "already_editing": True}),
+                 ({"labels": ["Endre"]}, {"ready": True})]
+        cases += [(change, {"ready": False}) for change in [
+            {"labels": []}, {"labels": ["Avbryt endring", "Avbryt endring"]},
+            {"labels": ["Avbryt endring", "Endre"]}, {"disabled": "Avbryt endring"},
+            {"auth": 0}, {"auth": 2}, {"order": "99990002"},
+            {"path": "/trumf-profil/nettbutikk/bestilling/99990002"},
+            {"origin": "https://example.org"},
+        ]]
+        for change, expected in cases:
+            with self.subTest(change=change):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "state": {**base, **change}}),
+                                        text=True, capture_output=True, check=True)
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed["snapshot"], expected)
+                self.assertEqual(observed["marked"], ["change-open"] if change == {"labels": ["Endre"]} else [])
 
     def test_order_list_maps_and_removes_the_private_dom_status_marker(self):
         client = self.client()
@@ -4661,6 +4838,73 @@ process.stdout.write(eval(script));
             mock.call("meny:2026-09-03T07:00/08:00"),
         ])
 
+    def test_delivery_only_review_uses_verified_selection_without_reserving_again(self):
+        client = self.client()
+        client._verify_order_change = mock.Mock()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        client._click_checkout_control = mock.Mock()
+        client._delivery_slots = mock.Mock(return_value={"slots": [normalize_meny_delivery_slot({
+            "slot_id": "3. september klokka 07:00 til 08:00",
+            "date": "2026-09-03",
+            "start": "07:00",
+            "end": "08:00",
+            "display": "3. september klokka 07:00 til 08:00",
+            "selected": True,
+        })]})
+        client._select_delivery_slot = mock.Mock(side_effect=AssertionError("must not reserve again"))
+        original = {"code": "TEST-CODE"}
+        client._get_order = mock.Mock(return_value=original)
+        change = {"order_id": "123", "code": "TEST-CODE", "delivery_only": True,
+                  "requested_delivery": {"slot": deepcopy(client._delivery_slots.return_value["slots"][0])},
+                  "before": {"order": original}}
+        step = {
+            "ready": True,
+            "authenticated": True,
+            "step": 1,
+            "next_enabled": True,
+            "items": [{"product_id": MENY_PRODUCT, "identity": "Brokkoli 400g", "quantity": 1}],
+            "unavailable_items": [],
+            "active_order_change": True,
+        }
+        client._eval = mock.Mock(side_effect=[
+            step,
+            {"unavailable": False, "dismiss": False},
+            {"ready": True, "checked": True},
+            {"ready": True, "lost": False},
+            {
+                "ready": True,
+                "authenticated": True,
+                "vipps_checked": True,
+                "home_delivery": True,
+                "submit_enabled": True,
+                "total": 415.7,
+                "delivery": "torsdag 3. september Kl. 07:00-08:00",
+                "submit_controls": 1,
+            },
+        ])
+        cart = {
+            "items": [{"product_id": MENY_PRODUCT, "name": "Brokkoli", "quantity": 1, "price": 13.9}],
+            "count": 1,
+            "total": 13.9,
+            "delivery": None,
+        }
+
+        review = client._review_checkout(cart, order_change=change)
+
+        self.assertEqual(review["summary"]["delivery"]["display"], "torsdag 3. september Kl. 07:00-08:00")
+        client._delivery_slots.assert_called_once_with()
+        client._select_delivery_slot.assert_not_called()
+        self.assertEqual(review["target_order_id"], "123")
+        self.assertIn("Send oppdatering", client._eval.call_args.args[0])
+        for key, value in (("start_at", "2026-09-03T06:00:00+02:00"), ("price_ore", 100)):
+            with self.subTest(drift=key):
+                drifted = deepcopy(change)
+                drifted["requested_delivery"]["slot"][key] = value
+                with self.assertRaises(HouseholdError):
+                    client._review_checkout(cart, order_change=drifted)
+                client._select_delivery_slot.assert_not_called()
+
     def test_checkout_review_stops_after_two_delivery_reservation_failures(self):
         client = self.client()
         client._delivery_slots = mock.Mock(return_value={"slots": [normalize_meny_delivery_slot({
@@ -4936,7 +5180,7 @@ process.stdout.write(eval(script));
         client._open = lambda url: events.append(("open", url))
         client._review_checkout = lambda cart, **kwargs: events.append(("review_checkout", cart, kwargs)) or deepcopy(review)
         client._require_time = lambda value: events.append(("require_time", value))
-        client._wait_for_vipps_dispatch = lambda *args: events.append(("wait_for_vipps_dispatch", *args))
+        client._wait_for_vipps_dispatch = lambda *args, **kwargs: events.append(("wait_for_vipps_dispatch", *args, kwargs)) or True
         client._click_checkout_submit(
             review,
             lambda: events.append(("before_dispatch",)),
@@ -5169,6 +5413,63 @@ process.stdout.write(eval(script));
         client._sleep.assert_called_once_with(0.25)
         client._complete_vipps_request.assert_called_once_with()
 
+    def test_meny_update_waits_for_delayed_same_order_receipt_without_vipps(self):
+        client = self.client()
+        client._sleep = mock.Mock()
+        client._complete_vipps_request = mock.Mock()
+        client._invoke = mock.Mock(return_value={"requests": [{
+            "method": "POST", "status": 200,
+            "url": "https://platform-rest-prod.ngdata.no/order/1300/7080000000000",
+        }]})
+        client._eval = mock.Mock(side_effect=[
+            {"authenticated": True, "blank": False, "vipps_gateway": False, "order_id": None},
+            {"authenticated": True, "blank": False, "vipps_gateway": False, "order_id": "123"},
+        ])
+        # The caller already holds the non-reentrant browser lock.
+        client.lock.acquire()
+        try:
+            self.assertFalse(client._wait_for_vipps_dispatch(target_order_id="123"))
+        finally:
+            client.lock.release()
+        client._complete_vipps_request.assert_not_called()
+        client._sleep.assert_called_once_with(0.25)
+
+    def test_meny_update_requires_actual_vipps_gateway_for_payment_handoff(self):
+        client = self.client()
+        client._sleep = mock.Mock()
+        client._complete_vipps_request = mock.Mock()
+        client._invoke = mock.Mock(return_value={"requests": [{
+            "method": "POST", "status": 200,
+            "url": "https://platform-rest-prod.ngdata.no/order/1300/7080000000000",
+        }]})
+        client._eval = mock.Mock(side_effect=[
+            {"authenticated": True, "blank": False, "vipps_gateway": False, "order_id": None},
+            {"authenticated": False, "blank": False, "vipps_gateway": True, "order_id": None},
+        ])
+        self.assertTrue(client._wait_for_vipps_dispatch(target_order_id="123"))
+        client._complete_vipps_request.assert_called_once_with()
+        client._sleep.assert_called_once_with(0.25)
+
+    def test_meny_update_post_without_matching_receipt_or_gateway_is_uncertain(self):
+        for observed in (None, "456"):
+            with self.subTest(observed=observed):
+                client = self.client()
+                client._sleep = mock.Mock()
+                client._complete_vipps_request = mock.Mock()
+                client._invoke = mock.Mock(return_value={"requests": [{
+                    "method": "POST", "status": 200,
+                    "url": "https://platform-rest-prod.ngdata.no/order/1300/7080000000000",
+                }]})
+                client._eval = mock.Mock(return_value={
+                    "authenticated": True, "blank": False,
+                    "vipps_gateway": False, "order_id": observed,
+                })
+                with self.assertRaises(HouseholdError) as caught:
+                    client._wait_for_vipps_dispatch(target_order_id="123")
+                self.assertNotIsInstance(caught.exception, CheckoutPreconditionError)
+                client._complete_vipps_request.assert_not_called()
+                self.assertTrue(all(call.args == ("network", "requests") for call in client._invoke.call_args_list))
+
     def test_vipps_dispatch_without_acknowledgement_is_uncertain(self):
         client = self.client()
         client._sleep = mock.Mock()
@@ -5287,6 +5588,93 @@ process.stdout.write(eval(script));
         self.assertIsNone(client.checkout_confirmation_order_id())
         self.assertIn("about:blank", client._eval.call_args.args[0])
 
+    def test_checkout_confirmation_recovers_only_the_same_receipt_without_resubmitting(self):
+        client = self.client()
+        client._locked_operation = mock.MagicMock()
+        client._invoke = mock.Mock()
+        client._sleep = mock.Mock()
+        shell = {"authenticated": False, "order_id": None,
+                 "receipt_url": "https://meny.no/kassen/bekreftelse?orderid=7631908"}
+        client._checkout_confirmation_snapshot = mock.Mock(side_effect=[
+            shell, shell, shell, {**shell, "authenticated": True, "order_id": "7631908"},
+        ])
+
+        self.assertEqual(client.checkout_confirmation_order_id(), "7631908")
+        self.assertEqual(client._invoke.call_args_list, [mock.call("reload")])
+
+    def test_checkout_receipt_reload_does_not_hide_a_real_login_requirement(self):
+        client = self.client()
+        client._locked_operation = mock.MagicMock()
+        client._invoke = mock.Mock()
+        client._sleep = mock.Mock()
+        client._checkout_confirmation_snapshot = mock.Mock(return_value={
+            "authenticated": False, "order_id": None,
+            "receipt_url": "https://meny.no/kassen/bekreftelse?orderid=7631908",
+        })
+
+        with self.assertRaisesRegex(HouseholdError, "login is required"):
+            client.checkout_confirmation_order_id()
+        self.assertEqual(client._invoke.call_args_list, [mock.call("reload")])
+
+    def test_checkout_receipt_reload_stops_when_the_receipt_changes(self):
+        shell = {"authenticated": False, "order_id": None,
+                 "receipt_url": "https://meny.no/kassen/bekreftelse?orderid=7631908"}
+        for changed in [None, "https://meny.no/kassen/bekreftelse?orderid=999"]:
+            for before_reload in [True, False]:
+                with self.subTest(changed=changed, before_reload=before_reload):
+                    client = self.client()
+                    client._locked_operation = mock.MagicMock()
+                    client._invoke = mock.Mock()
+                    client._checkout_confirmation_snapshot = mock.Mock(side_effect=[
+                        shell, *([] if before_reload else [shell]),
+                        {**shell, "receipt_url": changed},
+                    ])
+                    with self.assertRaisesRegex(HouseholdError, "receipt changed"):
+                        client.checkout_confirmation_order_id()
+                    self.assertEqual(client._invoke.call_args_list,
+                                     [] if before_reload else [mock.call("reload")])
+
+    def test_checkout_receipt_keeps_an_authenticated_but_incomplete_receipt_for_reconciliation(self):
+        client = self.client()
+        client._locked_operation = mock.MagicMock()
+        client._invoke = mock.Mock()
+        client._sleep = mock.Mock()
+        client._checkout_confirmation_snapshot = mock.Mock(return_value={
+            "authenticated": True, "order_id": None,
+            "receipt_url": "https://meny.no/kassen/bekreftelse?orderid=7631908",
+        })
+
+        with self.assertRaisesRegex(HouseholdError, "reconcile the same attempt again"):
+            client.checkout_confirmation_order_id()
+        self.assertEqual(client._invoke.call_args_list, [mock.call("reload")])
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes the receipt URL boundary")
+    def test_checkout_receipt_snapshot_requires_one_exact_receipt_identity(self):
+        client = self.client()
+        client._eval = mock.Mock(return_value={})
+        client._checkout_confirmation_snapshot()
+        script = client._eval.call_args.args[0]
+        harness = r"""
+const {script,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=text=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:1,height:1})});
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+global.location={href:url};
+global.document={querySelectorAll:s=>s==='button'?[node('Brukermeny')]:s==='main'?[node('Bestillingen er oppdatert')]:[]};
+process.stdout.write(eval(script));
+"""
+        valid = "https://meny.no/kassen/bekreftelse?orderid=7631908"
+        for url in [valid, valid + "&orderid=7631908", valid + "&other=1", valid + "#x",
+                    valid.replace("7631908", "bad"), valid.replace("meny.no", "example.org"),
+                    "https://meny.no/kassen", "about:blank",
+                    "https://api.vipps.no/dwo-api-application/v1/deeplink/vippsgateway"]:
+            with self.subTest(url=url):
+                result = subprocess.run([shutil.which("node"), "-e", harness],
+                                        input=json.dumps({"script": script, "url": url}),
+                                        text=True, capture_output=True, check=True)
+                snapshot = json.loads(result.stdout)
+                self.assertEqual(snapshot["receipt_url"], valid if url == valid else None)
+                self.assertEqual(snapshot["order_id"], "7631908" if url == valid else None)
+
     def test_checkout_reconcile_keeps_the_vipps_waiting_page_alive(self):
         client = self.client()
         client._locked_operation = mock.MagicMock()
@@ -5352,7 +5740,7 @@ process.stdout.write(eval(script));
         client._review_checkout = mock.Mock(return_value=review)
         client._require_selected_delivery = mock.Mock()
         client._eval = mock.Mock(return_value={"ready": True})
-        client._click_checkout_submit = mock.Mock()
+        client._click_checkout_submit = mock.Mock(return_value=True)
         cart = {"items": [], "delivery": {"display": "torsdag 3. september Kl. 09:00-12:00"}}
         result = client.submit_checkout(cart, review)
         self.assertTrue(result["awaiting_user_payment"])
@@ -5374,6 +5762,18 @@ process.stdout.write(eval(script));
         self.assertIn("deliveryBinding", client._eval.call_args.args[0])
         self.assertNotIn("deliveryRoots", client._eval.call_args.args[0])
 
+    def test_meny_update_submit_returns_receipt_for_ordinary_reconciliation(self):
+        client = self.client()
+        review = self.checkout_review(target_order_id="123", target_order_code="XY-CODE-1")
+        client._review_checkout = mock.Mock(return_value=review)
+        client._require_selected_delivery = mock.Mock()
+        client._eval = mock.Mock(return_value={"ready": True})
+        client._click_checkout_submit = mock.Mock(return_value=False)
+        result = client.submit_checkout({"items": []}, review)
+        self.assertIs(result["awaiting_user_payment"], False)
+        client._click_checkout_submit.assert_called_once()
+        self.assertIn("Send oppdatering", client._eval.call_args.args[0])
+
     def test_vipps_submit_retries_one_transient_disabled_checkout_before_payment(self):
         client = self.client()
         review = self.checkout_review()
@@ -5384,7 +5784,7 @@ process.stdout.write(eval(script));
         ])
         client._reset_checkout_review = mock.Mock()
         client._eval = mock.Mock(return_value={"ready": True})
-        client._click_checkout_submit = mock.Mock()
+        client._click_checkout_submit = mock.Mock(return_value=True)
 
         result = client.submit_checkout({"items": [], "delivery": review["summary"]["delivery"]}, review)
 
@@ -6160,6 +6560,53 @@ class FlowTests(unittest.TestCase):
                     "changes": {"enabled": True, "maximum_total": 1000, "delivery": {"weekday": "Saturday"}, "auto_checkout": True},
                 })
             self.assertFalse(store.read()["schedule"]["auto_checkout"])
+
+    def test_meny_receipt_identity_survives_read_failure_and_restart_without_repayment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = {**CONFIG, "provider": "meny"}
+            store = StateStore(Path(temp), config)
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            app.handle({"operation": "checkout", "action": "confirm",
+                        "confirmation_id": prepared["confirmation_id"]})
+            order = {"orderNumber": "99990002", "order_number": "99990002", "id": "99990002",
+                     "status": "confirmed", "grossAmount": 40.0,
+                     "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                     "productQuantityCount": 1,
+                     "products": [{"identity": "Brokkoli 400g", "quantity": 1}]}
+            provider.orders.append(order)
+            provider.confirmation_order_id = "99990002"
+            original_call = provider.call
+
+            def read_failure(tool, arguments, **kwargs):
+                # The order-list read already leaves the receipt page.
+                provider.confirmation_order_id = None
+                if tool == "get_order":
+                    raise HouseholdError("MENY browser order response changed")
+                return original_call(tool, arguments, **kwargs)
+
+            provider.call = read_failure
+            request = {"operation": "checkout", "action": "reconcile",
+                       "confirmation_id": prepared["confirmation_id"]}
+            with self.assertRaisesRegex(HouseholdError, "order response changed"):
+                app.handle(request)
+            self.assertEqual(store.read()["pending_checkout"]["meny_confirmation_order_id"], "99990002")
+            provider.call = original_call
+            app = Application(StateStore(Path(temp), config), provider, self.browser)
+            provider.confirmation_order_id = "99990003"
+            retained = deepcopy(store.read()["pending_checkout"])
+            with self.assertRaisesRegex(HouseholdError, "confirmation changed"):
+                app.handle(request)
+            self.assertEqual(store.read()["pending_checkout"], retained)
+            provider.confirmation_order_id = None
+            order["grossAmount"] = 41.0
+            self.assertFalse(app.handle(request)["confirmed"])
+            self.assertIsNotNone(store.read()["pending_checkout"])
+            order["grossAmount"] = 40.0
+            self.assertTrue(app.handle(request)["confirmed"])
+            self.assertIsNone(store.read()["pending_checkout"])
+            self.assertEqual(provider.checkout_clicks, 1)
 
     def test_standing_authorization_submits_meny_without_a_second_agent_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -8608,6 +9055,63 @@ class DeliveryPriceAuthorizationTests(unittest.TestCase):
             browser.confirmation_order_id = shop.orders[0]['orderNumber']
             result = app.handle({'operation': 'checkout', 'action': 'reconcile', 'confirmation_id': prepared['confirmation_id']})
         return result
+
+    def test_meny_direct_update_receipt_reconciles_same_order_once(self):
+        with self.flow('meny', 'standing', 10000) as (app, store, shop, browser):
+            prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+
+            def immediate_receipt(cart, review, before_click=None, **kwargs):
+                if before_click:
+                    before_click()
+                shop.checkout_clicks += 1
+                shop.orders[0].update(deliverySlotDisplay=review['summary']['delivery']['display'])
+                shop.confirmation_order_id = shop.orders[0]['orderNumber']
+                return {'awaiting_user_payment': False, 'payment': 'vipps'}
+
+            shop.submit_checkout = immediate_receipt
+            request = {'operation': 'checkout', 'action': 'confirm',
+                       'confirmation_id': prepared['confirmation_id']}
+            result = app.handle(request)
+            self.assertTrue(result['confirmed'])
+            self.assertEqual(result['order_id'], '99990001')
+            self.assertIsNone(store.read()['pending_checkout'])
+            self.assertIsNone(store.read()['order_change'])
+            replay = app.handle(request)
+            self.assertTrue(replay['confirmed'])
+            self.assertEqual(replay['order_id'], result['order_id'])
+            self.assertEqual(replay['confirmation_id'], result['confirmation_id'])
+            self.assertEqual(shop.checkout_clicks, 1)
+
+    def test_meny_delivery_receipt_identity_survives_failed_read_and_restart(self):
+        with self.flow('meny', 'standing', 9000) as (app, store, shop, browser):
+            prepared = app.handle({'operation': 'checkout', 'action': 'prepare'})
+            result = app.handle({'operation': 'checkout', 'action': 'confirm',
+                                 'confirmation_id': prepared['confirmation_id']})
+            self.assertTrue(result['awaiting_user_payment'])
+            shop.orders[0].update(order_total=90, grossAmount=90,
+                                  deliverySlotDisplay=prepared['summary']['delivery']['display'])
+            browser.confirmation_order_id = shop.orders[0]['orderNumber']
+            original_call = shop.call
+
+            def read_failure(tool, arguments, **kwargs):
+                browser.confirmation_order_id = None
+                if tool == 'get_order':
+                    raise HouseholdError('MENY browser order response changed')
+                return original_call(tool, arguments, **kwargs)
+
+            shop.call = read_failure
+            request = {'operation': 'checkout', 'action': 'reconcile',
+                       'confirmation_id': prepared['confirmation_id']}
+            with self.assertRaisesRegex(HouseholdError, 'order response changed'):
+                app.handle(request)
+            self.assertEqual(store.read()['pending_checkout']['meny_confirmation_order_id'], '99990001')
+            shop.call = original_call
+            restarted = Application(StateStore(store.directory, store.config), shop, browser)
+            restarted._now = app._now
+            self.assertTrue(restarted.handle(request)['confirmed'])
+            self.assertIsNone(store.read()['pending_checkout'])
+            self.assertIsNone(store.read()['order_change'])
+            self.assertEqual(browser.checkout_clicks, 1)
 
     def test_same_lower_and_higher_totals_share_one_rule_for_all_three_providers(self):
         for provider in ('oda', 'mathem', 'meny'):

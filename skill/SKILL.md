@@ -126,9 +126,10 @@ includes this distinction. Missing original target evidence preserves the
 uncertain attempt for reconciliation. If the owner completes payment manually,
 reconcile it and attribute that payment to the owner.
 
-If a Mathem addition recovery itself fails, another review is available only
+If a Mathem new-order or addition recovery itself fails, another review is available only
 when reconciliation positively verifies that current attempt's own terminal
-failure for the same order/change and unchanged paid base. Use the returned
+failure for the same order and unchanged reviewed goods/total; an addition also
+requires the original change and unchanged paid base. Use the returned
 `recovery_preparation_available`, then prepare a fresh recovery and review its
 new confirmation and notice. The failed confirmation remains failed and cannot
 act on a newer payment. Missing observation, timeout or user absence never
@@ -680,7 +681,9 @@ difference and new total and ask once. After that approval, confirm its unchange
 `confirmation_id` with `delivery_price_approved=true`. Without an increase or
 within the bound limit, confirm the fresh review without another question.
 Changed goods/account/order or stale review stop; reprepare changed amounts.
-MENY retains its full-order checkout and phone approval. Keep every uncertain
+MENY retains its full-order review. An actual Vipps request requires phone
+approval; an existing-order update may instead return an authenticated receipt
+directly. Use the actual result, not the submit caption. Keep every uncertain
 submission under its original confirmation/key and reconcile without another
 dispatch. Do not reselect an uncertain window.
 
@@ -698,8 +701,8 @@ and reconciliation. If an older uncertain operation lacks this evidence, retain
 it and report the missing binding; never rewrite the journal or substitute the
 currently selected account. A new review is appropriate only before dispatch.
 
-MENY still requires approval of its actual payment request through Vipps on the
-user's phone.
+An actual MENY payment request through Vipps requires approval on the user's
+phone.
 Keep that attempt for reconciliation. Only an explicit no-dispatch result with
 safe fresh-prepare instructions permits one new standing-authorized submit.
 A confirmed expired delivery reservation can be renewed once with the same exact

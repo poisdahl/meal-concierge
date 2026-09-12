@@ -1,10 +1,14 @@
-# Oda and Mathem: current evidence and open ordinary flows
+# Oda, Mathem and MENY: ordinary flow evidence
 
-As of 2026-09-10, #50 is **incomplete for ordinary end-to-end parity**. Its earlier
-closure accepted a recovery-assisted addition and a UI-prepared free delivery
-change. Those results remain valid within that scope; neither demonstrates the
-whole product sequence requested in the resumed acceptance. Bank reconciliation
-is outside this work and is not a completion gate.
+As of 12 September 2026 (Europe/Oslo), the remaining #50 recovery and delivery
+criteria are complete within the separately observed provider capabilities.
+Oda and MENY passed ordinary same/lower/higher-total delivery changes. Mathem
+passed unchanged-total delivery; its bounded slot reviews exposed no priced
+alternative, so lower/higher live outcomes remain unavailable rather than
+claimed. Owned-order cleanup is verified. The final MENY cart restoration needed
+separate operator reconciliation before ordinary per-item restoration, as
+recorded below. Earlier assisted results retain their original scope. Bank
+reconciliation is outside this work and is not a completion gate.
 
 ## Ordinary Mathem failed-addition recovery — 2026-09-10
 
@@ -41,8 +45,8 @@ of only this test order once. Independent merchant reads confirmed `cancelled`,
 an empty cart, both notices acknowledged and no pending checkout, cart change,
 order change or cancellation. The reads preserved the full product state.
 No bank settlement, refund or authorization release is inferred from the
-merchant result. The separate changed-delivery-price criterion
-remains open; earlier ordinary Oda recovery and #60 acceptance are unchanged.
+merchant result. At that checkpoint, the separate changed-delivery-price criterion
+remained open; earlier ordinary Oda recovery and #60 acceptance are unchanged.
 
 ## Paired payment investigation and bank approval — 2026-09-10
 
@@ -372,9 +376,9 @@ The earlier 18 CI errors were fixed by using the household timezone in test
 fixtures, with all 18 reproduced as passing under UTC while Oslo's date differed.
 Production scheduler behavior and CI configuration were unchanged.
 
-The bounded #60 review criterion is complete. Following the ordinary recovery
-recorded above, #50 remains open for provider-independent same/lower/higher-final-total
-delivery-change acceptance. This earlier review adds no payment or delivery-change authority.
+The bounded #60 review criterion is complete. At that checkpoint, #50 still
+awaited provider-independent same/lower/higher-final-total delivery acceptance,
+which is recorded in the later provider-specific trials below. This earlier review adds no payment or delivery-change authority.
 
 ## Failed-payment recovery audit — 2026-09-09
 
@@ -672,19 +676,65 @@ restored the original Vipps preference through ordinary setup. An independent
 merchant read confirmed cancellation and no protected pending operation remained
 (proof SHA256 `3c4dde3d4845bc30b754f052679369c723055be41b65c6c63f620207aa75ce87`).
 Merchant adjustments and cancellation do not establish bank settlement, refund
-or reservation release. Current Mathem and MENY delivery outcomes remain pending.
+or reservation release. Separate Mathem and MENY results follow below.
 
-#### Remaining Mathem and MENY delivery trials
+#### Mathem and MENY delivery trials
 
 A new ordinary Bob/Mathem test prepared one 500 g pasta package at SEK 124.50
 for 12 September 06–11 and dispatched its original payment once. The provider
 presented a Bank Norwegian challenge; Bob selected the app method once.
 Same-attempt reconciliation later positively identified payment failure and the
-same unpaid order, with supported recovery preparation available. The cause of
-failure is not established. No recovery payment has been sent, and the original
-pending attempt remains preserved while owner bank-app participation is awaited.
-This does not demonstrate a delivery change. Current zero-price slot quotes
-alone do not establish availability of equal/lower/higher final-order totals.
+same unpaid order, with supported recovery preparation available. Owner-authorized
+ordinary recoveries then each reached an actual app challenge and later positively
+failed on that same order. The cause of each bank failure is not established.
+A defect excluded new-order recovery children from late-failure observation;
+the repair now binds each child's own terminal failure to its exact unpaid order,
+unchanged goods, full total, account and delivery before permitting a fresh review.
+The focused 43-test recovery suite passes, including unknown status, wrong-order
+failure, restart and historical replay. One isolated Application reconciliation
+preserved the native failure page during deployment; that bridge is technical
+evidence, not an ordinary acceptance result. Subsequent installed Bob
+reconciliation demonstrated the repaired failure path. The latest owner-ready
+fresh preparation stopped before dispatch because the merchant changed its date
+label to “Imorgon” after Stockholm midnight. A separate pure read proved that
+URL, account/address, saved card, SEK 124.50 total and final control all matched;
+only the numeric-date parser rejected the relative label. The repaired shared
+matcher resolves one observed today/tomorrow label using the provider's local
+date, rejecting mixed/duplicate dates and changed times. All 86 Mathem checks
+pass, including midnight, year and leap-day transitions. Existing numeric-date
+and year-matching semantics are unchanged. The failed history remains preserved. Following the repaired fresh review,
+ordinary Bob confirmed one new recovery and selected the app method once. The
+owner-requested Signal alert was sent once through Bob's existing exact sender,
+with a returned message timestamp. The owner then approved, and an independent
+installed order read reported paid-and-modifiable, one package and SEK 124.50
+(proof SHA256 `56ef0cab36e9b3ff3d01e8bfe5cd337b7f2ea17439a23f57b9b0229cc0d262ad`).
+Ordinary reconciliation then confirmed that same order. A requested delivery
+selection still stored the relative merchant label; deriving its stable display
+from the already verified, offset-aware slot corrected this second boundary.
+Ordinary Bob reselected 12 September 07–09, reviewed original/new totals of
+SEK 124.50 and zero payable, and confirmed once without a price limit or extra
+price approval. Same-attempt reconciliation and an independent merchant read
+confirmed the changed window, unchanged goods and paid/modifiable status
+(proof SHA256 `0c0c712c364023d4a7ae77adc213c5ec0dcbf031639af2ae31e4491d73b5dad9`).
+A second ordinary full review for 09–11 also returned SEK 124.50 and zero payable;
+it was not submitted. Across 11–24 September, all 231 returned selectable slots
+quoted an exact zero delivery fee; no distinct priced alternative was returned.
+Mathem therefore demonstrates an unchanged full total. Lower/higher full-total
+outcomes were not demonstrated; the quote observations are not 231 full-order
+reviews or a claim that other prices are globally unavailable.
+The first cancellation review then incorrectly reported unavailable because the
+receipt used “Imorgon”; a read-only check showed the matching order/total and an
+enabled cancellation button within its reported deadline. Cancellation now uses
+the same provider-local date reader, retaining its required bound delivery and
+all total, order and final-control checks. The repaired ordinary conversation
+prepared cancellation, confirmed once and read the same cancelled order. A
+separate installed read independently confirmed cancellation with no pending
+operation (proof SHA256 `65ba66e31a3bdd157f6b3f922ba4b6f92531475f5ca43e0b525858d447cb427e`).
+Other provider journals remained unchanged. A further read-only audit found an
+empty cart, no pending operations, all 29 notices sent, and five pre-existing
+order entries unchanged. Address and unattended-delivery settings also matched
+the initial empty cart. Its unused 12 September 09–11 cart selection remained;
+the initial cart had no selected window. Payment release/refund was not established.
 
 The retained MENY setup was temporarily selected after Oda cleanup. Direct
 browser egress returned a blocked page. Using the existing approved Bob proxy
@@ -695,14 +745,176 @@ cart, order, delivery and catalog reads then succeeded with native CLI exit 0,
 and all three provider state files remained unchanged. The readiness proof
 SHA256 is `7edabf020e251ae3b979a492c375aedcd4dc8e47baa44175b7d00f1806977907`.
 
-MENY contained an existing five-line cart belonging to earlier work and no
-upcoming modifiable order. That cart was preserved without a test checkout;
-owner clarification is required before using it for the trial. The 13 September
-windows displayed “from 0 kr”, which does not verify final delivery fees or
-changed-order totals. No MENY delivery outcome is claimed. The original Oda
-provider configuration and service route are restored after the bounded probe.
-Both remaining provider gates keep #50 open; completed payment recovery and the
-Oda delivery matrix are retained.
+After that probe restored Oda, the owner explicitly authorized the existing
+five-line MENY cart for the full trial. The retained MENY route was selected
+again with the same dedicated profile and approved proxy. Ordinary Bob selected
+13 September 08–10 once and verified it, then used the digest-bound `keep_current`
+path for the five unchanged quantities. The saved menu and recipe usage were
+preserved. The selected slot's “from 0 kr” label does not establish the final fee.
+Checkout preparation first stopped with `MENY checkout control changed`; one
+further preparation stopped with `MENY payment page did not finish rendering`.
+A separate current-page read found the payment-information heading but no Vipps
+control. The loaded public checkout code confirms that Aera card-storage terms
+indicate Card selection and that “Til betaling” submits the order before opening
+the payment page; it is not a safe navigation step for finding Vipps. A later
+ordinary preparation succeeded: NOK 599.90, five unchanged quantities, the
+selected delivery and Vipps. Passive observation saw the merchant's native
+payment-options responses succeed with Card, Invoice and Vipps; the earlier
+missing control's cause remains unproven. Bob declined confirmation on the
+known lamb exclusion, with no tool call or payment in either confirmation turn.
+The test was therefore reduced to the four remaining existing lines. Ordinary
+cart get/change/get verified only the lamb removal. The owner separately accepted
+the four products' reported ingredient/dietary uncertainty. Fresh preparation
+returned NOK 545.90 and Vipps. A changed control and an expired delivery
+reservation stopped before dispatch; a later actual Vipps handoff expired and
+was reconciled before the owner requested one new attempt. The owner approved
+that new handoff. Its receipt read failed after navigation, losing the transient
+confirmed order ID. The repair persists only the exact authenticated receipt
+identity before navigation and reads the latest completed, matching order
+response; malformed responses remain errors. For this base order only, a
+separate diagnostic restored its original authenticated receipt URL from the
+dedicated browser history, without repeating payment or editing the journal.
+Ordinary same-attempt reconciliation then confirmed the exact four-item order.
+This assisted base-order restoration is separate from delivery acceptance.
+
+The receipt DOM showed a reservation but no full-total label. The exact provider
+order response supplied `totals.totalGrossAmount`; the reader now binds that
+amount to the same `ngOrderId`, retaining reservation reporting separately and
+rejecting a conflicting visible full total. An independent installed order read
+verified NOK 545.90, the four unchanged quantities and 13 September 08–10
+(proof SHA256 `f9f666ac5d5574be7ab60c5510919331200c6d4d7a3ec013746868b738640596`).
+Ordinary delivery listing returned 68 unique selectable windows for
+13–19 September, all with **from** zero quotes. Those minimum prices do not
+establish zero fees or exclude lower/higher full totals. Two ordinary preparations for 13 September 10–12 stopped before payment.
+Although selection had verified that window, the cart omitted its time and
+preparation redundantly tried a temporary alternative reservation. Passive DOM
+observation showed the selected window and enabled keep control, followed by a
+closed picker before the expected confirmation. Delivery-only review now compares
+the fresh normalized selection against the frozen requested slot and reuses it;
+window drift and actual reservation expiry still stop checkout. The next
+preparation passed that step but gave up before a valid exact-order response
+arrived. The existing two-phase read now waits up to 40 polls per phase, retaining
+one reload and all exact-response, latest-body, identity, status and amount checks.
+The subsequent prepare verified the selected window and NOK 545.90, but stopped
+before submission because an existing-order checkout uses **Send oppdatering**.
+Passive authenticated DOM inspection and the public frontend establish that this
+control submits the bound existing order; its response may open payment or return
+an order directly. The control caption alone does not prove that mobile approval
+is unnecessary (private evidence SHA256
+`9df748326a819a9ae362d1536b5e9d306680b1706408b02e18abd1ad4f8f1f29`).
+The installed repair binds all four final-control/recovery selectors to the
+existing order and accepts an actual authenticated same-order receipt or actual
+Vipps gateway, preserving the existing dispatch fence and reconciliation. It does
+not treat the shared order POST as proof of a payment redirect.
+
+On 11 September, ordinary Bob preparation for 13 September 10–12 showed original
+and new full totals of NOK 545.90, difference zero and no new price approval.
+One confirmation, same-attempt reconciliation and exact-order read confirmed the
+change (native CLI 0, stdout SHA256
+`018ef418bab52e8da42444e7c7e712394d4ca52be1c67e1045841e38a14c00c1`).
+A separate installed merchant read verified that window, full total and unchanged
+products/all other order fields (SHA256
+`af86d3f26a2597ac5b6d31cfe9b1c70e0725f3a5e459fa84c9a381e38ec16431`).
+The review's payable field was the full NOK 545.90; it is not evidence of a new
+charge. This update returned no new Vipps handoff. A bounded passive observer
+ended before confirmation and captured no order POST/receipt; that missing
+capture is not used as proof.
+
+The next ordinary change selected 14 September 08–12. Full review showed
+NOK 545.90 → 525.90 (−20.00), with no maximum or new approval required. Bob
+confirmed once, reconciled the same attempt and read the exact order again
+(native CLI 0, stdout SHA256
+`a8617f871aff5c0e1bddc2b22993b747b7eb801f722a8e38e5b1ad97f61b2683`).
+The separate merchant read matched the native frozen review and confirmed
+NOK 525.90, the requested window and every unchanged product/quantity (SHA256
+`546b51c29c0c36231cfb7fd15defe8e378f931f62c9df9bfe0c17f2489bb7a1d`).
+A separate passive observer captured the actual successful order POST with
+that exact owned order/full total, no redirect, and then its authenticated
+receipt; it stopped itself after capture (SHA256
+`7c98e8c63e4859b7fbbd4ae938d933fa32de7707333e457da86e0e2ca4cd97c4`).
+This demonstrates a merchant order-price decrease, without establishing refund
+or bank settlement.
+
+The first narrow-window review for 14 September 07–08 returned NOK 525.90 →
+545.90 (+20.00), with no maximum and an explicit price approval required. After
+one approval under the owner's full test authorization, one ordinary confirmation
+sent the update. The successful same-order response contained NOK 545.90 and
+no redirect, but the receipt remained an unauthenticated empty shell. Ordinary
+same-attempt reconciliation correctly stopped on its login requirement. One
+separately reviewed diagnostic reload of that exact receipt restored its
+authenticated confirmation without login, payment or journal edits. Ordinary
+reconciliation and a separate merchant read then confirmed the requested window,
+NOK 545.90 and unchanged products (proof SHA256
+`9d786df1b25dd2818e1f12d7170a5ee82e6687ea36a64218063b2d16d4707ec0`).
+This first higher result is assisted evidence and does not establish ordinary
+higher-price acceptance.
+
+The native receipt reader now permits one bounded reload of the same exact
+MENY receipt URL during reconciliation. It still requires authentication and
+confirmation text, rejects changed or malformed receipt identities, and preserves
+the uncertain attempt and receipt when rendering remains incomplete. It never
+reloads checkout or a payment callback. Five focused tests include execution of
+the actual URL extractor; all 377 core checks pass. A fresh ordinary lower-price
+trial initially failed during preparation before any confirmation existed. One
+fresh review of the retained selection then returned NOK 545.90 → 525.90 without
+new price approval. Ordinary confirmation, reconciliation and independent
+merchant readback verified 14 September 08–12 and every unchanged product
+(proof SHA256 `7eac0ff0752f138628bdc2597d7a21aa8c73231bc5171cc32c2513a8bd95ae46`).
+A passive observer separately captured its successful same-order response and
+authenticated receipt (SHA256
+`77289b12e1798caa82c43373c8a09a23c4b682a6b7b8530042eb5decc33db75a`).
+The fresh higher-price review returned NOK 525.90 → 545.90 (+20.00), with no
+stored maximum and `confirmation_required=true`. An earlier stale-selection
+check stopped before dispatch. A later uncertain selection was resolved through
+an ordinary list read, without repeating it. An unrelated host reboot then
+interrupted the fresh review before any confirmation call; the durable journal
+remained `awaiting_confirmation`. Restoring the same reviewed service preserved
+all journals, profiles and configuration and involved no browser assistance.
+Bob confirmed that still-valid review once under the exact +20.00 approval,
+reconciled the same attempt and read the owned order (native CLI 0, stdout SHA256
+`ea1d75497005c04f639aa8854c7f4123171b324360deec4596cd19c63a0785af`).
+The independent merchant read matched the review, NOK 545.90, 14 September
+07–08 and every unchanged product/quantity (SHA256
+`b1ce69f549dc95be970bf0260813507d898e41f68e28bc2ad199e181878819de`).
+A passive observer captured exactly one successful same-order POST and its
+authenticated receipt, with an empty redirect and no Vipps gateway (SHA256
+`f17c9b20d11e239d47315b0ab489c7b98a6a3de6b152f3a0e2b079e85bdca9cf`).
+This completes ordinary MENY same/lower/higher-total delivery acceptance; it
+does not establish a new bank charge or refund.
+
+Final cleanup on 12 September (Europe/Oslo) first exposed an already-active
+merchant edit after checkout had cleared the local edit journal. The bounded
+repair adopts that edit only after verifying the exact authenticated order and
+cart code. Ordinary `change_begin` then `change_abort` ended it without changing
+the confirmed order. Ordinary cancellation used one fresh prepare, one confirm
+and same-attempt reconciliation; an independent order read verified cancellation.
+
+Cart restoration stopped after a partially applied two-item batch: lamb was
+added, salmon was absent, and the subsequent carrot addition was not dispatched.
+The unresolved batch was not replayed. Separate operator reconciliation verified
+completed, uncached HTTP 200 cart-sync and calculator responses, three stable
+cart reads and the same exact three variants. It archived the original pending
+journal, recorded only the observed addition, marked the local cart plan for
+review and cleared only that matched pending operation. This is assisted cleanup,
+not ordinary cart-recovery acceptance. Two subsequent ordinary `ensure` calls
+restored salmon and carrot separately. Independent reads verified all five
+original variants at quantity one, no extra variants and no pending operation
+(final-cart proof SHA256
+`76f8270a67f950a8c8c0ce81d699f885e84f44b6b85878366a13e6280ea6bd46`).
+
+The original Oda route was restored with all current provider journals preserved.
+Its first verification stopped on environment-list ordering; a separate read-only
+check confirmed identical environment mappings, healthy Oda RPC, all 155 original
+source files and unchanged other containers. The later owner-selected Bob model
+was preserved. Both independent code reviews approved the final implementation;
+1,390 standalone tests passed with nine optional macOS skips, and the real MCP
+SDK/stdio/socket, reconnect and interrupted-dispatch checks passed.
+
+Repeated ordinary Bob MCP startups also exposed actual cancellations at the
+configured ten-second connection timeout. Increasing only that connection timeout
+to thirty seconds restored native tool discovery without a Hermes code change or
+restart. Completed failed-addition recovery and the Oda delivery matrix are
+retained.
 
 ### Earlier ordinary acceptance — 2026-09-08
 
