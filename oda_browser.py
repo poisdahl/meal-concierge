@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+import base64
 import calendar
 import hashlib
 import json
@@ -12,8 +13,10 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -110,6 +113,26 @@ def oda_checkout_pay_request_id(value: Any) -> str:
     return matches[0]
 
 
+def _oda_https_gateway_url(value: Any) -> str:
+    """Return one absolute HTTPS payment URL without embedded credentials."""
+
+    try:
+        parsed_gateway = urlsplit(value) if isinstance(value, str) else None
+        gateway_hostname = parsed_gateway.hostname if parsed_gateway is not None else None
+    except ValueError:
+        parsed_gateway = None
+        gateway_hostname = None
+    if (
+        parsed_gateway is None
+        or parsed_gateway.scheme != "https"
+        or gateway_hostname is None
+        or parsed_gateway.username is not None
+        or parsed_gateway.password is not None
+    ):
+        raise HouseholdError("Oda checkout payment response changed; do not send payment")
+    return value
+
+
 def _oda_checkout_pay_redirect(value: Any) -> tuple[str, str]:
     """Return the exact HTTPS Vipps redirect and order from Oda's pay response."""
     if not isinstance(value, Mapping) or not isinstance(value.get("responseBody"), str):
@@ -121,25 +144,14 @@ def _oda_checkout_pay_redirect(value: Any) -> tuple[str, str]:
     params = payload.get("params") if isinstance(payload, Mapping) else None
     order_id = params.get("orderNumber") if isinstance(params, Mapping) else None
     gateway_url = payload.get("url") if isinstance(payload, Mapping) else None
-    try:
-        parsed_gateway = urlsplit(gateway_url) if isinstance(gateway_url, str) else None
-        gateway_hostname = parsed_gateway.hostname if parsed_gateway is not None else None
-    except ValueError:
-        parsed_gateway = None
-        gateway_hostname = None
     if (
         not isinstance(payload, Mapping)
         or payload.get("type") != "payments-providers-vipps"
-        or parsed_gateway is None
-        or parsed_gateway.scheme != "https"
-        or gateway_hostname is None
-        or parsed_gateway.username is not None
-        or parsed_gateway.password is not None
         or not isinstance(order_id, str)
         or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", order_id) is None
     ):
         raise HouseholdError("Oda checkout payment response changed; do not send payment")
-    return gateway_url, order_id
+    return _oda_https_gateway_url(gateway_url), order_id
 
 
 def oda_checkout_pay_order_id(value: Any, gateway_url: str) -> str:
@@ -149,6 +161,52 @@ def oda_checkout_pay_order_id(value: Any, gateway_url: str) -> str:
     if observed_url != gateway_url:
         raise HouseholdError("Oda checkout payment response changed; do not send payment")
     return order_id
+
+
+def _oda_checkout_pay_har_response(value: Any) -> dict[str, str]:
+    """Return the one successful Oda pay body captured around the exact click."""
+
+    log = value.get("log") if isinstance(value, Mapping) else None
+    entries = log.get("entries") if isinstance(log, Mapping) else None
+    if not isinstance(entries, list):
+        raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+    matches = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+        request = entry.get("request")
+        response = entry.get("response")
+        if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+            raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+        parsed = urlsplit(str(request.get("url") or ""))
+        if not (
+            str(request.get("method") or "").upper() == "POST"
+            and parsed.scheme == "https"
+            and parsed.netloc == "oda.com"
+            and re.fullmatch(r"/(?:no/)?api/v1/checkout/pay/", parsed.path) is not None
+            and not parsed.query
+            and not parsed.fragment
+        ):
+            continue
+        matches.append((request, response))
+    if len(matches) != 1:
+        raise HouseholdError("Oda checkout payment capture is missing or ambiguous; do not send payment")
+    _, response = matches[0]
+    status = response.get("status")
+    if (isinstance(status, bool) or not isinstance(status, int)
+            or not 200 <= status < 300):
+        raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+    content = response.get("content")
+    text = content.get("text") if isinstance(content, Mapping) else None
+    encoding = content.get("encoding") if isinstance(content, Mapping) else None
+    if not isinstance(text, str) or encoding not in {None, "", "base64"}:
+        raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+    if encoding == "base64":
+        try:
+            text = base64.b64decode(text, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HouseholdError("Oda checkout payment capture changed; do not send payment") from exc
+    return {"responseBody": text}
 
 
 def oda_checkout_amount_minor(label: Any, amount_text: Any, *, provider: str = "oda") -> int:
@@ -1172,6 +1230,8 @@ class OdaBrowser:
                 self._require_checkout_time(FINAL_CLICK_MARGIN)
                 dispatch_tab = self._checkout_dispatch_tab()
                 vipps = review["payment_choice"]["method"] == "vipps"
+                if vipps and dispatch_tab is None:
+                    raise HouseholdError("The Oda/Vipps payment tab is unavailable; do not send payment")
                 if vipps:
                     self._invoke("network", "requests", "--clear")
                 before_click()
@@ -1195,13 +1255,25 @@ class OdaBrowser:
                           + "if(JSON.stringify(canonical(actual))!==JSON.stringify(canonical(expected)))return JSON.stringify({clicked:false});return " + click + ";})()")
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
-            if self._eval(script) != {"clicked": True}:
+            payment_capture = self._start_oda_vipps_capture() if vipps else None
+            try:
+                clicked = self._eval(script)
+            except Exception:
+                if payment_capture is not None:
+                    self._discard_oda_vipps_capture(payment_capture)
+                raise
+            if clicked != {"clicked": True}:
+                if payment_capture is not None:
+                    self._discard_oda_vipps_capture(payment_capture)
                 raise CheckoutPreconditionError("Recovery changed before the final payment click")
             return self._capture_checkout_payment(dispatch_tab,
+                order_id=(review["order_id"] if vipps else None),
                 authentication_expected=review["payment_choice"]["method"] == "saved_card",
                 capture_failure=False,
                 vipps_expected_total=(expected["total_minor"]
                                       if vipps else None),
+                vipps_payment_capture=payment_capture,
+                vipps_source_url=(review["surface"]["url"] if vipps else None),
                 before_vipps_request=before_vipps_request)
 
     def _order_cart(self, cart, order_id, order, binding):
@@ -1789,34 +1861,109 @@ class OdaBrowser:
                     process.kill()
                 process.wait()
 
-    def _complete_oda_vipps_request(self, dispatch_tab: str, expected_total: int, before_request=None) -> dict[str, Any]:
-        """Send one verified hosted Vipps request for the already-created Oda order."""
+    def _start_oda_vipps_capture(self) -> Path:
+        capture = Path(self.socket_directory) / f".oda-vipps-{secrets.token_hex(16)}.har"
+        if capture.exists():
+            raise HouseholdError("Oda checkout payment capture path is unavailable")
+        self._invoke("network", "har", "start", "--content", "text")
+        return capture
 
-        if self.checkout_provider != "oda" or re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None:
-            raise HouseholdError("An exact private Vipps phone number is required before Oda checkout")
-        payment_request_id = None
-        for attempt in range(40):
-            if self._checkout_dispatch_tab() != dispatch_tab:
-                raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
-            try:
-                payment_request_id = oda_checkout_pay_request_id(
-                    self._invoke("network", "requests", "--filter", "/checkout/pay/")
-                )
-                break
-            except HouseholdError:
-                if attempt < 39:
-                    self._settle(0.25)
-        if payment_request_id is None:
-            raise HouseholdError("Oda checkout payment response is missing or ambiguous; do not send payment")
+    def _stop_oda_vipps_capture(self, capture: Path) -> Mapping[str, Any]:
+        try:
+            self._invoke("network", "har", "stop", str(capture))
+            metadata = capture.lstat()
+            if (not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != self.uid
+                    or metadata.st_size > 8 * 1024 * 1024):
+                raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+            return json.loads(capture.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HouseholdError("Oda checkout payment capture is unavailable; do not send payment") from exc
+        finally:
+            capture.unlink(missing_ok=True)
+
+    def _discard_oda_vipps_capture(self, capture: Path) -> None:
+        try:
+            self._invoke("network", "har", "stop", str(capture))
+        except HouseholdError:
+            pass
+        finally:
+            capture.unlink(missing_ok=True)
+
+    def _complete_oda_vipps_request(
+        self,
+        dispatch_tab: str,
+        expected_total: int,
+        before_request=None,
+        *,
+        expected_order_id: str | None = None,
+        payment_capture: Path | None = None,
+        source_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Send one hosted request bound to Oda's causally captured pay response."""
+
         payment_response: Mapping[str, Any] = {}
-        for attempt in range(8):
-            response = self._invoke("network", "request", payment_request_id)
-            payment_response = response if isinstance(response, Mapping) else {}
-            if isinstance(payment_response.get("responseBody"), str):
-                break
-            if attempt < 7:
-                self._settle(0.25)
+        captured_payment: Mapping[str, Any] | None = None
+        try:
+            if self.checkout_provider != "oda" or re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None:
+                raise HouseholdError("An exact private Vipps phone number is required before Oda checkout")
+            if expected_order_id is not None and re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", expected_order_id
+            ) is None:
+                raise HouseholdError("The Oda/Vipps recovery order is invalid")
+            if payment_capture is not None:
+                if not isinstance(source_url, str):
+                    raise HouseholdError("Oda checkout payment capture has no source page; do not send payment")
+                _oda_https_gateway_url(source_url)
+                for attempt in range(40):
+                    if self._checkout_dispatch_tab() != dispatch_tab:
+                        raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
+                    current_url = str(self._invoke("get", "url").get("url") or "")
+                    try:
+                        navigated = _oda_https_gateway_url(current_url) != source_url
+                    except HouseholdError:
+                        navigated = False
+                    if navigated:
+                        self._settle(0.25)
+                        break
+                    if attempt < 39:
+                        self._settle(0.25)
+                else:
+                    raise HouseholdError("The Oda/Vipps payment page did not follow the exact Oda click; do not send payment")
+            else:
+                payment_request_id = None
+                for attempt in range(40):
+                    if self._checkout_dispatch_tab() != dispatch_tab:
+                        raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
+                    try:
+                        payment_request_id = oda_checkout_pay_request_id(
+                            self._invoke("network", "requests", "--filter", "/checkout/pay/")
+                        )
+                        break
+                    except HouseholdError:
+                        if attempt < 39:
+                            self._settle(0.25)
+                if payment_request_id is None:
+                    raise HouseholdError("Oda checkout payment response is missing or ambiguous; do not send payment")
+                for attempt in range(8):
+                    response = self._invoke("network", "request", payment_request_id)
+                    payment_response = response if isinstance(response, Mapping) else {}
+                    if isinstance(payment_response.get("responseBody"), str):
+                        break
+                    if attempt < 7:
+                        self._settle(0.25)
+        finally:
+            if payment_capture is not None:
+                captured_payment = self._stop_oda_vipps_capture(payment_capture)
+        if payment_capture is not None:
+            if captured_payment is None:
+                raise HouseholdError("Oda checkout payment capture changed; do not send payment")
+            payment_response = _oda_checkout_pay_har_response(captured_payment)
+        elif "responseBody" not in payment_response:
+            raise HouseholdError("Oda checkout payment response changed; do not send payment")
         gateway_url, order_id = _oda_checkout_pay_redirect(payment_response)
+        if expected_order_id is not None and order_id != expected_order_id:
+            raise HouseholdError("The Oda/Vipps payment response identifies a different order; do not send payment")
         observed: dict[str, Any] = {}
         phone_filled = False
         for _ in range(40):
@@ -1917,17 +2064,26 @@ class OdaBrowser:
             return {"status": "expired"}
         return {"status": "unknown"}
 
-    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True, vipps_expected_total=None, before_vipps_request=None):
+    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True, vipps_expected_total=None, vipps_payment_capture=None, vipps_source_url=None, before_vipps_request=None):
         # Bind 3DS to this dispatch's tab and native payment identity. Only a
         # visible issuer challenge establishes user action. Continue observing
         # so a terminal failure still retains its ID.
         unresolved = {"authentication_unresolved": True} if authentication_expected else None
         if dispatch_tab is None:
+            if vipps_payment_capture is not None:
+                self._discard_oda_vipps_capture(vipps_payment_capture)
             return unresolved
         if vipps_expected_total is not None:
             if type(vipps_expected_total) is not int or vipps_expected_total < 0:
                 raise HouseholdError("The Oda/Vipps payment amount is invalid")
-            context = self._complete_oda_vipps_request(dispatch_tab, vipps_expected_total, before_vipps_request)
+            context = self._complete_oda_vipps_request(
+                dispatch_tab,
+                vipps_expected_total,
+                before_vipps_request,
+                expected_order_id=order_id,
+                payment_capture=vipps_payment_capture,
+                source_url=vipps_source_url,
+            )
             return {"vipps_request_sent": True, "vipps_request_context": context}
         context = None
         read_failures = 0
@@ -2221,6 +2377,8 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             raise CheckoutPreconditionError(str(exc)) from exc
         dispatch_tab = self._checkout_dispatch_tab()
         vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
+        if vipps and dispatch_tab is None:
+            raise CheckoutPreconditionError("The Oda/Vipps payment tab is unavailable; do not send payment")
         if vipps:
             self._invoke("network", "requests", "--clear")
         if before_click:
@@ -2257,12 +2415,23 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                       + ";if(Object.keys(actual).length!==Object.keys(expected).length||"
                       + "Object.keys(expected).some(k=>JSON.stringify(actual[k])!==JSON.stringify(expected[k])))"
                       + "return JSON.stringify({clicked:false});return " + script.strip() + ";})()")
-        if self._eval(script) != {"clicked": True}:
+        payment_capture = self._start_oda_vipps_capture() if vipps else None
+        try:
+            clicked = self._eval(script)
+        except Exception:
+            if payment_capture is not None:
+                self._discard_oda_vipps_capture(payment_capture)
+            raise
+        if clicked != {"clicked": True}:
+            if payment_capture is not None:
+                self._discard_oda_vipps_capture(payment_capture)
             raise CheckoutPreconditionError("Oda checkout button changed before click")
         return self._capture_checkout_payment(
             dispatch_tab,
             authentication_expected=authentication_expected,
             vipps_expected_total=(expected_total if vipps else None),
+            vipps_payment_capture=payment_capture,
+            vipps_source_url=(expected_url if vipps else None),
             before_vipps_request=before_vipps_request,
         )
 

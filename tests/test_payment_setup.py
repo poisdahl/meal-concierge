@@ -247,6 +247,7 @@ class PaymentBrowserTests(unittest.TestCase):
             self.assertEqual(clicks, [])
 
     def test_vipps_final_click_binds_method_card_and_amount_after_callback(self):
+        from unittest import mock
         from oda_browser import OdaBrowser, _oda_checkout_surface_script, CHECKOUT_URL
         from core import CheckoutPreconditionError
         expected = {"delivery_address": "Eksempelveien 1", "total_minor": 4550}
@@ -262,10 +263,14 @@ class PaymentBrowserTests(unittest.TestCase):
                            *([{"options": ["Vipps", "Nytt kort", "•••• 5678"]}] if method == "saved_card" else [])]:
                 with self.subTest(method=method, change=change):
                     browser = OdaBrowser.__new__(OdaBrowser)
-                    browser._checkout_dispatch_tab = lambda: None
+                    browser._checkout_dispatch_tab = lambda: "tab-1"
                     browser._checkout_deadline = None
                     observed, callbacks, network = [], [], []
                     browser._invoke = lambda *arguments: network.append(arguments)
+                    payment_capture = Path("/private/capture.har")
+                    browser._start_oda_vipps_capture = mock.Mock(return_value=payment_capture)
+                    browser._discard_oda_vipps_capture = mock.Mock()
+                    browser._capture_checkout_payment = mock.Mock(return_value=None)
                     def evaluate(final):
                         self.assertEqual(callbacks, [True])
                         result = self.evaluate(final, **{"selected": selected, **change})
@@ -280,6 +285,16 @@ class PaymentBrowserTests(unittest.TestCase):
                             submit()
                     else:
                         submit()
+                        browser._capture_checkout_payment.assert_called_once_with(
+                            "tab-1",
+                            authentication_expected=True,
+                            vipps_expected_total=(4550 if method == "vipps" else None),
+                            vipps_payment_capture=(payment_capture if method == "vipps" else None),
+                            vipps_source_url=(CHECKOUT_URL if method == "vipps" else None),
+                            before_vipps_request=None,
+                        )
+                    if change and method == "vipps":
+                        browser._discard_oda_vipps_capture.assert_called_once_with(payment_capture)
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
                     self.assertEqual(network, [("network", "requests", "--clear")] if method == "vipps" else [])
 
