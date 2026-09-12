@@ -473,6 +473,38 @@ def _mathem_receipt_address_script(order_id: str, address: str) -> str:
     return _receipt_address_script(order_id, address, provider="mathem")
 
 
+def _oda_order_payment_state_script(order_id: str) -> str:
+    """Read an exact Oda same-order retry offer without returning page text."""
+
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", order_id) is None:
+        raise HouseholdError("invalid order identity")
+    order_url = f"https://oda.com/no/account/orders/{order_id}/"
+    receipt_path = f"/api/v1/orders/{order_id}/receipt"
+    retry_path = "/no/checkout/retry/"
+    return r"""
+(() => {
+ if(location.href!==ORDER_URL||document.querySelector('input[type="password"]'))return JSON.stringify({status:'unknown'});
+ const norm=value=>(value||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=e=>{const style=getComputedStyle(e),box=e.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0;};
+ const headings=[...document.querySelectorAll('h1')].filter(visible).map(e=>norm(e.innerText)).filter(text=>text==='Betaling påbegynt');
+ const receipts=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+  const url=new URL(e.href,location.href);
+  return url.origin===location.origin&&url.pathname===RECEIPT_PATH&&!url.search&&!url.hash;
+ });
+ const retries=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+  const url=new URL(e.href,location.href);
+  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'&&
+   url.origin===location.origin&&url.pathname===RETRY_PATH&&!url.hash&&
+   [...url.searchParams.keys()].length===1&&url.searchParams.get('orderNumber')===ORDER_ID;
+ });
+ const retryable=headings.length===1&&receipts.length===1&&retries.length===1;
+ return JSON.stringify({status:retryable?'retry_available':'unknown'});
+})()
+""".replace("ORDER_URL", json.dumps(order_url)).replace("RECEIPT_PATH", json.dumps(receipt_path)).replace(
+        "RETRY_PATH", json.dumps(retry_path),
+    ).replace("ORDER_ID", json.dumps(order_id))
+
+
 def identity_tokens(value: str) -> tuple[str, ...]:
     return tuple(re.findall(r"[^\W_]+", unicodedata.normalize("NFC", value).lower()))
 
@@ -951,6 +983,21 @@ class OdaBrowser:
     def read_order_binding(self, order_id, order, *, deadline=None, expected_binding=None):
         with self._checkout_operation(deadline):
             return self._read_order_binding(order_id, order, deadline=deadline, expected_binding=expected_binding)
+
+    def order_payment_state(self, order_id, *, deadline=None):
+        """Read a fail-closed payment state from the exact Oda order page."""
+
+        if self.checkout_provider != "oda":
+            return {"status": "unknown"}
+        with self._checkout_operation(deadline, preserve_session=True):
+            self._open(self._order_url(order_id))
+            script = _oda_order_payment_state_script(order_id)
+            for _ in range(20):
+                state = self._eval(script)
+                if state.get("status") == "retry_available":
+                    return state
+                self._settle(0.25)
+        return {"status": "unknown"}
 
     def _binding_client(self):
         client = getattr(self, "provider_client", None)

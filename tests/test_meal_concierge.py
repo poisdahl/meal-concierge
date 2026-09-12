@@ -41,6 +41,7 @@ from oda_browser import (  # noqa: E402
     _oda_checkout_amount_script,
     _oda_checkout_payment_script,
     _oda_checkout_surface_script,
+    _oda_order_payment_state_script,
     _oda_vipps_gateway_script,
     _oda_vipps_phone_fill_script,
     cancellation_delivery_matches,
@@ -2455,6 +2456,56 @@ process.stdout.write(eval(script));
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
         })
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes Oda order DOM contract")
+    def test_oda_retry_state_requires_the_exact_order_page_receipt_and_retry_link(self):
+        harness = r"""
+const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const node=(text='')=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:10,height:10})});
+global.location=new URL(c.url);
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+const heading=node(c.heading),extraHeading=node(c.extraHeading),receipt=node('Last ned kvittering (PDF)');receipt.href=c.receipt;
+const retry=node(c.retryText);retry.href=c.retry;
+global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading,...(c.extraHeading?[extraHeading]:[])]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[])]:[]};
+process.stdout.write(eval(script));
+"""
+        script = _oda_order_payment_state_script("order-1")
+
+        def evaluate(**changes):
+            context = {
+                "url": "https://oda.com/no/account/orders/order-1/",
+                "heading": "Betaling påbegynt",
+                "receipt": "https://oda.com/api/v1/orders/order-1/receipt",
+                "hasReceipt": True,
+                "retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1",
+                "retryText": "Betal",
+                "hasRetry": True,
+                "extraHeading": "",
+                **changes,
+            }
+            result = subprocess.run(
+                [shutil.which("node"), "-e", harness],
+                input=json.dumps({"script": script, "c": context}),
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode:
+                self.fail(result.stderr)
+            return json.loads(result.stdout)
+
+        self.assertEqual(evaluate(), {"status": "retry_available"})
+        self.assertEqual(
+            evaluate(extraHeading="Sopps Fusilli fullkorn 500 g"),
+            {"status": "retry_available"},
+        )
+        self.assertEqual(evaluate(heading="Betalt"), {"status": "unknown"})
+        self.assertEqual(evaluate(hasReceipt=False), {"status": "unknown"})
+        self.assertEqual(evaluate(hasRetry=False), {"status": "unknown"})
+        self.assertEqual(evaluate(retry="https://oda.com/no/checkout/retry/?orderNumber=other"), {"status": "unknown"})
+        self.assertEqual(evaluate(retryText="Fortsett"), {"status": "unknown"})
+        self.assertEqual(
+            evaluate(url="https://oda.com/no/account/orders/other/"),
+            {"status": "unknown"},
+        )
 
     def test_oda_vipps_request_fills_the_phone_before_next(self):
         browser = OdaBrowser.__new__(OdaBrowser)

@@ -111,10 +111,24 @@ checks its goods, account/address, delivery, total and fee rows. The default
 payment method is the original one. An explicitly authorized alternative may
 be passed as `checkout_payment` for this recovery alone; saved-card selection
 uses an existing card, and global preferences remain unchanged. Include the
-returned payment choice and actual dietary findings in the recovery review,
+exact `order_id`, original `confirmation_id`, and
+`vipps_request_not_received=true` only when the owner identifies that Oda order
+as `Betaling påbegynt` and reports no request in their Vipps app. If tracking
+reports an incompatible paid state, do not override it;
+wait until tracking itself reports `unpaid_order`. The dedicated browser must
+independently verify that exact page state, its same-order `Betal` retry link and
+the unique post-checkout provider order before recovery can be reviewed; a user
+report or coarse tracking status alone is insufficient. A recorded Vipps request
+that is sent, dispatching or otherwise unresolved remains locked.
+Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
-timeout. The earlier failure never authorizes another payment. Report the
+timeout. A later Oda paid status remains locked until the owner reports
+completing that exact phone approval; then reconcile the fresh recovery
+confirmation with `vipps_approval_completed=true`. Do not supply that flag for
+an approval attempt, an absent or unknown reply, or an expired Vipps page.
+Picking, shipping or delivery is independent terminal fulfillment evidence.
+The earlier failure never authorizes another payment. Report the
 method that actually completed recovery; saved-card recovery is not a completed
 Vipps payment. Mathem addition recovery retains the original submit's merchant
 order/change target and frozen goods; it never rebuilds the cart or derives
