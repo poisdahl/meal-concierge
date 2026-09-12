@@ -782,7 +782,7 @@ def _oda_vipps_gateway_script(
  const merchant=/(?:^|\s)Oda(?:\s|$)/i.test(text);
  const amountBound=amounts.length>0&&amounts.every(value=>value===EXPECTED_TOTAL);
  const sent=identity&&merchant&&amountBound&&/We've sent a payment request to/i.test(text)&&/Open Vipps/i.test(text);
- const expired=identity&&merchant&&amountBound&&/(?:payment timed out|betalingen (?:har )?(?:utløpt|gått ut))/i.test(text);
+ const expired=identity&&((merchant&&amountBound&&/betalingen (?:har )?(?:utløpt|gått ut)/i.test(text))||(/your payment timed out/i.test(text)&&/Go back and try again/i.test(text)));
  const phones=root?[...root.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible):[];
  const national=phones.length===1?phones[0].value.replace(/\D/g,''):'';
  const remember=root?[...root.querySelectorAll('input[type="checkbox"]')].filter(represented):[];

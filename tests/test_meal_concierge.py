@@ -2439,7 +2439,7 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const remember=node();const next=node('Next');
-const text='Continue to pay with Vipps Oda NOK 256.50';
+const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
 global.location=new URL(c.url);
 global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:e===remember?'0':'1'});
 const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:s==='button'?[next]:[];
@@ -2447,14 +2447,14 @@ global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAl
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=expected_url or url,
                     ),
-                    "c": {"phone": phone, "url": url},
+                    "c": {"phone": phone, "url": url, "text": text},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2495,6 +2495,14 @@ process.stdout.write(eval(script));
             expected_url="https://pay.vipps.no/?token=stale",
         ), {
             "identity": False, "ready": False, "sent": False, "expired": False,
+            "fillable": False, "phone_matches": False,
+        })
+        self.assertEqual(evaluate(
+            "90000000",
+            "https://payments.example/hosted/opaque",
+            text="Oh no, your payment timed out Go back and try again. Go back",
+        ), {
+            "identity": True, "ready": False, "sent": False, "expired": True,
             "fillable": False, "phone_matches": False,
         })
 
