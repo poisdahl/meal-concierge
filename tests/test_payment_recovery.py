@@ -55,6 +55,7 @@ class MerchantBrowser:
         self.payment_state = "unknown"
         self.vipps_request_state = "unknown"
         self.recovery_surface = "unknown"
+        self.binding_reads = 0
 
     def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, **kwargs):
         self.recovery_surface = "retry"
@@ -77,6 +78,8 @@ class MerchantBrowser:
         self.merchant.status = "paid_and_modifiable"
 
     def read_order_binding(self, order_id, order, *, expected_binding, **kwargs):
+        self.binding_reads += 1
+        self.recovery_surface = "order"
         return expected_binding
 
     def order_payment_state(self, order_id, **kwargs):
@@ -402,11 +405,14 @@ class RecoveryTests(unittest.TestCase):
                 self.call("confirm", confirmation_id=prepared["confirmation_id"])
                 self.merchant.status = "paid_and_not_modifiable"
                 self.browser.vipps_request_state = observed
+                binding_reads = self.browser.binding_reads
 
                 result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
 
                 self.assertFalse(result["confirmed"])
                 self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+                self.assertEqual(self.browser.binding_reads, binding_reads)
+                self.assertEqual(self.browser.recovery_surface, "retry")
 
     def test_exact_retry_expired_page_blocks_owner_approval_claim(self):
         with self.app.store.locked() as state:

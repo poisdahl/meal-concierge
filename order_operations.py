@@ -3518,7 +3518,9 @@ class OrderOperations:
             tracking_conflict = payment_page_status == "retry_available"
         receipt_order = order
         if (self.provider in {"oda", "mathem"} and order is not None and candidate_id == details_id == tracking_id
-                and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}):
+                and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
+                and (not page_bound_before_retry
+                     or tracking_status in {"picking", "shipped", "delivered"})):
             # Keep an unpaid checkout or bank challenge on its current page.
             # Receipt navigation is needed only for a potentially accepted order.
             address = (pending["summary"].get("delivery") or {}).get("address")
