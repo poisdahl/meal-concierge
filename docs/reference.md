@@ -201,6 +201,13 @@ identifies the target; provider evidence must independently make it unique and
 matching. A user report alone is insufficient, and an active or explicitly
 unknown recorded Vipps request remains locked.
 Recovery does not create another order.
+After that exact recovery sends a Vipps request, a conflicting Oda paid status
+does not by itself confirm the order. Reconcile with
+`vipps_approval_completed=true` only after the owner reports completing that
+exact phone approval. The flag is accepted only for the matching dispatched
+recovery confirmation, is retained with that attempt, and still cannot override
+an expired Vipps page. Later picking, shipping or delivery is independent
+terminal fulfillment evidence.
 
 The default method is the original `checkout_payment`. An explicitly authorized
 `checkout_payment` override selects an existing supported method for this

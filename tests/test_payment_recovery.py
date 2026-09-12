@@ -367,9 +367,84 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(pending["recovery"]["vipps_request_status"], "sent")
         self.assertEqual(pending["recovery"]["vipps_request_context"]["order_id"], "order-1")
         self.merchant.status = "paid_and_modifiable"
+        self.browser.vipps_request_state = "sent"
         self.browser.payment_state = "unknown"
-        self.assertTrue(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["confirmed"])
+        self.assertTrue(self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_approval_completed=True,
+        )["confirmed"])
         self.assertEqual(self.browser.clicks, 1)
+
+    def test_exact_retry_paid_tracking_stays_locked_without_owner_approval(self):
+        for observed in ("sent", "expired", "unknown"):
+            with self.subTest(observed=observed):
+                with self.app.store.locked() as state:
+                    state["pending_checkout"] = deepcopy(self.original)
+                    pending = state["pending_checkout"]
+                    pending.pop("vipps_request_status")
+                    pending.pop("unpaid_order_id")
+                    pending.pop("unpaid_order_binding_source")
+                self.merchant.status = "unpaid_order"
+                self.browser.payment_state = "retry_available"
+                prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+                def submit(_cart, review, before_click, **kwargs):
+                    before_click()
+                    self.browser.clicks += 1
+                    context = {
+                        "tab_id": "vipps-tab", "expected_total": 24640,
+                        "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
+                    }
+                    kwargs["before_vipps_request"](context)
+                    return {"vipps_request_sent": True}
+
+                self.browser.submit_payment_recovery = submit
+                self.call("confirm", confirmation_id=prepared["confirmation_id"])
+                self.merchant.status = "paid_and_not_modifiable"
+                self.browser.vipps_request_state = observed
+
+                result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+
+                self.assertFalse(result["confirmed"])
+                self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+
+    def test_exact_retry_expired_page_blocks_owner_approval_claim(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+        def submit(_cart, review, before_click, **kwargs):
+            before_click()
+            context = {
+                "tab_id": "vipps-tab", "expected_total": 24640,
+                "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
+            }
+            kwargs["before_vipps_request"](context)
+            return {"vipps_request_sent": True}
+
+        self.browser.submit_payment_recovery = submit
+        self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.vipps_request_state = "expired"
+
+        result = self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_approval_completed=True,
+        )
+
+        self.assertFalse(result["confirmed"])
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+
+    def test_owner_vipps_approval_requires_the_exact_dispatched_recovery(self):
+        with self.assertRaisesRegex(HouseholdError, "exact dispatched Oda recovery"):
+            self.call(
+                "reconcile", confirmation_id="original",
+                vipps_approval_completed=True,
+            )
 
     def test_exact_retry_preclick_provider_check_keeps_the_retry_surface_current(self):
         with self.app.store.locked() as state:

@@ -123,7 +123,12 @@ that is sent, dispatching or otherwise unresolved remains locked.
 Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
-timeout. The earlier failure never authorizes another payment. Report the
+timeout. A later Oda paid status remains locked until the owner reports
+completing that exact phone approval; then reconcile the fresh recovery
+confirmation with `vipps_approval_completed=true`. Do not supply that flag for
+an approval attempt, an absent or unknown reply, or an expired Vipps page.
+Picking, shipping or delivery is independent terminal fulfillment evidence.
+The earlier failure never authorizes another payment. Report the
 method that actually completed recovery; saved-card recovery is not a completed
 Vipps payment. Mathem addition recovery retains the original submit's merchant
 order/change target and frozen goods; it never rebuilds the cart or derives

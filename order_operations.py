@@ -1790,6 +1790,10 @@ class OrderOperations:
             and request.get("vipps_request_not_received") is True
         ):
             raise HouseholdError("vipps_request_not_received is true only for exact Oda recovery preparation")
+        if "vipps_approval_completed" in request and not (
+            action == "reconcile" and request.get("vipps_approval_completed") is True
+        ):
+            raise HouseholdError("vipps_approval_completed is true only for exact Oda recovery reconciliation")
         if (action == "prepare" and request.get("recovery") and request.get("order_id") is not None
                 and (
                     request.get("vipps_request_not_received") is not True
@@ -1915,7 +1919,11 @@ class OrderOperations:
                 }
             return {**result, "confirmation_id": prepared["confirmation_id"], "authorized_summary": prepared["summary"], "order_change": prepared.get("order_change")}
         if action == "reconcile":
-            return self._checkout_reconcile(deadline, str(request.get("confirmation_id") or ""))
+            return self._checkout_reconcile(
+                deadline,
+                str(request.get("confirmation_id") or ""),
+                vipps_approval_completed=request.get("vipps_approval_completed") is True,
+            )
         if action == "authenticate":
             return self._checkout_authenticate(deadline, str(request.get("confirmation_id") or ""))
         if action == "auto":
@@ -3287,9 +3295,13 @@ class OrderOperations:
             return {**self._checkout_reconcile_unlocked(deadline, confirmation_id),
                     "bank_app_method_chosen": choice.get("chosen") is True}
 
-    def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
+    def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "", *,
+                            vipps_approval_completed: bool = False) -> dict[str, Any]:
         with self._browser_operation(deadline):
-            return self._checkout_reconcile_unlocked(deadline, confirmation_id)
+            return self._checkout_reconcile_unlocked(
+                deadline, confirmation_id,
+                vipps_approval_completed=vipps_approval_completed,
+            )
 
     def _meny_confirmation_before_navigation(self, pending, deadline):
         observed = self.browser.checkout_confirmation_order_id(deadline=deadline)
@@ -3318,7 +3330,8 @@ class OrderOperations:
             state["pending_checkout"] = updated
         return observed, updated
 
-    def _checkout_reconcile_unlocked(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
+    def _checkout_reconcile_unlocked(self, deadline: float | None = None, confirmation_id: str = "", *,
+                                     vipps_approval_completed: bool = False) -> dict[str, Any]:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout") if confirmation_id else None
@@ -3333,6 +3346,27 @@ class OrderOperations:
             raise HouseholdError("checkout has not reached reconciliation")
         if pending.get("order_change"):
             return self._order_change_reconcile(pending, deadline)
+        if vipps_approval_completed:
+            child = pending.get("recovery")
+            context = child.get("vipps_request_context") if isinstance(child, Mapping) else None
+            if not (
+                self.provider == "oda"
+                and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+                and isinstance(child, Mapping)
+                and confirmation_id == child.get("confirmation_id")
+                and child.get("vipps_request_status") in {"dispatching", "sent"}
+                and isinstance(context, Mapping)
+                and context.get("order_id") == child.get("order_id") == pending.get("unpaid_order_id")
+            ):
+                raise HouseholdError(
+                    "vipps_approval_completed does not match an exact dispatched Oda recovery"
+                )
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("checkout state changed while recording Vipps approval")
+                current = state["pending_checkout"]["recovery"]
+                current.setdefault("owner_vipps_approval_completed_at", self._now().isoformat())
+                pending = deepcopy(state["pending_checkout"])
         recovery_attempt = pending.get("recovery")
         active_attempt = (recovery_attempt if recovery_attempt
                           and recovery_attempt.get("status") != "awaiting_confirmation" else pending)
@@ -3454,28 +3488,26 @@ class OrderOperations:
         )
         recovery_context = ((pending.get("recovery") or {}).get("vipps_request_context")
                             if isinstance(pending.get("recovery"), Mapping) else None)
-        exact_retry_request_sent = bool(
+        exact_retry_payment_authorized = bool(
             pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
             and isinstance(recovery_context, Mapping)
             and recovery_context.get("order_id") == (pending.get("recovery") or {}).get("order_id")
             and (pending.get("recovery") or {}).get("order_id") == pending.get("unpaid_order_id")
-            and (
-                (pending.get("recovery") or {}).get("vipps_request_status") == "sent"
-                or (
-                    (pending.get("recovery") or {}).get("vipps_request_status") == "dispatching"
-                    and oda_vipps_observation == "sent"
-                )
-            )
+            and (pending.get("recovery") or {}).get("vipps_request_status") in {"dispatching", "sent"}
+            and isinstance((pending.get("recovery") or {}).get("owner_vipps_approval_completed_at"), str)
+            and bool((pending.get("recovery") or {}).get("owner_vipps_approval_completed_at"))
+            and oda_vipps_observation != "expired"
         )
         payment_page_status = None
         tracking_conflict = False
         page_bound_before_retry = (
             self.provider == "oda"
             and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-            and not exact_retry_request_sent
+            and not exact_retry_payment_authorized
         )
         if (
             page_bound_before_retry
+            and not recovery_dispatched
             and order is not None
             and candidate_id == details_id == tracking_id
             and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
@@ -3520,7 +3552,8 @@ class OrderOperations:
             fulfillable = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
             confirmed = (order is not None and candidate_id and candidate_id == details_id == tracking_id
                          and tracking_status in fulfillable and oda_vipps_bound
-                         and not page_bound_before_retry
+                         and (tracking_status in {"picking", "shipped", "delivered"}
+                              or not page_bound_before_retry)
                          and order_matches_checkout(receipt_order, pending["summary"], provider=self.provider))
         expired_unpaid = False
         candidate_matches = order is not None and meny_order_matches_checkout(order, pending["summary"])

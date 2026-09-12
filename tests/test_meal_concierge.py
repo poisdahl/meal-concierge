@@ -2464,9 +2464,9 @@ const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const node=(text='')=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:10,height:10})});
 global.location=new URL(c.url);
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
-const heading=node(c.heading),receipt=node('Last ned kvittering (PDF)');receipt.href=c.receipt;
+const heading=node(c.heading),extraHeading=node(c.extraHeading),receipt=node('Last ned kvittering (PDF)');receipt.href=c.receipt;
 const retry=node(c.retryText);retry.href=c.retry;
-global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[])]:[]};
+global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading,...(c.extraHeading?[extraHeading]:[])]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[])]:[]};
 process.stdout.write(eval(script));
 """
         script = _oda_order_payment_state_script("order-1")
@@ -2480,6 +2480,7 @@ process.stdout.write(eval(script));
                 "retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1",
                 "retryText": "Betal",
                 "hasRetry": True,
+                "extraHeading": "",
                 **changes,
             }
             result = subprocess.run(
@@ -2492,6 +2493,10 @@ process.stdout.write(eval(script));
             return json.loads(result.stdout)
 
         self.assertEqual(evaluate(), {"status": "retry_available"})
+        self.assertEqual(
+            evaluate(extraHeading="Sopps Fusilli fullkorn 500 g"),
+            {"status": "retry_available"},
+        )
         self.assertEqual(evaluate(heading="Betalt"), {"status": "unknown"})
         self.assertEqual(evaluate(hasReceipt=False), {"status": "unknown"})
         self.assertEqual(evaluate(hasRetry=False), {"status": "unknown"})
