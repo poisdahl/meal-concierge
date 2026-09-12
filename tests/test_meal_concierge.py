@@ -1558,8 +1558,8 @@ class CoreTestsBase:
             "amounts_valid": True,
         }
         results = iter([
-            {"expanded": True},
-            {"ready": True},
+            {"expanded": True, "mode": "items"},
+            {"ready": True, "mode": "items"},
             {"expanded": True},
             deepcopy(extracted),
             deepcopy(extracted_amounts),
@@ -1584,7 +1584,7 @@ class CoreTestsBase:
         self.assertIn("summaryRoot.contains(row.root)", scripts[-1])
         self.assertIn("unknownRows", scripts[-1])
 
-        malformed = iter([{"expanded": True}, {"ready": True}, {"expanded": True}, {**extracted, "submit_controls": True}])
+        malformed = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True}, {**extracted, "submit_controls": True}])
         browser._eval = lambda _script: next(malformed)
         with self.assertRaisesRegex(HouseholdError, "page changed"):
             browser._review_checkout(cart)
@@ -1597,7 +1597,7 @@ class CoreTestsBase:
             ({"total_matches": False}, "does not match the reviewed cart"),
         ]:
             with self.subTest(changes=changes):
-                responses = iter([{"expanded": True}, {"ready": True}, {"expanded": True},
+                responses = iter([{"expanded": True, "mode": "items"}, {"ready": True, "mode": "items"}, {"expanded": True},
                                   {**deepcopy(extracted), **changes}])
                 browser._eval = lambda _script: next(responses)
                 with self.assertRaisesRegex(HouseholdError, message):
