@@ -15,9 +15,9 @@ browser handoff, service lifecycle and native delivery surfaces.
    another household. Ask for missing store/household choices. A repeated setup
    request does not authorize an update, reset or another service.
 2. **Get the source.** Use one immutable repository commit and its matching
-   instructions. Clone/check out that commit, or download its GitHub source ZIP
-   and use ordinary `unzip` into a new directory after checking archive paths
-   and types. Keep source separate from household data; never extract over an
+   instructions. Prefer its GitHub source ZIP and ordinary `unzip` into a
+   new directory after checking archive paths and types. Cloning/checking out
+   the same commit is also supported. Keep source separate from household data; never extract over an
    installation. Unpacking alone does not install the service.
 3. **Check prerequisites.** Follow [runtime prerequisites](runtime.md#install-and-attach):
    Python 3.10+, `uv`, and browser dependencies for the selected store. Use the
@@ -44,9 +44,38 @@ browser handoff, service lifecycle and native delivery surfaces.
 `install.sh` performs the normal dependency installation and recipe-pack import;
 all subprocesses remain subject to platform review. If Shell rejects a command,
 report the exact failure and reconcile any partial effects before recovery.
-Do not cycle through wrappers or approval-request retries. For an executable
-binding error, see the [known upstream issue and supported command form](https://forum.cursor.com/t/grok-bot-0-44-0-on-macos-shell-executable-binding-rejection-persists-approval-card-never-appears/170819/5).
-The Shell workaround does not apply to the MCP configuration printed by `attach`.
+Do not cycle through wrappers or approval-request retries.
+
+### Executable-binding fallback
+
+There is no need to wait for the upstream fix: use ZIP/`unzip` plus the normal
+installer above. If executable binding blocks it, reconcile partial effects
+first, then use the [supported interpreter form](https://forum.cursor.com/t/grok-bot-0-44-0-on-macos-shell-executable-binding-rejection-persists-approval-card-never-appears/170819/10)
+through normal review. Unpacking obtains the source; it does not replace the
+installer or this invocation workaround.
+
+Use a verified Python 3.10+ interpreter at `venv/bin/python` relative to an
+explicit Shell `working_directory`. If needed, create that bootstrap venv with
+ordinary `uv --no-config venv --python ACTUAL_PYTHON ACTUAL_WORK_DIR/venv`.
+Replace all placeholders with inspected paths and the chosen installation values:
+
+```text
+working_directory: ACTUAL_WORK_DIR
+command: venv/bin/python /ABSOLUTE/SOURCE/install.py install --manager external --uv /ABSOLUTE/uv --home ACTUAL_HOME --code-root ACTUAL_CODE_ROOT --name ACTUAL_NAME --provider ACTUAL_STORE --household ACTUAL_HOUSEHOLD --socket ACTUAL_SOCKET
+```
+
+The interpreter token must not start with `/`, `./` or `../`; the script path
+is absolute. Put no Python flags such as `-I -B` between them. Preserve any
+additional store/browser arguments required by the normal install instructions.
+Verify effective Python/package-source overrides and cache locations before
+execution. A partially completed installation requires the normal recovery
+procedure, not another `install` into the same home.
+
+Grok reported this form accepted through normal review on 2026-09-12 with the
+unchanged 560-line installer from commit `95990976384b0de1f6804ac1ebe39537c58533ef`:
+stopped installation and all 4,599 bundled recipes completed. This is a tested
+workaround, not confirmation of an upstream fix or fully unattended setup.
+Do not rewrite the MCP configuration printed by `attach` to match this Shell form.
 
 ## Browser and login
 
