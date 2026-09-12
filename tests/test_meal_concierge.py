@@ -42,6 +42,7 @@ from oda_browser import (  # noqa: E402
     _oda_checkout_payment_script,
     _oda_checkout_surface_script,
     _oda_vipps_gateway_script,
+    _oda_vipps_phone_fill_script,
     cancellation_delivery_matches,
     cancellation_total_matches,
     clear_cancellation_cache,
@@ -199,37 +200,6 @@ class FakeBrowser:
 
     def checkout_vipps_request_state(self, context, *, deadline=None):
         return {"status": self.vipps_request_state}
-
-    def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, deadline=None, addition=None):
-        return {
-            "order_id": order_id,
-            "binding": self.read_order_binding(order_id, {}, expected_binding=expected_binding),
-            "payment_choice": deepcopy(payment),
-            "payment_display": "Vipps" if payment["method"] == "vipps" else "•••• 1234",
-            "surface": {"url": f"https://oda.com/no/checkout/retry/?orderNumber={order_id}"},
-            "amounts_minor": {
-                "product_subtotal": None,
-                "delivery_price": None,
-                "discounts": None,
-                "deposits": None,
-                "bags": None,
-                "other_fees": None,
-                "provider_total": 3500,
-            },
-        }
-
-    def submit_payment_recovery(self, cart, review, before_click=None, *, deadline=None,
-                                addition=None, before_vipps_request=None):
-        if before_click:
-            before_click()
-        self.checkout_clicks += 1
-        if review["payment_choice"]["method"] == "vipps" and before_vipps_request:
-            before_vipps_request({
-                "tab_id": "tab-1", "expected_total": 3500,
-                "gateway_url_digest": "a" * 64,
-                "order_id": review["order_id"],
-            })
-        return {"vipps_request_sent": True} if review["payment_choice"]["method"] == "vipps" else None
 
     def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
         self.review_deadlines.append(deadline)
@@ -2510,6 +2480,7 @@ process.stdout.write(eval(script));
         browser._invoke = mock.Mock(side_effect=invoke)
         browser._eval = mock.Mock(side_effect=[
             {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"filled": True},
             {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
             {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
             {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
@@ -2518,13 +2489,32 @@ process.stdout.write(eval(script));
 
         browser._complete_oda_vipps_request("tab-1", 25650)
 
-        self.assertEqual(browser._invoke.call_args_list[0],
-                         mock.call("fill", "[data-oda-household-vipps-phone]", "90000000"))
         self.assertEqual(browser._invoke.call_args_list[-3:], [
             mock.call("mouse", "move", "25", "40"),
             mock.call("mouse", "down"),
             mock.call("mouse", "up"),
         ])
+
+    def test_oda_vipps_phone_is_sent_to_browser_over_stdin_not_process_argv(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.binary = Path("/shared/agent-browser-native")
+        browser.executable = Path("/usr/bin/chromium")
+        browser.profile = Path("/profile")
+        browser.home = Path("/home")
+        browser.socket_directory = Path("/run/browser")
+        browser.session = "test"
+        browser.uid = 10001
+        browser.gid = 10002
+        browser._checkout_deadline = None
+        completed = mock.Mock(returncode=0, stdout='{"success":true,"data":{"result":"{\\"filled\\":true}"}}')
+
+        with mock.patch("oda_browser.subprocess.run", return_value=completed) as run:
+            result = browser._eval(_oda_vipps_phone_fill_script("90000000"))
+
+        self.assertEqual(result, {"filled": True})
+        self.assertNotIn("90000000", run.call_args.args[0])
+        self.assertIn("90000000", run.call_args.kwargs["input"])
+        self.assertEqual(run.call_args.args[0][-2:], ["eval", "--stdin"])
 
 
 class MenyClientTests(unittest.TestCase):
@@ -6533,77 +6523,6 @@ class FlowTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
-
-    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
-    def test_explicit_unreceived_vipps_report_binds_only_the_exact_retry_review(self):
-        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
-                         "changes": {"checkout_payment": {"method": "vipps"}}})
-        self.oda.orders = [{"order_number": "old-unpaid"}]
-        self.oda.tracking = "unpaid_order"
-        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
-        self.app.handle({"operation": "checkout", "action": "confirm",
-                         "confirmation_id": prepared["confirmation_id"]})
-        with self.store.locked() as state:
-            pending = state["pending_checkout"]
-            for key in ("vipps_request_status", "vipps_request_context",
-                        "unpaid_order_binding_source", "unpaid_order_id"):
-                pending.pop(key, None)
-            pending["status"] = "uncertain"
-            pending["browser_review"]["account_reference_digest"] = "a" * 64
-            pending["browser_review"]["amounts"] = {
-                "product_subtotal": None, "delivery_price": None, "discounts": None,
-                "deposits": None, "bags": None, "other_fees": None,
-                "provider_total": 35.0,
-            }
-        clicks = self.browser.checkout_clicks
-        recovery = self.app.handle({
-            "operation": "checkout", "action": "prepare", "recovery": True,
-            "confirmation_id": prepared["confirmation_id"],
-            "vipps_request_not_received": True,
-            "unreceived_vipps_order_id": "new-order",
-        })
-        self.assertTrue(recovery["recovery"])
-        self.assertEqual(recovery["order_id"], "new-order")
-        self.assertEqual(self.browser.checkout_clicks, clicks)
-        pending = self.store.read()["pending_checkout"]
-        self.assertEqual(pending["unpaid_order_id"], "new-order")
-        self.assertEqual(pending["vipps_request_status"], "verifying")
-        self.assertEqual(pending["unpaid_order_binding_source"],
-                         "explicit_unreceived_exact_retry_review")
-
-    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
-    def test_explicit_unreceived_vipps_report_rejects_a_different_or_ambiguous_order(self):
-        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
-                         "changes": {"checkout_payment": {"method": "vipps"}}})
-        self.oda.orders = [{"order_number": "old-unpaid"}]
-        self.oda.tracking = "unpaid_order"
-        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
-        self.app.handle({"operation": "checkout", "action": "confirm",
-                         "confirmation_id": prepared["confirmation_id"]})
-        with self.store.locked() as state:
-            pending = state["pending_checkout"]
-            for key in ("vipps_request_status", "vipps_request_context",
-                        "unpaid_order_binding_source", "unpaid_order_id"):
-                pending.pop(key, None)
-            pending["status"] = "uncertain"
-        request = {
-            "operation": "checkout", "action": "prepare", "recovery": True,
-            "confirmation_id": prepared["confirmation_id"],
-            "vipps_request_not_received": True,
-            "unreceived_vipps_order_id": "other-order",
-        }
-        with self.assertRaisesRegex(HouseholdError, "explicit current-user report"):
-            self.app.handle({**request, "vipps_request_not_received": False})
-        with self.assertRaisesRegex(HouseholdError, "exactly one new merchant order"):
-            self.app.handle(request)
-        intended = deepcopy(next(row for row in self.oda.orders if row.get("order_number") == "new-order"))
-        self.oda.orders.append({**intended, "order_number": "other-order"})
-        request["unreceived_vipps_order_id"] = "new-order"
-        with self.assertRaisesRegex(HouseholdError, "exactly one new merchant order"):
-            self.app.handle(request)
-        pending = self.store.read()["pending_checkout"]
-        self.assertNotIn("unpaid_order_binding_source", pending)
-        self.assertNotIn("recovery", pending)
 
     def test_store_guidance_does_not_probe_checkout_or_change_setup_idempotence(self):
         with mock.patch.object(self.browser, "review_checkout", side_effect=AssertionError("readiness must not enter checkout")):

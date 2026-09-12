@@ -207,17 +207,6 @@ order details and tracking before the durable fence and hosted `Next` click;
 other concurrent order-list entries are irrelevant and cannot become the
 payment target.
 
-If the hosted request control was never reached and the current user explicitly
-reports that no matching phone request arrived, recovery preparation may bind
-`unreceived_vipps_order_id` to the exact `unpaid_order_id` returned by
-reconciliation only when it is
-the sole new order, remains `unpaid_order`, matches the frozen goods, total and
-delivery, and the browser independently verifies Oda's same-order retry review
-and account/address. Pass the original `confirmation_id` and
-`vipps_request_not_received=true`; this prepares but does not dispatch a new
-payment. Missing, changed or ambiguous evidence leaves the original attempt
-locked.
-
 Mathem addition recovery requires a retry target captured from the original
 revalidated payment dispatch: the same active browser tab must show the native
 payment-failed article and exact original order/change URL. That evidence is

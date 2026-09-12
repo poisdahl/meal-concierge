@@ -742,6 +742,26 @@ def _oda_vipps_gateway_script(
     ).replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
 
 
+def _oda_vipps_phone_fill_script(phone_number: str) -> str:
+    """Fill the marked hosted field through stdin-backed evaluation, never argv."""
+
+    return r"""
+(()=>{
+ const PHONE=EXPECTED_PHONE;
+ const identity=location.origin==='https://pay.vipps.no'&&location.pathname==='/dwo-api-application/v1/deeplink/vippsgateway';
+ const fields=[...document.querySelectorAll('[data-oda-household-vipps-phone]')];
+ const field=identity&&fields.length===1?fields[0]:null;
+ if(!field||field.disabled||field.readOnly)return JSON.stringify({filled:false});
+ const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')?.set;
+ if(!setter)return JSON.stringify({filled:false});
+ setter.call(field,PHONE);
+ field.dispatchEvent(new Event('input',{bubbles:true}));
+ field.dispatchEvent(new Event('change',{bubbles:true}));
+ return JSON.stringify({filled:true});
+})()
+""".replace("EXPECTED_PHONE", json.dumps(phone_number))
+
+
 def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[str, Any] | None = None, *, provider: str = "oda") -> str:
     return r"""
 (() => {
@@ -1606,7 +1626,8 @@ class OdaBrowser:
             if observed.get("sent") is True:
                 raise HouseholdError("The Oda/Vipps request was already sent before its bound control was verified; reconcile the same order")
             if observed.get("fillable") is True and observed.get("phone_matches") is not True and not phone_filled:
-                self._invoke("fill", "[data-oda-household-vipps-phone]", self.vipps_phone_number)
+                if self._eval(_oda_vipps_phone_fill_script(self.vipps_phone_number)) != {"filled": True}:
+                    raise HouseholdError("The Oda/Vipps phone field changed before it could be filled")
                 phone_filled = True
                 self._settle(0.25)
                 continue
