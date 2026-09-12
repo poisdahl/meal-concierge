@@ -687,8 +687,10 @@ vipps_request_not_received=true)` may release only that local interactive
 checkout journal. The provider API must still return the exact order as
 `unpaid_order` or the known conflicting `paid_and_modifiable` /
 `paid_and_not_modifiable` state; retain that API status and the page status in
-the result. Report that the old merchant entry remains payment-started and must
-not be retried, then review the current cart before preparing at most one fresh
+the result. The original attempt must also have no dispatch/request timestamp;
+a pre-dispatch `verifying` context is accepted only for this same order. Report
+that the old merchant entry remains payment-started and is durably fenced from
+future recovery, then review the current cart before preparing at most one fresh
 checkout. Never use this for a scheduled attempt, another provider, fulfillment
 status, or any recorded dispatch/request context.
 

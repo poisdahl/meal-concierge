@@ -104,6 +104,21 @@ class OrderOperations:
             value.setdefault('payment_resolution', {'authorization_release': 'unknown', 'refund': 'unknown'})
         return value
 
+    @staticmethod
+    def _order_was_abandoned(state: Mapping[str, Any], order_id: str) -> bool:
+        records = state.get("protected_results")
+        if not isinstance(records, Mapping):
+            return False
+        return any(
+            isinstance(record, Mapping)
+            and record.get("kind") == "checkout"
+            and record.get("target_id") == order_id
+            and isinstance(record.get("result"), Mapping)
+            and record["result"].get("abandoned_unpaid") is True
+            and record["result"].get("order_id") == order_id
+            for record in records.values()
+        )
+
     def _guard_scheduled_context(self, state, context):
         if context is None:
             return
@@ -2494,6 +2509,22 @@ class OrderOperations:
                     "Only an interactive exact Oda/Vipps unpaid order can be abandoned"
                 )
             child = pending.get("recovery")
+            original_request_status = pending.get("vipps_request_status")
+            original_request_context = pending.get("vipps_request_context")
+            original_not_dispatched = (
+                original_request_status in {None, "expired", "verifying", "not_sent"}
+                and pending.get("vipps_request_attempted_at") is None
+                and pending.get("payment_requested_at") is None
+                and pending.get("owner_vipps_approval_completed_at") is None
+                and (
+                    original_request_context is None
+                    or (
+                        original_request_status == "verifying"
+                        and isinstance(original_request_context, Mapping)
+                        and original_request_context.get("order_id") == order_id
+                    )
+                )
+            )
             exact_not_sent = (
                 isinstance(child, Mapping)
                 and confirmation_id == child.get("confirmation_id")
@@ -2512,6 +2543,7 @@ class OrderOperations:
                     "order_id": order_id,
                     "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
                 }
+                and original_not_dispatched
             )
             if not exact_not_sent:
                 raise HouseholdError(
@@ -2654,6 +2686,10 @@ class OrderOperations:
             order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
         if pending.get("payment_failure") and pending["payment_failure"]["order_id"] != order_id:
             raise HouseholdError("The unpaid order differs from the original payment failure")
+        if self._order_was_abandoned(self.store.read(), order_id):
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be recovered"
+            )
         order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
         tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
         order_identity = str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "")

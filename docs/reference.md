@@ -1958,9 +1958,12 @@ conflicting paid status, and its verified order page is stuck at
 requires the active recovery `confirmation_id`, exact `order_id`, and a current
 `vipps_request_not_received=true` owner report. It clears only the local pending
 checkout so one fresh order can be reviewed. Both the API status and exact page
-status are retained in the protected result. The provider entry remains
-payment-started, is recorded as abandoned, and must never be retried. Scheduled
-attempts, fulfillment states and any recorded dispatch remain ineligible.
+status are retained in the protected result. Any original dispatch/request
+timestamp blocks abandonment; only a same-order pre-dispatch `verifying` context
+is eligible. The provider entry remains payment-started, is recorded as
+abandoned, and its order ID is rejected by every later recovery even after a
+restart or order-list churn. Scheduled attempts, fulfillment states and any
+recorded dispatch remain ineligible.
 
 Oda and Mathem bind checkout accounts and original order receipts through the
 same reader with separate origins and receipt labels. Existing-order review and
