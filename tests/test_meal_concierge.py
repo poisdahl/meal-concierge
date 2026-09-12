@@ -2458,14 +2458,15 @@ process.stdout.write(eval(script));
         })
 
     @unittest.skipUnless(shutil.which("node"), "Node executes Oda order DOM contract")
-    def test_oda_payment_started_state_requires_the_exact_order_page_and_receipt(self):
+    def test_oda_retry_state_requires_the_exact_order_page_receipt_and_retry_link(self):
         harness = r"""
 const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const node=(text='')=>({innerText:text,getAttribute:()=>null,getBoundingClientRect:()=>({width:10,height:10})});
 global.location=new URL(c.url);
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 const heading=node(c.heading),receipt=node('Last ned kvittering (PDF)');receipt.href=c.receipt;
-global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading]:s==='a[href]'?(c.hasReceipt?[receipt]:[]):[]};
+const retry=node(c.retryText);retry.href=c.retry;
+global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[])]:[]};
 process.stdout.write(eval(script));
 """
         script = _oda_order_payment_state_script("order-1")
@@ -2476,6 +2477,9 @@ process.stdout.write(eval(script));
                 "heading": "Betaling påbegynt",
                 "receipt": "https://oda.com/api/v1/orders/order-1/receipt",
                 "hasReceipt": True,
+                "retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1",
+                "retryText": "Betal",
+                "hasRetry": True,
                 **changes,
             }
             result = subprocess.run(
@@ -2487,9 +2491,12 @@ process.stdout.write(eval(script));
                 self.fail(result.stderr)
             return json.loads(result.stdout)
 
-        self.assertEqual(evaluate(), {"status": "payment_started"})
+        self.assertEqual(evaluate(), {"status": "retry_available"})
         self.assertEqual(evaluate(heading="Betalt"), {"status": "unknown"})
         self.assertEqual(evaluate(hasReceipt=False), {"status": "unknown"})
+        self.assertEqual(evaluate(hasRetry=False), {"status": "unknown"})
+        self.assertEqual(evaluate(retry="https://oda.com/no/checkout/retry/?orderNumber=other"), {"status": "unknown"})
+        self.assertEqual(evaluate(retryText="Fortsett"), {"status": "unknown"})
         self.assertEqual(
             evaluate(url="https://oda.com/no/account/orders/other/"),
             {"status": "unknown"},

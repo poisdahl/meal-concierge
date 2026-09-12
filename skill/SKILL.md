@@ -113,8 +113,11 @@ be passed as `checkout_payment` for this recovery alone; saved-card selection
 uses an existing card, and global preferences remain unchanged. Include the
 exact `order_id` only when the owner identifies that Oda order as `Betaling
 påbegynt` after tracking reports an incompatible paid state. The dedicated
-browser must independently verify that exact page state before recovery can be
-reviewed; a user report or coarse tracking status alone is insufficient.
+browser must independently verify that exact page state, its same-order `Betal`
+retry link and the unique post-checkout provider order before recovery can be
+reviewed; a user report or coarse tracking status alone is insufficient. A
+recorded Vipps request that is sent, dispatching or otherwise unresolved remains
+locked.
 Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or

@@ -190,9 +190,12 @@ A missing or inconsistent merchant retry review stops preparation.
 Oda's tracking result can conflict with its exact order page. When the owner
 identifies the exact order as `Betaling påbegynt`, pass that `order_id` only with
 `action="prepare", recovery=true`. Recovery remains blocked unless the dedicated
-browser independently verifies the exact Oda order URL, status and receipt link,
-then matches the frozen order, account/address, delivery, total and fee rows.
-This never derives an order identity from a user report or creates another order.
+browser independently verifies the exact Oda order URL, status, receipt link and
+same-order `Betal` retry link, the provider exposes exactly one order absent from
+the pre-checkout baseline, and that order matches the frozen order,
+account/address, delivery, total and fee rows. A supplied ID is only a selector;
+the provider evidence establishes the unique target. An active or unknown
+recorded Vipps request remains locked. Recovery does not create another order.
 
 The default method is the original `checkout_payment`. An explicitly authorized
 `checkout_payment` override selects an existing supported method for this
