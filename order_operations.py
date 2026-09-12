@@ -1784,13 +1784,39 @@ class OrderOperations:
             raise HouseholdError("recovery is a boolean option for checkout prepare only")
         if "checkout_payment" in request and not (action == "prepare" and request.get("recovery")):
             raise HouseholdError("checkout_payment override is available only for recovery preparation")
-        if "order_id" in request and action == "prepare" and not request.get("recovery"):
-            raise HouseholdError("order_id is available only for exact-order recovery preparation")
+        if "vipps_request_not_received" in request and not (
+            action == "prepare" and request.get("recovery")
+            and request.get("order_id") is not None
+            and request.get("vipps_request_not_received") is True
+        ):
+            raise HouseholdError("vipps_request_not_received is true only for exact Oda recovery preparation")
+        if (action == "prepare" and request.get("recovery") and request.get("order_id") is not None
+                and (
+                    request.get("vipps_request_not_received") is not True
+                    or not isinstance(request.get("confirmation_id"), str)
+                    or not request["confirmation_id"]
+                )):
+            raise HouseholdError("Exact Oda recovery requires the original confirmation and the owner's current no-request report")
+        if "order_id" in request and not (action == "prepare" and request.get("recovery")):
+            state = self.store.read()
+            legacy_result = None
+            if action == "confirm":
+                legacy_result = self._read_protected_result(
+                    state, str(request.get("confirmation_id") or ""), "checkout"
+                )
+            elif action == "submit":
+                key = self._idempotency_key(request.get("idempotency_key"), "checkout")
+                protected = self._protected_request(state, "checkout", key)
+                legacy_result = protected.get("result") if isinstance(protected, Mapping) else None
+            if (not isinstance(legacy_result, Mapping)
+                    or str(legacy_result.get("order_id") or "") != str(request.get("order_id") or "")):
+                raise HouseholdError("order_id is available only for exact-order recovery preparation")
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
                 request.get("checkout_payment"),
                 request.get("order_id"),
+                request.get("confirmation_id"),
             )
         if action == "prepare":
             occurrence = str(request.get("occurrence") or "") or None
@@ -2407,7 +2433,7 @@ class OrderOperations:
             ),
         }
 
-    def _checkout_recovery_target(self, pending, deadline, requested_order_id=None):
+    def _checkout_recovery_target(self, pending, deadline, requested_order_id=None, *, verify_retry_page=True):
         if self.provider not in {"oda", "mathem"} or self.browser is None:
             raise HouseholdError("Merchant payment recovery is unavailable for this installation")
         requested = safe_order_id(requested_order_id) if requested_order_id is not None else None
@@ -2496,14 +2522,11 @@ class OrderOperations:
             and binding_source not in ODA_VIPPS_ORDER_BINDING_SOURCES
         )
         requires_retry_page = needs_page_binding or binding_source == "oda_retry_available_page"
-        if self.provider == "oda" and requires_retry_page:
+        if self.provider == "oda" and requires_retry_page and verify_retry_page:
             retry_available = self.browser.order_payment_state(order_id, deadline=deadline).get("status") == "retry_available"
-        allowed_tracking = {"unpaid_order"}
-        if requires_retry_page:
-            allowed_tracking.update({"paid_and_modifiable", "paid_and_not_modifiable"})
         if (order_identity != order_id or tracking_identity != order_id
-                or tracking_status not in allowed_tracking
-                or requires_retry_page and not retry_available):
+                or tracking_status != "unpaid_order"
+                or requires_retry_page and verify_retry_page and not retry_available):
             raise HouseholdError("The original order is no longer unpaid; reconcile it before recovery")
         # MCP omits an unpaid order's address. The native retry review below
         # independently verifies it and the original account reference.
@@ -2548,9 +2571,12 @@ class OrderOperations:
                 time.sleep(0.5)
         raise HouseholdError("The Oda order does not match the reviewed Vipps checkout; do not send payment")
 
-    def _checkout_recovery_prepare(self, deadline, checkout_payment=None, requested_order_id=None):
+    def _checkout_recovery_prepare(self, deadline, checkout_payment=None, requested_order_id=None,
+                                   original_confirmation_id=None):
         with self._browser_operation(deadline):
-            return self._checkout_recovery_prepare_unlocked(deadline, checkout_payment, requested_order_id)
+            return self._checkout_recovery_prepare_unlocked(
+                deadline, checkout_payment, requested_order_id, original_confirmation_id
+            )
 
     @staticmethod
     def _recovery_browser_options(pending):
@@ -2580,10 +2606,15 @@ class OrderOperations:
             summary["merchant_summary_total"] = overview / 100
         return summary
 
-    def _checkout_recovery_prepare_unlocked(self, deadline, checkout_payment=None, requested_order_id=None):
+    def _checkout_recovery_prepare_unlocked(self, deadline, checkout_payment=None,
+                                            requested_order_id=None,
+                                            original_confirmation_id=None):
         pending = deepcopy(self.store.read().get("pending_checkout"))
         if not pending or pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
             raise HouseholdError("No original dispatched checkout is pending recovery")
+        if (requested_order_id is not None
+                and original_confirmation_id != pending.get("confirmation_id")):
+            raise HouseholdError("Exact Oda recovery does not match the original checkout confirmation")
         active_attempt = pending.get("recovery") or pending
         legacy_retry_offer = (
             requested_order_id is not None
@@ -2623,6 +2654,9 @@ class OrderOperations:
             "receipt_address": pending["summary"]["delivery"]["address"],
         })
         payment = checkout_payment_settings(checkout_payment, self.provider) if checkout_payment is not None else pending["checkout_payment"]
+        if (pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+                and payment.get("method") != "vipps"):
+            raise HouseholdError("Exact Oda retry-page recovery must preserve Vipps")
         review = self.browser.review_payment_recovery(pending["cart"], order_id,
             payment=payment, expected_binding=binding, deadline=deadline,
             **self._recovery_browser_options(pending))
@@ -2662,6 +2696,9 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
+        if requested_order_id is not None:
+            child["owner_reported_no_vipps_request"] = True
+            child["original_confirmation_id"] = original_confirmation_id
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("The pending checkout changed during recovery preparation")
@@ -2731,10 +2768,14 @@ class OrderOperations:
                         original_status is None
                         and pending.get("vipps_request_context") is None
                         and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+                        and child.get("owner_reported_no_vipps_request") is True
+                        and child.get("original_confirmation_id") == pending.get("confirmation_id")
                     )
                     if original_status not in {"expired", "verifying", "not_sent"} and not legacy_offer:
                         raise HouseholdError("The original Oda/Vipps request is not positively closed; do not retry payment")
-                if self._checkout_recovery_target(pending, deadline) != child["order_id"]:
+                if self._checkout_recovery_target(
+                    pending, deadline, verify_retry_page=False
+                ) != child["order_id"]:
                     raise HouseholdError("Recovery merchant target changed")
                 if self._checkout_dietary(pending["summary"], deadline) != child["dietary_assessment"]:
                     raise HouseholdError("Recovery dietary findings changed; prepare a new review")
@@ -3406,13 +3447,27 @@ class OrderOperations:
             pending.get("recovery")
             and pending["recovery"].get("status") != "awaiting_confirmation"
         )
+        recovery_context = ((pending.get("recovery") or {}).get("vipps_request_context")
+                            if isinstance(pending.get("recovery"), Mapping) else None)
+        exact_retry_request_sent = bool(
+            pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+            and isinstance(recovery_context, Mapping)
+            and recovery_context.get("order_id") == (pending.get("recovery") or {}).get("order_id")
+            and (pending.get("recovery") or {}).get("order_id") == pending.get("unpaid_order_id")
+            and (
+                (pending.get("recovery") or {}).get("vipps_request_status") == "sent"
+                or (
+                    (pending.get("recovery") or {}).get("vipps_request_status") == "dispatching"
+                    and oda_vipps_observation == "sent"
+                )
+            )
+        )
         payment_page_status = None
         tracking_conflict = False
         page_bound_before_retry = (
             self.provider == "oda"
-            and active_payment.get("method") == "vipps"
             and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-            and not recovery_dispatched
+            and not exact_retry_request_sent
         )
         if (
             page_bound_before_retry
@@ -3424,10 +3479,6 @@ class OrderOperations:
                 self.browser.order_payment_state(candidate_id, deadline=deadline).get("status") or "unknown"
             )
             tracking_conflict = payment_page_status == "retry_available"
-            if (tracking_conflict
-                    and pending.get("vipps_request_status") is None
-                    and pending.get("vipps_request_context") is None):
-                oda_vipps_active = False
         receipt_order = order
         if (self.provider in {"oda", "mathem"} and order is not None and candidate_id == details_id == tracking_id
                 and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}):
@@ -3485,7 +3536,7 @@ class OrderOperations:
         unpaid_matches = (
             self.provider in {"oda", "mathem"} and order is not None
             and candidate_id == details_id == tracking_id
-            and (tracking_status == "unpaid_order" or tracking_conflict)
+            and tracking_status == "unpaid_order"
             and order_matches_checkout(
                 order if "deliveryAddress" in order or "delivery_address" in order else {
                     **order, "deliveryAddress": (pending["summary"].get("delivery") or {}).get("address")},
@@ -3566,9 +3617,7 @@ class OrderOperations:
                if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed else {}),
             **({"unpaid_order_id": candidate_id, "tracking_status": tracking_status,
                 "recovery_preparation_available": True,
-                "next": ("The exact Oda order page offers a same-order payment retry although order_tracking reports a paid fulfillment state. Inspect it with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment."
-                         if tracking_conflict else
-                         "The original merchant order is unpaid. Inspect its supported retry review with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment.")}
+                "next": "The original merchant order is unpaid. Inspect its supported retry review with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment."}
                if unpaid_matches and oda_vipps_bound and not oda_vipps_active
                and (not recovery_dispatched or recovery_failed) and not authentication else {}),
             **({"tracking_status": tracking_status,

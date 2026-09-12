@@ -187,15 +187,20 @@ delivery; the browser independently checks the original account/address and fee
 rows. An unpaid tracking status alone does not prove a terminal payment failure.
 A missing or inconsistent merchant retry review stops preparation.
 
-Oda's tracking result can conflict with its exact order page. When the owner
-identifies the exact order as `Betaling påbegynt`, pass that `order_id` only with
-`action="prepare", recovery=true`. Recovery remains blocked unless the dedicated
-browser independently verifies the exact Oda order URL, status, receipt link and
-same-order `Betal` retry link, the provider exposes exactly one order absent from
-the pre-checkout baseline, and that order matches the frozen order,
-account/address, delivery, total and fee rows. A supplied ID is only a selector;
-the provider evidence establishes the unique target. An active or unknown
-recorded Vipps request remains locked. Recovery does not create another order.
+Oda's tracking result can temporarily conflict with its exact order page. Do not
+override that status: wait until tracking itself reports `unpaid_order`. When the
+owner identifies the exact order as `Betaling påbegynt`, pass that `order_id` only
+with `action="prepare", recovery=true`, the original `confirmation_id`, and
+`vipps_request_not_received=true` only after the owner reports no request in
+their Vipps app. Recovery remains blocked unless the
+dedicated browser independently verifies the exact Oda order URL, status,
+receipt link and same-order `Betal` retry link, the provider exposes exactly one
+order absent from the pre-checkout baseline, and that order matches the frozen
+order, account/address, delivery, total and fee rows. The owner's exact selection
+identifies the target; provider evidence must independently make it unique and
+matching. A user report alone is insufficient, and an active or explicitly
+unknown recorded Vipps request remains locked.
+Recovery does not create another order.
 
 The default method is the original `checkout_payment`. An explicitly authorized
 `checkout_payment` override selects an existing supported method for this

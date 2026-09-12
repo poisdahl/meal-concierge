@@ -54,8 +54,10 @@ class MerchantBrowser:
         self.review_change = None
         self.payment_state = "unknown"
         self.vipps_request_state = "unknown"
+        self.recovery_surface = "unknown"
 
     def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, **kwargs):
+        self.recovery_surface = "retry"
         review = {"order_id": order_id, "binding": deepcopy(expected_binding), "payment_choice": deepcopy(payment),
                   "payment_display": "Vipps" if payment["method"] == "vipps" else "•••• 1234", "amounts_minor": _oda_checkout_amounts_minor(AMOUNTS)}
         if self.review_change:
@@ -65,7 +67,10 @@ class MerchantBrowser:
     def submit_payment_recovery(self, cart, review, before_click, **kwargs):
         if self.precondition_failure:
             raise CheckoutPreconditionError("merchant review changed")
+        self.recovery_surface = "retry"
         before_click()
+        if self.recovery_surface != "retry":
+            raise CheckoutPreconditionError("recovery navigation changed before click")
         self.clicks += 1
         if self.lost_response:
             raise HouseholdError("response lost after dispatch")
@@ -75,6 +80,7 @@ class MerchantBrowser:
         return expected_binding
 
     def order_payment_state(self, order_id, **kwargs):
+        self.recovery_surface = "order"
         return {"status": self.payment_state}
 
     def checkout_vipps_request_state(self, context, **kwargs):
@@ -110,6 +116,9 @@ class RecoveryTests(unittest.TestCase):
         self.original = self.app.store.read()["pending_checkout"]
 
     def call(self, action, **kwargs):
+        if action == "prepare" and kwargs.get("recovery") and kwargs.get("order_id"):
+            kwargs.setdefault("confirmation_id", "original")
+            kwargs.setdefault("vipps_request_not_received", True)
         return self.app.handle({"operation": "checkout", "action": action, **kwargs})
 
     def prepare(self):
@@ -179,7 +188,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(self.app.store.read()["pending_checkout"])
         self.assertNotIn("get_cart", self.merchant.calls)
 
-    def test_exact_payment_started_order_recovers_when_tracking_claims_paid(self):
+    def test_exact_retry_order_rejects_conflicting_paid_tracking(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending["status"] = "awaiting_user_payment"
@@ -189,14 +198,13 @@ class RecoveryTests(unittest.TestCase):
         self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
 
-        prepared = self.call("prepare", recovery=True, order_id="order-1")
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call("prepare", recovery=True, order_id="order-1")
 
-        self.assertTrue(prepared["recovery"])
-        self.assertEqual(prepared["order_id"], "order-1")
         self.assertEqual(self.browser.clicks, 0)
         pending = self.app.store.read()["pending_checkout"]
-        self.assertEqual(pending["unpaid_order_id"], "order-1")
-        self.assertEqual(pending["unpaid_order_binding_source"], "oda_retry_available_page")
+        self.assertNotIn("unpaid_order_id", pending)
+        self.assertNotIn("unpaid_order_binding_source", pending)
 
     def test_exact_retry_order_recovers_after_tracking_converges_to_unpaid(self):
         with self.app.store.locked() as state:
@@ -212,12 +220,66 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(prepared["order_id"], "order-1")
         self.assertEqual(self.browser.clicks, 0)
 
+    def test_exact_retry_requires_owner_no_request_report_and_original_confirmation(self):
+        request = {
+            "operation": "checkout", "action": "prepare", "recovery": True,
+            "order_id": "order-1",
+        }
+        for changes in ({}, {"vipps_request_not_received": True}, {
+                "vipps_request_not_received": True, "confirmation_id": "other"}):
+            with self.subTest(changes=changes), self.assertRaises(HouseholdError):
+                self.app.handle({**request, **changes})
+
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_order_id_is_rejected_outside_exact_recovery_or_terminal_replay(self):
+        requests = (
+            {"action": "confirm", "confirmation_id": "original"},
+            {"action": "reconcile", "confirmation_id": "original"},
+            {"action": "submit", "idempotency_key": "new-intent"},
+        )
+        for request in requests:
+            with self.subTest(action=request["action"]), self.assertRaisesRegex(
+                    HouseholdError, "only for exact-order recovery"):
+                self.call(order_id="order-1", **request)
+
+    def test_exact_retry_records_owner_report_on_the_fresh_confirmation(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["confirmation_id"], prepared["confirmation_id"])
+        self.assertTrue(child["owner_reported_no_vipps_request"])
+        self.assertEqual(child["original_confirmation_id"], "original")
+
+    def test_exact_retry_page_recovery_cannot_switch_away_from_vipps(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+
+        with self.assertRaisesRegex(HouseholdError, "must preserve Vipps"):
+            self.call(
+                "prepare", recovery=True, order_id="order-1",
+                checkout_payment={"method": "saved_card"},
+            )
+
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_exact_order_recovery_requires_the_payment_started_page(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
-        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "unknown"
 
         with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
             self.call("prepare", recovery=True, order_id="order-1")
@@ -231,7 +293,6 @@ class RecoveryTests(unittest.TestCase):
             pending["orders_before"] = {"orders": [{"orderNumber": "order-1"}]}
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
-        self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
 
         with self.assertRaisesRegex(HouseholdError, "exactly one new merchant order"):
@@ -244,12 +305,16 @@ class RecoveryTests(unittest.TestCase):
             pending = state["pending_checkout"]
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
-        self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
         prepared = self.call("prepare", recovery=True, order_id="order-1")
-        self.browser.payment_state = "unknown"
 
-        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+        def changed_retry_surface(_cart, _review, before_click, **_kwargs):
+            before_click()
+            raise CheckoutPreconditionError("recovery retry surface changed")
+
+        self.browser.submit_payment_recovery = changed_retry_surface
+
+        with self.assertRaisesRegex(CheckoutPreconditionError, "retry surface changed"):
             self.call("confirm", confirmation_id=prepared["confirmation_id"])
 
         self.assertEqual(self.browser.clicks, 0)
@@ -259,7 +324,6 @@ class RecoveryTests(unittest.TestCase):
             pending = state["pending_checkout"]
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
-        self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
         prepared = self.call("prepare", recovery=True, order_id="order-1")
 
@@ -287,6 +351,20 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["confirmed"])
         self.assertEqual(self.browser.clicks, 1)
 
+    def test_exact_retry_preclick_provider_check_keeps_the_retry_surface_current(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+        result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(self.browser.clicks, 1)
+
     def test_exact_retry_page_reports_the_tracking_conflict_without_rewriting_it(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
@@ -297,12 +375,12 @@ class RecoveryTests(unittest.TestCase):
         result = self.call("reconcile", confirmation_id="original")
 
         self.assertFalse(result["confirmed"])
-        self.assertEqual(result["tracking_status"], "paid_and_not_modifiable")
+        self.assertEqual(result["payment"]["provider_status"], "paid_and_not_modifiable")
         self.assertEqual(result["tracking_conflict"], {
             "provider_tracking_status": "paid_and_not_modifiable",
             "order_page_status": "retry_available",
         })
-        self.assertTrue(result["recovery_preparation_available"])
+        self.assertNotIn("recovery_preparation_available", result)
         self.assertIsNotNone(self.app.store.read()["pending_checkout"])
 
     def test_unknown_exact_retry_page_never_confirms_a_prepared_recovery(self):
@@ -366,7 +444,6 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
             pending.pop("vipps_request_status")
-        self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
         prepared = self.call("prepare", recovery=True, order_id="order-1")
         with self.app.store.locked() as state:
@@ -413,13 +490,35 @@ class RecoveryTests(unittest.TestCase):
             return original_call(name, arguments, **kwargs)
 
         self.merchant.call = call
-        self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
 
         with self.assertRaisesRegex(HouseholdError, "exactly one new merchant order"):
             self.call("prepare", recovery=True, order_id="order-1")
 
         self.assertEqual(self.browser.clicks, 0)
+
+    def test_clicking_without_exact_vipps_request_never_confirms_stale_paid_tracking(self):
+        for payment_state in ("retry_available", "unknown"):
+            with self.subTest(payment_state=payment_state):
+                with self.app.store.locked() as state:
+                    state["pending_checkout"] = deepcopy(self.original)
+                    pending = state["pending_checkout"]
+                    pending.pop("vipps_request_status")
+                    pending.pop("unpaid_order_id")
+                    pending.pop("unpaid_order_binding_source")
+                self.merchant.status = "unpaid_order"
+                self.browser.payment_state = "retry_available"
+                prepared = self.call("prepare", recovery=True, order_id="order-1")
+                with self.app.store.locked() as state:
+                    state["pending_checkout"]["recovery"]["status"] = "clicking"
+                self.merchant.status = "paid_and_not_modifiable"
+                self.browser.payment_state = payment_state
+
+                result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+
+                self.assertFalse(result["confirmed"])
+                self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+                self.assertEqual(self.browser.clicks, 0)
 
     def test_bank_challenge_recovery_survives_restart_and_lost_browser_without_repayment(self):
         prepared = self.call("prepare", recovery=True, checkout_payment={"method": "saved_card"})
