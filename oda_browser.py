@@ -491,14 +491,20 @@ def _oda_order_payment_state_script(order_id: str) -> str:
   const url=new URL(e.href,location.href);
   return url.origin===location.origin&&url.pathname===RECEIPT_PATH&&!url.search&&!url.hash;
  });
- const retries=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+ const retryCandidates=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+  const url=new URL(e.href,location.href);
+  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'||
+   url.origin===location.origin&&url.pathname===RETRY_PATH;
+ });
+ const retries=retryCandidates.filter(e=>{
   const url=new URL(e.href,location.href);
   return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'&&
    url.origin===location.origin&&url.pathname===RETRY_PATH&&!url.hash&&
    [...url.searchParams.keys()].length===1&&url.searchParams.get('orderNumber')===ORDER_ID;
  });
- const retryable=headings.length===1&&receipts.length===1&&retries.length===1;
- return JSON.stringify({status:retryable?'retry_available':'unknown'});
+ const paymentStarted=headings.length===1&&receipts.length===1;
+ const retryable=paymentStarted&&retryCandidates.length===1&&retries.length===1;
+ return JSON.stringify({status:retryable?'retry_available':paymentStarted&&retryCandidates.length===0?'payment_started':'unknown'});
 })()
 """.replace("ORDER_URL", json.dumps(order_url)).replace("RECEIPT_PATH", json.dumps(receipt_path)).replace(
         "RETRY_PATH", json.dumps(retry_path),
@@ -994,7 +1000,7 @@ class OdaBrowser:
             script = _oda_order_payment_state_script(order_id)
             for _ in range(20):
                 state = self._eval(script)
-                if state.get("status") == "retry_available":
+                if state.get("status") in {"retry_available", "payment_started"}:
                     return state
                 self._settle(0.25)
         return {"status": "unknown"}

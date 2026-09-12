@@ -192,7 +192,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(self.app.store.read()["pending_checkout"])
         self.assertNotIn("get_cart", self.merchant.calls)
 
-    def test_exact_retry_order_rejects_conflicting_paid_tracking(self):
+    def test_exact_owner_report_accepts_the_paid_tracking_conflict(self):
+        for tracking_status in ("paid_and_modifiable", "paid_and_not_modifiable"):
+            for page_state in ("retry_available", "payment_started"):
+                with self.subTest(tracking_status=tracking_status, page_state=page_state):
+                    with self.app.store.locked() as state:
+                        state["pending_checkout"] = deepcopy(self.original)
+                        pending = state["pending_checkout"]
+                        pending["status"] = "awaiting_user_payment"
+                        pending.pop("vipps_request_status")
+                        pending.pop("unpaid_order_id")
+                        pending.pop("unpaid_order_binding_source")
+                    self.merchant.status = tracking_status
+                    self.browser.payment_state = page_state
+
+                    prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+                    self.assertTrue(prepared["recovery"])
+                    self.assertEqual(prepared["order_id"], "order-1")
+                    self.assertEqual(self.browser.clicks, 0)
+
+    def test_paid_tracking_without_the_exact_payment_started_page_stays_locked(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending["status"] = "awaiting_user_payment"
@@ -200,7 +220,7 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
         self.merchant.status = "paid_and_not_modifiable"
-        self.browser.payment_state = "retry_available"
+        self.browser.payment_state = "unknown"
 
         with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
             self.call("prepare", recovery=True, order_id="order-1")
@@ -471,8 +491,55 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.browser.clicks, 0)
 
+    def test_owner_no_request_report_accepts_exact_paid_tracking_conflict(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["payment_failed"])
+        self.assertTrue(result["recovery_preparation_available"])
+        self.assertEqual(result["recovery_order_id"], "order-1")
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        fresh = self.app.handle({
+            "operation": "checkout", "action": "prepare", "recovery": True,
+        })
+        self.assertTrue(fresh["recovery"])
+        self.assertEqual(fresh["order_id"], "order-1")
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_paid_tracking_conflict_requires_the_complete_retry_review(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+        self.browser.review_change = lambda review: review["amounts_minor"].update(
+            provider_total=review["amounts_minor"]["provider_total"] + 1
+        )
+
+        result = self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["payment_failed"])
+        self.assertNotIn("recovery_preparation_available", result)
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_owner_no_request_report_requires_current_unpaid_retry_surface(self):
-        for tracking, page in (("paid_and_not_modifiable", "retry_available"),
+        for tracking, page in (("paid_and_not_modifiable", "unknown"),
                                ("unpaid_order", "unknown")):
             with self.subTest(tracking=tracking, page=page):
                 with self.app.store.locked() as state:

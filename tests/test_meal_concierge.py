@@ -2499,7 +2499,7 @@ process.stdout.write(eval(script));
         )
         self.assertEqual(evaluate(heading="Betalt"), {"status": "unknown"})
         self.assertEqual(evaluate(hasReceipt=False), {"status": "unknown"})
-        self.assertEqual(evaluate(hasRetry=False), {"status": "unknown"})
+        self.assertEqual(evaluate(hasRetry=False), {"status": "payment_started"})
         self.assertEqual(evaluate(retry="https://oda.com/no/checkout/retry/?orderNumber=other"), {"status": "unknown"})
         self.assertEqual(evaluate(retryText="Fortsett"), {"status": "unknown"})
         self.assertEqual(
