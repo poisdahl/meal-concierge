@@ -468,6 +468,90 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(waiting["payment_request_sent"])
         self.assertEqual(self.browser.clicks, 1)
 
+    def test_owner_can_abandon_one_exact_unsent_unpaid_order_when_retry_is_stuck(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+
+        self.assertTrue(result["abandoned_unpaid"])
+        self.assertTrue(result["new_checkout_allowed"])
+        self.assertFalse(result["payment_dispatched"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+        for confirmation_id in ("original", prepared["confirmation_id"]):
+            replayed = self.app.handle({
+                "operation": "checkout", "action": "abandon_unpaid",
+                "confirmation_id": confirmation_id, "order_id": "order-1",
+                "vipps_request_not_received": True,
+            })
+            self.assertTrue(replayed["abandoned_unpaid"])
+            self.assertTrue(replayed["idempotent"])
+        self.assertNotIn("get_cart", self.merchant.calls)
+
+    def test_abandon_unpaid_keeps_a_working_exact_retry(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "retry_available"
+
+        with self.assertRaisesRegex(HouseholdError, "non-actionable payment-started"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_cannot_override_dispatch_evidence(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            child = state["pending_checkout"]["recovery"]
+            child["vipps_request_status"] = "dispatching"
+            child["vipps_request_attempted_at"] = self.now.isoformat()
+
+        with self.assertRaisesRegex(HouseholdError, "not positively proven unsent"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_requires_current_unpaid_tracking(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+
+        with self.assertRaisesRegex(HouseholdError, "not currently reported unpaid"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_owner_no_request_report_cannot_override_dispatch_evidence(self):
         prepared = self.contextless_exact_retry_attempt()
         with self.app.store.locked() as state:

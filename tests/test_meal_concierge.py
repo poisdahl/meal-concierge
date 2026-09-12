@@ -8643,7 +8643,7 @@ class FlowTests(unittest.TestCase):
     def test_auto_checkout_defaults_off_and_only_completed_occurrence_is_single_use(self):
         with self.assertRaises(HouseholdError):
             self.app.handle({"operation": "checkout", "action": "auto", "occurrence": "2026-W36"})
-        self.app.handle({"operation": "schedule", "action": "update", "changes": {"enabled": True, "maximum_total": 100.0, "delivery": {"weekday": "Saturday"}, "auto_checkout": True}})
+        self.app.handle({"operation": "schedule", "action": "update", "changes": {"enabled": True, "maximum_total": None, "delivery": {"weekday": "Saturday"}, "auto_checkout": True}})
         with (
             mock.patch("service.now", return_value=datetime(2026, 9, 3, 13, 5, tzinfo=timezone.utc)),
             self.assertRaisesRegex(HouseholdError, "not linked"),
@@ -8662,6 +8662,7 @@ class FlowTests(unittest.TestCase):
             result = self.app.handle({"operation": "checkout", "action": "auto", "occurrence": "2026-W36"})
         self.assertFalse(result["confirmed"])
         self.assertTrue(result["awaiting_confirmation"])
+        self.assertIsNone(self.store.read()["schedule"]["maximum_total"])
         self.assertEqual(result["summary"]["delivery"]["selection_origin"], "external")
         self.assertIn(
             ("get_delivery_slots", {"delivery_date": "2026-09-05"}),
@@ -9207,14 +9208,14 @@ class FlowTests(unittest.TestCase):
             self.assertTrue(confirmed["confirmed"])
             self.assertEqual(browser.checkout_clicks, 1)
 
-    def test_auto_checkout_dispatches_inside_guards_under_standing_authorization(self):
+    def test_auto_checkout_dispatches_without_an_optional_maximum_under_standing_authorization(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "confirmation_policy": "standing"})
             oda = FakeOda()
             browser = FakeBrowser()
             browser.oda = oda
             app = Application(store, oda, browser)
-            app.handle({"operation": "schedule", "action": "update", "changes": {"enabled": True, "maximum_total": 100.0, "delivery": {"weekday": "Saturday"}, "auto_checkout": True}})
+            app.handle({"operation": "schedule", "action": "update", "changes": {"enabled": True, "maximum_total": None, "delivery": {"weekday": "Saturday"}, "auto_checkout": True}})
             app.handle({"operation": "schedule", "action": "set_cron_job", "cron_job_id": "test-cron"})
 
             with (

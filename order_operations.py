@@ -769,13 +769,10 @@ class OrderOperations:
         if not schedule.get("enabled") or not schedule.get("auto_checkout"):
             return "scheduled checkout is no longer enabled"
         total = summary.get("total")
-        if (
-            isinstance(total, bool)
-            or not isinstance(total, (int, float))
-            or not math.isfinite(float(total))
-            or maximum_total is None
-            or total > maximum_total
-        ):
+        if (isinstance(total, bool) or not isinstance(total, (int, float))
+                or not math.isfinite(float(total))):
+            return "total is unavailable"
+        if maximum_total is not None and total > maximum_total:
             return "total exceeds maximum"
         if not delivery_matches(
             schedule["delivery"],
@@ -1790,10 +1787,11 @@ class OrderOperations:
                 (action == "prepare" and request.get("recovery")
                  and request.get("order_id") is not None)
                 or action == "reconcile"
+                or action == "abandon_unpaid"
             )
         ):
             raise HouseholdError(
-                "vipps_request_not_received is true only for exact Oda recovery preparation or reconciliation"
+                "vipps_request_not_received is true only for exact Oda recovery preparation, reconciliation or abandonment"
             )
         if "vipps_approval_completed" in request and not (
             action == "reconcile" and request.get("vipps_approval_completed") is True
@@ -1809,7 +1807,18 @@ class OrderOperations:
                     or not request["confirmation_id"]
                 )):
             raise HouseholdError("Exact Oda recovery requires the original confirmation and the owner's current no-request report")
-        if "order_id" in request and not (action == "prepare" and request.get("recovery")):
+        if action == "abandon_unpaid" and (
+                request.get("vipps_request_not_received") is not True
+                or not isinstance(request.get("confirmation_id"), str)
+                or not request["confirmation_id"]
+                or not isinstance(request.get("order_id"), str)
+                or not request["order_id"]):
+            raise HouseholdError(
+                "Abandoning an unpaid Oda order requires its exact order_id, current recovery confirmation and the owner's no-request report"
+            )
+        if "order_id" in request and not (
+                (action == "prepare" and request.get("recovery"))
+                or action == "abandon_unpaid"):
             state = self.store.read()
             legacy_result = None
             if action == "confirm":
@@ -1823,6 +1832,12 @@ class OrderOperations:
             if (not isinstance(legacy_result, Mapping)
                     or str(legacy_result.get("order_id") or "") != str(request.get("order_id") or "")):
                 raise HouseholdError("order_id is available only for exact-order recovery preparation")
+        if action == "abandon_unpaid":
+            return self._checkout_abandon_unpaid(
+                deadline,
+                str(request["confirmation_id"]),
+                str(request["order_id"]),
+            )
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
@@ -2449,6 +2464,111 @@ class OrderOperations:
                 else "Standing authorization is configured. If the current request explicitly asks to order, pay or check out, call checkout confirm now with this confirmation_id; do not ask again."
             ),
         }
+
+    def _checkout_abandon_unpaid(self, deadline, confirmation_id, requested_order_id):
+        """Release one exact Oda/Vipps journal only after proven non-dispatch."""
+
+        order_id = safe_order_id(requested_order_id)
+        with self._browser_operation(deadline):
+            with self.store.locked() as state:
+                pending = deepcopy(state.get("pending_checkout"))
+                recovered = self._read_protected_result(
+                    state, confirmation_id, "checkout"
+                )
+            if recovered:
+                if (recovered.get("abandoned_unpaid") is True
+                        and recovered.get("order_id") == order_id):
+                    return recovered
+                raise HouseholdError("The confirmation belongs to another checkout result")
+            if (
+                self.provider != "oda"
+                or self.browser is None
+                or not isinstance(pending, Mapping)
+                or pending.get("order_change")
+                or pending.get("occurrence")
+                or pending.get("automatic_checkout")
+                or (pending.get("checkout_payment") or {}).get("method") != "vipps"
+                or pending.get("unpaid_order_binding_source") != "oda_retry_available_page"
+            ):
+                raise HouseholdError(
+                    "Only an interactive exact Oda/Vipps unpaid order can be abandoned"
+                )
+            child = pending.get("recovery")
+            exact_not_sent = (
+                isinstance(child, Mapping)
+                and confirmation_id == child.get("confirmation_id")
+                and child.get("order_id") == pending.get("unpaid_order_id") == order_id
+                and child.get("status") in {"clicking", "uncertain", "awaiting_user_payment"}
+                and (child.get("browser_review") or {}).get("payment_choice", {}).get("method") == "vipps"
+                and child.get("vipps_request_status") == "not_sent"
+                and child.get("vipps_request_context") is None
+                and child.get("vipps_request_attempted_at") is None
+                and child.get("payment_requested_at") is None
+                and child.get("owner_vipps_approval_completed_at") is None
+                and isinstance(child.get("owner_reported_no_vipps_request_after_attempt_at"), str)
+                and bool(child["owner_reported_no_vipps_request_after_attempt_at"])
+                and child.get("payment_failure") == {
+                    "payment_failed": True,
+                    "order_id": order_id,
+                    "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
+                }
+            )
+            if not exact_not_sent:
+                raise HouseholdError(
+                    "The current Oda/Vipps recovery is not positively proven unsent"
+                )
+            self._checkout_recovery_target(pending, deadline, order_id)
+            tracking = self.provider_client.call(
+                "order_tracking", {"order_number": order_id}, deadline=deadline
+            )
+            tracking_id = str(
+                tracking.get("orderNumber") or tracking.get("order_number")
+                or tracking.get("order_id") or tracking.get("id") or ""
+            )
+            if tracking_id != order_id or tracking.get("status") != "unpaid_order":
+                raise HouseholdError(
+                    "The exact merchant order is not currently reported unpaid"
+                )
+            page_state = str(
+                self.browser.order_payment_state(order_id, deadline=deadline).get("status")
+                or "unknown"
+            )
+            if page_state != "payment_started":
+                raise HouseholdError(
+                    "The exact unpaid order does not show the non-actionable payment-started page"
+                )
+            terminal = {
+                "confirmed": False,
+                "abandoned_unpaid": True,
+                "order_id": order_id,
+                "tracking_status": "unpaid_order",
+                "payment_request_state": "not_sent",
+                "payment_dispatched": False,
+                "retry_allowed": False,
+                "new_checkout_allowed": True,
+                "confirmation_id": confirmation_id,
+                "original_confirmation_id": pending["confirmation_id"],
+                "next": (
+                    "This exact merchant order remains unpaid and must not be retried. "
+                    "Review the current cart, then prepare one fresh checkout if the owner still wants a new order."
+                ),
+            }
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError(
+                        "The pending checkout changed while abandoning the unpaid order"
+                    )
+                state["pending_checkout"] = None
+                intent_signature = checkout_intent_signature(pending["summary"])
+                self._store_protected_result(
+                    state, pending["confirmation_id"], "checkout", terminal,
+                    target_id=order_id, intent_signature=intent_signature,
+                )
+                self._store_protected_result(
+                    state, confirmation_id, "checkout", terminal,
+                    target_id=order_id, intent_signature=intent_signature,
+                )
+            return terminal
 
     def _checkout_recovery_target(self, pending, deadline, requested_order_id=None, *, verify_retry_page=True):
         if self.provider not in {"oda", "mathem"} or self.browser is None:
