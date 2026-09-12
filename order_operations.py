@@ -105,19 +105,26 @@ class OrderOperations:
         return value
 
     @staticmethod
-    def _order_was_abandoned(state: Mapping[str, Any], order_id: str) -> bool:
+    def _abandoned_order_ids(state: Mapping[str, Any]) -> set[str]:
         records = state.get("protected_results")
         if not isinstance(records, Mapping):
-            return False
-        return any(
+            return set()
+        return {
+            str(record["result"]["order_id"])
+            for record in records.values()
+            if (
             isinstance(record, Mapping)
             and record.get("kind") == "checkout"
-            and record.get("target_id") == order_id
             and isinstance(record.get("result"), Mapping)
             and record["result"].get("abandoned_unpaid") is True
-            and record["result"].get("order_id") == order_id
-            for record in records.values()
-        )
+            and isinstance(record["result"].get("order_id"), str)
+            and record.get("target_id") == record["result"]["order_id"]
+            )
+        }
+
+    @classmethod
+    def _order_was_abandoned(cls, state: Mapping[str, Any], order_id: str) -> bool:
+        return order_id in cls._abandoned_order_ids(state)
 
     def _guard_scheduled_context(self, state, context):
         if context is None:
@@ -2644,6 +2651,11 @@ class OrderOperations:
         failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                            if self.provider == "mathem" else None)
         binding_source = pending.get("unpaid_order_binding_source")
+        abandoned_order_ids = self._abandoned_order_ids(self.store.read())
+        if requested in abandoned_order_ids:
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be recovered"
+            )
         if (self.provider == "oda"
                 and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                 and (retained_order_id is None
@@ -2663,6 +2675,7 @@ class OrderOperations:
                 safe_order_id(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or ""))
                 for row in orders.get("orders", []) if isinstance(row, Mapping)
                 and str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before
+                and str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in abandoned_order_ids
             ]
             if candidates != [requested] or requested in before or (
                 retained_order_id is not None and safe_order_id(retained_order_id) != requested
@@ -2681,6 +2694,8 @@ class OrderOperations:
             orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
             candidates = [row for row in orders.get("orders", [])
                           if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before]
+            candidates = [row for row in candidates
+                          if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in abandoned_order_ids]
             if len(candidates) != 1:
                 raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
             order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
@@ -2751,6 +2766,10 @@ class OrderOperations:
         """Verify the exact Oda checkout-response order before hosted Vipps Next."""
 
         candidate_id = safe_order_id(response_order_id)
+        if self._order_was_abandoned(self.store.read(), candidate_id):
+            raise HouseholdError(
+                "The Oda checkout response reused an explicitly abandoned order; do not send payment"
+            )
         before = {
             str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
             for row in pending["orders_before"].get("orders", []) if isinstance(row, Mapping)
@@ -3718,7 +3737,10 @@ class OrderOperations:
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
         after = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
-        candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping) and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids]
+        abandoned_order_ids = self._abandoned_order_ids(self.store.read())
+        candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping)
+                      and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids
+                      and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in abandoned_order_ids]
         exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                                  if self.provider == "mathem" else None)
         if self.provider == "meny" and confirmation_order_id:
@@ -3732,6 +3754,11 @@ class OrderOperations:
         details_id = ""
         tracking_id = ""
         retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None
+        if ((exact_failed_order_id is not None and str(exact_failed_order_id) in abandoned_order_ids)
+                or (retained_unpaid_id is not None and str(retained_unpaid_id) in abandoned_order_ids)):
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be reconciled"
+            )
         if exact_failed_order_id is not None:
             candidate_id = safe_order_id(exact_failed_order_id)
             matching_rows = [item for item in after.get("orders", []) if isinstance(item, Mapping)

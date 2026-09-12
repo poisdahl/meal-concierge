@@ -690,9 +690,11 @@ checkout journal. The provider API must still return the exact order as
 the result. The original attempt must also have no dispatch/request timestamp;
 a pre-dispatch `verifying` context is accepted only for this same order. Report
 that the old merchant entry remains payment-started and is durably fenced from
-future recovery, then review the current cart before preparing at most one fresh
-checkout. Never use this for a scheduled attempt, another provider, fulfillment
-status, or any recorded dispatch/request context.
+future recovery. Ignore that fenced ID when resolving a later checkout's new
+order candidates, while preserving ambiguity among every non-abandoned order.
+Then review the current cart before preparing at most one fresh checkout. Never
+use this for a scheduled attempt, another provider, fulfillment status, or any
+recorded dispatch/request context.
 
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as

@@ -658,6 +658,52 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.browser.clicks, 0)
 
+    def test_abandoned_order_does_not_make_a_later_exact_order_ambiguous(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "payment_started"
+        self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            later = deepcopy(self.original)
+            later["confirmation_id"] = "later-checkout"
+            later["status"] = "uncertain"
+            later["orders_before"] = {"orders": []}
+            later.pop("unpaid_order_id", None)
+            later.pop("unpaid_order_binding_source", None)
+            later.pop("vipps_request_status", None)
+            state["pending_checkout"] = later
+        old_order = deepcopy(self.merchant.order)
+        new_order = {**deepcopy(old_order), "orderNumber": "order-2"}
+        original_call = self.merchant.call
+
+        def two_orders(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": [deepcopy(old_order), deepcopy(new_order)]}
+            if name == "get_order" and arguments.get("order_number") == "order-2":
+                return deepcopy(new_order)
+            if name == "order_tracking" and arguments.get("order_number") == "order-2":
+                return {"orderNumber": "order-2", "status": "unpaid_order"}
+            return original_call(name, arguments, **kwargs)
+
+        self.merchant.call = two_orders
+        self.browser.payment_state = "retry_available"
+
+        recovered = self.app.handle({
+            "operation": "checkout", "action": "prepare", "recovery": True,
+            "order_id": "order-2", "confirmation_id": "later-checkout",
+            "vipps_request_not_received": True,
+        })
+
+        self.assertTrue(recovered["recovery"])
+        self.assertEqual(recovered["order_id"], "order-2")
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_owner_no_request_report_cannot_override_dispatch_evidence(self):
         prepared = self.contextless_exact_retry_attempt()
         with self.app.store.locked() as state:
