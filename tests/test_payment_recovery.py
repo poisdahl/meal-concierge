@@ -192,7 +192,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(self.app.store.read()["pending_checkout"])
         self.assertNotIn("get_cart", self.merchant.calls)
 
-    def test_exact_retry_order_rejects_conflicting_paid_tracking(self):
+    def test_exact_owner_report_accepts_the_paid_tracking_conflict(self):
+        for tracking_status in ("paid_and_modifiable", "paid_and_not_modifiable"):
+            for page_state in ("retry_available", "payment_started"):
+                with self.subTest(tracking_status=tracking_status, page_state=page_state):
+                    with self.app.store.locked() as state:
+                        state["pending_checkout"] = deepcopy(self.original)
+                        pending = state["pending_checkout"]
+                        pending["status"] = "awaiting_user_payment"
+                        pending.pop("vipps_request_status")
+                        pending.pop("unpaid_order_id")
+                        pending.pop("unpaid_order_binding_source")
+                    self.merchant.status = tracking_status
+                    self.browser.payment_state = page_state
+
+                    prepared = self.call("prepare", recovery=True, order_id="order-1")
+
+                    self.assertTrue(prepared["recovery"])
+                    self.assertEqual(prepared["order_id"], "order-1")
+                    self.assertEqual(self.browser.clicks, 0)
+
+    def test_paid_tracking_without_the_exact_payment_started_page_stays_locked(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending["status"] = "awaiting_user_payment"
@@ -200,7 +220,7 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
         self.merchant.status = "paid_and_not_modifiable"
-        self.browser.payment_state = "retry_available"
+        self.browser.payment_state = "unknown"
 
         with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
             self.call("prepare", recovery=True, order_id="order-1")
@@ -471,8 +491,55 @@ class RecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.browser.clicks, 0)
 
+    def test_owner_no_request_report_accepts_exact_paid_tracking_conflict(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["payment_failed"])
+        self.assertTrue(result["recovery_preparation_available"])
+        self.assertEqual(result["recovery_order_id"], "order-1")
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        fresh = self.app.handle({
+            "operation": "checkout", "action": "prepare", "recovery": True,
+        })
+        self.assertTrue(fresh["recovery"])
+        self.assertEqual(fresh["order_id"], "order-1")
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_paid_tracking_conflict_requires_the_complete_retry_review(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+        self.browser.review_change = lambda review: review["amounts_minor"].update(
+            provider_total=review["amounts_minor"]["provider_total"] + 1
+        )
+
+        result = self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["payment_failed"])
+        self.assertNotIn("recovery_preparation_available", result)
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_owner_no_request_report_requires_current_unpaid_retry_surface(self):
-        for tracking, page in (("paid_and_not_modifiable", "retry_available"),
+        for tracking, page in (("paid_and_not_modifiable", "unknown"),
                                ("unpaid_order", "unknown")):
             with self.subTest(tracking=tracking, page=page):
                 with self.app.store.locked() as state:
@@ -1610,6 +1677,60 @@ class MathemAdditionRecoveryTests(unittest.TestCase):
 
 
 class RetryAmountTests(unittest.TestCase):
+    def test_recovery_browser_rejects_same_count_and_total_with_changed_product(self):
+        import json
+        import shutil
+        import subprocess
+        from contextlib import nullcontext
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the actual browser script")
+        harness = PAYMENT_DOM.replace("new E('p','Pasta')", "new E('p',c.product||'Pasta')")
+        expected = {
+            "delivery_address": "Eksempelveien 1",
+            "delivery_text": "12. september 09:00–12:00",
+            "lines": [{"identity": "Pasta 500 g Sopps", "quantity": 1}],
+            "product_count": 1,
+            "total_minor": 4550,
+        }
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
+        url = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
+
+        def review(product):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser.checkout_provider = "oda"
+            browser._checkout_deadline = None
+            browser._checkout_operation = lambda *a, **k: nullcontext()
+            browser._order_url = lambda order_id: f"https://oda.com/no/account/orders/{order_id}"
+            browser._cart_expectation = lambda cart: expected
+            browser._invoke = lambda *a, **k: {"tabs": [{"label": "meal-concierge-payment-recovery", "tabId": "tab-1"}]} if a == ("tab", "list") else {}
+            browser._verify_checkout_account = lambda address: "a" * 64
+            browser._open = lambda target: None
+            browser._settle = lambda seconds: None
+            browser._expand_checkout_amount_summary = lambda: None
+
+            def evaluate(script):
+                completed = subprocess.run(
+                    [node, "-e", harness],
+                    input=json.dumps({"script": script, "c": {"url": url, "product": product}}),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                )
+                return json.loads(completed.stdout)["result"]
+
+            browser._eval = evaluate
+            return browser.review_payment_recovery(
+                {}, "order-1", payment={"method": "vipps"}, expected_binding=binding,
+            )
+
+        self.assertEqual(review("Pasta")["order_id"], "order-1")
+        with self.assertRaisesRegex(HouseholdError, "differs from the original order"):
+            review("Ris")
+
     def test_persisted_recovery_review_clicks_once_and_blocks_actual_drift(self):
         import json
         import shutil

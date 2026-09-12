@@ -104,7 +104,7 @@ does not establish access to the dedicated payment browser. If the user cannot
 reach the required bank UI, preserve the attempt and explain the missing access.
 
 If reconciliation returns `recovery_preparation_available` for an unpaid
-Oda/Mathem new order or an explicitly failed Mathem addition, use checkout
+Oda/Mathem new order, an exact Oda payment-started tracking conflict, or an explicitly failed Mathem addition, use checkout
 `prepare` with `recovery=true` to review the merchant's existing payment. This
 does not restage goods or send payment. It preserves the original attempt and
 checks its goods, account/address, delivery, total and fee rows. The default
@@ -113,20 +113,23 @@ be passed as `checkout_payment` for this recovery alone; saved-card selection
 uses an existing card, and global preferences remain unchanged. Include the
 exact `order_id`, original `confirmation_id`, and
 `vipps_request_not_received=true` only when the owner identifies that Oda order
-as `Betaling påbegynt` and reports no request in their Vipps app. If tracking
-reports an incompatible paid state, do not override it;
-wait until tracking itself reports `unpaid_order`. The dedicated browser must
-independently verify that exact page state, its same-order `Betal` retry link and
-the unique post-checkout provider order before recovery can be reviewed; a user
-report or coarse tracking status alone is insufficient. A recorded Vipps request
+as `Betaling påbegynt` and reports no request in their Vipps app. A coarse
+`paid_and_modifiable` or `paid_and_not_modifiable` tracking result can conflict
+with that exact page. Treat it as recoverable only while the dedicated browser
+independently verifies the exact payment-started order page and receipt, and the
+same-order retry route then reproduces the complete frozen account, goods,
+delivery, total and Vipps review. An exact `Betal` link is preferred but may be
+absent while that direct same-order review remains available. A user report or
+coarse tracking status alone is insufficient. A recorded Vipps request
 that is sent, dispatching or otherwise unresolved remains locked.
 If the exact recovery stops before recording any request context, attempted
 timestamp or sent marker and the owner still received nothing, reconcile that
 fresh recovery confirmation once with `vipps_request_not_received=true`. The
 service will classify it as not sent only when the same order still reports
-`unpaid_order` and the dedicated browser again verifies its exact retry surface;
-then prepare a fresh review. Never use this report to override any recorded
-dispatch evidence, paid status or absent retry surface.
+`unpaid_order`, or the narrowly verified payment-started conflict above remains,
+and the dedicated browser again verifies its exact retry surface; then prepare a
+fresh review. Never use this report to override any recorded dispatch evidence,
+fulfillment status or absent retry review.
 Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or

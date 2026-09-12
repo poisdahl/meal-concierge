@@ -491,14 +491,20 @@ def _oda_order_payment_state_script(order_id: str) -> str:
   const url=new URL(e.href,location.href);
   return url.origin===location.origin&&url.pathname===RECEIPT_PATH&&!url.search&&!url.hash;
  });
- const retries=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+ const retryCandidates=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
+  const url=new URL(e.href,location.href);
+  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'||
+   url.origin===location.origin&&url.pathname===RETRY_PATH;
+ });
+ const retries=retryCandidates.filter(e=>{
   const url=new URL(e.href,location.href);
   return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'&&
    url.origin===location.origin&&url.pathname===RETRY_PATH&&!url.hash&&
    [...url.searchParams.keys()].length===1&&url.searchParams.get('orderNumber')===ORDER_ID;
  });
- const retryable=headings.length===1&&receipts.length===1&&retries.length===1;
- return JSON.stringify({status:retryable?'retry_available':'unknown'});
+ const paymentStarted=headings.length===1&&receipts.length===1;
+ const retryable=paymentStarted&&retryCandidates.length===1&&retries.length===1;
+ return JSON.stringify({status:retryable?'retry_available':paymentStarted&&retryCandidates.length===0?'payment_started':'unknown'});
 })()
 """.replace("ORDER_URL", json.dumps(order_url)).replace("RECEIPT_PATH", json.dumps(receipt_path)).replace(
         "RETRY_PATH", json.dumps(retry_path),
@@ -804,7 +810,7 @@ def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[s
  const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|CURRENCY)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||'')));
  const login=!!document.querySelector('form[action*="login"],input[type="password"]');
  const unavailable=/ikke tilgjengelig|utsolgt|unavailable/i.test(text);
- const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
+ const itemInputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
  const items=itemInputs.map(input=>{const root=input.closest('li,article');return {quantity:Number(input.value),text:norm([...(root?.querySelectorAll('p')||[])].filter(visible).slice(0,2).map(x=>x.innerText).join(' '))};});
  const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|CURRENCY)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
  const amounts=labels.length===1?money(labels[0].innerText||labels[0].getAttribute('aria-label')||''):[];
@@ -817,7 +823,7 @@ def _oda_checkout_surface_script(expected: Mapping[str, Any], payment: Mapping[s
  const paymentDisplay=verifiedPayment?payment.payment_display:null;
  return JSON.stringify({url:location.href,authenticated:!login,available:!unavailable,items,total_matches:totalMatch,delivery_roots:deliveryRoots.map(root=>norm(root.innerText||'')),address_matches:addressMatch,masked_payment:verifiedPayment,payment_display:paymentDisplay,submit_controls:labels.length});
 })()
-""".replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("CURRENCY", "SEK" if provider == "mathem" else "NOK").replace("DELIVERY_HEADING", json.dumps("Vi levererar din beställning" if provider == "mathem" else "Vi leverer varene dine")).replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Confirm and pay").replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
+""".replace("PAYMENT", _oda_checkout_payment_script(payment).strip()).replace("CURRENCY", "SEK" if provider == "mathem" else "NOK").replace("DELIVERY_HEADING", json.dumps("Vi levererar din beställning" if provider == "mathem" else "Vi leverer varene dine")).replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if payment and payment.get("method") == "vipps" else "Bekreft og betal|Confirm and pay").replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))").replace("EXPECTED", json.dumps(expected, ensure_ascii=False, separators=(",", ":")))
 
 
 _BANK_APP_CHOICE_SCRIPT = r"""
@@ -994,7 +1000,7 @@ class OdaBrowser:
             script = _oda_order_payment_state_script(order_id)
             for _ in range(20):
                 state = self._eval(script)
-                if state.get("status") == "retry_available":
+                if state.get("status") in {"retry_available", "payment_started"}:
                     return state
                 self._settle(0.25)
         return {"status": "unknown"}
@@ -1060,11 +1066,13 @@ class OdaBrowser:
                 self._settle(0.5)
             else:
                 raise HouseholdError("The merchant has no payable recovery review for this order")
+            self._expand_checkout_items(len(expected["lines"]))
             self._expand_checkout_amount_summary()
             surface = self._eval(_oda_checkout_surface_script(expected, payment, provider=self.checkout_provider))
             if (surface.get("url") != url or surface.get("submit_controls") != 1
                     or not all(surface.get(key) is True for key in (
                         "authenticated", "available", "total_matches", "address_matches", "masked_payment"))
+                    or not checkout_lines_match(expected["lines"], surface.get("items"))
                     or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider)):
                 raise HouseholdError("The merchant recovery review differs from the original order")
             amounts = self._eval(_oda_checkout_amount_script(expected["total_minor"],
@@ -1145,6 +1153,33 @@ class OdaBrowser:
             review["binding"] = binding
             return review
 
+    def _expand_checkout_items(self, expected_line_count: int) -> None:
+        expanded = self._eval(r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const buttons=[...document.querySelectorAll('button')].filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===SHOW_LABEL);
+ if(buttons.length>1)return JSON.stringify({expanded:false});
+ if(buttons.length===1)buttons[0].click();
+ return JSON.stringify({expanded:true});
+})()
+""".replace("SHOW_LABEL", json.dumps("Visa varor" if self.checkout_provider == "mathem" else "Vis varene")))
+        if expanded != {"expanded": True}:
+            raise HouseholdError("Oda checkout items cannot be reviewed")
+        for _ in range(20):
+            ready = self._eval(r"""
+(() => {
+ const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
+ const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
+ const show=[...document.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===SHOW_LABEL);
+ const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
+ return JSON.stringify({ready:show.length===0&&inputs.length===COUNT});
+})()
+""".replace("COUNT", str(expected_line_count)).replace("SHOW_LABEL", json.dumps("Visa varor" if self.checkout_provider == "mathem" else "Vis varene")).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
+            if ready == {"ready": True}:
+                return
+            self._settle(0.25)
+        raise HouseholdError("Oda checkout items did not finish rendering")
+
     def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None) -> dict[str, Any]:
         expected = self._cart_expectation(cart)
         account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
@@ -1154,32 +1189,7 @@ class OdaBrowser:
             self._navigate_to_checkout(payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout()
         else:
             self._navigate_to_checkout(order_id)
-        expanded = self._eval(r"""
-(() => {
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const buttons=[...document.querySelectorAll('button')].filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Vis varene');
- if(buttons.length>1)return JSON.stringify({expanded:false});
- if(buttons.length===1)buttons[0].click();
- return JSON.stringify({expanded:true});
-})()
-""")
-        if expanded != {"expanded": True}:
-            raise HouseholdError("Oda checkout items cannot be reviewed")
-        for _ in range(20):
-            ready = self._eval(r"""
-(() => {
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const show=[...document.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')==='Vis varene');
- const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
- return JSON.stringify({ready:show.length===0&&inputs.length===COUNT});
-})()
-""".replace("COUNT", str(len(expected["lines"]))))
-            if ready == {"ready": True}:
-                break
-            self._settle(0.25)
-        else:
-            raise HouseholdError("Oda checkout items did not finish rendering")
+        self._expand_checkout_items(len(expected["lines"]))
         self._expand_checkout_amount_summary()
         script = _oda_checkout_surface_script(expected, payment)
         result = self._eval(script)

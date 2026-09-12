@@ -187,16 +187,20 @@ delivery; the browser independently checks the original account/address and fee
 rows. An unpaid tracking status alone does not prove a terminal payment failure.
 A missing or inconsistent merchant retry review stops preparation.
 
-Oda's tracking result can temporarily conflict with its exact order page. Do not
-override that status: wait until tracking itself reports `unpaid_order`. When the
-owner identifies the exact order as `Betaling påbegynt`, pass that `order_id` only
+Oda's tracking result can temporarily conflict with its exact order page. When
+the owner identifies the exact order as `Betaling påbegynt`, pass that `order_id` only
 with `action="prepare", recovery=true`, the original `confirmation_id`, and
 `vipps_request_not_received=true` only after the owner reports no request in
 their Vipps app. Recovery remains blocked unless the
 dedicated browser independently verifies the exact Oda order URL, status,
-receipt link and same-order `Betal` retry link, the provider exposes exactly one
-order absent from the pre-checkout baseline, and that order matches the frozen
-order, account/address, delivery, total and fee rows. The owner's exact selection
+receipt link, the provider exposes exactly one order absent from the pre-checkout
+baseline, and the same-order retry route reproduces the frozen order,
+account/address, delivery, total, fee rows and Vipps choice. A visible exact
+`Betal` link is accepted but is not required when the order page still has the
+unique payment-started identity and that direct retry review succeeds. Only
+`paid_and_modifiable` or `paid_and_not_modifiable` may be treated as a conflicting
+coarse tracking result; picking, shipping, delivery and cancellation remain
+terminal. The owner's exact selection
 identifies the target; provider evidence must independently make it unique and
 matching. A user report alone is insufficient, and an active or explicitly
 unknown recorded Vipps request remains locked.
@@ -205,9 +209,11 @@ If an exact recovery stops before recording any Vipps request context,
 attempt timestamp or sent marker, the owner may report the still-absent phone
 request with `action="reconcile"`, that recovery's fresh `confirmation_id` and
 `vipps_request_not_received=true`. This classifies the attempt as not sent only
-when tracking still says `unpaid_order` and the browser again verifies the exact
-same-order retry surface. Any dispatch context, attempted-request timestamp,
-sent marker, paid status or missing retry surface keeps the attempt locked.
+when tracking still says `unpaid_order`, or the narrowly verified
+payment-started tracking conflict remains, and the browser again verifies the
+exact same-order retry surface. Any dispatch context, attempted-request
+timestamp, sent marker, fulfillment status or missing retry review keeps the
+attempt locked.
 After that exact recovery sends a Vipps request, a conflicting Oda paid status
 does not by itself confirm the order. Reconcile with
 `vipps_approval_completed=true` only after the owner reports completing that
