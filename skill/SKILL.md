@@ -111,7 +111,11 @@ checks its goods, account/address, delivery, total and fee rows. The default
 payment method is the original one. An explicitly authorized alternative may
 be passed as `checkout_payment` for this recovery alone; saved-card selection
 uses an existing card, and global preferences remain unchanged. Include the
-returned payment choice and actual dietary findings in the recovery review,
+exact `order_id` only when the owner identifies that Oda order as `Betaling
+påbegynt` after tracking reports an incompatible paid state. The dedicated
+browser must independently verify that exact page state before recovery can be
+reviewed; a user report or coarse tracking status alone is insufficient.
+Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
 timeout. The earlier failure never authorizes another payment. Report the

@@ -187,6 +187,13 @@ delivery; the browser independently checks the original account/address and fee
 rows. An unpaid tracking status alone does not prove a terminal payment failure.
 A missing or inconsistent merchant retry review stops preparation.
 
+Oda's tracking result can conflict with its exact order page. When the owner
+identifies the exact order as `Betaling påbegynt`, pass that `order_id` only with
+`action="prepare", recovery=true`. Recovery remains blocked unless the dedicated
+browser independently verifies the exact Oda order URL, status and receipt link,
+then matches the frozen order, account/address, delivery, total and fee rows.
+This never derives an order identity from a user report or creates another order.
+
 The default method is the original `checkout_payment`. An explicitly authorized
 `checkout_payment` override selects an existing supported method for this
 recovery alone and leaves household preferences unchanged. Review the returned
