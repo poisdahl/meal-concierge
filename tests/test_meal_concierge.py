@@ -8609,11 +8609,11 @@ class FlowTests(unittest.TestCase):
     def test_cart_ready_occurrence_must_be_carried_into_manual_checkout(self):
         self.oda.cart["delivery"] = None
         self.oda.delivery_slots["slots"] = [{
-            "slot_ref": "candidate", "provider_slot_id": 1,
+            "slot_ref": "oda:2026-09-05:1", "provider_slot_id": 1,
             "start_at": "2026-09-05T09:00:00+02:00", "end_at": "2026-09-05T12:00:00+02:00",
             "price_ore": 2900, "price_kind": "exact", "selected": False,
         }]
-        self.oda.delivery_displays["candidate"] = "Lør 5. sep 09:00 - 12:00"
+        self.oda.delivery_displays["oda:2026-09-05:1"] = "Lør 5. sep 09:00 - 12:00"
         self.app.handle({"operation": "schedule", "action": "update", "changes": {
             "enabled": True, "mode": "cart_ready", "auto_checkout": False,
             "delivery": {"weekday": "Saturday", "strategy": "cheapest"},

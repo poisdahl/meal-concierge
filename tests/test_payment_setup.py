@@ -259,7 +259,8 @@ class PaymentBrowserTests(unittest.TestCase):
                     browser = OdaBrowser.__new__(OdaBrowser)
                     browser._checkout_dispatch_tab = lambda: None
                     browser._checkout_deadline = None
-                    observed, callbacks = [], []
+                    observed, callbacks, network = [], [], []
+                    browser._invoke = lambda *arguments: network.append(arguments)
                     def evaluate(final):
                         self.assertEqual(callbacks, [True])
                         result = self.evaluate(final, **{"selected": selected, **change})
@@ -275,6 +276,7 @@ class PaymentBrowserTests(unittest.TestCase):
                     else:
                         submit()
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
+                    self.assertEqual(network, [("network", "requests", "--clear")] if method == "vipps" else [])
 
 
 if __name__ == "__main__":
