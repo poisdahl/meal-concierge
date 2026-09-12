@@ -1677,6 +1677,60 @@ class MathemAdditionRecoveryTests(unittest.TestCase):
 
 
 class RetryAmountTests(unittest.TestCase):
+    def test_recovery_browser_rejects_same_count_and_total_with_changed_product(self):
+        import json
+        import shutil
+        import subprocess
+        from contextlib import nullcontext
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the actual browser script")
+        harness = PAYMENT_DOM.replace("new E('p','Pasta')", "new E('p',c.product||'Pasta')")
+        expected = {
+            "delivery_address": "Eksempelveien 1",
+            "delivery_text": "12. september 09:00–12:00",
+            "lines": [{"identity": "Pasta 500 g Sopps", "quantity": 1}],
+            "product_count": 1,
+            "total_minor": 4550,
+        }
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
+        url = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
+
+        def review(product):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser.checkout_provider = "oda"
+            browser._checkout_deadline = None
+            browser._checkout_operation = lambda *a, **k: nullcontext()
+            browser._order_url = lambda order_id: f"https://oda.com/no/account/orders/{order_id}"
+            browser._cart_expectation = lambda cart: expected
+            browser._invoke = lambda *a, **k: {"tabs": [{"label": "meal-concierge-payment-recovery", "tabId": "tab-1"}]} if a == ("tab", "list") else {}
+            browser._verify_checkout_account = lambda address: "a" * 64
+            browser._open = lambda target: None
+            browser._settle = lambda seconds: None
+            browser._expand_checkout_amount_summary = lambda: None
+
+            def evaluate(script):
+                completed = subprocess.run(
+                    [node, "-e", harness],
+                    input=json.dumps({"script": script, "c": {"url": url, "product": product}}),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                )
+                return json.loads(completed.stdout)["result"]
+
+            browser._eval = evaluate
+            return browser.review_payment_recovery(
+                {}, "order-1", payment={"method": "vipps"}, expected_binding=binding,
+            )
+
+        self.assertEqual(review("Pasta")["order_id"], "order-1")
+        with self.assertRaisesRegex(HouseholdError, "differs from the original order"):
+            review("Ris")
+
     def test_persisted_recovery_review_clicks_once_and_blocks_actual_drift(self):
         import json
         import shutil

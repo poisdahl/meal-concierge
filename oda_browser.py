@@ -1066,11 +1066,13 @@ class OdaBrowser:
                 self._settle(0.5)
             else:
                 raise HouseholdError("The merchant has no payable recovery review for this order")
+            self._expand_checkout_items(len(expected["lines"]))
             self._expand_checkout_amount_summary()
             surface = self._eval(_oda_checkout_surface_script(expected, payment, provider=self.checkout_provider))
             if (surface.get("url") != url or surface.get("submit_controls") != 1
                     or not all(surface.get(key) is True for key in (
                         "authenticated", "available", "total_matches", "address_matches", "masked_payment"))
+                    or not checkout_lines_match(expected["lines"], surface.get("items"))
                     or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider)):
                 raise HouseholdError("The merchant recovery review differs from the original order")
             amounts = self._eval(_oda_checkout_amount_script(expected["total_minor"],
@@ -1151,15 +1153,7 @@ class OdaBrowser:
             review["binding"] = binding
             return review
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None) -> dict[str, Any]:
-        expected = self._cart_expectation(cart)
-        account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
-        if delivery_text is not None:
-            expected["delivery_text"] = delivery_text
-        if order_id is None:
-            self._navigate_to_checkout(payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout()
-        else:
-            self._navigate_to_checkout(order_id)
+    def _expand_checkout_items(self, expected_line_count: int) -> None:
         expanded = self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
@@ -1180,12 +1174,22 @@ class OdaBrowser:
  const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>/\bAntall\b/i.test(norm(input.closest('li,article')?.innerText||'')));
  return JSON.stringify({ready:show.length===0&&inputs.length===COUNT});
 })()
-""".replace("COUNT", str(len(expected["lines"]))))
+""".replace("COUNT", str(expected_line_count)))
             if ready == {"ready": True}:
-                break
+                return
             self._settle(0.25)
+        raise HouseholdError("Oda checkout items did not finish rendering")
+
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        expected = self._cart_expectation(cart)
+        account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
+        if delivery_text is not None:
+            expected["delivery_text"] = delivery_text
+        if order_id is None:
+            self._navigate_to_checkout(payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout()
         else:
-            raise HouseholdError("Oda checkout items did not finish rendering")
+            self._navigate_to_checkout(order_id)
+        self._expand_checkout_items(len(expected["lines"]))
         self._expand_checkout_amount_summary()
         script = _oda_checkout_surface_script(expected, payment)
         result = self._eval(script)
