@@ -258,6 +258,26 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(child["owner_reported_no_vipps_request"])
         self.assertEqual(child["original_confirmation_id"], "original")
 
+    def test_exact_retry_dietary_drift_requires_fresh_owner_evidence(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+        with self.app.store.locked() as state:
+            state["profile"]["diet"]["allergies_or_sensitivities"] = ["mustard"]
+
+        with self.assertRaisesRegex(HouseholdError, "prepare exact recovery again"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["confirmation_id"], prepared["confirmation_id"])
+        self.assertTrue(child["owner_reported_no_vipps_request"])
+        self.assertEqual(child["original_confirmation_id"], "original")
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_exact_retry_page_recovery_cannot_switch_away_from_vipps(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]

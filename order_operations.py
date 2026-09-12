@@ -2742,6 +2742,11 @@ class OrderOperations:
                 raise HouseholdError("Payment preference changed during recovery")
             assessment = self._checkout_dietary(pending["summary"], deadline)
             if assessment != child["dietary_assessment"]:
+                if child.get("owner_reported_no_vipps_request") is True:
+                    raise HouseholdError(
+                        "Recovery dietary findings changed; prepare exact recovery again "
+                        "with the owner's current no-request report"
+                    )
                 return {"confirmed": False, "reprepared": True, **self._checkout_recovery_prepare_unlocked(deadline, child["browser_review"]["payment_choice"])}
             recovery_summary = self._recovery_summary(pending, child["browser_review"], assessment)
             gate_pending = {**pending, "confirmation_id": child["confirmation_id"],
