@@ -2431,17 +2431,17 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const remember=node();const next=node('Next');
 const text='Continue to pay with Vipps Oda NOK 256.50';
-global.location=new URL('https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
-global.getComputedStyle=()=>({display:'block',visibility:'visible',opacity:'1'});
+global.location=new URL(c.url);
+global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:e===remember?'0':'1'});
 const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:s==='button'?[next]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
-                input=json.dumps({"script": _oda_vipps_gateway_script(25650, "90000000"), "c": {"phone": phone}}),
+                input=json.dumps({"script": _oda_vipps_gateway_script(25650, "90000000"), "c": {"phone": phone, "url": url}}),
                 text=True, capture_output=True, check=False,
             )
             if result.returncode:
@@ -2456,6 +2456,29 @@ process.stdout.write(eval(script));
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
         })
+        self.assertEqual(evaluate("90000000", "https://pay.vipps.no/?token=opaque"), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+        self.assertEqual(evaluate("90000000", "https://pay.vipps.no/future/hosted-flow?token=opaque"), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+        for url in (
+            "https://pay.vipps.no/",
+            "https://pay.vipps.no/?token=",
+            "https://pay.vipps.no/?token=one&token=two",
+            "https://pay.vipps.no/?token=opaque&extra=value",
+            "http://pay.vipps.no/?token=opaque",
+            "https://pay.vipps.no.example/?token=opaque",
+            "https://user@pay.vipps.no/?token=opaque",
+            "https://pay.vipps.no:444/?token=opaque",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(evaluate("90000000", url), {
+                    "identity": False, "ready": False, "sent": False, "expired": False,
+                    "fillable": False, "phone_matches": False,
+                })
 
     @unittest.skipUnless(shutil.which("node"), "Node executes Oda order DOM contract")
     def test_oda_retry_state_requires_the_exact_order_page_receipt_and_retry_link(self):
@@ -2513,7 +2536,7 @@ process.stdout.write(eval(script));
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
         browser._settle = mock.Mock()
         browser._require_checkout_time = mock.Mock()
-        gateway = "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"
+        gateway = "https://pay.vipps.no/?token=opaque"
 
         def invoke(action, *args, **_kwargs):
             if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):

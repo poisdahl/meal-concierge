@@ -750,10 +750,12 @@ def _oda_vipps_gateway_script(
 (() => {
  const norm=value=>(value||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
+ const represented=e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||(p!==e&&s.opacity==='0'))return false;}const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
  const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true';
  document.querySelectorAll('[data-oda-household-vipps-next]').forEach(e=>e.removeAttribute('data-oda-household-vipps-next'));
  document.querySelectorAll('[data-oda-household-vipps-phone]').forEach(e=>e.removeAttribute('data-oda-household-vipps-phone'));
- const identity=location.origin==='https://pay.vipps.no'&&location.pathname==='/dwo-api-application/v1/deeplink/vippsgateway'&&(!EXPECTED_URL||location.href===EXPECTED_URL);
+ const current=new URL(location.href),params=[...current.searchParams.entries()];
+ const identity=current.protocol==='https:'&&current.host==='pay.vipps.no'&&!current.username&&!current.password&&!current.hash&&params.length===1&&params[0][0]==='token'&&params[0][1]!==''&&(!EXPECTED_URL||current.href===EXPECTED_URL);
  const roots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
  const root=roots.length===1?roots[0]:null;
  const text=norm(root?.innerText||'');
@@ -764,7 +766,7 @@ def _oda_vipps_gateway_script(
  const expired=identity&&merchant&&amountBound&&/(?:payment timed out|betalingen (?:har )?(?:utløpt|gått ut))/i.test(text);
  const phones=root?[...root.querySelectorAll('input[type="tel"][name="phone-number"]')].filter(visible):[];
  const national=phones.length===1?phones[0].value.replace(/\D/g,''):'';
- const remember=root?[...root.querySelectorAll('input[type="checkbox"]')].filter(visible):[];
+ const remember=root?[...root.querySelectorAll('input[type="checkbox"]')].filter(represented):[];
  const buttons=root?[...root.querySelectorAll('button')].filter(enabled).filter(e=>norm(e.innerText||e.getAttribute('aria-label')||'')==='Next'):[];
  const fillable=identity&&!sent&&!expired&&/Continue to pay with Vipps/i.test(text)&&merchant&&amountBound&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&remember.length===1&&remember[0].checked===false&&buttons.length===1;
  const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
@@ -786,7 +788,8 @@ def _oda_vipps_phone_fill_script(phone_number: str) -> str:
     return r"""
 (()=>{
  const PHONE=EXPECTED_PHONE;
- const identity=location.origin==='https://pay.vipps.no'&&location.pathname==='/dwo-api-application/v1/deeplink/vippsgateway';
+ const current=new URL(location.href),params=[...current.searchParams.entries()];
+ const identity=current.protocol==='https:'&&current.host==='pay.vipps.no'&&!current.username&&!current.password&&!current.hash&&params.length===1&&params[0][0]==='token'&&params[0][1]!=='';
  const fields=[...document.querySelectorAll('[data-oda-household-vipps-phone]')];
  const field=identity&&fields.length===1?fields[0]:null;
  if(!field||field.disabled||field.readOnly)return JSON.stringify({filled:false});
@@ -1796,9 +1799,11 @@ class OdaBrowser:
         selector = "[data-oda-household-vipps-next]"
         gateway_url = str(self._invoke("get", "url").get("url") or "")
         parsed_gateway = urlsplit(gateway_url)
+        gateway_params = parse_qs(parsed_gateway.query, keep_blank_values=True)
         if (parsed_gateway.scheme != "https" or parsed_gateway.hostname != "pay.vipps.no"
-                or parsed_gateway.path != "/dwo-api-application/v1/deeplink/vippsgateway"
-                or not parsed_gateway.query or parsed_gateway.fragment):
+                or parsed_gateway.netloc != "pay.vipps.no"
+                or set(gateway_params) != {"token"} or len(gateway_params["token"]) != 1
+                or not gateway_params["token"][0] or parsed_gateway.fragment):
             raise HouseholdError("The exact Oda/Vipps transaction URL is unavailable; do not send or retry payment")
         payment_request_id = oda_checkout_pay_request_id(
             self._invoke("network", "requests", "--filter", "/checkout/pay/")
