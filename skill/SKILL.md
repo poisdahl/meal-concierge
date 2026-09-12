@@ -680,14 +680,17 @@ Use the supported recovery review above only when the product verifies its
 binding; retain the original attempt and do not use an external helper as a substitute.
 
 If an exact Oda/Vipps recovery has been reconciled as `not_sent`, the owner again
-reports no request, the merchant still exposes the same unpaid order, and its
-exact order page is stuck at `Betaling påbegynt` without an actionable retry,
+reports no request, and its exact order page is stuck at `Betaling påbegynt`
+without an actionable retry,
 `checkout(action="abandon_unpaid", confirmation_id=..., order_id=...,
 vipps_request_not_received=true)` may release only that local interactive
-checkout journal. Report that the old merchant order remains unpaid and must not
-be retried, then review the current cart before preparing at most one fresh
-checkout. Never use this for a scheduled attempt, another provider, or any
-recorded dispatch/request context.
+checkout journal. The provider API must still return the exact order as
+`unpaid_order` or the known conflicting `paid_and_modifiable` /
+`paid_and_not_modifiable` state; retain that API status and the page status in
+the result. Report that the old merchant entry remains payment-started and must
+not be retried, then review the current cart before preparing at most one fresh
+checkout. Never use this for a scheduled attempt, another provider, fulfillment
+status, or any recorded dispatch/request context.
 
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as

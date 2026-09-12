@@ -534,7 +534,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNotNone(self.app.store.read()["pending_checkout"])
         self.assertEqual(self.browser.clicks, 0)
 
-    def test_abandon_unpaid_requires_current_unpaid_tracking(self):
+    def test_abandon_unpaid_records_the_exact_paid_tracking_conflict(self):
         prepared = self.contextless_exact_retry_attempt()
         self.call(
             "reconcile", confirmation_id=prepared["confirmation_id"],
@@ -543,7 +543,30 @@ class RecoveryTests(unittest.TestCase):
         self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "payment_started"
 
-        with self.assertRaisesRegex(HouseholdError, "not currently reported unpaid"):
+        result = self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+
+        self.assertTrue(result["abandoned_unpaid"])
+        self.assertEqual(result["tracking_status"], "paid_and_not_modifiable")
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_rejects_a_fulfillment_tracking_state(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.merchant.status = "picking"
+        self.browser.payment_state = "payment_started"
+
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
             self.call(
                 "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
                 order_id="order-1", vipps_request_not_received=True,

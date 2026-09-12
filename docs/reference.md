@@ -1952,13 +1952,15 @@ prove a bank refund or reservation release.
 
 An interactive Oda/Vipps recovery that is positively journaled `not_sent` may
 be explicitly abandoned with `checkout(action="abandon_unpaid", ...)` only when
-the same exact merchant order is still unpaid and its verified order page is
-stuck at `Betaling påbegynt` rather than exposing an actionable retry. The call
+the same exact merchant entry is still reported as unpaid or with Oda's known
+conflicting paid status, and its verified order page is stuck at
+`Betaling påbegynt` rather than exposing an actionable retry. The call
 requires the active recovery `confirmation_id`, exact `order_id`, and a current
 `vipps_request_not_received=true` owner report. It clears only the local pending
-checkout so one fresh order can be reviewed. The provider order remains unpaid,
-is recorded as abandoned, and must never be retried. Scheduled attempts and any
-recorded dispatch remain ineligible.
+checkout so one fresh order can be reviewed. Both the API status and exact page
+status are retained in the protected result. The provider entry remains
+payment-started, is recorded as abandoned, and must never be retried. Scheduled
+attempts, fulfillment states and any recorded dispatch remain ineligible.
 
 Oda and Mathem bind checkout accounts and original order receipts through the
 same reader with separate origins and receipt labels. Existing-order review and

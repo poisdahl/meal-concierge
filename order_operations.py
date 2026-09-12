@@ -2525,9 +2525,11 @@ class OrderOperations:
                 tracking.get("orderNumber") or tracking.get("order_number")
                 or tracking.get("order_id") or tracking.get("id") or ""
             )
-            if tracking_id != order_id or tracking.get("status") != "unpaid_order":
+            tracking_status = str(tracking.get("status") or "").casefold()
+            if tracking_id != order_id or tracking_status not in {
+                    "unpaid_order", "paid_and_modifiable", "paid_and_not_modifiable"}:
                 raise HouseholdError(
-                    "The exact merchant order is not currently reported unpaid"
+                    "The exact merchant order is no longer payment-started"
                 )
             page_state = str(
                 self.browser.order_payment_state(order_id, deadline=deadline).get("status")
@@ -2541,7 +2543,12 @@ class OrderOperations:
                 "confirmed": False,
                 "abandoned_unpaid": True,
                 "order_id": order_id,
-                "tracking_status": "unpaid_order",
+                "tracking_status": tracking_status,
+                "order_page_status": "payment_started",
+                **({"tracking_conflict": {
+                    "provider_tracking_status": tracking_status,
+                    "order_page_status": "payment_started",
+                }} if tracking_status != "unpaid_order" else {}),
                 "payment_request_state": "not_sent",
                 "payment_dispatched": False,
                 "retry_allowed": False,
@@ -2549,7 +2556,7 @@ class OrderOperations:
                 "confirmation_id": confirmation_id,
                 "original_confirmation_id": pending["confirmation_id"],
                 "next": (
-                    "This exact merchant order remains unpaid and must not be retried. "
+                    "This exact merchant entry remains payment-started and must not be retried. "
                     "Review the current cart, then prepare one fresh checkout if the owner still wants a new order."
                 ),
             }
