@@ -2095,6 +2095,7 @@ class RetryAmountTests(unittest.TestCase):
         import shutil
         import subprocess
         from contextlib import nullcontext
+        from unittest import mock
         from test_payment_setup import PAYMENT_DOM
         from oda_browser import OdaBrowser, _oda_checkout_surface_script, _oda_checkout_amount_script
         node = shutil.which("node")
@@ -2120,14 +2121,17 @@ class RetryAmountTests(unittest.TestCase):
                 with self.subTest(method=method, change=change):
                     browser = OdaBrowser.__new__(OdaBrowser)
                     browser.vipps_phone_number = "90000000"
-                    browser._checkout_dispatch_tab = lambda: None
+                    browser._checkout_dispatch_tab = lambda: "tab-1"
                     browser.checkout_provider = "oda"
                     browser._checkout_deadline = None
                     browser._checkout_operation = lambda *a, **k: nullcontext()
                     browser._cart_expectation = lambda cart: expected
                     browser.review_payment_recovery = lambda *a, **k: deepcopy(review)
                     browser._invoke = lambda *a, **k: {}
-                    browser._capture_checkout_payment = lambda *a, **k: None
+                    browser._capture_checkout_payment = mock.Mock(return_value=None)
+                    payment_capture = Path("/private/capture.har")
+                    browser._start_oda_vipps_capture = mock.Mock(return_value=payment_capture)
+                    browser._discard_oda_vipps_capture = mock.Mock()
                     observed, callbacks = [], []
                     def final_eval(script):
                         self.assertEqual(callbacks, [True])
@@ -2142,6 +2146,19 @@ class RetryAmountTests(unittest.TestCase):
                             submit()
                     else:
                         submit()
+                        browser._capture_checkout_payment.assert_called_once_with(
+                            "tab-1",
+                            order_id=("order-1" if method == "vipps" else None),
+                            authentication_expected=method == "saved_card",
+                            capture_failure=False,
+                            vipps_expected_total=(4550 if method == "vipps" else None),
+                            vipps_payment_capture=(payment_capture if method == "vipps" else None),
+                            vipps_source_url=(url if method == "vipps" else None),
+                            before_vipps_request=None,
+                        )
+                        self.assertEqual(browser._start_oda_vipps_capture.call_count, method == "vipps")
+                    if change and method == "vipps":
+                        browser._discard_oda_vipps_capture.assert_called_once_with(payment_capture)
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
 
     def test_observed_retry_without_delsum_and_atomic_amount_binding(self):
