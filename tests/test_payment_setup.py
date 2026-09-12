@@ -126,7 +126,7 @@ const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p
 const rows=c.rows||[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',c.fee?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button',c.button||((c.selected??0)===0?'Betal med':'Bekreft og betal')+' 45,50 kr');pay.id='PAY';pay.disabled=!!c.payDisabled;
-global.document=new E('document','',[new E('body','',[item,delivery,...labels,summary,pay])]);document.body=document.children[0];
+global.document=new E('document','',[new E('body','',[...(c.summaryOnly?[]:[item]),delivery,...labels,summary,pay])]);document.body=document.children[0];
 global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
 global.location=new URL(c.url||'https://oda.com/no/checkout/confirm/');
 process.stdout.write(JSON.stringify({result:JSON.parse(eval(script)),clicks,selected:radios.map(r=>r.checked)}));
