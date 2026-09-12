@@ -714,6 +714,7 @@ def _oda_vipps_gateway_script(
  const visible=e=>{for(let p=e;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=e.getBoundingClientRect();return r.width>0&&r.height>0;};
  const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true';
  document.querySelectorAll('[data-oda-household-vipps-next]').forEach(e=>e.removeAttribute('data-oda-household-vipps-next'));
+ document.querySelectorAll('[data-oda-household-vipps-phone]').forEach(e=>e.removeAttribute('data-oda-household-vipps-phone'));
  const identity=location.origin==='https://pay.vipps.no'&&location.pathname==='/dwo-api-application/v1/deeplink/vippsgateway'&&(!EXPECTED_URL||location.href===EXPECTED_URL);
  const roots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
  const root=roots.length===1?roots[0]:null;
@@ -727,11 +728,14 @@ def _oda_vipps_gateway_script(
  const national=phones.length===1?phones[0].value.replace(/\D/g,''):'';
  const remember=root?[...root.querySelectorAll('input[type="checkbox"]')].filter(visible):[];
  const buttons=root?[...root.querySelectorAll('button')].filter(enabled).filter(e=>norm(e.innerText||e.getAttribute('aria-label')||'')==='Next'):[];
- const exact=identity&&!sent&&!expired&&/Continue to pay with Vipps/i.test(text)&&merchant&&amountBound&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE)&&!phones[0].disabled&&!phones[0].readOnly&&remember.length===1&&remember[0].checked===false&&buttons.length===1;
+ const fillable=identity&&!sent&&!expired&&/Continue to pay with Vipps/i.test(text)&&merchant&&amountBound&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&remember.length===1&&remember[0].checked===false&&buttons.length===1;
+ const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
+ const exact=fillable&&phoneMatches;
+ if(fillable)phones[0].setAttribute('data-oda-household-vipps-phone','');
  const target=exact?buttons[0]:null;
  if(target)target.setAttribute('data-oda-household-vipps-next','');
  const hit=REQUIRE_HIT?document.elementFromPoint(HIT_X,HIT_Y):target;
- return JSON.stringify({identity,ready:Boolean(target&&hit&&(hit===target||target.contains(hit))),sent,expired});
+ return JSON.stringify({identity,ready:Boolean(target&&hit&&(hit===target||target.contains(hit))),sent,expired,fillable,phone_matches:phoneMatches});
 })()
 """.replace("EXPECTED_TOTAL", str(expected_total)).replace("EXPECTED_PHONE", json.dumps(expected_phone)).replace(
         "EXPECTED_URL", json.dumps(expected_url),
@@ -1594,12 +1598,18 @@ class OdaBrowser:
         if self.checkout_provider != "oda" or re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None:
             raise HouseholdError("An exact private Vipps phone number is required before Oda checkout")
         observed: dict[str, Any] = {}
+        phone_filled = False
         for _ in range(40):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             observed = self._eval(_oda_vipps_gateway_script(expected_total, self.vipps_phone_number))
             if observed.get("sent") is True:
                 raise HouseholdError("The Oda/Vipps request was already sent before its bound control was verified; reconcile the same order")
+            if observed.get("fillable") is True and observed.get("phone_matches") is not True and not phone_filled:
+                self._invoke("fill", "[data-oda-household-vipps-phone]", self.vipps_phone_number)
+                phone_filled = True
+                self._settle(0.25)
+                continue
             if observed.get("identity") is True and (observed.get("ready") is True or observed.get("expired") is True):
                 break
             self._settle(0.25)
@@ -1636,7 +1646,8 @@ class OdaBrowser:
                 or self._eval(_oda_vipps_gateway_script(
                     expected_total, self.vipps_phone_number, expected_url=gateway_url,
                     require_hit=True, hit_x=x, hit_y=y,
-                )) != {"identity": True, "ready": True, "sent": False, "expired": False}):
+                )) != {"identity": True, "ready": True, "sent": False, "expired": False,
+                       "fillable": True, "phone_matches": True}):
             raise HouseholdError("The Oda/Vipps request control changed or is obscured; the outcome is uncertain; do not retry")
         self._require_checkout_time(FINAL_CLICK_MARGIN)
         request_context = {
@@ -1652,7 +1663,8 @@ class OdaBrowser:
                 or self._eval(_oda_vipps_gateway_script(
                     expected_total, self.vipps_phone_number, expected_url=gateway_url,
                     require_hit=True, hit_x=x, hit_y=y,
-                )) != {"identity": True, "ready": True, "sent": False, "expired": False}):
+                )) != {"identity": True, "ready": True, "sent": False, "expired": False,
+                       "fillable": True, "phone_matches": True}):
             raise HouseholdError("The fenced Oda/Vipps request changed before Next; reconcile it without retrying")
         self._invoke("mouse", "move", str(round(x)), str(round(y)))
         self._invoke("mouse", "down")

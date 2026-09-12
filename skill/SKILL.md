@@ -84,6 +84,15 @@ the same attempt. Do not claim a phone request was delivered, payment succeeded,
 or a retry is safe. Oda Vipps support here is for new orders; existing-order
 changes retain their separate saved-card flow.
 
+If the current user explicitly reports that no matching Oda/Vipps request was
+received and reconciliation returns one exact new unpaid order, do not resubmit
+the new-order checkout. Prepare recovery only with that original confirmation,
+`vipps_request_not_received=true` and `unreceived_vipps_order_id` set to the
+exact `unpaid_order_id` returned by reconciliation. The service additionally requires the unchanged
+goods, total and delivery plus Oda's exact same-order retry review before it can
+offer a new confirmation. Preparation sends no payment. Confirm only that fresh
+recovery review; otherwise preserve the uncertain attempt.
+
 For Oda/Mathem card payments, `authentication_required=true` means the retained
 payment is showing a visible 3D Secure bank challenge. Call checkout
 `authenticate` with that exact confirmation once to select the supported
