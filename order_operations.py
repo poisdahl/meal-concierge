@@ -3508,6 +3508,9 @@ class OrderOperations:
         if (
             page_bound_before_retry
             and not recovery_dispatched
+            and active_attempt is pending
+            and pending.get("vipps_request_status") is None
+            and pending.get("vipps_request_context") is None
             and order is not None
             and candidate_id == details_id == tracking_id
             and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}

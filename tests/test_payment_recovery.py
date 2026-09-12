@@ -87,6 +87,7 @@ class MerchantBrowser:
         return {"status": self.payment_state}
 
     def checkout_vipps_request_state(self, context, **kwargs):
+        self.recovery_surface = "vipps"
         return {"status": self.vipps_request_state}
 
 
@@ -412,7 +413,7 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(result["confirmed"])
                 self.assertIsNotNone(self.app.store.read()["pending_checkout"])
                 self.assertEqual(self.browser.binding_reads, binding_reads)
-                self.assertEqual(self.browser.recovery_surface, "retry")
+                self.assertEqual(self.browser.recovery_surface, "vipps")
 
     def test_exact_retry_expired_page_blocks_owner_approval_claim(self):
         with self.app.store.locked() as state:
@@ -470,6 +471,8 @@ class RecoveryTests(unittest.TestCase):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending.pop("vipps_request_status")
+            pending.pop("vipps_request_context", None)
         self.merchant.status = "paid_and_not_modifiable"
         self.browser.payment_state = "retry_available"
 
@@ -538,6 +541,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(result["awaiting_user_payment"])
         self.assertNotIn("recovery_preparation_available", result)
         self.assertEqual(self.browser.clicks, 0)
+        self.assertEqual(self.browser.recovery_surface, "vipps")
 
     def test_original_vipps_request_becoming_active_after_review_blocks_dispatch(self):
         with self.app.store.locked() as state:
