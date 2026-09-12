@@ -1090,7 +1090,14 @@ class OdaBrowser:
                 raise HouseholdError("The merchant has no payable recovery review for this order")
             item_review = self._expand_checkout_items(
                 len(expected["lines"]),
-                allow_summary_only=self.checkout_provider == "oda",
+                # Oda's current retry page can omit product controls entirely.
+                # That reduced review is safe only for Vipps: after this click,
+                # the hosted-payment capture binds the exact response order
+                # before it sends the phone request. A saved card can dispatch
+                # immediately, so it must retain the detailed item review.
+                allow_summary_only=(
+                    self.checkout_provider == "oda" and payment.get("method") == "vipps"
+                ),
                 expected_product_count=expected["product_count"],
             )
             self._expand_checkout_amount_summary()
@@ -1123,6 +1130,12 @@ class OdaBrowser:
 
     def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None, before_vipps_request=None):
         with self._checkout_operation(deadline, preserve_session=True):
+            if (review.get("summary_only") is True
+                    and (self.checkout_provider != "oda"
+                         or review.get("payment_choice", {}).get("method") != "vipps")):
+                raise CheckoutPreconditionError(
+                    "Summary-only payment recovery is available only for Oda/Vipps"
+                )
             if (review.get("payment_choice", {}).get("method") == "vipps"
                     and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
                 raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
@@ -1210,11 +1223,10 @@ class OdaBrowser:
             or not 0 < expected_product_count <= 1_000_000
         ):
             raise HouseholdError("Oda checkout summary product count is invalid")
-        show_labels = (
-            ["Visa varor", "Visa sammanfattning"]
-            if self.checkout_provider == "mathem"
-            else ["Vis varene", "Vis oppsummering"]
-        )
+        item_control_label = "Visa varor" if self.checkout_provider == "mathem" else "Vis varene"
+        summary_control_label = (
+            "Visa sammanfattning" if self.checkout_provider == "mathem" else "Vis oppsummering"
+        ) if allow_summary_only else None
         summary_label = None
         if allow_summary_only:
             summary_label = (
@@ -1225,29 +1237,42 @@ class OdaBrowser:
         expanded = self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const labels=SHOW_LABELS;
- const buttons=[...document.querySelectorAll('button')].filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>labels.includes(norm(x.innerText||x.getAttribute('aria-label')||'')));
- if(buttons.length>1)return JSON.stringify({expanded:false});
- if(buttons.length===1)buttons[0].click();
- return JSON.stringify({expanded:true});
+ const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
+ const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
+ const itemLabel=ITEM_CONTROL_LABEL,summaryLabel=SUMMARY_CONTROL_LABEL;
+ const buttons=[...document.querySelectorAll('button')].filter(enabled);
+ const itemControls=buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===itemLabel);
+ const summaryControls=summaryLabel===null?[]:buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===summaryLabel);
+ const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
+ if(itemControls.length>1)return JSON.stringify({expanded:false,mode:null});
+ if(inputs.length>0)return JSON.stringify({expanded:true,mode:'items'});
+ if(itemControls.length===1){itemControls[0].click();return JSON.stringify({expanded:true,mode:'items'});}
+ if(summaryLabel!==null){
+   if(summaryControls.length>1)return JSON.stringify({expanded:false,mode:null});
+   if(summaryControls.length===1)summaryControls[0].click();
+   return JSON.stringify({expanded:true,mode:'summary'});
+ }
+ return JSON.stringify({expanded:true,mode:'items'});
 })()
-""".replace("SHOW_LABELS", json.dumps(show_labels, ensure_ascii=False)))
-        if expanded != {"expanded": True}:
+""".replace("ITEM_CONTROL_LABEL", json.dumps(item_control_label, ensure_ascii=False)).replace("SUMMARY_CONTROL_LABEL", json.dumps(summary_control_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
+        if (expanded.get("expanded") is not True
+                or expanded.get("mode") not in {"items", "summary"}):
             raise HouseholdError("Oda checkout items cannot be reviewed")
+        mode = expanded["mode"]
         for _ in range(20):
             ready = self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const labels=SHOW_LABELS;
- const show=[...document.querySelectorAll('button')].filter(visible).filter(x=>labels.includes(norm(x.innerText||x.getAttribute('aria-label')||'')));
+ const mode=MODE,controlLabel=mode==='items'?ITEM_CONTROL_LABEL:SUMMARY_CONTROL_LABEL;
+ const show=[...document.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===controlLabel);
  const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
  const summaryLabel=SUMMARY_LABEL;
  const summaryNodes=summaryLabel===null?[]:[...document.querySelectorAll('*')].filter(visible).filter(node=>norm(node.innerText||'')===summaryLabel).filter(node=>![...node.children].some(child=>visible(child)&&norm(child.innerText||'')===summaryLabel));
- const mode=inputs.length===COUNT?'items':summaryLabel!==null&&inputs.length===0&&summaryNodes.length===1?'summary':null;
- return JSON.stringify({ready:show.length===0&&mode!==null,mode});
+ const ready=show.length===0&&(mode==='items'?inputs.length===COUNT:inputs.length===0&&summaryNodes.length===1);
+ return JSON.stringify({ready,mode});
 })()
-""".replace("COUNT", str(expected_line_count)).replace("SHOW_LABELS", json.dumps(show_labels, ensure_ascii=False)).replace("SUMMARY_LABEL", json.dumps(summary_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
+""".replace("COUNT", str(expected_line_count)).replace("MODE", json.dumps(mode)).replace("ITEM_CONTROL_LABEL", json.dumps(item_control_label, ensure_ascii=False)).replace("SUMMARY_CONTROL_LABEL", json.dumps(summary_control_label, ensure_ascii=False)).replace("SUMMARY_LABEL", json.dumps(summary_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
             if ready.get("ready") is True and ready.get("mode") in {"items", "summary"}:
                 return ready["mode"]
             self._settle(0.25)

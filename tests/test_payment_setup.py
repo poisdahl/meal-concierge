@@ -107,13 +107,14 @@ const clicks=[];
 class E {
  constructor(tag,text='',children=[]){this.tag=tag;this.text=text;this.children=children;for(const x of children)x.parentElement=this;}
  get innerText(){return this.text||this.children.map(x=>x.innerText).join('\n');}
+ get textContent(){return this.innerText;}
  getBoundingClientRect(){return {width:this.hidden?0:100,height:20};} getAttribute(){return null;}
  contains(n){return this===n||this.children.some(x=>x.contains(n));}
  matches(s){return s==='*'||s===this.tag||(s===`input[type="${this.type}"]`&&this.tag==='input');}
  querySelectorAll(s){return this.children.flatMap(x=>[...(s.split(',').some(y=>x.matches(y))?[x]:[]),...x.querySelectorAll(s)]);}
  querySelector(s){return this.querySelectorAll(s)[0]||null;}
  closest(s){return s.split(',').some(x=>this.matches(x))?this:this.parentElement?.closest(s)||null;}
- click(){clicks.push(this.id);if(this.type==='radio'&&!c.noEffect)radios.forEach(r=>r.checked=r===this);}
+ click(){clicks.push(this.id);if(this.hideOnClick)this.hidden=true;if(this.type==='radio'&&!c.noEffect)radios.forEach(r=>r.checked=r===this);}
 }
 const radios=[],labels=[];
 for(const [index,text] of (c.options||['Vipps','Nytt kort','•••• 1234']).entries()){
@@ -121,12 +122,16 @@ for(const [index,text] of (c.options||['Vipps','Nytt kort','•••• 1234'])
  const label=new E('label','',[new E('span',text),r]);r.labels=[label];radios.push(r);labels.push(label);
 }
 const quantity=new E('input');quantity.type='number';quantity.value=c.quantity||1;
-const item=new E('article','',[new E('p','Pasta'),new E('p','500 g, Sopps'),new E('label','Antall'),quantity]);
+const quantityLabel=new E('label',c.provider==='mathem'?'Antal':'Antall');quantity.labels=[quantityLabel];
+const item=new E('article','',[new E('p','Pasta'),new E('p','500 g, Sopps'),quantityLabel,quantity]);
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p','12. september 09:00–12:00'),new E('p','Eksempelveien 1')]);
 const rows=c.rows||[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',c.fee?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
 const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
 const pay=new E('button',c.button||((c.selected??0)===0?'Betal med':'Bekreft og betal')+' 45,50 kr');pay.id='PAY';pay.disabled=!!c.payDisabled;
-global.document=new E('document','',[new E('body','',[...(c.summaryOnly?[]:[item]),delivery,...labels,summary,pay])]);document.body=document.children[0];
+const itemExpand=new E('button',c.provider==='mathem'?'Visa varor':'Vis varene');itemExpand.id='ITEM';itemExpand.hidden=!!c.itemButtonHidden;itemExpand.hideOnClick=true;
+const summaryExpand=new E('button',c.provider==='mathem'?'Visa sammanfattning':'Vis oppsummering');summaryExpand.id='SUMMARY';summaryExpand.hidden=!!c.summaryButtonHidden;summaryExpand.hideOnClick=true;
+const expand=c.expandButtons==='both'?[itemExpand,summaryExpand]:c.expandButtons==='item'?[itemExpand]:c.expandButtons==='summary'?[summaryExpand]:[];
+global.document=new E('document','',[new E('body','',[...expand,...(c.summaryOnly?[]:[item]),delivery,...labels,summary,pay])]);document.body=document.children[0];
 global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
 global.location=new URL(c.url||'https://oda.com/no/checkout/confirm/');
 process.stdout.write(JSON.stringify({result:JSON.parse(eval(script)),clicks,selected:radios.map(r=>r.checked)}));

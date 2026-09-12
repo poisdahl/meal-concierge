@@ -1953,22 +1953,88 @@ class RetryAmountTests(unittest.TestCase):
         self.assertTrue(observed["summary_count_matches"])
         self.assertFalse(evaluate(2)["summary_count_matches"])
 
-    def test_oda_summary_expansion_is_explicit_and_returns_its_mode(self):
-        from unittest import mock
+    def test_item_expansion_ignores_independent_amount_summary_control(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
         from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the actual browser script")
+        for provider in ("oda", "mathem"):
+            with self.subTest(provider=provider):
+                browser = OdaBrowser.__new__(OdaBrowser)
+                browser.checkout_provider = provider
+                calls = []
+                cases = [
+                    {"provider": provider, "summaryOnly": True, "expandButtons": "both"},
+                    {"provider": provider, "itemButtonHidden": True, "expandButtons": "both"},
+                ]
+                def evaluate(script):
+                    completed = subprocess.run(
+                        [node, "-e", PAYMENT_DOM],
+                        input=json.dumps({"script": script, "c": cases[len(calls)]}),
+                        text=True, capture_output=True, check=True, timeout=10,
+                    )
+                    result = json.loads(completed.stdout)
+                    calls.append(result)
+                    return result["result"]
+                browser._eval = evaluate
+                browser._settle = lambda seconds: None
+                self.assertEqual(browser._expand_checkout_items(
+                    1,
+                    allow_summary_only=provider == "oda",
+                    expected_product_count=1 if provider == "oda" else None,
+                ), "items")
+                self.assertEqual(calls[0]["clicks"], ["ITEM"])
+                self.assertEqual(calls[1]["clicks"], [])
+
+    def test_oda_summary_expansion_is_an_explicit_fallback(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the actual browser script")
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.checkout_provider = "oda"
-        browser._eval = mock.Mock(side_effect=[
-            {"expanded": True},
-            {"ready": True, "mode": "summary"},
-        ])
+        calls = []
+        cases = [
+            {"summaryOnly": True, "expandButtons": "summary"},
+            {"summaryOnly": True, "expandButtons": "summary", "summaryButtonHidden": True},
+        ]
+        def evaluate(script):
+            completed = subprocess.run(
+                [node, "-e", PAYMENT_DOM],
+                input=json.dumps({"script": script, "c": cases[len(calls)]}),
+                text=True, capture_output=True, check=True, timeout=10,
+            )
+            result = json.loads(completed.stdout)
+            calls.append(result)
+            return result["result"]
+        browser._eval = evaluate
         browser._settle = lambda seconds: None
         self.assertEqual(browser._expand_checkout_items(
             1, allow_summary_only=True, expected_product_count=1,
         ), "summary")
-        scripts = [call.args[0] for call in browser._eval.call_args_list]
-        self.assertIn("Vis oppsummering", scripts[0])
-        self.assertIn("1 vare", scripts[1])
+        self.assertEqual(calls[0]["clicks"], ["SUMMARY"])
+        self.assertEqual(calls[1]["clicks"], [])
+
+    def test_summary_only_saved_card_recovery_is_rejected_before_browser_use(self):
+        from contextlib import nullcontext
+        from oda_browser import OdaBrowser
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        browser._checkout_deadline = None
+        browser._checkout_operation = lambda *a, **k: nullcontext()
+        with self.assertRaisesRegex(CheckoutPreconditionError, "only for Oda/Vipps"):
+            browser.submit_payment_recovery({}, {
+                "summary_only": True,
+                "payment_choice": {"method": "saved_card"},
+            }, lambda: None)
 
     def test_recovery_browser_rejects_same_count_and_total_with_changed_product(self):
         import json
