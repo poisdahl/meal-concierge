@@ -120,6 +120,13 @@ independently verify that exact page state, its same-order `Betal` retry link an
 the unique post-checkout provider order before recovery can be reviewed; a user
 report or coarse tracking status alone is insufficient. A recorded Vipps request
 that is sent, dispatching or otherwise unresolved remains locked.
+If the exact recovery stops before recording any request context, attempted
+timestamp or sent marker and the owner still received nothing, reconcile that
+fresh recovery confirmation once with `vipps_request_not_received=true`. The
+service will classify it as not sent only when the same order still reports
+`unpaid_order` and the dedicated browser again verifies its exact retry surface;
+then prepare a fresh review. Never use this report to override any recorded
+dispatch evidence, paid status or absent retry surface.
 Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
