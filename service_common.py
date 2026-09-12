@@ -501,8 +501,8 @@ def validate_schedule(schedule: Mapping[str, Any], provider: str) -> float | Non
     if schedule.get("auto_checkout"):
         if provider not in {"oda", "mathem"}:
             raise HouseholdError(f"{provider.upper()} supports cart_ready scheduling; checkout continues manually in the browser")
-        if maximum is None or not (delivery_weekday or delivery.get("latest_end")):
-            raise HouseholdError("auto-checkout requires maximum total and a delivery weekday or latest end")
+        if not (delivery_weekday or delivery.get("latest_end")):
+            raise HouseholdError("auto-checkout requires a delivery weekday or latest end")
     return maximum_value
 
 def money_cents(value: Any) -> int | None:

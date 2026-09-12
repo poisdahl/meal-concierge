@@ -468,6 +468,242 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(waiting["payment_request_sent"])
         self.assertEqual(self.browser.clicks, 1)
 
+    def test_owner_can_abandon_one_exact_unsent_unpaid_order_when_retry_is_stuck(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+
+        self.assertTrue(result["abandoned_unpaid"])
+        self.assertTrue(result["new_checkout_allowed"])
+        self.assertFalse(result["payment_dispatched"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+        for confirmation_id in ("original", prepared["confirmation_id"]):
+            replayed = self.app.handle({
+                "operation": "checkout", "action": "abandon_unpaid",
+                "confirmation_id": confirmation_id, "order_id": "order-1",
+                "vipps_request_not_received": True,
+            })
+            self.assertTrue(replayed["abandoned_unpaid"])
+            self.assertTrue(replayed["idempotent"])
+        self.assertNotIn("get_cart", self.merchant.calls)
+
+    def test_abandon_unpaid_keeps_a_working_exact_retry(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "retry_available"
+
+        with self.assertRaisesRegex(HouseholdError, "non-actionable payment-started"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_cannot_override_dispatch_evidence(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            child = state["pending_checkout"]["recovery"]
+            child["vipps_request_status"] = "dispatching"
+            child["vipps_request_attempted_at"] = self.now.isoformat()
+
+        with self.assertRaisesRegex(HouseholdError, "not positively proven unsent"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_cannot_override_original_dispatch_evidence(self):
+        for field in ("vipps_request_attempted_at", "payment_requested_at"):
+            with self.subTest(field=field):
+                with self.app.store.locked() as state:
+                    state["pending_checkout"] = deepcopy(self.original)
+                prepared = self.contextless_exact_retry_attempt()
+                self.call(
+                    "reconcile", confirmation_id=prepared["confirmation_id"],
+                    vipps_request_not_received=True,
+                )
+                with self.app.store.locked() as state:
+                    original = state["pending_checkout"]
+                    original["status"] = "awaiting_user_payment"
+                    original[field] = self.now.isoformat()
+                self.browser.payment_state = "payment_started"
+
+                with self.assertRaisesRegex(HouseholdError, "not positively proven unsent"):
+                    self.call(
+                        "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                        order_id="order-1", vipps_request_not_received=True,
+                    )
+
+                self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+                self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_accepts_same_order_original_predispatch_context(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            original = state["pending_checkout"]
+            original["vipps_request_status"] = "verifying"
+            original["vipps_request_context"] = {
+                "order_id": "order-1", "tab_id": "original-payment",
+            }
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+
+        self.assertTrue(result["abandoned_unpaid"])
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_records_the_exact_paid_tracking_conflict(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "payment_started"
+
+        result = self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+
+        self.assertTrue(result["abandoned_unpaid"])
+        self.assertEqual(result["tracking_status"], "paid_and_not_modifiable")
+        self.assertEqual(result["tracking_conflict"], {
+            "provider_tracking_status": "paid_and_not_modifiable",
+            "order_page_status": "payment_started",
+        })
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandon_unpaid_rejects_a_fulfillment_tracking_state(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.merchant.status = "picking"
+        self.browser.payment_state = "payment_started"
+
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call(
+                "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+                order_id="order-1", vipps_request_not_received=True,
+            )
+
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandoned_order_cannot_be_rebound_after_restart_and_list_churn(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "payment_started"
+        self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            later = deepcopy(self.original)
+            later["confirmation_id"] = "later-checkout"
+            later["status"] = "uncertain"
+            later["orders_before"] = {"orders": []}
+            later.pop("unpaid_order_id", None)
+            later.pop("unpaid_order_binding_source", None)
+            later.pop("vipps_request_status", None)
+            state["pending_checkout"] = later
+        self.browser.payment_state = "retry_available"
+
+        with self.assertRaisesRegex(HouseholdError, "explicitly abandoned"):
+            self.app.handle({
+                "operation": "checkout", "action": "prepare", "recovery": True,
+                "order_id": "order-1", "confirmation_id": "later-checkout",
+                "vipps_request_not_received": True,
+            })
+
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["confirmation_id"],
+            "later-checkout",
+        )
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abandoned_order_does_not_make_a_later_exact_order_ambiguous(self):
+        prepared = self.contextless_exact_retry_attempt()
+        self.call(
+            "reconcile", confirmation_id=prepared["confirmation_id"],
+            vipps_request_not_received=True,
+        )
+        self.browser.payment_state = "payment_started"
+        self.call(
+            "abandon_unpaid", confirmation_id=prepared["confirmation_id"],
+            order_id="order-1", vipps_request_not_received=True,
+        )
+        with self.app.store.locked() as state:
+            later = deepcopy(self.original)
+            later["confirmation_id"] = "later-checkout"
+            later["status"] = "uncertain"
+            later["orders_before"] = {"orders": []}
+            later.pop("unpaid_order_id", None)
+            later.pop("unpaid_order_binding_source", None)
+            later.pop("vipps_request_status", None)
+            state["pending_checkout"] = later
+        old_order = deepcopy(self.merchant.order)
+        new_order = {**deepcopy(old_order), "orderNumber": "order-2"}
+        original_call = self.merchant.call
+
+        def two_orders(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": [deepcopy(old_order), deepcopy(new_order)]}
+            if name == "get_order" and arguments.get("order_number") == "order-2":
+                return deepcopy(new_order)
+            if name == "order_tracking" and arguments.get("order_number") == "order-2":
+                return {"orderNumber": "order-2", "status": "unpaid_order"}
+            return original_call(name, arguments, **kwargs)
+
+        self.merchant.call = two_orders
+        self.browser.payment_state = "retry_available"
+
+        recovered = self.app.handle({
+            "operation": "checkout", "action": "prepare", "recovery": True,
+            "order_id": "order-2", "confirmation_id": "later-checkout",
+            "vipps_request_not_received": True,
+        })
+
+        self.assertTrue(recovered["recovery"])
+        self.assertEqual(recovered["order_id"], "order-2")
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_owner_no_request_report_cannot_override_dispatch_evidence(self):
         prepared = self.contextless_exact_retry_attempt()
         with self.app.store.locked() as state:

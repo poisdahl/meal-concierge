@@ -28,8 +28,9 @@ uses `cancel_reconcile` with that same confirmation ID. For a delivery change, b
 the exact order edit with `delivery_only=true` and an empty addition cart, select the requested available
 window, then prepare its fresh original/final-total review under the shared
 rule below. Unavailable merchant controls or unverified full totals require a
-manual handoff. Weekly auto-checkout requires the same configured
-browser, standing/fresh policy, dietary permissions and amount/delivery guards.
+manual handoff. Weekly auto-checkout requires the same configured browser,
+standing/fresh policy, dietary permissions and delivery guards. `maximum_total`
+is an optional budget policy, not a prerequisite; enforce it when configured.
 A missing or changed prerequisite stops the attempt. Confirm purchase only when
 its bound submit/reconcile returns `confirmed=true`; Mathem receipt reconciliation
 also checks the exact order's address in the browser because MCP omits it.
@@ -678,6 +679,23 @@ failure is distinct from unknown effect and from an explicit platform approval.
 Use the supported recovery review above only when the product verifies its
 binding; retain the original attempt and do not use an external helper as a substitute.
 
+If an exact Oda/Vipps recovery has been reconciled as `not_sent`, the owner again
+reports no request, and its exact order page is stuck at `Betaling påbegynt`
+without an actionable retry,
+`checkout(action="abandon_unpaid", confirmation_id=..., order_id=...,
+vipps_request_not_received=true)` may release only that local interactive
+checkout journal. The provider API must still return the exact order as
+`unpaid_order` or the known conflicting `paid_and_modifiable` /
+`paid_and_not_modifiable` state; retain that API status and the page status in
+the result. The original attempt must also have no dispatch/request timestamp;
+a pre-dispatch `verifying` context is accepted only for this same order. Report
+that the old merchant entry remains payment-started and is durably fenced from
+future recovery. Ignore that fenced ID when resolving a later checkout's new
+order candidates, while preserving ambiguity among every non-abandoned order.
+Then review the current cart before preparing at most one fresh checkout. Never
+use this for a scheduled attempt, another provider, fulfillment status, or any
+recorded dispatch/request context.
+
 
 Use exact returned delivery slot refs. Display exact/from/unavailable prices as
 returned; “fra 0” is not free. Preserve explicit or provider-external selections.
@@ -748,7 +766,8 @@ For a due managed schedule, call schedule due with its scheduler invocation,
 then checkout auto with its returned occurrence and scheduler. Cart_ready never
 pays. Carry its occurrence into later manual prepare or submit; this remains
 manual continuation. Auto checkout additionally requires complete menu/product
-preparation and configured amount/delivery guards. Updating settings or pausing
+preparation, a known exact total and configured delivery guards. A configured
+`maximum_total` remains a hard budget ceiling, but may be absent. Updating settings or pausing
 invalidates old workers; replan and verify before resuming. Disable affects only
 the weekly run, preserving order emails. An uncertain delivery selection stays
 in its original occurrence; use schedule reconcile, which only reads selected

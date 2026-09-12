@@ -1258,8 +1258,10 @@ class MathemFlowTests(unittest.TestCase):
             self.app.handle({'operation': 'orders', 'action': 'change_abort', 'order_id': '1'})
         self.assertEqual(self.store.read(), before)
         self.assertEqual(self.shop.calls, [])
-        with self.assertRaisesRegex(HouseholdError, 'maximum total'):
-            validate_schedule({**before['schedule'], 'auto_checkout': True, 'maximum_total': None}, 'mathem')
+        self.assertIsNone(validate_schedule(
+            {**before['schedule'], 'auto_checkout': True, 'maximum_total': None},
+            'mathem',
+        ))
 
     def test_mathem_defaults_recipes_and_provider_isolation(self):
         status = self.app.handle({'operation': 'status'})

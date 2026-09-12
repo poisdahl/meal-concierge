@@ -104,6 +104,28 @@ class OrderOperations:
             value.setdefault('payment_resolution', {'authorization_release': 'unknown', 'refund': 'unknown'})
         return value
 
+    @staticmethod
+    def _abandoned_order_ids(state: Mapping[str, Any]) -> set[str]:
+        records = state.get("protected_results")
+        if not isinstance(records, Mapping):
+            return set()
+        return {
+            str(record["result"]["order_id"])
+            for record in records.values()
+            if (
+            isinstance(record, Mapping)
+            and record.get("kind") == "checkout"
+            and isinstance(record.get("result"), Mapping)
+            and record["result"].get("abandoned_unpaid") is True
+            and isinstance(record["result"].get("order_id"), str)
+            and record.get("target_id") == record["result"]["order_id"]
+            )
+        }
+
+    @classmethod
+    def _order_was_abandoned(cls, state: Mapping[str, Any], order_id: str) -> bool:
+        return order_id in cls._abandoned_order_ids(state)
+
     def _guard_scheduled_context(self, state, context):
         if context is None:
             return
@@ -769,13 +791,10 @@ class OrderOperations:
         if not schedule.get("enabled") or not schedule.get("auto_checkout"):
             return "scheduled checkout is no longer enabled"
         total = summary.get("total")
-        if (
-            isinstance(total, bool)
-            or not isinstance(total, (int, float))
-            or not math.isfinite(float(total))
-            or maximum_total is None
-            or total > maximum_total
-        ):
+        if (isinstance(total, bool) or not isinstance(total, (int, float))
+                or not math.isfinite(float(total))):
+            return "total is unavailable"
+        if maximum_total is not None and total > maximum_total:
             return "total exceeds maximum"
         if not delivery_matches(
             schedule["delivery"],
@@ -1790,10 +1809,11 @@ class OrderOperations:
                 (action == "prepare" and request.get("recovery")
                  and request.get("order_id") is not None)
                 or action == "reconcile"
+                or action == "abandon_unpaid"
             )
         ):
             raise HouseholdError(
-                "vipps_request_not_received is true only for exact Oda recovery preparation or reconciliation"
+                "vipps_request_not_received is true only for exact Oda recovery preparation, reconciliation or abandonment"
             )
         if "vipps_approval_completed" in request and not (
             action == "reconcile" and request.get("vipps_approval_completed") is True
@@ -1809,7 +1829,18 @@ class OrderOperations:
                     or not request["confirmation_id"]
                 )):
             raise HouseholdError("Exact Oda recovery requires the original confirmation and the owner's current no-request report")
-        if "order_id" in request and not (action == "prepare" and request.get("recovery")):
+        if action == "abandon_unpaid" and (
+                request.get("vipps_request_not_received") is not True
+                or not isinstance(request.get("confirmation_id"), str)
+                or not request["confirmation_id"]
+                or not isinstance(request.get("order_id"), str)
+                or not request["order_id"]):
+            raise HouseholdError(
+                "Abandoning an unpaid Oda order requires its exact order_id, current recovery confirmation and the owner's no-request report"
+            )
+        if "order_id" in request and not (
+                (action == "prepare" and request.get("recovery"))
+                or action == "abandon_unpaid"):
             state = self.store.read()
             legacy_result = None
             if action == "confirm":
@@ -1823,6 +1854,12 @@ class OrderOperations:
             if (not isinstance(legacy_result, Mapping)
                     or str(legacy_result.get("order_id") or "") != str(request.get("order_id") or "")):
                 raise HouseholdError("order_id is available only for exact-order recovery preparation")
+        if action == "abandon_unpaid":
+            return self._checkout_abandon_unpaid(
+                deadline,
+                str(request["confirmation_id"]),
+                str(request["order_id"]),
+            )
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
@@ -2450,6 +2487,135 @@ class OrderOperations:
             ),
         }
 
+    def _checkout_abandon_unpaid(self, deadline, confirmation_id, requested_order_id):
+        """Release one exact Oda/Vipps journal only after proven non-dispatch."""
+
+        order_id = safe_order_id(requested_order_id)
+        with self._browser_operation(deadline):
+            with self.store.locked() as state:
+                pending = deepcopy(state.get("pending_checkout"))
+                recovered = self._read_protected_result(
+                    state, confirmation_id, "checkout"
+                )
+            if recovered:
+                if (recovered.get("abandoned_unpaid") is True
+                        and recovered.get("order_id") == order_id):
+                    return recovered
+                raise HouseholdError("The confirmation belongs to another checkout result")
+            if (
+                self.provider != "oda"
+                or self.browser is None
+                or not isinstance(pending, Mapping)
+                or pending.get("order_change")
+                or pending.get("occurrence")
+                or pending.get("automatic_checkout")
+                or (pending.get("checkout_payment") or {}).get("method") != "vipps"
+                or pending.get("unpaid_order_binding_source") != "oda_retry_available_page"
+            ):
+                raise HouseholdError(
+                    "Only an interactive exact Oda/Vipps unpaid order can be abandoned"
+                )
+            child = pending.get("recovery")
+            original_request_status = pending.get("vipps_request_status")
+            original_request_context = pending.get("vipps_request_context")
+            original_not_dispatched = (
+                original_request_status in {None, "expired", "verifying", "not_sent"}
+                and pending.get("vipps_request_attempted_at") is None
+                and pending.get("payment_requested_at") is None
+                and pending.get("owner_vipps_approval_completed_at") is None
+                and (
+                    original_request_context is None
+                    or (
+                        original_request_status == "verifying"
+                        and isinstance(original_request_context, Mapping)
+                        and original_request_context.get("order_id") == order_id
+                    )
+                )
+            )
+            exact_not_sent = (
+                isinstance(child, Mapping)
+                and confirmation_id == child.get("confirmation_id")
+                and child.get("order_id") == pending.get("unpaid_order_id") == order_id
+                and child.get("status") in {"clicking", "uncertain", "awaiting_user_payment"}
+                and (child.get("browser_review") or {}).get("payment_choice", {}).get("method") == "vipps"
+                and child.get("vipps_request_status") == "not_sent"
+                and child.get("vipps_request_context") is None
+                and child.get("vipps_request_attempted_at") is None
+                and child.get("payment_requested_at") is None
+                and child.get("owner_vipps_approval_completed_at") is None
+                and isinstance(child.get("owner_reported_no_vipps_request_after_attempt_at"), str)
+                and bool(child["owner_reported_no_vipps_request_after_attempt_at"])
+                and child.get("payment_failure") == {
+                    "payment_failed": True,
+                    "order_id": order_id,
+                    "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
+                }
+                and original_not_dispatched
+            )
+            if not exact_not_sent:
+                raise HouseholdError(
+                    "The current Oda/Vipps recovery is not positively proven unsent"
+                )
+            self._checkout_recovery_target(pending, deadline, order_id)
+            tracking = self.provider_client.call(
+                "order_tracking", {"order_number": order_id}, deadline=deadline
+            )
+            tracking_id = str(
+                tracking.get("orderNumber") or tracking.get("order_number")
+                or tracking.get("order_id") or tracking.get("id") or ""
+            )
+            tracking_status = str(tracking.get("status") or "").casefold()
+            if tracking_id != order_id or tracking_status not in {
+                    "unpaid_order", "paid_and_modifiable", "paid_and_not_modifiable"}:
+                raise HouseholdError(
+                    "The exact merchant order is no longer payment-started"
+                )
+            page_state = str(
+                self.browser.order_payment_state(order_id, deadline=deadline).get("status")
+                or "unknown"
+            )
+            if page_state != "payment_started":
+                raise HouseholdError(
+                    "The exact unpaid order does not show the non-actionable payment-started page"
+                )
+            terminal = {
+                "confirmed": False,
+                "abandoned_unpaid": True,
+                "order_id": order_id,
+                "tracking_status": tracking_status,
+                "order_page_status": "payment_started",
+                **({"tracking_conflict": {
+                    "provider_tracking_status": tracking_status,
+                    "order_page_status": "payment_started",
+                }} if tracking_status != "unpaid_order" else {}),
+                "payment_request_state": "not_sent",
+                "payment_dispatched": False,
+                "retry_allowed": False,
+                "new_checkout_allowed": True,
+                "confirmation_id": confirmation_id,
+                "original_confirmation_id": pending["confirmation_id"],
+                "next": (
+                    "This exact merchant entry remains payment-started and must not be retried. "
+                    "Review the current cart, then prepare one fresh checkout if the owner still wants a new order."
+                ),
+            }
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError(
+                        "The pending checkout changed while abandoning the unpaid order"
+                    )
+                state["pending_checkout"] = None
+                intent_signature = checkout_intent_signature(pending["summary"])
+                self._store_protected_result(
+                    state, pending["confirmation_id"], "checkout", terminal,
+                    target_id=order_id, intent_signature=intent_signature,
+                )
+                self._store_protected_result(
+                    state, confirmation_id, "checkout", terminal,
+                    target_id=order_id, intent_signature=intent_signature,
+                )
+            return terminal
+
     def _checkout_recovery_target(self, pending, deadline, requested_order_id=None, *, verify_retry_page=True):
         if self.provider not in {"oda", "mathem"} or self.browser is None:
             raise HouseholdError("Merchant payment recovery is unavailable for this installation")
@@ -2485,6 +2651,11 @@ class OrderOperations:
         failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                            if self.provider == "mathem" else None)
         binding_source = pending.get("unpaid_order_binding_source")
+        abandoned_order_ids = self._abandoned_order_ids(self.store.read())
+        if requested in abandoned_order_ids:
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be recovered"
+            )
         if (self.provider == "oda"
                 and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                 and (retained_order_id is None
@@ -2504,6 +2675,7 @@ class OrderOperations:
                 safe_order_id(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or ""))
                 for row in orders.get("orders", []) if isinstance(row, Mapping)
                 and str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before
+                and str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in abandoned_order_ids
             ]
             if candidates != [requested] or requested in before or (
                 retained_order_id is not None and safe_order_id(retained_order_id) != requested
@@ -2522,11 +2694,17 @@ class OrderOperations:
             orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
             candidates = [row for row in orders.get("orders", [])
                           if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before]
+            candidates = [row for row in candidates
+                          if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in abandoned_order_ids]
             if len(candidates) != 1:
                 raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
             order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
         if pending.get("payment_failure") and pending["payment_failure"]["order_id"] != order_id:
             raise HouseholdError("The unpaid order differs from the original payment failure")
+        if self._order_was_abandoned(self.store.read(), order_id):
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be recovered"
+            )
         order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
         tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
         order_identity = str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "")
@@ -2588,6 +2766,10 @@ class OrderOperations:
         """Verify the exact Oda checkout-response order before hosted Vipps Next."""
 
         candidate_id = safe_order_id(response_order_id)
+        if self._order_was_abandoned(self.store.read(), candidate_id):
+            raise HouseholdError(
+                "The Oda checkout response reused an explicitly abandoned order; do not send payment"
+            )
         before = {
             str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
             for row in pending["orders_before"].get("orders", []) if isinstance(row, Mapping)
@@ -3555,7 +3737,10 @@ class OrderOperations:
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
         after = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
-        candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping) and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids]
+        abandoned_order_ids = self._abandoned_order_ids(self.store.read())
+        candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping)
+                      and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids
+                      and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in abandoned_order_ids]
         exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                                  if self.provider == "mathem" else None)
         if self.provider == "meny" and confirmation_order_id:
@@ -3569,6 +3754,11 @@ class OrderOperations:
         details_id = ""
         tracking_id = ""
         retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None
+        if ((exact_failed_order_id is not None and str(exact_failed_order_id) in abandoned_order_ids)
+                or (retained_unpaid_id is not None and str(retained_unpaid_id) in abandoned_order_ids)):
+            raise HouseholdError(
+                "This merchant order was explicitly abandoned and must never be reconciled"
+            )
         if exact_failed_order_id is not None:
             candidate_id = safe_order_id(exact_failed_order_id)
             matching_rows = [item for item in after.get("orders", []) if isinstance(item, Mapping)

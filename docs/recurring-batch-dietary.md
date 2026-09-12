@@ -80,7 +80,7 @@ policy. Documented allergy/never-buy conflicts cannot be overridden.
 
 A different product, changed retail evidence, changed rule or an older pending
 summary without an assessment requires an updated summary. Scheduled context,
-amount/delivery guards, cart reconciliation and protected payment journal remain
+delivery guards, any configured optional amount ceiling, cart reconciliation and protected payment journal remain
 bound to the same operation. No warning authorizes an unrelated purchase.
 
 ## Standing uncertainty permission and native notices

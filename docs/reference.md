@@ -1950,6 +1950,23 @@ An uncertain result retains the original journal and cannot dispatch twice.
 Bank-app approval remains external. Lower merchant totals do not by themselves
 prove a bank refund or reservation release.
 
+An interactive Oda/Vipps recovery that is positively journaled `not_sent` may
+be explicitly abandoned with `checkout(action="abandon_unpaid", ...)` only when
+the same exact merchant entry is still reported as unpaid or with Oda's known
+conflicting paid status, and its verified order page is stuck at
+`Betaling påbegynt` rather than exposing an actionable retry. The call
+requires the active recovery `confirmation_id`, exact `order_id`, and a current
+`vipps_request_not_received=true` owner report. It clears only the local pending
+checkout so one fresh order can be reviewed. Both the API status and exact page
+status are retained in the protected result. Any original dispatch/request
+timestamp blocks abandonment; only a same-order pre-dispatch `verifying` context
+is eligible. The provider entry remains payment-started, is recorded as
+abandoned, and its order ID is rejected by every later recovery even after a
+restart or order-list churn. A fenced ID is excluded from later new-order
+candidate discovery so it cannot make a legitimate order ambiguous; ambiguity
+among non-abandoned entries remains blocking. Scheduled attempts, fulfillment
+states and any recorded dispatch remain ineligible.
+
 Oda and Mathem bind checkout accounts and original order receipts through the
 same reader with separate origins and receipt labels. Existing-order review and
 reconciliation retain the reference captured before editing. Missing binding
