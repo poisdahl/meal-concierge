@@ -340,6 +340,26 @@ class RecoveryTests(unittest.TestCase):
                 self.assertNotIn("recovery", result)
                 self.assertEqual(self.browser.clicks, 0)
 
+    def test_retry_page_does_not_override_a_recorded_active_vipps_request(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {
+                "tab_id": "original-tab", "expected_total": 24640,
+                "gateway_url_digest": "b" * 64, "order_id": "order-1",
+            }
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_state = "retry_available"
+        self.browser.vipps_request_state = "sent"
+
+        result = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["awaiting_user_payment"])
+        self.assertNotIn("recovery_preparation_available", result)
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_original_vipps_request_becoming_active_after_review_blocks_dispatch(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]

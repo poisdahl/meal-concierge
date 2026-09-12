@@ -3424,7 +3424,9 @@ class OrderOperations:
                 self.browser.order_payment_state(candidate_id, deadline=deadline).get("status") or "unknown"
             )
             tracking_conflict = payment_page_status == "retry_available"
-            if tracking_conflict:
+            if (tracking_conflict
+                    and pending.get("vipps_request_status") is None
+                    and pending.get("vipps_request_context") is None):
                 oda_vipps_active = False
         receipt_order = order
         if (self.provider in {"oda", "mathem"} and order is not None and candidate_id == details_id == tracking_id
