@@ -927,7 +927,7 @@ class RecoveryTests(unittest.TestCase):
                     pending["vipps_request_status"] = request_status
                     pending["vipps_request_context"] = {
                         "tab_id": "original-tab", "expected_total": 24640,
-                        "gateway_url_digest": "b" * 64, "order_id": "order-1",
+                        "gateway_url_digest": "b" * 64, "order_id": None,
                     }
                 self.browser.vipps_request_state = observed
                 self.browser.payment_state = "retry_available"
@@ -938,6 +938,175 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(result["retry_allowed"])
                 self.assertNotIn("recovery", result)
                 self.assertEqual(self.browser.clicks, 0)
+
+    def test_unbound_vipps_dispatch_keeps_multiple_new_orders_ambiguous_after_restart(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+            pending["status"] = "awaiting_user_payment"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {
+                "tab_id": "original-tab", "expected_total": 24640,
+                "gateway_url_digest": "b" * 64, "order_id": None,
+            }
+        second = {**deepcopy(self.merchant.order), "orderNumber": "order-2"}
+        visible = [deepcopy(self.merchant.order), second]
+        original_call = self.merchant.call
+
+        def call(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": deepcopy(visible)}
+            if arguments.get("order_number") == "order-2":
+                if name == "get_order":
+                    return deepcopy(second)
+                if name == "order_tracking":
+                    return {"orderNumber": "order-2", "status": "unpaid_order"}
+            return original_call(name, arguments, **kwargs)
+
+        self.merchant.call = call
+        self.browser.vipps_request_state = "sent"
+
+        first = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(first["confirmed"])
+        self.assertTrue(self.app.store.read()["pending_checkout"]["candidate_binding_ambiguous"])
+        self.assertEqual(self.browser.clicks, 0)
+
+        visible[:] = [deepcopy(self.merchant.order)]
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.app._now = lambda: self.now
+        second_attempt = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(second_attempt["confirmed"])
+        self.assertTrue(self.app.store.read()["pending_checkout"]["candidate_binding_ambiguous"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_unbound_vipps_dispatch_ignores_an_unrelated_new_order(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+            pending["status"] = "awaiting_user_payment"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {
+                "tab_id": "original-tab", "expected_total": 24640,
+                "gateway_url_digest": "b" * 64, "order_id": None,
+            }
+        unrelated = {
+            **deepcopy(self.merchant.order),
+            "orderNumber": "order-2",
+            "grossAmount": 99.0,
+            "products": [{"product_id": "other", "name": "Other", "quantity": 1, "price": 99.0}],
+        }
+        original_call = self.merchant.call
+
+        def call(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": [deepcopy(self.merchant.order), deepcopy(unrelated)]}
+            if arguments.get("order_number") == "order-2":
+                if name == "get_order":
+                    return deepcopy(unrelated)
+                if name == "order_tracking":
+                    return {"orderNumber": "order-2", "status": "unpaid_order"}
+            return original_call(name, arguments, **kwargs)
+
+        self.merchant.call = call
+        self.browser.vipps_request_state = "sent"
+
+        result = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["unpaid_order_id"], "order-1")
+        retained = self.app.store.read()["pending_checkout"]
+        self.assertEqual(retained["unpaid_order_id"], "order-1")
+        self.assertEqual(retained["unpaid_order_binding_source"], "oda_reconciled_exact_order")
+        self.assertNotIn("candidate_binding_ambiguous", retained)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_unbound_vipps_dispatch_does_not_bind_while_another_candidate_is_unreadable(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+            pending["status"] = "awaiting_user_payment"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {
+                "tab_id": "original-tab", "expected_total": 24640,
+                "gateway_url_digest": "b" * 64, "order_id": None,
+            }
+        unrelated = {
+            **deepcopy(self.merchant.order),
+            "orderNumber": "order-2",
+            "grossAmount": 99.0,
+            "products": [{"product_id": "other", "name": "Other", "quantity": 1, "price": 99.0}],
+        }
+        unreadable = True
+        original_call = self.merchant.call
+
+        def call(name, arguments, **kwargs):
+            if name == "get_orders":
+                return {"orders": [deepcopy(self.merchant.order), deepcopy(unrelated)]}
+            if arguments.get("order_number") == "order-2":
+                if name == "get_order":
+                    if unreadable:
+                        raise HouseholdError("temporary detail failure")
+                    return deepcopy(unrelated)
+                if name == "order_tracking":
+                    return {"orderNumber": "order-2", "status": "unpaid_order"}
+            return original_call(name, arguments, **kwargs)
+
+        self.merchant.call = call
+        self.browser.vipps_request_state = "sent"
+
+        unresolved = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(unresolved["confirmed"])
+        retained = self.app.store.read()["pending_checkout"]
+        self.assertNotIn("unpaid_order_id", retained)
+        self.assertNotIn("unpaid_order_binding_source", retained)
+        self.assertNotIn("candidate_binding_ambiguous", retained)
+
+        unreadable = False
+        resolved = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(resolved["confirmed"])
+        self.assertEqual(resolved["unpaid_order_id"], "order-1")
+        retained = self.app.store.read()["pending_checkout"]
+        self.assertEqual(retained["unpaid_order_id"], "order-1")
+        self.assertEqual(retained["unpaid_order_binding_source"], "oda_reconciled_exact_order")
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_expired_unbound_vipps_dispatch_binds_one_matching_order_for_recovery(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+            pending["status"] = "awaiting_user_payment"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {
+                "tab_id": "original-tab", "expected_total": 24640,
+                "gateway_url_digest": "b" * 64, "order_id": None,
+            }
+        self.browser.vipps_request_state = "expired"
+
+        expired = self.call("reconcile", confirmation_id="original")
+
+        self.assertFalse(expired["confirmed"])
+        self.assertTrue(expired["recovery_preparation_available"])
+        retained = self.app.store.read()["pending_checkout"]
+        self.assertEqual(retained["unpaid_order_id"], "order-1")
+        self.assertEqual(
+            retained["unpaid_order_binding_source"], "oda_reconciled_exact_order",
+        )
+
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.app._now = lambda: self.now
+        prepared = self.call("prepare", recovery=True)
+
+        self.assertTrue(prepared["recovery"])
+        self.assertEqual(prepared["order_id"], "order-1")
+        self.assertEqual(self.browser.clicks, 0)
 
     def test_retry_page_does_not_override_a_recorded_active_vipps_request(self):
         with self.app.store.locked() as state:
@@ -2129,9 +2298,6 @@ class RetryAmountTests(unittest.TestCase):
                     browser.review_payment_recovery = lambda *a, **k: deepcopy(review)
                     browser._invoke = lambda *a, **k: {}
                     browser._capture_checkout_payment = mock.Mock(return_value=None)
-                    payment_capture = Path("/private/capture.har")
-                    browser._start_oda_vipps_capture = mock.Mock(return_value=payment_capture)
-                    browser._discard_oda_vipps_capture = mock.Mock()
                     observed, callbacks = [], []
                     def final_eval(script):
                         self.assertEqual(callbacks, [True])
@@ -2152,13 +2318,9 @@ class RetryAmountTests(unittest.TestCase):
                             authentication_expected=method == "saved_card",
                             capture_failure=False,
                             vipps_expected_total=(4550 if method == "vipps" else None),
-                            vipps_payment_capture=(payment_capture if method == "vipps" else None),
                             vipps_source_url=(url if method == "vipps" else None),
                             before_vipps_request=None,
                         )
-                        self.assertEqual(browser._start_oda_vipps_capture.call_count, method == "vipps")
-                    if change and method == "vipps":
-                        browser._discard_oda_vipps_capture.assert_called_once_with(payment_capture)
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
 
     def test_observed_retry_without_delsum_and_atomic_amount_binding(self):
