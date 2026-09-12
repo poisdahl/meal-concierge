@@ -1465,7 +1465,7 @@ class CoreTestsBase:
                 self.assertTrue(order_matches_checkout(mathem_order, variant, provider="mathem"))
 
     def test_oda_checkout_pay_response_binds_exact_gateway_and_order(self):
-        gateway = "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"
+        gateway = "https://payments.example/hosted/opaque"
         request_id = oda_checkout_pay_request_id({"requests": [{
             "requestId": "pay-1", "method": "POST", "status": 200,
             "url": "https://oda.com/api/v1/checkout/pay/",
@@ -1483,6 +1483,15 @@ class CoreTestsBase:
                 "type": "payments-providers-card", "url": gateway,
                 "params": {"orderNumber": "new-order"},
             })}, gateway)
+        for unsafe_gateway in (
+            "http://payments.example/hosted/opaque",
+            "https://user@payments.example/hosted/opaque",
+        ):
+            with self.subTest(gateway=unsafe_gateway), self.assertRaises(HouseholdError):
+                oda_checkout_pay_order_id({"responseBody": json.dumps({
+                    "type": "payments-providers-vipps", "url": unsafe_gateway,
+                    "params": {"orderNumber": "new-order"},
+                })}, unsafe_gateway)
 
     def test_checkout_rejects_non_string_product_identity_fields(self):
         for brand in ({"name": "Testmerke"}, {}):
@@ -2430,18 +2439,23 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const remember=node();const next=node('Next');
-const text='Continue to pay with Vipps Oda NOK 256.50';
-global.location=new URL('https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
-global.getComputedStyle=()=>({display:'block',visibility:'visible',opacity:'1'});
+const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
+global.location=new URL(c.url);
+global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:e===remember?'0':'1'});
 const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:s==='button'?[next]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
-                input=json.dumps({"script": _oda_vipps_gateway_script(25650, "90000000"), "c": {"phone": phone}}),
+                input=json.dumps({
+                    "script": _oda_vipps_gateway_script(
+                        25650, "90000000", expected_url=expected_url or url,
+                    ),
+                    "c": {"phone": phone, "url": url, "text": text},
+                }),
                 text=True, capture_output=True, check=False,
             )
             if result.returncode:
@@ -2455,6 +2469,41 @@ process.stdout.write(eval(script));
         self.assertEqual(evaluate("90000000"), {
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
+        })
+        for url in (
+            "https://pay.vipps.no/?token=opaque",
+            "https://payments.example/future/hosted-flow",
+            "https://pay.example:444/#opaque-provider-state",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(evaluate("90000000", url), {
+                    "identity": True, "ready": True, "sent": False, "expired": False,
+                    "fillable": True, "phone_matches": True,
+                })
+        for url in (
+            "http://pay.vipps.no/?token=opaque",
+            "https://user@pay.vipps.no/?token=opaque",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(evaluate("90000000", url), {
+                    "identity": False, "ready": False, "sent": False, "expired": False,
+                    "fillable": False, "phone_matches": False,
+                })
+        self.assertEqual(evaluate(
+            "90000000",
+            "https://pay.vipps.no/?token=current",
+            expected_url="https://pay.vipps.no/?token=stale",
+        ), {
+            "identity": False, "ready": False, "sent": False, "expired": False,
+            "fillable": False, "phone_matches": False,
+        })
+        self.assertEqual(evaluate(
+            "90000000",
+            "https://payments.example/hosted/opaque",
+            text="Oh no, your payment timed out Go back and try again. Go back",
+        ), {
+            "identity": True, "ready": False, "sent": False, "expired": True,
+            "fillable": False, "phone_matches": False,
         })
 
     @unittest.skipUnless(shutil.which("node"), "Node executes Oda order DOM contract")
@@ -2513,7 +2562,7 @@ process.stdout.write(eval(script));
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
         browser._settle = mock.Mock()
         browser._require_checkout_time = mock.Mock()
-        gateway = "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"
+        gateway = "https://payments.example/hosted/opaque"
 
         def invoke(action, *args, **_kwargs):
             if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
@@ -2560,7 +2609,9 @@ process.stdout.write(eval(script));
         completed = mock.Mock(returncode=0, stdout='{"success":true,"data":{"result":"{\\"filled\\":true}"}}')
 
         with mock.patch("oda_browser.subprocess.run", return_value=completed) as run:
-            result = browser._eval(_oda_vipps_phone_fill_script("90000000"))
+            result = browser._eval(_oda_vipps_phone_fill_script(
+                "90000000", "https://payments.example/hosted/opaque",
+            ))
 
         self.assertEqual(result, {"filled": True})
         self.assertNotIn("90000000", run.call_args.args[0])
