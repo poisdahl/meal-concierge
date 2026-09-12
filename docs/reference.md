@@ -236,11 +236,21 @@ order using its existing saved card after a hosted Vipps timeout; the shared
 Mathem new-order route is implemented but not demonstrated live; the shared
 recovery logic has isolated coverage.
 
-For Oda/Vipps, the completed checkout response must bind the hosted redirect to
-one exact new order number. That exact order is then checked through merchant
-order details and tracking before the durable fence and hosted `Next` click;
-other concurrent order-list entries are irrelevant and cannot become the
-payment target.
+For Oda/Vipps, the final reviewed checkout is followed through its one controlled
+click and same browser tab to a credential-free HTTPS page. The hosted page must
+show Oda, the exact total and one usable phone form before the configured phone
+is filled. Its exact current URL and submit control are frozen and rechecked,
+and the dispatch journal is durable before the one hosted submit click. This
+does not depend on a payment provider domain, button language, Oda response
+body, HAR capture or internal checkout endpoint.
+
+Oda can expose the new order after the hosted page is ready. New-order dispatch
+therefore records no speculative order ID. Reconciliation considers only
+post-baseline orders whose exact detail and tracking identities, goods, total,
+delivery and address match the reviewed checkout, then persists the single
+match for payment recovery. Unrelated concurrent orders are ignored; multiple
+matching orders remain ambiguous and cannot be retried. An existing-order
+recovery still binds that exact order before opening its hosted payment form.
 
 Mathem addition recovery requires a retry target captured from the original
 revalidated payment dispatch: the same active browser tab must show the native

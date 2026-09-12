@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import importlib.util
 import json
 import os
@@ -50,9 +51,6 @@ from oda_browser import (  # noqa: E402
     checkout_delivery_matches,
     checkout_lines_match,
     oda_checkout_amount_minor,
-    _oda_checkout_pay_har_response,
-    oda_checkout_pay_order_id,
-    oda_checkout_pay_request_id,
     product_identity,
 )
 from service import Application, Server, config, delivery_matches, menu_email_html, meny_order_matches_checkout, oda_order_matches_addition, order_matches_checkout, peer_uid, validate_schedule  # noqa: E402
@@ -164,7 +162,6 @@ class FakeBrowser:
         self.receipt_address = "Eksempelveien 1"
         self.vipps_request_state = "sent"
         self.vipps_phone_number = "90000000"
-        self.vipps_response_order_id = "new-order"
 
     def read_order_binding(self, order_id, order, *, expected_binding=None, deadline=None):
         binding = {"account_reference_digest": "a" * 64, "receipt_address": self.receipt_address}
@@ -196,7 +193,7 @@ class FakeBrowser:
             before_vipps_request({
                 "tab_id": "tab-1", "expected_total": 3500,
                 "gateway_url_digest": "a" * 64,
-                "order_id": self.vipps_response_order_id,
+                "order_id": None,
             })
         return {"vipps_request_sent": True} if review.get("payment_display") == "Vipps" else None
 
@@ -1465,45 +1462,6 @@ class CoreTestsBase:
                 variant["delivery"]["slot"]["slot_ref"] = "mathem:2026-09-03:70"
                 self.assertTrue(order_matches_checkout(mathem_order, variant, provider="mathem"))
 
-    def test_oda_checkout_pay_response_binds_exact_gateway_and_order(self):
-        gateway = "https://payments.example/hosted/opaque"
-        request_id = oda_checkout_pay_request_id({"requests": [{
-            "requestId": "pay-1", "method": "POST", "status": 200,
-            "url": "https://oda.com/api/v1/checkout/pay/",
-        }]})
-        self.assertEqual(request_id, "pay-1")
-        response = {"responseBody": json.dumps({
-            "type": "payments-providers-vipps", "url": gateway,
-            "params": {"orderNumber": "new-order"},
-        })}
-        self.assertEqual(oda_checkout_pay_order_id(response, gateway), "new-order")
-        captured = {"log": {"entries": [{
-            "request": {"method": "POST", "url": "https://oda.com/no/api/v1/checkout/pay/"},
-            "response": {"status": 200, "content": {"text": response["responseBody"]}},
-        }]}}
-        self.assertEqual(
-            oda_checkout_pay_order_id(_oda_checkout_pay_har_response(captured), gateway),
-            "new-order",
-        )
-        with self.assertRaises(HouseholdError):
-            _oda_checkout_pay_har_response({"log": {"entries": captured["log"]["entries"] * 2}})
-        with self.assertRaises(HouseholdError):
-            oda_checkout_pay_order_id(response, gateway + "-different")
-        with self.assertRaises(HouseholdError):
-            oda_checkout_pay_order_id({"responseBody": json.dumps({
-                "type": "payments-providers-card", "url": gateway,
-                "params": {"orderNumber": "new-order"},
-            })}, gateway)
-        for unsafe_gateway in (
-            "http://payments.example/hosted/opaque",
-            "https://user@payments.example/hosted/opaque",
-        ):
-            with self.subTest(gateway=unsafe_gateway), self.assertRaises(HouseholdError):
-                oda_checkout_pay_order_id({"responseBody": json.dumps({
-                    "type": "payments-providers-vipps", "url": unsafe_gateway,
-                    "params": {"orderNumber": "new-order"},
-                })}, unsafe_gateway)
-
     def test_checkout_rejects_non_string_product_identity_fields(self):
         for brand in ({"name": "Testmerke"}, {}):
             with self.subTest(brand=brand):
@@ -2449,23 +2407,25 @@ const {script,c}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,readOnly:false,hidden:false,
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
-const remember=node();const next=node('Next');
+const next=node(c.button||'Next');const form=node();
+phone.closest=s=>s==='form'?form:null;
+form.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
 global.location=new URL(c.url);
-global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:e===remember?'0':'1'});
-const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"][name="phone-number"]'?[phone]:s==='input[type="checkbox"]'?[remember]:s==='button'?[next]:[];
+global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:'1'});
+const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=expected_url or url,
                     ),
-                    "c": {"phone": phone, "url": url, "text": text},
+                    "c": {"phone": phone, "url": url, "text": text, "button": button},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2481,6 +2441,16 @@ process.stdout.write(eval(script));
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
         })
+        self.assertEqual(evaluate("90000000", text="ODA 256.50 NOK", button="OK"), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+        for text in ("Other 256.50 NOK", "Oda 123.45 NOK"):
+            with self.subTest(text=text):
+                self.assertEqual(evaluate("90000000", text=text), {
+                    "identity": True, "ready": False, "sent": False, "expired": False,
+                    "fillable": False, "phone_matches": False,
+                })
         for url in (
             "https://pay.vipps.no/?token=opaque",
             "https://payments.example/future/hosted-flow",
@@ -2580,16 +2550,11 @@ process.stdout.write(eval(script));
                 return {"x": 10, "y": 20, "width": 30, "height": 40}
             if (action, args) == ("get", ("url",)):
                 return {"url": gateway}
-            if (action, args) == ("network", ("requests", "--filter", "/checkout/pay/")):
-                return {"requests": [{"requestId": "pay-1", "method": "POST", "status": 200,
-                                      "url": "https://oda.com/no/api/v1/checkout/pay/"}]}
-            if (action, args) == ("network", ("request", "pay-1")):
-                return {"responseBody": json.dumps({"type": "payments-providers-vipps", "url": gateway,
-                                                     "params": {"orderNumber": "new-order"}})}
             return {}
 
         browser._invoke = mock.Mock(side_effect=invoke)
         browser._eval = mock.Mock(side_effect=[
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
             {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
             {"filled": True},
             {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
@@ -2598,8 +2563,14 @@ process.stdout.write(eval(script));
             {"identity": True, "ready": False, "sent": True, "expired": False, "fillable": False, "phone_matches": False},
         ])
 
-        browser._complete_oda_vipps_request("tab-1", 25650)
+        contexts = []
+        context = browser._complete_oda_vipps_request(
+            "tab-1", 25650, contexts.append,
+            source_url="https://oda.com/no/checkout/confirm/",
+        )
 
+        self.assertIsNone(context["order_id"])
+        self.assertEqual(contexts, [context])
         self.assertEqual(browser._invoke.call_args_list[-3:], [
             mock.call("mouse", "move", "25", "40"),
             mock.call("mouse", "down"),
@@ -2614,33 +2585,17 @@ process.stdout.write(eval(script));
         browser._require_checkout_time = mock.Mock()
         source = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
         gateway = "https://payments.example/future/hosted-flow"
-        captured = {"log": {"entries": [{
-            "request": {"method": "POST", "url": "https://oda.com/no/api/v1/checkout/pay/"},
-            "response": {"status": 200, "content": {"text": json.dumps({
-                "type": "payments-providers-vipps", "url": gateway,
-                "params": {"orderNumber": "order-1"},
-            })}},
-        }]}}
 
         def invoke(action, *args, **_kwargs):
             if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
                 return {"x": 10, "y": 20, "width": 30, "height": 40}
             if (action, args) == ("get", ("url",)):
                 return {"url": gateway}
-            if (action, args) == ("network", ("requests", "--filter", "/checkout/pay/")):
-                return {"requests": [{"requestId": "pay-1", "method": "POST", "status": 200,
-                                      "url": "https://oda.com/no/api/v1/checkout/pay/"}]}
-            if (action, args) == ("network", ("request", "pay-1")):
-                return {"responseBody": json.dumps({
-                    "type": "payments-providers-vipps",
-                    "url": "https://payments.example/stale-order",
-                    "params": {"orderNumber": "stale-order"},
-                })}
             return {}
 
         browser._invoke = mock.Mock(side_effect=invoke)
-        browser._stop_oda_vipps_capture = mock.Mock(return_value=captured)
         browser._eval = mock.Mock(side_effect=[
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
             {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
             {"filled": True},
             {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
@@ -2653,12 +2608,10 @@ process.stdout.write(eval(script));
             "tab-1",
             25650,
             expected_order_id="order-1",
-            payment_capture=Path("/private/capture.har"),
             source_url=source,
         )
 
         self.assertEqual(context["order_id"], "order-1")
-        browser._stop_oda_vipps_capture.assert_called_once_with(Path("/private/capture.har"))
         self.assertFalse(any(call.args[:2] == ("network", "requests")
                              for call in browser._invoke.call_args_list))
         self.assertEqual(browser._invoke.call_args_list[-3:], [
@@ -2667,84 +2620,74 @@ process.stdout.write(eval(script));
             mock.call("mouse", "up"),
         ])
 
-    def test_oda_vipps_missing_response_body_still_blocks_new_checkout_and_wrong_recovery_order(self):
+    def test_oda_vipps_follows_an_intermediate_redirect_before_freezing_the_payment_page(self):
+        source = "https://oda.com/no/checkout/confirm/"
+        intermediate = "https://payments.example/redirecting"
         gateway = "https://payments.example/future/hosted-flow"
-        for response, expected_order_id in (
-            ({"requestId": "pay-1", "status": 200}, None),
-            ({"responseBody": json.dumps({
-                "type": "payments-providers-vipps", "url": gateway,
-                "params": {"orderNumber": "other-order"},
-            })}, "order-1"),
-        ):
-            with self.subTest(response=response, expected_order_id=expected_order_id):
-                browser = OdaBrowser.__new__(OdaBrowser)
-                browser.vipps_phone_number = "90000000"
-                browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
-                browser._settle = mock.Mock()
-                browser._eval = mock.Mock(side_effect=AssertionError("must not inspect or mutate the payment page"))
-
-                def invoke(action, *args, **_kwargs):
-                    if (action, args) == ("network", ("requests", "--filter", "/checkout/pay/")):
-                        return {"requests": [{"requestId": "pay-1", "method": "POST", "status": 200,
-                                              "url": "https://oda.com/no/api/v1/checkout/pay/"}]}
-                    if (action, args) == ("network", ("request", "pay-1")):
-                        return response
-                    return {}
-
-                browser._invoke = mock.Mock(side_effect=invoke)
-                with self.assertRaises(HouseholdError):
-                    browser._complete_oda_vipps_request(
-                        "tab-1",
-                        25650,
-                        expected_order_id=expected_order_id,
-                    )
-                browser._eval.assert_not_called()
-                self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
-
-    def test_oda_vipps_causal_capture_does_not_relabel_or_click_a_stale_same_total_gateway(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
         browser._settle = mock.Mock()
-        captured_gateway = "https://payments.example/order-a"
-        stale_gateway = "https://payments.example/order-b"
-        captured = {"log": {"entries": [{
-            "request": {"method": "POST", "url": "https://oda.com/no/api/v1/checkout/pay/"},
-            "response": {"status": 200, "content": {"text": json.dumps({
-                "type": "payments-providers-vipps", "url": captured_gateway,
-                "params": {"orderNumber": "order-1"},
-            })}},
-        }]}}
+        browser._require_checkout_time = mock.Mock()
+        urls = iter([intermediate, gateway, gateway, gateway])
 
         def invoke(action, *args, **_kwargs):
-            if (action, args) == ("network", ("requests", "--filter", "/checkout/pay/")):
-                return {"requests": [{"requestId": "pay-1", "method": "POST", "status": 200,
-                                      "url": "https://oda.com/no/api/v1/checkout/pay/"}]}
-            if (action, args) == ("network", ("request", "pay-1")):
-                return {"requestId": "pay-1", "status": 200}
+            if (action, args) == ("get", ("url",)):
+                return {"url": next(urls, gateway)}
+            if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
+                return {"x": 10, "y": 20, "width": 30, "height": 40}
+            return {}
+
+        browser._invoke = mock.Mock(side_effect=invoke)
+        browser._eval = mock.Mock(side_effect=[
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": False, "phone_matches": False},
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"filled": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": False, "sent": True, "expired": False, "fillable": False, "phone_matches": False},
+        ])
+
+        context = browser._complete_oda_vipps_request(
+            "tab-1", 25650, source_url=source,
+        )
+
+        self.assertEqual(context["gateway_url_digest"], hashlib.sha256(gateway.encode()).hexdigest())
+        self.assertIn(intermediate, browser._eval.call_args_list[0].args[0])
+        self.assertTrue(all(intermediate not in call.args[0]
+                            for call in browser._eval.call_args_list[1:]))
+        self.assertIn(mock.call("mouse", "down"), browser._invoke.call_args_list)
+
+    def test_oda_vipps_gateway_without_a_verified_payment_form_is_not_clicked(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._settle = mock.Mock()
+        stale_gateway = "https://payments.example/order-b"
+
+        def invoke(action, *args, **_kwargs):
             if (action, args) == ("get", ("url",)):
                 return {"url": stale_gateway}
             return {}
 
         browser._invoke = mock.Mock(side_effect=invoke)
-        browser._stop_oda_vipps_capture = mock.Mock(return_value=captured)
         browser._eval = mock.Mock(return_value={
-            "identity": False, "ready": False, "sent": False, "expired": False,
+            "identity": True, "ready": False, "sent": False, "expired": False,
             "fillable": False, "phone_matches": False,
         })
 
-        with self.assertRaisesRegex(HouseholdError, "payment page could not be verified"):
+        with self.assertRaisesRegex(HouseholdError, "did not follow the reviewed Oda click"):
             browser._complete_oda_vipps_request(
                 "tab-1",
                 25650,
                 expected_order_id="order-1",
-                payment_capture=Path("/private/capture.har"),
                 source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
             )
 
         self.assertEqual(browser._eval.call_count, 40)
-        self.assertTrue(all(captured_gateway in call.args[0] for call in browser._eval.call_args_list))
-        self.assertTrue(all(stale_gateway not in call.args[0] for call in browser._eval.call_args_list))
+        self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
     def test_oda_vipps_phone_is_sent_to_browser_over_stdin_not_process_argv(self):

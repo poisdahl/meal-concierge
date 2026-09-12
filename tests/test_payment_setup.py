@@ -267,9 +267,6 @@ class PaymentBrowserTests(unittest.TestCase):
                     browser._checkout_deadline = None
                     observed, callbacks, network = [], [], []
                     browser._invoke = lambda *arguments: network.append(arguments)
-                    payment_capture = Path("/private/capture.har")
-                    browser._start_oda_vipps_capture = mock.Mock(return_value=payment_capture)
-                    browser._discard_oda_vipps_capture = mock.Mock()
                     browser._capture_checkout_payment = mock.Mock(return_value=None)
                     def evaluate(final):
                         self.assertEqual(callbacks, [True])
@@ -289,14 +286,11 @@ class PaymentBrowserTests(unittest.TestCase):
                             "tab-1",
                             authentication_expected=True,
                             vipps_expected_total=(4550 if method == "vipps" else None),
-                            vipps_payment_capture=(payment_capture if method == "vipps" else None),
                             vipps_source_url=(CHECKOUT_URL if method == "vipps" else None),
                             before_vipps_request=None,
                         )
-                    if change and method == "vipps":
-                        browser._discard_oda_vipps_capture.assert_called_once_with(payment_capture)
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
-                    self.assertEqual(network, [("network", "requests", "--clear")] if method == "vipps" else [])
+                    self.assertEqual(network, [])
 
 
 if __name__ == "__main__":
