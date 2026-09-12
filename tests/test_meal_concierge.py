@@ -47,6 +47,8 @@ from oda_browser import (  # noqa: E402
     checkout_delivery_matches,
     checkout_lines_match,
     oda_checkout_amount_minor,
+    oda_checkout_pay_order_id,
+    oda_checkout_pay_request_id,
     product_identity,
 )
 from service import Application, Server, config, delivery_matches, menu_email_html, meny_order_matches_checkout, oda_order_matches_addition, order_matches_checkout, peer_uid, validate_schedule  # noqa: E402
@@ -156,6 +158,9 @@ class FakeBrowser:
         self.cancellation_submit_deadlines = []
         self.confirmation_order_id = None
         self.receipt_address = "Eksempelveien 1"
+        self.vipps_request_state = "sent"
+        self.vipps_phone_number = "90000000"
+        self.vipps_response_order_id = "new-order"
 
     def read_order_binding(self, order_id, order, *, expected_binding=None, deadline=None):
         binding = {"account_reference_digest": "a" * 64, "receipt_address": self.receipt_address}
@@ -170,7 +175,7 @@ class FakeBrowser:
         self.review_deadlines.append(deadline)
         return {"page_digest": "a" * 64, "payment_display": "Vipps" if payment and payment["method"] == "vipps" else "•••• 1234"}
 
-    def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
+    def submit_checkout(self, cart, review, before_click=None, *, deadline=None, before_vipps_request=None):
         self.submit_deadlines.append(deadline)
         if before_click:
             before_click()
@@ -183,6 +188,16 @@ class FakeBrowser:
             "deliveryAddress": "Eksempelveien 1",
             "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}],
         })
+        if review.get("payment_display") == "Vipps" and before_vipps_request:
+            before_vipps_request({
+                "tab_id": "tab-1", "expected_total": 3500,
+                "gateway_url_digest": "a" * 64,
+                "order_id": self.vipps_response_order_id,
+            })
+        return {"vipps_request_sent": True} if review.get("payment_display") == "Vipps" else None
+
+    def checkout_vipps_request_state(self, context, *, deadline=None):
+        return {"status": self.vipps_request_state}
 
     def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
         self.review_deadlines.append(deadline)
@@ -1352,7 +1367,16 @@ class CoreTestsBase:
         summary = {
             "items": [{"product_id": "10", "quantity": 1}],
             "total": 35.0,
-            "delivery": {"display": "Hjemlevering mellom kl 07 og 13, 3. sep", "address": "Eksempelveien 1"},
+            "delivery": {
+                "display": "Hjemlevering mellom kl 07 og 13, 3. sep",
+                "address": "Eksempelveien 1",
+                "slot": {
+                    "slot_ref": "oda:2026-09-03:70", "provider_slot_id": 70,
+                    "start_at": "2026-09-03T07:00:00+02:00",
+                    "end_at": "2026-09-03T13:00:00+02:00",
+                    "price_ore": 1900, "price_kind": "exact", "selected": True,
+                },
+            },
         }
         order = {
             "currency": "NOK",
@@ -1384,9 +1408,38 @@ class CoreTestsBase:
         self.assertFalse(order_matches_checkout({**order, "deliverySlotDisplay": [order["deliverySlotDisplay"]]}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliveryDate": [order["deliveryDate"]]}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliveryDate": "not-a-date"}, summary))
+        self.assertFalse(order_matches_checkout({**order, "deliveryDate": "2027-09-03"}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliverySlotDisplay": "Tor 4. sep 07:00 - 13:00"}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliverySlotDisplay": "Tor 4. ukjent 07:00 - 13:00"}, summary))
         self.assertFalse(order_matches_checkout({**order, "deliverySlotDisplay": "Tor 3. separat 07:00 - 13:00"}, summary))
+
+        mathem_order = {**order, "currency": "SEK", "deliverySlotDisplay": "Tor 3 sep 07:00 - 13:00"}
+        for relative in ("i dag", "idag", "i morgon", "imorgon"):
+            with self.subTest(relative=relative):
+                variant = deepcopy(summary)
+                variant["delivery"]["display"] = f"Hemleverans mellan kl 07 och 13, {relative}"
+                variant["delivery"]["slot"]["slot_ref"] = "mathem:2026-09-03:70"
+                self.assertTrue(order_matches_checkout(mathem_order, variant, provider="mathem"))
+
+    def test_oda_checkout_pay_response_binds_exact_gateway_and_order(self):
+        gateway = "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque"
+        request_id = oda_checkout_pay_request_id({"requests": [{
+            "requestId": "pay-1", "method": "POST", "status": 200,
+            "url": "https://oda.com/api/v1/checkout/pay/",
+        }]})
+        self.assertEqual(request_id, "pay-1")
+        response = {"responseBody": json.dumps({
+            "type": "payments-providers-vipps", "url": gateway,
+            "params": {"orderNumber": "new-order"},
+        })}
+        self.assertEqual(oda_checkout_pay_order_id(response, gateway), "new-order")
+        with self.assertRaises(HouseholdError):
+            oda_checkout_pay_order_id(response, gateway + "-different")
+        with self.assertRaises(HouseholdError):
+            oda_checkout_pay_order_id({"responseBody": json.dumps({
+                "type": "payments-providers-card", "url": gateway,
+                "params": {"orderNumber": "new-order"},
+            })}, gateway)
 
     def test_checkout_rejects_non_string_product_identity_fields(self):
         for brand in ({"name": "Testmerke"}, {}):
@@ -6352,6 +6405,25 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
         self.assertEqual(self.oda.calls, [])
 
+    def test_setup_question_does_not_reenter_the_locked_state_store(self):
+        with self.store.locked() as state:
+            with mock.patch.object(
+                self.store, "read", side_effect=AssertionError("nested state read would deadlock")
+            ):
+                question = self.app._setup_question(state)
+        self.assertIn("store_readiness", question)
+
+    def test_oda_vipps_guidance_reports_missing_private_phone_without_entering_checkout(self):
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
+                         "changes": {"checkout_payment": {"method": "vipps"}}})
+        self.browser.vipps_phone_number = None
+        with mock.patch.object(
+            self.browser, "review_checkout", side_effect=AssertionError("readiness must not enter checkout")
+        ):
+            readiness = self.app.handle({"operation": "status"})["store_readiness"]
+        self.assertEqual(readiness["payment_check"]["status"], "not_configured")
+        self.assertIn("ODA checkout", readiness["payment_check"]["next_action"])
+
     def test_store_guidance_distinguishes_missing_browser_and_login(self):
         self.app.browser = None
         self.app.integration = {"status": "awaiting_login"}
@@ -7586,15 +7658,19 @@ class FlowTests(unittest.TestCase):
                              "changes": {"checkout_payment": {"method": "saved_card"}}})
         self.assertFalse(waiting["confirmed"])
         self.assertFalse(waiting["retry_allowed"])
-        self.assertTrue(waiting["payment_followup_required"])
-        self.assertNotIn("awaiting_user_payment", waiting)
-        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertTrue(waiting["payment_request_sent"])
+        self.assertTrue(waiting["awaiting_user_payment"])
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "awaiting_user_payment")
         self.assertEqual(self.browser.checkout_clicks, 1)
         with self.assertRaises(HouseholdError):
             self.app.handle(request)
         again = self.app.handle({"operation": "checkout", "action": "reconcile"})
         self.assertTrue(again["payment_followup_required"])
         self.assertFalse(again["confirmed"])
+        self.assertEqual(again["unpaid_order_id"], "new-order")
+        self.assertTrue(again["awaiting_user_payment"])
+        self.assertNotIn("recovery_preparation_available", again)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "awaiting_user_payment")
         self.assertEqual(self.browser.checkout_clicks, 1)
         self.oda.tracking = "paid_and_modifiable"
         paid = self.app.handle({"operation": "checkout", "action": "reconcile"})
@@ -8533,11 +8609,11 @@ class FlowTests(unittest.TestCase):
     def test_cart_ready_occurrence_must_be_carried_into_manual_checkout(self):
         self.oda.cart["delivery"] = None
         self.oda.delivery_slots["slots"] = [{
-            "slot_ref": "candidate", "provider_slot_id": 1,
+            "slot_ref": "oda:2026-09-05:1", "provider_slot_id": 1,
             "start_at": "2026-09-05T09:00:00+02:00", "end_at": "2026-09-05T12:00:00+02:00",
             "price_ore": 2900, "price_kind": "exact", "selected": False,
         }]
-        self.oda.delivery_displays["candidate"] = "Lør 5. sep 09:00 - 12:00"
+        self.oda.delivery_displays["oda:2026-09-05:1"] = "Lør 5. sep 09:00 - 12:00"
         self.app.handle({"operation": "schedule", "action": "update", "changes": {
             "enabled": True, "mode": "cart_ready", "auto_checkout": False,
             "delivery": {"weekday": "Saturday", "strategy": "cheapest"},

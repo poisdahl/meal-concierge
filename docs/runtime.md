@@ -59,8 +59,8 @@ are checked against the native Unix limit before staging. Use shorter explicit
 Oda/Mathem OAuth uses the installed MCP SDK without Hermes. Provider readiness
 is separate from service health. Existing Compose and explicit legacy runner
 paths remain supported by `service.py`; native adoption does not convert Compose
-or claim live parity. MENY login and its private `vipps_phone_number`
-configuration require the authorized provider setup.
+or claim live parity. MENY login and the private `vipps_phone_number` used by
+Oda or MENY require the authorized provider setup.
 
 ## Externally managed hosts
 

@@ -2419,14 +2419,32 @@ class OrderOperations:
                     {"items": [], "total": 0}, provider=self.provider):
                 raise HouseholdError("The original paid order changed before addition recovery")
             return order_id
-        before = {str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
-                  for row in pending["orders_before"].get("orders", [])}
-        orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
-        candidates = [row for row in orders.get("orders", [])
-                      if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before]
-        if len(candidates) != 1:
-            raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
-        order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
+        retained_order_id = pending.get("unpaid_order_id")
+        failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
+                           if self.provider == "mathem" else None)
+        if (self.provider == "oda"
+                and (pending.get("checkout_payment") or {}).get("method") == "vipps"
+                and (retained_order_id is None
+                     or pending.get("unpaid_order_binding_source") != "oda_checkout_pay_response")):
+            raise HouseholdError(
+                "Recovery has no order identity bound before the original Vipps request; "
+                "preserve this attempt for manual reconciliation"
+            )
+        if failed_order_id is not None:
+            order_id = safe_order_id(failed_order_id)
+        elif retained_order_id is not None:
+            order_id = safe_order_id(retained_order_id)
+        else:
+            if pending.get("candidate_binding_ambiguous"):
+                raise HouseholdError("Recovery cannot resolve an earlier ambiguous merchant-order set")
+            before = {str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
+                      for row in pending["orders_before"].get("orders", [])}
+            orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
+            candidates = [row for row in orders.get("orders", [])
+                          if str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") not in before]
+            if len(candidates) != 1:
+                raise HouseholdError("Recovery cannot identify one original merchant order; reconcile this attempt")
+            order_id = safe_order_id(str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or ""))
         if pending.get("payment_failure") and pending["payment_failure"]["order_id"] != order_id:
             raise HouseholdError("The unpaid order differs from the original payment failure")
         order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
@@ -2442,6 +2460,41 @@ class OrderOperations:
         if not order_matches_checkout(addressed, pending["summary"], provider=self.provider):
             raise HouseholdError("The unpaid order goods, amount or delivery differ from the original checkout")
         return order_id
+
+    def _bind_oda_vipps_order_before_request(self, pending, response_order_id, deadline) -> str:
+        """Verify the exact Oda checkout-response order before hosted Vipps Next."""
+
+        candidate_id = safe_order_id(response_order_id)
+        before = {
+            str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
+            for row in pending["orders_before"].get("orders", []) if isinstance(row, Mapping)
+        }
+        if candidate_id in before:
+            raise HouseholdError("The Oda checkout response reused an earlier order; do not send payment")
+        for attempt in range(30):
+            try:
+                order = self.provider_client.call(
+                    "get_order", {"order_number": candidate_id}, deadline=deadline
+                )
+                tracking = self.provider_client.call(
+                    "order_tracking", {"order_number": candidate_id}, deadline=deadline
+                )
+                details_id = str(order.get("orderNumber") or order.get("order_number") or order.get("id") or "")
+                tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
+                addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
+                    **order, "deliveryAddress": pending["summary"]["delivery"]["address"],
+                }
+                if (candidate_id == details_id == tracking_id
+                        and tracking.get("status") == "unpaid_order"
+                        and order_matches_checkout(addressed, pending["summary"], provider="oda")):
+                    return candidate_id
+            except HouseholdError:
+                pass
+            if attempt < 29:
+                if deadline is not None and time.monotonic() + 0.5 >= deadline:
+                    break
+                time.sleep(0.5)
+        raise HouseholdError("The Oda order does not match the reviewed Vipps checkout; do not send payment")
 
     def _checkout_recovery_prepare(self, deadline, checkout_payment=None):
         with self._browser_operation(deadline):
@@ -2479,6 +2532,12 @@ class OrderOperations:
         pending = deepcopy(self.store.read().get("pending_checkout"))
         if not pending or pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
             raise HouseholdError("No original dispatched checkout is pending recovery")
+        active_attempt = pending.get("recovery") or pending
+        if (self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps"
+                and (active_attempt is pending or active_attempt.get("status") != "awaiting_confirmation")
+                and active_attempt.get("vipps_request_status") not in {"expired", "verifying"}
+                and not active_attempt.get("payment_failure")):
+            return self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
         child = pending.get("recovery")
         if child and child.get("status") != "awaiting_confirmation":
             result = self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
@@ -2589,6 +2648,7 @@ class OrderOperations:
 
             dispatch_claimed = False
             dispatched = deepcopy(pending)
+            vipps_dispatched = None
             dispatched["recovery"]["status"] = "clicking"
             if child["browser_review"]["payment_choice"]["method"] == "saved_card":
                 dispatched["recovery"]["authentication_unresolved"] = True
@@ -2608,13 +2668,37 @@ class OrderOperations:
                     state["pending_checkout"]["recovery"] = deepcopy(dispatched["recovery"])
                 dispatch_claimed = True
 
-            try:
-                submit_result = self.browser.submit_payment_recovery(pending["cart"], child["browser_review"], before_click,
-                    deadline=deadline, **self._recovery_browser_options(pending))
-                context = submit_result.get("authentication_context") if isinstance(submit_result, Mapping) else None
-                unresolved = isinstance(submit_result, Mapping) and submit_result.get("authentication_unresolved") is True
+            def before_vipps_request(context):
+                nonlocal vipps_dispatched
+                if (not isinstance(context, Mapping)
+                        or context.get("order_id") != child["order_id"]):
+                    raise HouseholdError("Recovery Vipps response belongs to a different Oda order")
                 with self.store.locked() as state:
                     if not dispatch_claimed or canonical(state.get("pending_checkout")) != canonical(dispatched):
+                        raise HouseholdError("Recovery changed before the Vipps request")
+                    current = state["pending_checkout"]["recovery"]
+                    current["vipps_request_status"] = "dispatching"
+                    current["vipps_request_attempted_at"] = self._now().isoformat()
+                    current["vipps_request_context"] = deepcopy(context)
+                    vipps_dispatched = deepcopy(state["pending_checkout"])
+
+            try:
+                submit_result = self.browser.submit_payment_recovery(
+                    pending["cart"], child["browser_review"], before_click,
+                    deadline=deadline,
+                    before_vipps_request=(before_vipps_request if self.provider == "oda"
+                                          and child["browser_review"]["payment_choice"]["method"] == "vipps" else None),
+                    **self._recovery_browser_options(pending),
+                )
+                context = submit_result.get("authentication_context") if isinstance(submit_result, Mapping) else None
+                unresolved = isinstance(submit_result, Mapping) and submit_result.get("authentication_unresolved") is True
+                vipps_request_sent = (self.provider == "oda"
+                                      and child["browser_review"]["payment_choice"]["method"] == "vipps"
+                                      and isinstance(submit_result, Mapping)
+                                      and submit_result.get("vipps_request_sent") is True)
+                with self.store.locked() as state:
+                    expected_dispatched = vipps_dispatched or dispatched
+                    if not dispatch_claimed or canonical(state.get("pending_checkout")) != canonical(expected_dispatched):
                         raise HouseholdError("Recovery changed after its payment dispatch")
                     current = state["pending_checkout"]["recovery"]
                     if context:
@@ -2622,15 +2706,34 @@ class OrderOperations:
                         current["authentication_context"] = deepcopy(context)
                     if unresolved:
                         current["authentication_unresolved"] = True
+                    if vipps_request_sent:
+                        current["status"] = "awaiting_user_payment"
+                        current["vipps_request_status"] = "sent"
+                        current["payment_requested_at"] = self._now().isoformat()
             except CheckoutPreconditionError:
                 # This exception guarantees no final click. Discard only the
                 # recovery review; the original uncertain purchase stays intact.
                 with self.store.locked() as state:
                     current = state.get("pending_checkout")
-                    expected = dispatched if dispatch_claimed else pending
+                    expected = (vipps_dispatched or dispatched) if dispatch_claimed else pending
                     if canonical(current) == canonical(expected):
                         current.pop("recovery")
                 raise
+            if vipps_request_sent:
+                return {
+                    "confirmed": False,
+                    "recovery": True,
+                    "order_id": child["order_id"],
+                    "confirmation_id": child["confirmation_id"],
+                    "original_confirmation_id": pending["confirmation_id"],
+                    "summary": recovery_summary,
+                    "awaiting_user_payment": True,
+                    "payment_method": "vipps",
+                    "payment_request_sent": True,
+                    "payment": self._payment_evidence("unpaid_order"),
+                    "retry_allowed": False,
+                    "next": "Approve this exact Oda recovery payment in Vipps, then reconcile this same confirmation. Do not submit again.",
+                }
             return self._checkout_reconcile_unlocked(deadline, child["confirmation_id"])
 
     def _checkout_confirm(self, deadline: float | None = None, confirmation_id: str = "", *, request=None) -> dict[str, Any]:
@@ -2780,6 +2883,37 @@ class OrderOperations:
                     if self._now() >= datetime.fromisoformat(pending["expires_at"]):
                         raise CheckoutPreconditionError("checkout confirmation expired before the final click")
 
+                vipps_dispatched = None
+
+                def before_vipps_request(context) -> None:
+                    nonlocal vipps_dispatched
+                    order_id = safe_order_id(
+                        context.get("order_id") if isinstance(context, Mapping) else None
+                    )
+                    if order_id in {
+                        str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "")
+                        for row in pending["orders_before"].get("orders", []) if isinstance(row, Mapping)
+                    }:
+                        raise HouseholdError("The Oda checkout response reused an earlier order; do not send payment")
+                    with self.store.locked() as state:
+                        current = state.get("pending_checkout")
+                        expected = {**pending, "status": "clicking"}
+                        if not current or canonical(current) != canonical(expected):
+                            raise HouseholdError("checkout changed before the Oda/Vipps request")
+                        current["vipps_request_status"] = "verifying"
+                        current["vipps_request_context"] = deepcopy(context)
+                        current["unpaid_order_id"] = order_id
+                        current["unpaid_order_binding_source"] = "oda_checkout_pay_response"
+                        bound = deepcopy(current)
+                    self._bind_oda_vipps_order_before_request(pending, order_id, deadline)
+                    with self.store.locked() as state:
+                        current = state.get("pending_checkout")
+                        if not current or canonical(current) != canonical(bound):
+                            raise HouseholdError("checkout changed while verifying the Oda/Vipps order")
+                        current["vipps_request_status"] = "dispatching"
+                        current["vipps_request_attempted_at"] = self._now().isoformat()
+                        vipps_dispatched = deepcopy(current)
+
                 if self.provider == "meny":
                     try:
                         self._unchanged_delivery_binding(
@@ -2824,6 +2958,8 @@ class OrderOperations:
                         pending["browser_review"],
                         before_click,
                         deadline=deadline,
+                        **({"before_vipps_request": before_vipps_request}
+                           if pending["checkout_payment"]["method"] == "vipps" else {}),
                     )
                 if self.provider == "meny" and isinstance(submit_result, Mapping) and submit_result.get("awaiting_user_payment") is True:
                     requested_at = self._now()
@@ -2841,6 +2977,28 @@ class OrderOperations:
                         "retry_allowed": False,
                         "next": "Approve this exact MENY payment in Vipps, then call checkout reconcile. Do not submit again.",
                     }
+                if (self.provider == "oda" and pending["checkout_payment"]["method"] == "vipps"
+                        and isinstance(submit_result, Mapping) and submit_result.get("vipps_request_sent") is True):
+                    requested_at = self._now()
+                    with self.store.locked() as state:
+                        current_pending = state.get("pending_checkout")
+                        if (not current_pending or vipps_dispatched is None
+                                or canonical(current_pending) != canonical(vipps_dispatched)):
+                            raise HouseholdError("checkout state changed after the Oda/Vipps request")
+                        state["pending_checkout"]["status"] = "awaiting_user_payment"
+                        state["pending_checkout"]["vipps_request_status"] = "sent"
+                        state["pending_checkout"]["payment_requested_at"] = requested_at.isoformat()
+                    return {
+                        "confirmed": False,
+                        "confirmation_id": pending["confirmation_id"],
+                        "summary": deepcopy(pending["summary"]),
+                        "awaiting_user_payment": True,
+                        "payment_method": "vipps",
+                        "payment_request_sent": True,
+                        "payment": self._payment_evidence(),
+                        "retry_allowed": False,
+                        "next": "Approve this exact Oda payment in Vipps, then call checkout reconcile. Do not submit again.",
+                    }
                 evidence = {}
                 if self.provider in {"oda", "mathem"} and isinstance(submit_result, Mapping):
                     if submit_result.get("authentication_context"):
@@ -2854,7 +3012,8 @@ class OrderOperations:
                             (("payment_failed", "order_id", "order_change_id") if pending_change else ("payment_failed", "order_id"))}
                 if evidence or pending.get("authentication_unresolved"):
                     with self.store.locked() as state:
-                        if canonical(state.get("pending_checkout")) != canonical({**pending, "status": "clicking"}):
+                        expected_dispatched = vipps_dispatched or {**pending, "status": "clicking"}
+                        if canonical(state.get("pending_checkout")) != canonical(expected_dispatched):
                             raise HouseholdError("Checkout changed after the original payment dispatch")
                         if evidence.get("authentication_context") or evidence.get("payment_failure"):
                             state["pending_checkout"].pop("authentication_unresolved", None)
@@ -3049,6 +3208,47 @@ class OrderOperations:
             raise HouseholdError("checkout has not reached reconciliation")
         if pending.get("order_change"):
             return self._order_change_reconcile(pending, deadline)
+        recovery_attempt = pending.get("recovery")
+        active_attempt = (recovery_attempt if recovery_attempt
+                          and recovery_attempt.get("status") != "awaiting_confirmation" else pending)
+        active_payment = ((active_attempt.get("browser_review") or {}).get("payment_choice")
+                          if active_attempt is not pending else pending.get("checkout_payment")) or {}
+        oda_vipps_observation = None
+        oda_vipps_active = False
+        oda_vipps_expired = False
+        oda_vipps_not_sent = False
+        oda_vipps_bound = not (
+            self.provider == "oda" and active_payment.get("method") == "vipps"
+        )
+        if self.provider == "oda" and active_payment.get("method") == "vipps":
+            if active_attempt is pending:
+                oda_vipps_bound = pending.get("unpaid_order_binding_source") == "oda_checkout_pay_response"
+            else:
+                recovery_context = active_attempt.get("vipps_request_context")
+                oda_vipps_bound = (
+                    pending.get("unpaid_order_binding_source") == "oda_checkout_pay_response"
+                    or (
+                        isinstance(recovery_context, Mapping)
+                        and recovery_context.get("order_id") == active_attempt.get("order_id")
+                        and active_attempt.get("order_id") == pending.get("unpaid_order_id")
+                    )
+                )
+        if self.provider == "oda" and active_payment.get("method") == "vipps":
+            request_status = active_attempt.get("vipps_request_status")
+            if request_status in {"dispatching", "sent"}:
+                context = active_attempt.get("vipps_request_context")
+                observed = self.browser.checkout_vipps_request_state(context, deadline=deadline)
+                oda_vipps_observation = str((observed or {}).get("status") or "unknown")
+            elif request_status == "expired":
+                oda_vipps_observation = "expired"
+            elif request_status == "verifying" and oda_vipps_bound:
+                oda_vipps_observation = "not_sent"
+                oda_vipps_not_sent = True
+            else:
+                oda_vipps_observation = "unknown"
+            oda_vipps_expired = oda_vipps_observation == "expired"
+            oda_vipps_active = (not oda_vipps_expired and not oda_vipps_not_sent
+                                and not active_attempt.get("payment_failure"))
         payment_expiry = pending.get("payment_expires_at")
         try:
             payment_expires_at = datetime.fromisoformat(str(payment_expiry or ""))
@@ -3080,14 +3280,42 @@ class OrderOperations:
         after = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
         before_ids = {str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") for item in pending["orders_before"].get("orders", []) if isinstance(item, Mapping)}
         candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping) and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids]
+        exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
+                                 if self.provider == "mathem" else None)
+        if self.provider == "meny" and confirmation_order_id:
+            candidates = [item for item in candidates if str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == confirmation_order_id]
+        candidate_ambiguous = (
+            bool(pending.get("candidate_binding_ambiguous")) or len(candidates) > 1
+        ) and not exact_failed_order_id and not confirmation_order_id
         order = None
         tracking = None
         candidate_id = ""
         details_id = ""
         tracking_id = ""
-        if self.provider == "meny" and confirmation_order_id:
-            candidates = [item for item in candidates if str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == confirmation_order_id]
-        if len(candidates) == 1:
+        retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None
+        if exact_failed_order_id is not None:
+            candidate_id = safe_order_id(exact_failed_order_id)
+            matching_rows = [item for item in after.get("orders", []) if isinstance(item, Mapping)
+                             and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == candidate_id]
+            if len(matching_rows) > 1:
+                raise HouseholdError("The exact failed order is ambiguous in the merchant order list")
+            details = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
+            tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
+            details_id = str(details.get("orderNumber") or details.get("order_number") or details.get("id") or "")
+            tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
+            order = {**(matching_rows[0] if matching_rows else {}), **details}
+        elif retained_unpaid_id is not None:
+            candidate_id = safe_order_id(retained_unpaid_id)
+            matching_rows = [item for item in after.get("orders", []) if isinstance(item, Mapping)
+                             and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") == candidate_id]
+            if len(matching_rows) > 1:
+                raise HouseholdError("The retained unpaid order is ambiguous in the merchant order list")
+            details = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
+            tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
+            details_id = str(details.get("orderNumber") or details.get("order_number") or details.get("id") or "")
+            tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
+            order = {**(matching_rows[0] if matching_rows else {}), **details}
+        if exact_failed_order_id is None and retained_unpaid_id is None and len(candidates) == 1 and not candidate_ambiguous:
             candidate_id = str(candidates[0].get("orderNumber") or candidates[0].get("order_number") or candidates[0].get("id") or "")
             details = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
             tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
@@ -3129,7 +3357,9 @@ class OrderOperations:
             )
         else:
             fulfillable = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
-            confirmed = order is not None and candidate_id and candidate_id == details_id == tracking_id and tracking_status in fulfillable and order_matches_checkout(receipt_order, pending["summary"], provider=self.provider)
+            confirmed = (order is not None and candidate_id and candidate_id == details_id == tracking_id
+                         and tracking_status in fulfillable and oda_vipps_bound
+                         and order_matches_checkout(receipt_order, pending["summary"], provider=self.provider))
         expired_unpaid = False
         candidate_matches = order is not None and meny_order_matches_checkout(order, pending["summary"])
         undispatched_retryable = payment_not_dispatched and confirmation_order_id is None and not candidates
@@ -3156,7 +3386,12 @@ class OrderOperations:
         )
         recovery_dispatched = pending.get("recovery") and pending["recovery"].get("status") != "awaiting_confirmation"
         authentication = self._checkout_authentication_wait(pending, deadline) if not confirmed else {}
-        recovery_failed = bool(recovery_dispatched and pending["recovery"].get("payment_failure"))
+        recovery_failed = bool(
+            recovery_dispatched and (
+                pending["recovery"].get("payment_failure")
+                or (oda_vipps_expired and unpaid_matches)
+            )
+        )
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
                 raise HouseholdError("checkout state changed while reconciling the order")
@@ -3184,7 +3419,26 @@ class OrderOperations:
             elif expired_unpaid or undispatched_retryable:
                 state["pending_checkout"] = None
             else:
-                state["pending_checkout"]["status"] = "uncertain"
+                if candidate_ambiguous:
+                    state["pending_checkout"]["candidate_binding_ambiguous"] = True
+                if (unpaid_matches and self.provider in {"oda", "mathem"}
+                        and not (self.provider == "mathem" and pending.get("payment_failure"))
+                        and oda_vipps_bound):
+                    state["pending_checkout"]["unpaid_order_id"] = safe_order_id(candidate_id)
+                if oda_vipps_active:
+                    state["pending_checkout"]["status"] = "awaiting_user_payment"
+                else:
+                    state["pending_checkout"]["status"] = "uncertain"
+                if oda_vipps_expired:
+                    target = (state["pending_checkout"].get("recovery")
+                              if active_attempt is not pending else state["pending_checkout"])
+                    target["vipps_request_status"] = "expired"
+                    if active_attempt is not pending and unpaid_matches:
+                        target["payment_failure"] = {
+                            "payment_failed": True,
+                            "order_id": safe_order_id(candidate_id),
+                            "reason": "vipps_request_expired",
+                        }
         return {
             **(terminal if confirmed else {}),
             "confirmed": confirmed,
@@ -3192,8 +3446,10 @@ class OrderOperations:
             "order": order if confirmed else None,
             "tracking": tracking if confirmed else None,
             "retry_allowed": expired_unpaid or undispatched_retryable,
+            **({"payment": self._payment_evidence(tracking_status or None)}
+               if self.provider in {"oda", "mathem"} else {}),
             **({"payment_dispatched": False} if undispatched_retryable else {}),
-            **({"payment_failed": True} if not confirmed and (recovery_failed or (pending.get("payment_failure") and not recovery_dispatched)) else {}),
+            **({"payment_failed": True} if not confirmed and (oda_vipps_expired or recovery_failed or (pending.get("payment_failure") and not recovery_dispatched)) else {}),
             **({"payment_followup_required": True,
                 "payment_method": (pending["recovery"]["browser_review"]["payment_choice"]
                                    if recovery_dispatched else pending["checkout_payment"])["method"]}
@@ -3201,15 +3457,28 @@ class OrderOperations:
             **({"unpaid_order_id": candidate_id, "tracking_status": tracking_status,
                 "recovery_preparation_available": True,
                 "next": "The original merchant order is unpaid. Inspect its supported retry review with checkout prepare recovery=true; do not recreate the cart or resubmit the original confirmation. A new review does not send payment."}
-               if unpaid_matches and (not recovery_dispatched or recovery_failed) and not authentication else {}),
+               if unpaid_matches and oda_vipps_bound and not oda_vipps_active
+               and (not recovery_dispatched or recovery_failed) and not authentication else {}),
             **({"tracking_status": tracking_status,
                 "recovery_payment_unconfirmed": True,
                 "next": "Recovery payment was dispatched but is not confirmed. Preserve that payment and reconcile this same attempt; the earlier failure does not authorize another payment."}
-               if not confirmed and recovery_dispatched and not recovery_failed else {}),
+               if not confirmed and recovery_dispatched and not recovery_failed and not oda_vipps_active else {}),
+            **({"awaiting_user_payment": True,
+                "payment_request_state": oda_vipps_observation,
+                "tracking_status": tracking_status or None,
+                **({"unpaid_order_id": candidate_id} if unpaid_matches else {}),
+                "next": "The original Oda/Vipps request may still be active. Approve it if present, then reconcile this same attempt. Recovery and cancellation remain blocked until the same request is paid or positively expired."}
+               if not confirmed and oda_vipps_active else {}),
+            **({"payment_request_state": "expired", "payment_request_expired": True}
+               if not confirmed and oda_vipps_expired else {}),
+            **({"payment_request_state": "not_sent", "payment_dispatched": False}
+               if not confirmed and oda_vipps_not_sent else {}),
             **({"payment_followup_required": True,
                 "payment_method": "vipps",
                 "next": "The original Oda/Vipps payment is not confirmed. Check its original payment page and complete any requested approval, then reconcile this same attempt. Do not submit again."}
-               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps" and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched else {}),
+               if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps"
+               and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched
+               and not oda_vipps_active else {}),
             **({"tracking_status": tracking_status or None,
                 "payment": self._payment_evidence(tracking_status or None),
                 "next": "The original Mathem payment is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}

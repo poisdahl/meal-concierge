@@ -201,6 +201,12 @@ order using its existing saved card after a hosted Vipps timeout; the shared
 Mathem new-order route is implemented but not demonstrated live; the shared
 recovery logic has isolated coverage.
 
+For Oda/Vipps, the completed checkout response must bind the hosted redirect to
+one exact new order number. That exact order is then checked through merchant
+order details and tracking before the durable fence and hosted `Next` click;
+other concurrent order-list entries are irrelevant and cannot become the
+payment target.
+
 Mathem addition recovery requires a retry target captured from the original
 revalidated payment dispatch: the same active browser tab must show the native
 payment-failed article and exact original order/change URL. That evidence is
@@ -250,9 +256,9 @@ Vipps method. Confirm submits once: an actual Vipps request requires phone
 approval, while an existing-order update can return an authenticated receipt
 without another phone approval step. Reconcile verifies the exact new or updated
 MENY order. These outcomes do not establish bank settlement. Anonymous MENY mode
-is not supported. The private
-config's `vipps_phone_number` is entered only on Vipps's own handoff page; it
-is never returned by status, written to state or included in application logs.
+is not supported. For Oda and MENY, the private `vipps_phone_number` binds the
+configured household recipient only on Vipps's own handoff page. It is never
+returned by status, written to state or included in application logs.
 
 Before the payment click, each MENY line is bound to its exact product path.
 MENY's completed-order view omits those paths, so reconciliation uses the
@@ -264,8 +270,8 @@ if two different paths share that identity.
 Use the [standalone installer/update guide](runtime.md) for native service
 ownership, exact existing-path adoption, full offline backup and failed-upgrade
 recovery. Installation does not perform provider login or prompt for payment
-configuration. MENY's private `vipps_phone_number` belongs in its config when
-provider setup is separately authorized.
+configuration. Oda and MENY require the private `vipps_phone_number` in their
+config before a Vipps checkout can dispatch.
 
 JSON and SQLite migrations run offline. Clean state is v12; existing v6
 households gain `delivery.strategy="keep_selected"`, while new installations
