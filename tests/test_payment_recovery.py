@@ -292,8 +292,51 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(prepared["order_id"], "order-1")
         self.browser.checkout_payment_failure.assert_not_called()
         self.assertEqual(self.browser.clicks, 0)
-        self.assertTrue(self.call("confirm", confirmation_id=prepared["confirmation_id"])["confirmed"])
+        context = {"tab_id": "recovery-tab", "payment_id": "234567"}
+        self.browser.checkout_payment_authentication.return_value = {"active": True, "challenge": True}
+        def challenged(cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.clicks += 1
+            return {"authentication_context": context}
+        self.browser.submit_payment_recovery = challenged
+        cid = prepared["confirmation_id"]
+        self.assertTrue(self.call("confirm", confirmation_id=cid)["authentication_required"])
+        pending = self.app.store.read()["pending_checkout"]
+        self.browser.checkout_payment_authentication.return_value = None
+        self.browser.checkout_payment_failure.return_value = None
+        unknown = self.call("reconcile", confirmation_id=cid)
+        self.assertEqual(unknown["authentication_status"], "unavailable")
+        self.assertFalse(unknown["recovery_preparation_available"])
+        self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+        self.browser.checkout_payment_failure.return_value = {**failure, "order_id": "another"}
+        with self.assertRaisesRegex(HouseholdError, "another merchant change"):
+            self.call("reconcile", confirmation_id=cid)
+        self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+        self.browser.checkout_payment_failure.return_value = failure
+        self.browser.checkout_payment_failure.reset_mock()
+        failed = self.call("reconcile", confirmation_id=cid)
+        self.assertTrue(failed["payment_failed"])
+        self.assertTrue(failed["recovery_preparation_available"])
+        self.assertNotIn("recovery_payment_unconfirmed", failed)
+        self.browser.checkout_payment_failure.assert_called_once_with(context, deadline=mock.ANY)
+        retained = self.app.store.read()["pending_checkout"]
+        self.assertEqual({k: v for k, v in retained.items() if k != "recovery"}, {**before, "payment_failure": failure})
+        self.assertEqual(retained["recovery"], {**pending["recovery"], "payment_failure": failure})
+        self.app = Application(StateStore(root, self.settings), self.merchant, self.browser)
+        fresh = self.prepare()
+        self.assertNotEqual(fresh["confirmation_id"], cid)
+        archived = deepcopy(self.app.store.read()["protected_results"][cid])
+        self.assertEqual(archived["failed_attempt"], retained["recovery"])
+        for action in ("confirm", "reconcile", "authenticate"):
+            self.assertTrue(self.call(action, confirmation_id=cid)["payment_failed"])
         self.assertEqual(self.browser.clicks, 1)
+        self.browser.submit_payment_recovery = MerchantBrowser.submit_payment_recovery.__get__(self.browser)
+        self.assertTrue(self.call("confirm", confirmation_id=fresh["confirmation_id"])["confirmed"])
+        self.assertTrue(self.call("reconcile", confirmation_id="original")["confirmed"])
+        self.assertFalse(self.call("reconcile", confirmation_id=cid)["confirmed"])
+        self.assertEqual(self.app.store.read()["protected_results"][cid], archived)
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 2)
 
     def test_late_mathem_failure_rejects_other_order_and_concurrent_change(self):
         self.app.provider = "mathem"
@@ -693,7 +736,7 @@ class MathemAdditionRecoveryTests(unittest.TestCase):
         self.assertNotIn("payment_failure", self.app.store.read()["pending_checkout"])
         self.assertEqual(self.browser.clicks, 0)
 
-    def test_late_addition_resolution_preserves_active_auth_and_excludes_delivery_and_new_order_retry(self):
+    def test_late_addition_resolution_preserves_active_auth_and_excludes_delivery(self):
         from unittest import mock
         context = {"tab_id": "owned", "payment_id": "123456"}
         pending = {**self.original, "authentication_context": context}
@@ -704,12 +747,6 @@ class MathemAdditionRecoveryTests(unittest.TestCase):
         self.browser.checkout_payment_authentication.return_value = None
         delivery = {**pending, "order_change": {**pending["order_change"], "requested_delivery": {"display": "unchanged"}}}
         self.assertFalse(self.app._checkout_authentication_wait(delivery, None)["recovery_preparation_available"])
-        child = {"status": "clicking", "confirmation_id": "recovery", "authentication_context": context,
-                 "browser_review": {"payment_choice": {"method": "saved_card"}, "payment_display": "•••• 1234",
-                                    "amounts_minor": {"provider_total": 1850, "discount_breakdown": {
-                                        "product_discount": None, "delivery_discount": None}}}, "dietary_assessment": {}}
-        new_order = {**pending, "order_change": None, "recovery": child}
-        self.assertFalse(self.app._checkout_authentication_wait(new_order, None)["recovery_preparation_available"])
         self.browser.checkout_payment_failure.assert_not_called()
 
     def challenged_recovery(self):

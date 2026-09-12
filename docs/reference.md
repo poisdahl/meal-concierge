@@ -165,10 +165,11 @@ identify the same unpaid order. For a new order, its goods, amount and delivery
 must match the review. For an addition, the exact order and change IDs must agree
 in both sources, tracking must be `unpaid_order_change`, and the original paid
 base must remain unchanged. Only that terminal evidence enables a fresh recovery
-review. Delivery changes and new-order recovery attempts are excluded from this
-late-failure resolver. A current Mathem addition recovery can also resolve its
-own terminal failure, but only when its native order/change pair matches the
-original addition and the same unchanged paid-base checks pass.
+review. Delivery changes are excluded from this late-failure resolver. A current
+Mathem new-order or addition recovery can also resolve its own terminal failure.
+Its retained native payment must identify the original order; an addition must
+also identify the original change and pass the unchanged paid-base checks.
+A new-order recovery still requires the same unpaid goods, amount and delivery.
 The authentication context and original history remain
 recorded; missing observation alone still leaves the outcome unknown.
 
@@ -208,7 +209,7 @@ cannot supply the missing binding. Fresh preparation also requires
 `unpaid_order_change`, unchanged paid base goods/total, the original account,
 address, delivery and card, and an unchanged native review. Missing capture,
 ambiguous outcome or an unresolved dispatched recovery permits reconciliation only.
-A positively failed current addition recovery may receive another fresh review.
+A positively failed current Mathem new-order or addition recovery may receive another fresh review.
 Only after that review succeeds does Application archive the complete failed
 attempt privately and replace it with a new confirmation. Its old confirmation
 permanently replays a failed result and cannot confirm, authenticate or reconcile
@@ -243,11 +244,13 @@ MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths
 rather than private web endpoints. The service requires a persistent MENY login
 so store, lists, offers, cart and orders all belong to the intended account.
-MENY checkout requires home delivery and Vipps as the payment method: prepare
-verifies the unchanged cart, final reserved amount, delivery window and
-selected Vipps payment method; confirm starts one payment request through
-Vipps; the user approves it on the phone; and reconcile verifies the exact new
-or updated MENY order. Anonymous MENY mode is not supported. The private
+MENY checkout requires home delivery and Vipps as the payment method. Prepare
+verifies the unchanged cart, reviewed amounts, delivery window and selected
+Vipps method. Confirm submits once: an actual Vipps request requires phone
+approval, while an existing-order update can return an authenticated receipt
+without another phone approval step. Reconcile verifies the exact new or updated
+MENY order. These outcomes do not establish bank settlement. Anonymous MENY mode
+is not supported. The private
 config's `vipps_phone_number` is entered only on Vipps's own handoff page; it
 is never returned by status, written to state or included in application logs.
 
@@ -1265,8 +1268,9 @@ requests, in a safe order, are:
 - “Prepare checkout” or “Prepare cancellation for order …” only prepares a
   summary. Under `fresh`, review it and confirm in the next message. Under
   `standing`, a direct “order/pay/check out/cancel” request submits without a
-  second Hermes question. MENY then waits for one payment approval through Vipps and
-  reconciliation; an expired or uncertain result is never blindly retried.
+  second Hermes question. If MENY returns a Vipps request, wait for phone approval
+  and reconcile it. An existing-order update can instead return an authenticated
+  receipt directly; an expired or uncertain result is never blindly retried.
 - “Send a test recipe email for order …” or run the returned delivery-day
   action. Test email never consumes the due job. A due email gets a short
   pre-dispatch claim; `begin_send` must accept that token immediately before
@@ -1318,7 +1322,9 @@ and never retried automatically. Adding goods preserves the existing order
 identity. Moving a delivery window is kept separate from an Oda addition cart
 so the target cannot become ambiguous. A scheduled checkout dispatches only
 after its configured total and delivery guards, and only under standing
-authorization; MENY always requires the user's payment approval through Vipps.
+authorization. An actual MENY Vipps payment request still requires the user's
+phone approval; an existing-order update can return an authenticated receipt
+without another phone approval step.
 
 The selected native scheduler owns weekly and delivery-day wakeups; this
 package stores settings, exact ownership and recovery journals and returns
@@ -1858,10 +1864,11 @@ Use `change` for explicit additional quantity deltas. Both actions accept an
 active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
 
-The [Oda/Mathem evidence matrix](oda-mathem-parity.md) distinguishes earlier
-assisted acceptance from ordinary flows still requiring demonstration. The
-same/lower/higher-total delivery criterion remains open until separately
-demonstrated through installed Hermes and independent merchant evidence. Do not
+The [provider evidence matrix](oda-mathem-parity.md) distinguishes earlier
+assisted results from ordinary installed Hermes flows and independent merchant
+evidence. Oda and MENY demonstrate same/lower/higher full totals; Mathem
+demonstrates unchanged totals, with no distinct priced alternative returned in
+the bounded trial. This does not establish global price unavailability. Do not
 retry a failed or uncertain addition payment through a separate helper and
 describe that as product recovery.
 
@@ -1877,8 +1884,11 @@ Fresh review preserves the original order, account and goods, and reports
 `summary.delivery_change`: original/new full totals, their difference, the
 separate signed payable amount, currency, price limit and `confirmation_required`.
 Totals include the merchant's fees and discounts. Oda/Mathem require independent
-original/final/payable overview values; MENY compares the original receipt's
-exact `Totalsum` with the reopened checkout total, not its reserved-card amount.
+original/final/payable overview values. MENY reads the original full total from
+the exact order response's `totals.totalGrossAmount`, bound by `ngOrderId`, or
+the receipt's unique `Totalsum` when available. If both are present they must
+agree. The separately displayed payment reservation is not a substitute for
+that full total when comparing it with the reopened checkout.
 Oda can display a negative `Å betale` amount on both the overview and final
 button when reducing delivery cost. Preserve that sign through review and
 submission; only a positive payable amount anticipates new payment approval.
@@ -1922,8 +1932,9 @@ A nonempty Oda/Mathem cart returns `cart_confirmation_required` with `cart_diges
 The unchanged digest may be supplied to `change_begin` only when all those
 items are authorized for the selected order. Goods are never cleared to start
 an edit. Checkout binds and confirms the resulting addition to the same order;
-MENY reopens the full order and requires checkout and payment approval through
-Vipps again. Actual provider permission is checked during editing and checkout
+MENY reopens and reviews the full order. Its update can return an authenticated
+receipt directly; an actual Vipps request still requires phone approval.
+Actual provider permission is checked during editing and checkout
 rather than inferred from time.
 
 Provider explanations: [Oda additions](https://hjelp.oda.com/no/article/100639),

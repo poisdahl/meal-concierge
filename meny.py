@@ -427,8 +427,8 @@ def meny_order_detail_request_id(value: Any, order_id: str) -> str | None:
     return None
 
 
-def meny_order_provider_status(value: Any) -> str | None:
-    """Read the provider status hidden behind MENY's sometimes-stale order DOM."""
+def meny_order_provider_details(value: Any, order_id: str) -> dict[str, Any]:
+    """Read exact order status and full total separately from payment reservations."""
 
     if not isinstance(value, Mapping) or not isinstance(value.get("responseBody"), str):
         raise HouseholdError("MENY browser order response changed")
@@ -438,10 +438,26 @@ def meny_order_provider_status(value: Any) -> str | None:
         raise HouseholdError("MENY browser order response changed") from exc
     if not isinstance(payload, Mapping):
         raise HouseholdError("MENY browser order response changed")
+    result = {}
     description = str(payload.get("statusDescription") or "").strip().casefold()
     if description in {"deleted", "cancelled", "canceled"}:
-        return "cancelled"
-    return None
+        result["status"] = "cancelled"
+    totals = payload.get("totals")
+    amount = totals.get("totalGrossAmount") if isinstance(totals, Mapping) else None
+    if amount is not None:
+        if str(payload.get("ngOrderId") or "") != order_id:
+            raise HouseholdError("MENY full order total belongs to a different order")
+        if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+            raise HouseholdError("MENY full order total is invalid")
+        try:
+            scaled = float(amount) * 100
+        except OverflowError as exc:
+            raise HouseholdError("MENY full order total is invalid") from exc
+        if (not math.isfinite(scaled) or scaled < 0
+                or not math.isclose(scaled, round(scaled), rel_tol=0, abs_tol=1e-6)):
+            raise HouseholdError("MENY full order total is invalid")
+        result["order_total"] = round(scaled) / 100
+    return result
 
 
 def meny_delivery_reservation_acknowledged(value: Any) -> bool:
@@ -1609,7 +1625,7 @@ class MenyClient:
         review: Mapping[str, Any],
         before_dispatch: Any,
         dispatch_fence: Any = None,
-    ) -> None:
+    ) -> bool:
         if self.vipps_phone_number is None:
             raise HouseholdError("MENY checkout requires vipps_phone_number in the private household config")
         selector = '[data-meal-concierge-action="checkout-submit"]'
@@ -1632,7 +1648,7 @@ class MenyClient:
   const checked = vipps.length === 1 && (vipps[0].checked === true || vipps[0].getAttribute('aria-checked') === 'true');
   const home = [...root.querySelectorAll('input[type="radio"], [role="radio"]')].filter(visible).filter(x => /^Levert på døren(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.closest('label')?.innerText || x.parentElement?.innerText)));
   const homeChecked = home.length === 1 && (home[0].checked === true || home[0].getAttribute('aria-checked') === 'true');
-  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === 'Til betaling');
+  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === __SUBMIT_LABEL__);
   const blockingDialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[role="alert"],[aria-modal="true"]')].filter(visible);
   const totalLabels = leaf('*').filter(x => norm(x.innerText) === 'Totalsum');
   const totals = [];
@@ -1654,7 +1670,7 @@ __DELIVERY_BINDING__
 })()
 """
         def render_gate(require_hit: bool, x: int = 0, y: int = 0) -> str:
-            return gate.replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL))
+            return gate.replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__REQUIRE_HIT__", "true" if require_hit else "false").replace("__HIT_X__", str(x)).replace("__HIT_Y__", str(y)).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL))
 
         if self._eval(render_gate(False)) != {"ready": True}:
             raise HouseholdError("MENY Vipps payment control changed")
@@ -1712,7 +1728,7 @@ __DELIVERY_BINDING__
             dispatch_fence()
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
-        self._wait_for_vipps_dispatch(
+        return self._wait_for_vipps_dispatch(
             lambda: self._eval(render_gate(False)) == {"ready": True},
             lambda: self._eval(r"""
 (() => {
@@ -1723,15 +1739,23 @@ __DELIVERY_BINDING__
   return JSON.stringify({reservation_expired:location.href === 'https://meny.no/kassen' && authenticated.length === 1 && notices.length === 1});
 })()
 """),
+            target_order_id=review.get("target_order_id"),
         )
 
-    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None) -> None:
+    def _wait_for_vipps_dispatch(self, exact_checkout: Any = None, known_failure: Any = None, *, target_order_id: str | None = None) -> bool:
         requests: Any = {"requests": []}
         for attempt in range(40):
             requests = self._invoke("network", "requests")
-            if vipps_dispatch_acknowledged(requests):
+            snapshot = self._checkout_confirmation_snapshot() if target_order_id is not None else None
+            if (snapshot is not None and snapshot.get("authenticated") is True
+                    and snapshot.get("order_id") == target_order_id):
+                return False
+            # The same order POST can complete an edit without a new payment.
+            # Its acknowledgement alone does not establish a Vipps handoff.
+            if (vipps_dispatch_acknowledged(requests)
+                    and (snapshot is None or snapshot.get("vipps_gateway") is True)):
                 self._complete_vipps_request()
-                return
+                return True
             if attempt < 39:
                 self._sleep(0.25)
         if not vipps_dispatch_attempted(requests):
@@ -2437,14 +2461,14 @@ __DELIVERY_BINDING__
         self._open(BASE_URL + path)
         request_id = None
         for phase in range(2):
-            for attempt in range(4):
+            for attempt in range(40):
                 request_id = meny_order_detail_request_id(
                     self._invoke("network", "requests", "--filter", "/api/order/"),
                     order_id,
                 )
                 if request_id is not None:
                     break
-                if attempt < 3:
+                if attempt < 39:
                     self._sleep(0.25)
             if request_id is not None:
                 break
@@ -2523,40 +2547,80 @@ __DELIVERY_BINDING__
             self._sleep(0.25)
         else:
             raise HouseholdError("MENY order details changed or are unavailable")
-        provider_status = meny_order_provider_status(self._invoke("network", "request", request_id))
+        for attempt in range(8):
+            # Rendering may have issued a newer request, while the first one's
+            # body is unavailable. Read the latest exact order after the DOM is
+            # ready; never substitute an older status for a newer missing body.
+            request_id = meny_order_detail_request_id(
+                self._invoke("network", "requests", "--filter", "/api/order/"), order_id,
+            )
+            if request_id is None:
+                raise HouseholdError("MENY order status did not refresh")
+            response = self._invoke("network", "request", request_id)
+            if isinstance(response, Mapping) and "responseBody" not in response and attempt < 7:
+                self._sleep(0.25)
+                continue
+            provider_details = meny_order_provider_details(response, order_id)
+            break
+        order_total = provider_details.get("order_total", result.get("order_total"))
+        if (provider_details.get("order_total") is not None and result.get("order_total") is not None
+                and round(provider_details["order_total"] * 100) != round(result["order_total"] * 100)):
+            raise HouseholdError("MENY full order total changed between its response and page")
         return {
             "provider": "meny",
             "orderNumber": order_id,
             "order_number": order_id,
             "id": order_id,
             "code": result.get("code"),
-            "status": provider_status or result["status"],
+            "status": provider_details.get("status") or result["status"],
             "grossAmount": result["total"],
-            **({"order_total": result["order_total"]} if result.get("order_total") is not None else {}),
+            **({"order_total": order_total} if order_total is not None else {}),
             "deliverySlotDisplay": result["delivery"],
             "productQuantityCount": result["item_count"],
             "products": result["products"],
         }
 
-    def checkout_confirmation_order_id(self, *, deadline: float | None = None) -> str | None:
-        with self._locked_operation(MENY_READ_TIMEOUT, deadline):
-            result = self._eval(r"""
+    def _checkout_confirmation_snapshot(self) -> dict[str, Any]:
+        return self._eval(r"""
 (() => {
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
   const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
   const main = [...document.querySelectorAll('main')].filter(visible);
-  const url = new URL(location.href), orderId = url.pathname === '/kassen/bekreftelse' ? url.searchParams.get('orderid') : null;
+  const url = new URL(location.href), orderId = url.origin === 'https://meny.no' && url.pathname === '/kassen/bekreftelse' ? url.searchParams.get('orderid') : null;
+  const receiptUrl = /^\d{1,20}$/.test(orderId || '') && !url.hash && [...url.searchParams.keys()].length === 1 ? url.href : null;
   const blank = url.href === 'about:blank';
   const vippsGateway = url.origin === 'https://api.vipps.no' && url.pathname === '/dwo-api-application/v1/deeplink/vippsgateway';
   const confirmed = main.length === 1 && /Takk for (?:din )?bestilling(?:en)?|Bestillingen (?:er|ble) (?:mottatt|oppdatert)|Ordrebekreftelse/i.test(norm(main[0].innerText));
-  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, order_id:confirmed && /^\d{1,20}$/.test(orderId || '') ? orderId : null});
+  return JSON.stringify({authenticated:authenticated.length === 1, blank, vipps_gateway:vippsGateway, receipt_url:receiptUrl, order_id:confirmed && receiptUrl ? orderId : null});
 })()
 """)
+
+    def checkout_confirmation_order_id(self, *, deadline: float | None = None) -> str | None:
+        with self._locked_operation(MENY_READ_TIMEOUT, deadline):
+            result = self._checkout_confirmation_snapshot()
+            receipt_url = result.get("receipt_url")
+            if receipt_url and (result.get("authenticated") is not True or result.get("order_id") is None):
+                # The completed MENY update can leave an unhydrated receipt
+                # shell. Reload only that same receipt GET once; never replay
+                # checkout or a payment callback, or relax authentication.
+                if self._checkout_confirmation_snapshot().get("receipt_url") != receipt_url:
+                    raise HouseholdError("MENY checkout receipt changed before reconciliation")
+                self._invoke("reload")
+                for attempt in range(40):
+                    result = self._checkout_confirmation_snapshot()
+                    if result.get("receipt_url") != receipt_url:
+                        raise HouseholdError("MENY checkout receipt changed during reconciliation")
+                    if result.get("authenticated") is True and result.get("order_id") is not None:
+                        break
+                    if attempt < 39:
+                        self._sleep(0.25)
             if result.get("authenticated") is not True:
                 if (result.get("blank") is True or result.get("vipps_gateway") is True) and result.get("order_id") is None:
                     return None
                 raise HouseholdError("MENY login is required in the configured browser profile")
+            if receipt_url and result.get("order_id") is None:
+                raise HouseholdError("MENY receipt did not finish loading; reconcile the same attempt again")
             order_id = result.get("order_id")
             return str(order_id) if order_id is not None else None
 
@@ -2603,7 +2667,7 @@ __DELIVERY_BINDING__
   const checked = vipps.length === 1 && (vipps[0].checked === true || vipps[0].getAttribute('aria-checked') === 'true');
   const home = [...root.querySelectorAll('input[type="radio"], [role="radio"]')].filter(visible).filter(x => /^Levert på døren(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.closest('label')?.innerText || x.parentElement?.innerText)));
   const homeChecked = home.length === 1 && (home[0].checked === true || home[0].getAttribute('aria-checked') === 'true');
-  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === 'Til betaling');
+  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === __SUBMIT_LABEL__);
   const blockingDialogs = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"]')].filter(visible);
   const totalLabels = leaf('*').filter(x => norm(x.innerText) === 'Totalsum');
   const totals = [];
@@ -2618,7 +2682,7 @@ __DELIVERY_BINDING__
   const exact = checked && homeChecked && targetReady && buttons.length === 1 && blockingDialogs.length === 0 && totalLabels.length === 1 && totals.length === 1 && Math.round(totals[0]*100) === __TOTAL__ && deliveryBinding?.root && deliveryBinding.display === __DELIVERY__ && location.href === __URL__;
   return JSON.stringify({ready:Boolean(exact)});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
+""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
             if result != {"ready": True}:
                 return False
             return not vipps_dispatch_attempted(self._invoke("network", "requests"))
@@ -2709,12 +2773,29 @@ __DELIVERY_BINDING__
   document.querySelectorAll('[data-meal-concierge-action]').forEach(x => x.removeAttribute('data-meal-concierge-action'));
   const norm = value => (value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const visible = x => { const style=getComputedStyle(x), box=x.getBoundingClientRect(); return style.display!=='none' && style.visibility!=='hidden' && box.width>0 && box.height>0; };
-  const buttons = [...document.querySelectorAll('main button')].filter(visible).filter(x => !x.disabled && x.getAttribute('aria-disabled') !== 'true').filter(x => norm(x.innerText) === 'Endre');
-  if (buttons.length !== 1) return JSON.stringify({ready:false});
+  const mains = [...document.querySelectorAll('main')].filter(visible);
+  const controls = mains.length === 1 ? [...mains[0].querySelectorAll('button')].filter(visible) : [];
+  const enabled = x => !x.disabled && x.getAttribute('aria-disabled') !== 'true';
+  const buttons = controls.filter(x => norm(x.innerText) === 'Endre');
+  const aborts = controls.filter(x => norm(x.innerText) === 'Avbryt endring');
+  if (aborts.length) {
+    const expected = __ORDER__, paths = [`/trumf-profil/nettbutikk/bestilling/${expected}`, `/profil/nettbutikk/bestilling/${expected}`];
+    const lines = (mains[0].innerText || '').split(/\n+/).map(norm).filter(Boolean);
+    const indexes = lines.flatMap((line, index) => line === 'Ordrenummer' ? [index] : []);
+    const authenticated = [...document.querySelectorAll('button')].filter(visible).filter(x => norm(x.getAttribute('aria-label') || x.innerText).startsWith('Brukermeny'));
+    if (aborts.length !== 1 || !enabled(aborts[0]) || buttons.length || authenticated.length !== 1 || location.origin !== 'https://meny.no' || !paths.includes(location.pathname) || indexes.length !== 1 || lines[indexes[0]+1] !== expected) return JSON.stringify({ready:false});
+    return JSON.stringify({ready:true, already_editing:true});
+  }
+  if (buttons.length !== 1 || !enabled(buttons[0])) return JSON.stringify({ready:false});
   buttons[0].setAttribute('data-meal-concierge-action', 'change-open');
   return JSON.stringify({ready:true});
 })()
-""")
+""".replace("__ORDER__", json.dumps(order_id)))
+            if result == {"ready": True, "already_editing": True}:
+                # A confirmed update can leave the merchant cart in edit mode.
+                # Adopt only its verified identity; never reopen or discard it.
+                verified = self._verify_order_change(order_id, code)
+                return {"provider": "meny", "order_id": order_id, "code": verified["code"], "order": order, "editing": True}
             if result != {"ready": True}:
                 raise HouseholdError("MENY order cannot be changed now")
             self._invoke("click", '[data-meal-concierge-action="change-open"]')
@@ -2832,7 +2913,15 @@ __DELIVERY_BINDING__
             raise HouseholdError("cart is empty")
         if expected.get("delivery") is None:
             selected_delivery = meny_selected_delivery(self._delivery_slots().get("slots"))
-            if selected_delivery is not None:
+            requested = (order_change or {}).get("requested_delivery")
+            if order_change and order_change.get("delivery_only") and requested:
+                # Explicit selection already reserved this window. A cart can
+                # omit its time; refreshing here would select another window.
+                if (selected_delivery is None
+                        or {key: value for key, value in selected_delivery.items() if key != "display"}
+                        != requested["slot"]):
+                    raise HouseholdError("MENY selected delivery changed before review")
+            elif selected_delivery is not None:
                 try:
                     self._select_delivery_slot(selected_delivery["slot_ref"])
                 except _DeliveryReservationError:
@@ -3021,7 +3110,7 @@ __DELIVERY_BINDING__
   const vippsChecked = vipps.length === 1 && (vipps[0].checked === true || vipps[0].getAttribute('aria-checked') === 'true');
   const home = [...root.querySelectorAll('input[type="radio"], [role="radio"]')].filter(visible).filter(x => /^Levert på døren(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.closest('label')?.innerText || x.parentElement?.innerText)));
   const homeChecked = home.length === 1 && (home[0].checked === true || home[0].getAttribute('aria-checked') === 'true');
-  const buttons = [...root.querySelectorAll('button')].filter(visible).filter(x => norm(x.innerText) === 'Til betaling');
+  const buttons = [...root.querySelectorAll('button')].filter(visible).filter(x => norm(x.innerText) === __SUBMIT_LABEL__);
   const enabled = buttons.length === 1 && !buttons[0].disabled && buttons[0].getAttribute('aria-disabled') !== 'true';
   const totalLabels = leaf('*').filter(x => norm(x.innerText) === 'Totalsum');
   const totals = [];
@@ -3035,7 +3124,7 @@ __DELIVERY_BINDING__
 __DELIVERY_BINDING__
   return JSON.stringify({ready:buttons.length===1 && totalLabels.length===1 && totals.length===1 && Boolean(deliveryBinding?.root) && Boolean(deliveryBinding.display), authenticated:true, vipps_checked:vippsChecked, home_delivery:homeChecked, submit_enabled:enabled, total:totals[0], delivery:deliveryBinding?.display, submit_controls:buttons.length});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS)
+""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if target_order_id and target_code else "Til betaling"))
         required = {"ready", "authenticated", "vipps_checked", "home_delivery", "submit_enabled", "total", "delivery", "submit_controls"}
         result: dict[str, Any] = {}
         payment_summary: dict[str, Any] | None = None
@@ -3134,7 +3223,7 @@ __DELIVERY_BINDING__
   const checked = vipps.length === 1 && (vipps[0].checked === true || vipps[0].getAttribute('aria-checked') === 'true');
   const home = [...root.querySelectorAll('input[type="radio"], [role="radio"]')].filter(visible).filter(x => /^Levert på døren(?:\s|$)/i.test(norm(x.getAttribute('aria-label') || x.closest('label')?.innerText || x.parentElement?.innerText)));
   const homeChecked = home.length === 1 && (home[0].checked === true || home[0].getAttribute('aria-checked') === 'true');
-  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === 'Til betaling');
+  const buttons = [...root.querySelectorAll('button')].filter(enabled).filter(x => norm(x.innerText) === __SUBMIT_LABEL__);
   const totalLabels = leaf('*').filter(x => norm(x.innerText) === 'Totalsum');
   const totals = [];
   for (const label of totalLabels) {
@@ -3150,7 +3239,7 @@ __DELIVERY_BINDING__
   buttons[0].setAttribute('data-meal-concierge-action', 'checkout-submit');
   return JSON.stringify({ready:true});
 })()
-""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
+""".replace("__DELIVERY_BINDING__", CHECKOUT_DELIVERY_BINDING_JS).replace("__CODE__", json.dumps(review.get("target_order_code"))).replace("__SUBMIT_LABEL__", json.dumps("Send oppdatering" if review.get("target_order_id") and review.get("target_order_code") else "Til betaling")).replace("__TOTAL__", str(int(round(float(review["summary"]["total"]) * 100)))).replace("__DELIVERY__", json.dumps(review["summary"]["delivery"]["display"], ensure_ascii=False)).replace("__URL__", json.dumps(CHECKOUT_URL)))
                 if ready != {"ready": True}:
                     raise HouseholdError("MENY Vipps payment control changed")
                 def check_pre_dispatch() -> None:
@@ -3161,8 +3250,8 @@ __DELIVERY_BINDING__
                     nonlocal final_dispatched
                     final_dispatched = True
 
-                self._click_checkout_submit(review, check_pre_dispatch, mark_dispatched)
-                return {"awaiting_user_payment": True, "payment": "vipps"}
+                awaiting_user_payment = self._click_checkout_submit(review, check_pre_dispatch, mark_dispatched)
+                return {"awaiting_user_payment": awaiting_user_payment, "payment": "vipps"}
         except HouseholdError as exc:
             if not final_dispatched:
                 raise CheckoutPreconditionError(

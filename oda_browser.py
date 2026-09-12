@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import calendar
 import hashlib
@@ -502,12 +502,28 @@ def delivery_signature(value: str, *, provider: str = "oda") -> tuple[int, int, 
 def checkout_delivery_matches(expected: str, roots: Any, *, provider: str = "oda") -> bool:
     if not expected:
         return True
-    return isinstance(roots, list) and len(roots) == 1 and isinstance(roots[0], str) and delivery_signature(expected, provider=provider) is not None and delivery_signature(expected, provider=provider) == delivery_signature(roots[0], provider=provider)
+    signature = delivery_signature(expected, provider=provider)
+    if signature is None or not isinstance(roots, list) or len(roots) != 1 or not isinstance(roots[0], str):
+        return False
+    observed = " ".join(unicodedata.normalize("NFC", roots[0]).lower().split())
+    relative_pattern = r"\bi\s?(?:dag|morgon)\b" if provider == "mathem" else r"\bi (?:dag|morgen)\b"
+    relative = re.findall(relative_pattern, observed)
+    if relative:
+        # Retail checkout switches to relative dates at local midnight. Never
+        # let a relative label override a numeric date or a second date label.
+        if len(relative) != 1 or delivery_signature(observed, provider=provider) is not None:
+            return False
+        today = datetime.now(ZoneInfo("Europe/Stockholm" if provider == "mathem" else "Europe/Oslo")).date()
+        day = today + timedelta(days=0 if relative[0].replace(" ", "") == "idag" else 1)
+        months = ("jan", "feb", "mar", "apr", "maj" if provider == "mathem" else "mai", "jun", "jul", "aug", "sep", "okt", "nov", "dec" if provider == "mathem" else "des")
+        observed = re.sub(relative_pattern, f"{day.day} {months[day.month - 1]}", observed)
+    return delivery_signature(observed, provider=provider) == signature
 
 
 def cancellation_delivery_matches(expected: str, lines: Any, *, provider: str = "oda") -> bool:
-    signature = delivery_signature(expected, provider=provider)
-    return signature is not None and isinstance(lines, list) and len(lines) == 1 and isinstance(lines[0], str) and delivery_signature(lines[0], provider=provider) == signature
+    # Cancellation always requires a bound delivery; checkout also permits an
+    # absent expectation for other flows. Share its provider-local date reader.
+    return bool(expected) and checkout_delivery_matches(expected, lines, provider=provider)
 
 
 def cancellation_total_matches(expected_minor: int, rows: Any, *, provider: str = "oda") -> bool:

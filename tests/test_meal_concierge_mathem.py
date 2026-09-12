@@ -26,7 +26,7 @@ from recipe_sources import provider_recipe_candidates
 from recipes import RecipeError, normalize_recipe
 from service import Application, config, validate_schedule
 from service_common import email_automation_key
-from oda_browser import MathemBrowser, _mathem_receipt_address_script, oda_checkout_amount_minor, _oda_checkout_amount_script, _oda_checkout_amounts_minor, _mathem_checkout_account_script, checkout_delivery_matches, delivery_signature, _mathem_checkout_payment_script
+from oda_browser import MathemBrowser, _mathem_receipt_address_script, oda_checkout_amount_minor, _oda_checkout_amount_script, _oda_checkout_amounts_minor, _mathem_checkout_account_script, checkout_delivery_matches, cancellation_delivery_matches, delivery_signature, _mathem_checkout_payment_script
 
 
 PRODUCTS = {'result': [{'query': 'ägg', 'hasMore': False, 'products': [
@@ -821,6 +821,7 @@ class MathemOrderIdentityTests(unittest.TestCase):
         self.assertTrue(cancellation_delivery_matches("9 december 14–16", ["9 dec 14:00 till 16:00"], provider="mathem"))
         self.assertFalse(cancellation_delivery_matches("9 december 14–16", ["9 dec 14:00 till 16:00"]))
         self.assertFalse(cancellation_delivery_matches("9 december 14–16", ["9 dec 14–16", "10 dec 14–16"], provider="mathem"))
+        self.assertFalse(cancellation_delivery_matches("", ["Imorgon, 07:00 - 09:00"], provider="mathem"))
         self.assertTrue(cancellation_total_matches(12195, ["Totalt inkl. moms 121,95 SEK"], provider="mathem"))
         for row in ["Totalt 121,95 NOK", "Totalt 121,95 kr NOK", "Totalt 121,94 SEK", "Totalt 121,95 SEK Avgift 10,00 SEK"]:
             with self.subTest(row=row):
@@ -872,6 +873,35 @@ class MathemCheckoutAmountTests(unittest.TestCase):
         self.assertEqual(delivery_signature("1 december, 09 till 12", provider="mathem"), (9, 0, 12, 0, 1, "dec"))
         self.assertIsNone(delivery_signature("31 februari, 09–12", provider="mathem"))
         self.assertIsNone(delivery_signature("1 mai, 09–12", provider="mathem"))
+
+    def test_relative_checkout_and_cancellation_delivery_use_the_provider_day(self):
+        cases = [
+            ("2026-09-11T00:34:00+00:00", "Lör 12. sep 07:00 - 09:00", "Imorgon, 07:00 - 09:00", True),
+            ("2026-09-10T21:59:59+00:00", "12 sep, 06–11", "Imorgon, 06:00–11:00", False),
+            ("2026-09-10T22:00:00+00:00", "12 sep, 06–11", "Imorgon, 06:00–11:00", True),
+            ("2026-09-10T22:00:00+00:00", "11 sep, 06–11", "Idag, 06:00–11:00", True),
+            ("2026-09-10T22:00:00+00:00", "12 sep, 06–11", "Idag, 06:00–11:00", False),
+            ("2026-12-31T12:00:00+00:00", "1 jan, 06–11", "I morgon, 06:00–11:00", True),
+            ("2028-02-28T12:00:00+00:00", "29 feb, 06–11", "Imorgon, 06:00–11:00", True),
+            ("2027-02-28T12:00:00+00:00", "1 mar, 06–11", "Imorgon, 06:00–11:00", True),
+        ]
+        for instant, expected, observed, matches in cases:
+            with self.subTest(instant=instant, observed=observed), mock.patch("oda_browser.datetime") as clock:
+                clock.now.side_effect = lambda zone: datetime.fromisoformat(instant).astimezone(zone)
+                for matcher in (checkout_delivery_matches, cancellation_delivery_matches):
+                    self.assertEqual(matcher(expected, [observed], provider="mathem"), matches)
+                self.assertEqual(clock.now.call_args.args[0].key, "Europe/Stockholm")
+        with mock.patch("oda_browser.datetime") as clock:
+            clock.now.side_effect = lambda zone: datetime(2026, 9, 10, 22, tzinfo=timezone.utc).astimezone(zone)
+            self.assertTrue(checkout_delivery_matches("12 sep, 06–11", ["I morgen, 06:00–11:00"]))
+            self.assertEqual(clock.now.call_args.args[0].key, "Europe/Oslo")
+            for roots in (["Imorgon, 06:01–11:00"], ["Imorgon, 06:00–12:00"],
+                          ["Idag och Imorgon, 06:00–11:00"], ["Imorgon Imorgon, 06:00–11:00"],
+                          ["12 sep Imorgon, 06:00–11:00"], ["13 sep Imorgon, 06:00–11:00"],
+                          ["Imorgon, 06:00–11:00"] * 2, ["I morgen, 06:00–11:00"]):
+                with self.subTest(roots=roots):
+                    for matcher in (checkout_delivery_matches, cancellation_delivery_matches):
+                        self.assertFalse(matcher("12 sep, 06–11", roots, provider="mathem"))
 
     @unittest.skipUnless(shutil.which("node"), "Node executes delayed checkout expansion")
     def test_checkout_expansion_waits_for_visible_sections_and_never_reclicks(self):
@@ -2091,11 +2121,20 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
         binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'}
         self.browser.read_order_binding = mock.Mock(return_value=binding)
+        provider_call = self.shop.call
+        def relative_cart_label(tool, arguments, **kwargs):
+            result = provider_call(tool, arguments, **kwargs)
+            if tool == 'select_delivery_slot':
+                self.shop.cart['delivery']['display'] = 'Hemleverans mellan 09 och 12, imorgon'
+            return result
+        self.shop.call = relative_cart_label
         original_review = self.browser.review_delivery_change
         self.browser.review_delivery_change = lambda *a, expected_binding=None, **kw: original_review(*a, **kw)
         self.app._orders({'action': 'change_begin', 'order_id': '123456'})
         selected = self.app._delivery({'action': 'select', 'slot_ref': 'mathem:2026-09-12:77'})
         self.assertEqual(selected['staged_for_order'], '123456')
+        self.assertEqual(self.store.read()['order_change']['requested_delivery']['display'], '12 sep 09:00 - 12:00')
+        self.assertIn('imorgon', self.shop.cart['delivery']['display'])
         prepared = self.app._checkout_prepare()
         self.assertEqual(prepared['summary']['total'], 0)
         original_submit = self.browser.submit_delivery_change
@@ -2127,6 +2166,22 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 1)
         self.assertEqual(len(self.shop.orders), 1)
         self.assertEqual([name for name, _ in self.shop.calls].count('select_delivery_slot'), 1)
+
+    def test_mathem_delivery_selection_freezes_winter_slot_without_reading_today(self):
+        self.shop.orders.append(self.order())
+        self.shop.cart = {'items': [], 'subtotal': 0, 'delivery': None}
+        self.shop.slots['deliveryDate'] = '2026-12-31'
+        self.shop.slots['slots'][0].update(openDatetime='2026-12-31T06:00:00Z', closeDatetime='2026-12-31T08:00:00Z')
+        self.browser.read_order_binding = mock.Mock(return_value={
+            'account_reference_digest': 'a' * 64, 'receipt_address': 'Exempelvägen 1'})
+        self.app._orders({'action': 'change_begin', 'order_id': '123456', 'delivery_only': True})
+        with mock.patch('order_operations.datetime', wraps=datetime) as clock:
+            clock.now.side_effect = AssertionError('Frozen slot must not depend on the current date')
+            self.app._delivery({'action': 'select', 'slot_ref': 'mathem:2026-12-31:77', 'max_total_ore': 20000})
+        requested = self.store.read()['order_change']['requested_delivery']
+        self.assertEqual(requested['display'], '31 dec 07:00 - 09:00')
+        self.assertEqual(requested['slot']['start_at'], '2026-12-31T06:00:00Z')
+        self.assertEqual(requested['max_total_ore'], 20000)
 
     def test_mathem_cancellation_last_expiry_check_and_unknown_click_are_distinct(self):
         from core import CancellationPreconditionError
@@ -2269,7 +2324,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertIn('12. september', options['deadline_text'])
         self.assertIn(options['deadline_text'], after['payload']['message'])
         self.assertIn('removal, replacement, refund and payment release are not promised', options['message'].casefold())
-        self.assertIn('zero additional payment', options['message'])
+        self.assertIn('a higher total requires approval unless covered by the authorized price limit', options['message'])
         self.browser.order_followup.assert_called_once()
         self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': after['notice_token'],
                          'send_outcome': 'unknown', 'sender_receipt': 'synthetic-result-ack-lost'})
