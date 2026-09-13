@@ -129,14 +129,19 @@ class RecurringDietaryTests(unittest.TestCase):
         self.assertEqual(next_plan['status'], 'planned')
         self.assertEqual(len(next_plan['selection']['slots']), 7)
 
-    def test_shortage_is_concrete_and_settings_unchanged(self):
-        plan = self.batch(4)
-        self.assertEqual(plan['status'], 'needs_input')
-        issue = plan['issues'][0]
-        self.assertEqual(issue['required_portions'], 14); self.assertEqual(issue['available_portions'], 8)
-        self.assertEqual([s['proposed_prepared_portions'] for s in issue['shortages']], [6, 8])
-        self.assertEqual(self.store.read()['profile']['meals']['prepared_portion_range'], [4, 4])
-        self.assertIsNone(self.store.read()['menu'])
+    def test_preferred_batch_size_never_truncates_accepted_meal_coverage(self):
+        self.batch(4)
+        self.profile(meals={'prepared_portion_range': [3, 4]})
+        plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37'}})['plan']
+        self.assertEqual(plan['status'], 'planned')
+        menu, _products = self.shop(plan)
+        self.assertEqual([bp.fraction(b['prepared_portions']) for b in menu['batches']], [6, 8])
+        self.assertEqual(len(menu['slots']), 7)
+        self.assertEqual(self.store.read()['profile']['meals']['portions'], 2)
+        self.assertEqual(self.store.read()['profile']['meals']['prepared_portion_range'], [3, 4])
+        assessment = self.app.handle({'operation': 'menu', 'action': 'assess'})['assessment']
+        self.assertTrue(assessment['ready'])
+        self.assertEqual(assessment['issues'], [])
 
     def test_manual_finding_review_substitution_and_known_conflict(self):
         self.profile(diet={'rules': [{'kind': 'allergy', 'term': 'milk'}, {'kind': 'sensitivity', 'term': 'onion'}, {'kind': 'preference', 'term': 'sugar'}]})

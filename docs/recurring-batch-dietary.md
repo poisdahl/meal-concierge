@@ -21,9 +21,10 @@ The proposal shows every eating day and its source before saving. Save uses the
 unchanged handoff/reference. Each source is stored and purchased once at its
 prepared quantity; leftovers add no shopping or recipe-use events. The same
 accepted settings work in subsequent weeks without another batch confirmation.
-Two four-portion batches for seven two-portion meals produce a visible six-
-portion shortfall and propose six/eight prepared portions. The planner does not
-save a complete-looking menu or silently increase the accepted range.
+A preferred three/four-portion preparation range does not cap seven two-portion
+meals: the plan prepares six/eight portions with no shortfall warning or extra
+approval. Consumption and dates remain unchanged, as does the saved preference.
+The actual cooking amounts remain visible in the plan, recipes and shopping.
 
 Optional candidate `facts.batch_guidance` carries `basis`, `suitability`
 (`suitable`, `unsuitable`, `unknown`), `storage` and `reheating`. Copy actual

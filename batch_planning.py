@@ -205,7 +205,7 @@ def sources(menu):
 
 
 def recurring_layout(profile, eating_dates):
-    """Allocate accepted preparation ranges without changing consumption or dates."""
+    """Cover accepted eating dates; preparation size is a preference, not a cap."""
     meals = profile['meals']
     if meals.get('meal_mode', 'fresh') == 'fresh':
         return None
@@ -217,7 +217,7 @@ def recurring_layout(profile, eating_dates):
     count = meals['batch_dishes']
     if not 1 <= count <= len(cooking) or (meals['meal_mode'] == 'batch' and count != len(cooking)):
         raise HouseholdError('Batch count must fit cooking days; batch mode requires every dish to be a batch.')
-    low, high = meals['prepared_portion_range']
+    low, _high = meals['prepared_portion_range']
     portions = meals['portions']
     intervals = {day: [d for d in eating_dates if day < d < (cooking[i + 1] if i + 1 < len(cooking) else '9999-12-31')] for i, day in enumerate(cooking)}
     # Repeated eating dates determine which cooking sessions need batches.
@@ -225,21 +225,16 @@ def recurring_layout(profile, eating_dates):
     if len(batch_days) != count:
         raise HouseholdError('batch_dishes must match cooking sessions with dependent eating days; adjust cooking days or batch count explicitly')
     result = []
-    shortages = []
     for index, day in enumerate(cooking):
         next_day = cooking[index + 1] if index + 1 < len(cooking) else '9999-12-31'
         dependents = [d for d in eating_dates if day < d < next_day]
         is_batch = day in batch_days
         needed = portions * (1 + len(dependents))
         prepared = max(low, needed) if is_batch else portions
-        if (is_batch and (not dependents or prepared > high)) or (dependents and not is_batch):
-            shortages.append({'source_date': day, 'needed_portions': needed, 'available_portions': high if is_batch else portions,
-                              'uncovered_dates': dependents, 'proposed_prepared_portions': needed,
-                              'adjustment': 'Explicitly accept this prepared quantity or add a fresh cooking meal on the uncovered days.'})
         result.append({'source_date': day, 'eating_dates': [day] + dependents, 'batch': is_batch,
                        'prepared_portions': prepared, 'consumed_at_source': portions})
-    return {'sources': result, 'shortages': shortages, 'required_portions': len(eating_dates) * portions,
-            'available_portions': sum(min(s['prepared_portions'], high) if s['batch'] else portions for s in result),
+    return {'sources': result, 'shortages': [], 'required_portions': len(eating_dates) * portions,
+            'available_portions': sum(s['prepared_portions'] for s in result),
             'accepted_settings': deepcopy(meals)}
 
 
