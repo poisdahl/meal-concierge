@@ -2686,16 +2686,17 @@ process.stdout.write(eval(script));
                 source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
             )
 
-        self.assertEqual(browser._eval.call_count, 120)
+        self.assertEqual(browser._eval.call_count, 260)
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
     def test_oda_vipps_waits_past_ten_seconds_for_a_late_gateway(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
+        browser._checkout_deadline = 100.0
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
-        browser._settle = mock.Mock()
-        browser._require_checkout_time = mock.Mock()
+        clock = [10.0]
+        browser._settle = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
         source = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
         gateway = "https://payments.example/hosted/late"
         url_reads = 0
@@ -2704,7 +2705,7 @@ process.stdout.write(eval(script));
             nonlocal url_reads
             if (action, args) == ("get", ("url",)):
                 url_reads += 1
-                return {"url": source if url_reads <= 45 else gateway}
+                return {"url": source if clock[0] < 41.0 else gateway}
             if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
                 return {"x": 10, "y": 20, "width": 30, "height": 40}
             return {}
@@ -2726,13 +2727,48 @@ process.stdout.write(eval(script));
              "fillable": False, "phone_matches": False},
         ])
 
-        context = browser._complete_oda_vipps_request(
-            "tab-1", 25620, expected_order_id="order-1", source_url=source,
-        )
+        with mock.patch("oda_browser.time.monotonic", side_effect=lambda: clock[0]):
+            context = browser._complete_oda_vipps_request(
+                "tab-1", 25620, expected_order_id="order-1", source_url=source,
+            )
 
         self.assertEqual(context["order_id"], "order-1")
-        self.assertGreater(url_reads, 40)
+        self.assertGreater(url_reads, 120)
         self.assertIn(mock.call("mouse", "down"), browser._invoke.call_args_list)
+
+    def test_oda_vipps_gateway_wait_preserves_the_post_gateway_deadline(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_deadline = 100.0
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        clock = [10.0]
+
+        def settle(seconds):
+            browser._require_checkout_time(seconds)
+            clock[0] += seconds
+
+        browser._settle = settle
+        browser._invoke = mock.Mock(return_value={"url": "https://payments.example/stalled"})
+
+        def slow_evaluate(_script):
+            clock[0] = min(clock[0] + 1.0, browser._checkout_deadline)
+            return {
+                "identity": True, "ready": False, "sent": False, "expired": False,
+                "fillable": False, "phone_matches": False,
+            }
+
+        browser._eval = mock.Mock(side_effect=slow_evaluate)
+        with mock.patch("oda_browser.time.monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(HouseholdError, "did not follow"):
+                browser._complete_oda_vipps_request(
+                    "tab-1", 25620, expected_order_id="order-1",
+                    source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+                )
+
+        self.assertGreaterEqual(browser._checkout_deadline - clock[0], 25.0)
+        self.assertLess(browser._eval.call_count, 260)
+        self.assertFalse(any(call.args[:2] == ("mouse", "down")
+                             for call in browser._invoke.call_args_list))
 
     def test_oda_vipps_phone_is_sent_to_browser_over_stdin_not_process_argv(self):
         browser = OdaBrowser.__new__(OdaBrowser)
