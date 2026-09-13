@@ -112,12 +112,12 @@ import/image, scheduler or checkout acceptance does not establish it. See the
 | Host/path | Text | PDF/image outbound | Email | Scheduled chat |
 | --- | --- | --- | --- | --- |
 | Shared Application + actual MCP 2.1.1 + Unix RPC/CLI | Verified local synthetic transfer | Verified exact PDF/image byte transfer; native recipient not implied | Verified single MIME send to loopback-only SMTP sink | Unavailable in this implementation |
-| Hermes native host | Unverified for this new occurrence | Unverified | Unverified for this new occurrence | Unavailable here |
+| Hermes native host | Read-only current Bob client/MCP status verified; no delivery occurrence | Unverified | Sender inventory unavailable; no probe send | Unavailable here |
 | OpenClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
 | Codex desktop | Verified emitted synthetic seven-day recipe text in the bound task | Verified for the original synthetic occurrence: recipient confirmed readable PDF and native image preview; historical transport acknowledgements remain unknown | Unverified | Unavailable here |
 | Codex CLI | Unverified native reply for this occurrence | Local file transfer verified; visual preview unavailable in CLI itself | Unverified | Unavailable here |
-| Claude Code/Desktop | Unverified for this new occurrence | Unverified; earlier PDF import/managed-image results are separate | Unverified | Unavailable here |
-| Grok Bot | Unverified for this new occurrence | Unverified for this new delivery path | Unverified | Unavailable here |
+| Claude Desktop 1.46388.4 / embedded Code 2.1.260 | Verified 19,172-byte complete frozen saved-week text in the bound native conversation | Verified 276,833-byte readable ten-page PDF and two exact managed-image native previews; all four parts accepted | Unverified; email absent from the occurrence | Unavailable here |
+| Grok Bot 0.44.0 | Verified once for current-source bank-only saved week: 15,719-byte structured text accepted by `SendToUser`; exact final bubble styling/read status unobserved | Definitively `not_sent` for the 585,065-byte PDF and three managed images because Bot group rooms drop attachments | Unverified | Unavailable here |
 | NanoClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
 
 Codex desktop documents a PDF preview panel in its
@@ -150,10 +150,41 @@ operational bounds of 16,000 text bytes and 1,000,000 attachment bytes. Shared
 integration tests separately exercise bounded splitting, oversized attachments,
 missing/disabled assets, text fallback and partial/unknown outcome recovery.
 Existing six-page native and thirteen-page long-fixture visual reviews apply to
-unchanged PDF bytes; no renderer or layout changed. Grok's introspected
-`SendToUser` schema remains unperformed transfer, and other host qualifications
-remain as listed above. See [issue 53](https://github.com/poisdahl/meal-concierge/issues/53)
+unchanged PDF bytes; no renderer or layout changed. Grok's earlier introspected
+`SendToUser` schema was not a performed transfer; the current result below is
+separate. Other host qualifications remain as listed above. See [issue 53](https://github.com/poisdahl/meal-concierge/issues/53)
 for the acceptance result reusable by issue 52.
+
+On 13 September, Grok Bot 0.44.0 exercised this delivery path from a current
+public-source retained installation. Request
+`issue52-grok-final-20260913-a` froze bank-only menu
+`menu_0162193d6ce0eb841f317d45` revision 1, digest
+`5657fde91b2d4a108fae3ddcef9ddd3f9370eae01c2c541aabc5e75260836f87`.
+The complete 15,719-byte text part was accepted once. The maintained plain-text
+renderer separates section titles with line breaks, prefixes list rows with
+bullets and preserves source URLs in parentheses. The final delivered
+group-room bubble was not exposed in the available Bot transcripts, so exact
+visual styling and recipient-read status are not claimed. Its 585,065-byte PDF
+and three managed images were positively `not_sent`, rather than unknown,
+because the selected Bot group-room transport drops attachments. The sender did
+not retry them. This is accepted evidence for the structured current-client
+text payload and attachment limit, not a successful Grok PDF/image presentation.
+
+The same date's owner-confirmed Claude Desktop Code occurrence used retained
+menu `menu_dfc3b9a6641e31009991a612` revision 1, digest
+`82dea9d29f815f13c4877e90c298798f3a234d5d271163469ccaceefaaf3741a`.
+Request `issue52-claude-final-20260913-a` presented the complete 19,172-byte
+text, a 276,833-byte ten-page PDF and two managed JPEG previews of 32,546 and
+140,434 bytes in the same native conversation. The operator opened the PDF in
+Claude's built-in viewer, observed readable pages 1 and 10 and the full 1–10
+page structure; both image previews were visible. Exported hashes matched the
+frozen metadata. Each part was begun, presented and acknowledged once with its
+original token and actual native file/message receipt. Final `get` reports all
+four parts `accepted` and `all_accepted=true`; `recipient_read` remains unknown
+because the API does not record the separate operator observation. A first
+read-only binary export used the absent default Linux socket, returned zero
+bytes and `dispatched:false`, then succeeded against the actual Desktop socket
+before any `begin`; no send was replayed.
 
 ## Validation
 
