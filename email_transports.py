@@ -96,17 +96,43 @@ class GmailTransport:
         if actual["account"] != binding["account"]:
             raise ValueError("original Gmail account is unavailable; no account fallback")
         if actual["reconciliation"]:
+            marker_name = "X-Meal-Concierge-Delivery-ID"
+            markers = message.get_all(marker_name, [])
+            marker = str(markers[0]) if len(markers) == 1 and re.fullmatch(r"[a-f0-9]{48}", str(markers[0])) else None
+            def matches(found, *, rewritten=False):
+                candidate = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(found["raw"]))
+                # Transport headers can change; routing and MIME interpretation cannot.
+                leaves = lambda m: [(p.get_content_type(), p.get_filename(), p.get_content_charset(),
+                                     p.get_all("Content-ID"), p.get_all("Content-Disposition"), p.get_payload(decode=True))
+                                    for p in m.walk() if not p.is_multipart()]
+                tree = lambda m: (m.get_content_type(), m.get_param("start"), m.get_param("type"),
+                                  [tree(p) for p in m.iter_parts()] if m.is_multipart() else [])
+                headers = ("From", "To", "Cc", "Bcc", "Sender", "Reply-To", "Subject", "Date", marker_name)
+                return ("SENT" in found.get("labelIds", []) and
+                        not any(p.defects for p in candidate.walk()) and
+                        not any(k.lower().startswith("resent-") for k in candidate.keys()) and
+                        all(candidate.get_all(k) == message.get_all(k) for k in headers) and
+                        (rewritten or candidate.get_all("Message-ID") == message.get_all("Message-ID")) and
+                        tree(candidate) == tree(message) and leaves(candidate) == leaves(message))
             result = self.service.users().messages().list(userId="me", q="in:sent rfc822msgid:" + str(message["Message-ID"]), maxResults=10).execute(num_retries=0)
             for item in result.get("messages", []):
                 found = self.service.users().messages().get(userId="me", id=item["id"], format="raw").execute(num_retries=0)
-                candidate = BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(found["raw"]))
-                # Gmail may add/rewrite transport headers. Compare the actual
-                # selected addresses and every decoded MIME leaf, not wire bytes.
-                leaves = lambda m: [(p.get_content_type(), p.get_filename(), p.get_payload(decode=True)) for p in m.walk() if not p.is_multipart()]
-                if ("SENT" in found.get("labelIds", []) and
-                    all(candidate.get_all(k) == message.get_all(k) for k in ("From", "To", "Cc", "Bcc", "Subject", "Message-ID")) and
-                    leaves(candidate) == leaves(message)):
+                if matches(found):
                     return {"outcome": "accepted", "evidence": "gmail:message:" + item["id"]}
+            if marker:
+                # Gmail can replace Message-ID entirely. A bounded header scan
+                # finds our frozen random marker without downloading every PDF.
+                # Do not constrain by MIME Date: held messages may be sent later.
+                result = self.service.users().messages().list(userId="me",
+                    q='in:sent from:"' + binding["sender"] + '" to:"' + binding["recipient"] + '"', maxResults=50).execute(num_retries=0)
+                for item in result.get("messages", [])[:50]:
+                    meta = self.service.users().messages().get(userId="me", id=item["id"], format="metadata", metadataHeaders=[marker_name]).execute(num_retries=0)
+                    values = [h.get("value") for h in meta.get("payload", {}).get("headers", []) if h.get("name", "").lower() == marker_name.lower()]
+                    if values != [marker] or "SENT" not in meta.get("labelIds", []):
+                        continue
+                    found = self.service.users().messages().get(userId="me", id=item["id"], format="raw").execute(num_retries=0)
+                    if matches(found, rewritten=True):
+                        return {"outcome": "accepted", "evidence": "gmail:message:" + item["id"]}
         return {"outcome": "unknown", "next": "No positive sent-mail evidence. Do not resend; inspect the original account."}
 
 

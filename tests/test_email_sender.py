@@ -237,6 +237,58 @@ class SenderTests(unittest.TestCase):
                 sink.shutdown()
                 worker.join(timeout=5)
 
+    def test_gmail_rewritten_message_id_requires_exact_frozen_marker_and_content(self):
+        import base64
+        self.send()
+        raw = self.mailbox.messages[0]
+        binding = self.rpc("recipe_delivery", action="sender")["binding"]
+        original = BytesParser(policy=policy.default).parsebytes(raw)
+        marker_name = "X-Meal-Concierge-Delivery-ID"
+        marker = str(original[marker_name])
+        self.assertEqual(48, len(marker))
+        for change in ("none", "missing", "duplicate", "other_marker", "body", "date", "recipient", "content_id", "multipart", "not_sent"):
+            with self.subTest(change=change):
+                found = BytesParser(policy=policy.default).parsebytes(raw)
+                found.replace_header("Message-ID", "<rewritten@mail.gmail.com>")
+                if change == "missing":
+                    del found[marker_name]
+                elif change == "duplicate":
+                    found[marker_name] = marker
+                elif change == "other_marker":
+                    found.replace_header(marker_name, "0" * 48)
+                elif change == "body":
+                    found.get_payload()[0].get_payload()[0].set_content("Other content")
+                elif change == "date":
+                    found.replace_header("Date", "Sat, 12 Sep 2026 10:00:00 +0000")
+                elif change == "recipient":
+                    found.replace_header("To", "other@example.test")
+                elif change == "content_id":
+                    found.get_payload()[-1]["Content-ID"] = "<changed>"
+                elif change == "multipart":
+                    found.set_type("multipart/alternative")
+                labels = [] if change == "not_sent" else ["SENT"]
+                service = mock.MagicMock()
+                service.users().getProfile().execute.return_value = {"emailAddress": binding["sender"]}
+                service.users().messages().list().execute.side_effect = [{}, {"messages": [{"id": "rewritten"}], "nextPageToken": "more"}]
+                metadata = {"labelIds": labels, "payload": {"headers": [{"name": marker_name, "value": v} for v in found.get_all(marker_name, [])]}}
+                service.users().messages().get().execute.side_effect = [metadata, {"labelIds": labels, "raw": base64.urlsafe_b64encode(found.as_bytes(policy=policy.SMTP)).decode()}]
+                transport = GmailTransport(service, ["https://www.googleapis.com/auth/gmail.modify"])
+                self.assertEqual("accepted" if change == "none" else "unknown", transport.reconcile(raw, binding)["outcome"])
+                service.users().messages().list.assert_called_with(userId="me", q='in:sent from:"sender@example.test" to:"recipient@example.test"', maxResults=50)
+                if change in {"missing", "duplicate", "other_marker", "not_sent"}:
+                    self.assertEqual(1, service.users().messages().get().execute.call_count)
+
+    def test_gmail_old_message_without_marker_does_not_scan_unrelated_sent_mail(self):
+        self.send()
+        message = BytesParser(policy=policy.default).parsebytes(self.mailbox.messages[0])
+        del message["X-Meal-Concierge-Delivery-ID"]
+        service = mock.MagicMock()
+        binding = self.rpc("recipe_delivery", action="sender")["binding"]
+        service.users().getProfile().execute.return_value = {"emailAddress": binding["sender"]}
+        service.users().messages().list().execute.return_value = {}
+        transport = GmailTransport(service, ["https://www.googleapis.com/auth/gmail.modify"])
+        self.assertEqual("unknown", transport.reconcile(message.as_bytes(), binding)["outcome"])
+        service.users().messages().list().execute.assert_called_once_with(num_retries=0)
     def test_real_mcp_configure_send_then_cli_recovery(self):
         source = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="mc-email-", dir="/tmp") as temporary:
