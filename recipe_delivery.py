@@ -39,15 +39,18 @@ def render_menu(menu, assets, *, images=True):
             if missing:
                 recipe["notes"] = "\n".join(filter(None, [recipe.get("notes"), *missing]))
                 warnings.extend(missing)
-    full = menu_email_html(frozen, image_cids=media["image_cids"])
     # Saved structured slots carry canonical dates; legacy schedule text alone
     # must not be mistaken for dated slots.
     dates = []
     names = {r.get("recipe_key"): r.get("name", "")
              for group in ("dishes", "salads") for r in frozen.get(group, [])}
     for slot in frozen.get("slots", []):
-        dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type")), names.get(slot.get("recipe_key")),
+        recipe_name = names.get(slot.get("recipe_key"), '') + (' (rester)' if slot.get('kind') == 'leftover' else '')
+        dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type")), recipe_name,
                      f"{format_portions(slot['portions'])} porsjoner" if slot.get("portions") else None) if v))
+    if dates:
+        frozen['schedule'] = []  # The canonical dated slots already cover this plan.
+    full = menu_email_html(frozen, image_cids=media["image_cids"])
     if dates:
         position = full.index("</h1>") + len("</h1>")
         full = full[:position] + "<h2>Datoer</h2>" + "".join("<p>" + html.escape(v) + "</p>" for v in dates) + full[position:]
