@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest import mock
 
-sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parents[3] / 'scripts/tests')]
+sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import test_meal_concierge_recurring_dietary as fixture
 from core import HouseholdError
 from planner import equipment_conflicts
@@ -130,6 +130,24 @@ class WeeklyFlowTests(unittest.TestCase):
     def test_weekly_raw_cart_cannot_claim_menu_coverage(self):
         self.assertEqual(self.call('prepare', weekly=True)['reason'], 'weekly_menu_products_incomplete')
         self.assertEqual(self.browser.checkout_clicks, 0)
+
+    def test_batch_menu_renders_recipe_sources_and_pdf_without_changing_snapshot(self):
+        from recipe_delivery import render_menu, render_pdf
+        import pypdfium2
+        plan = self.batch()
+        menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_handoff': plan['save_handoff']})['menu']
+        original = deepcopy(menu)
+        rendered = render_menu(menu, self.app.recipes.assets, images=False)
+        document = pypdfium2.PdfDocument(render_pdf(rendered))
+        self.addCleanup(document.close)
+        text = '\n'.join(page.get_textpage().get_text_range() for page in document)
+        self.assertIn('Planlagt batch:', text)
+        self.assertIn('Ingredienser', text)
+        self.assertIn('Fremgangsmåte', text)
+        for recipe in menu['dishes']:
+            self.assertIn(recipe['name'], text)
+        self.assertEqual(menu, original)
+        self.assertEqual(self.store.read()['menu'], original)
 
     def test_explicit_dates_and_one_plan_portions_preserve_profile(self):
         self.batch(4)

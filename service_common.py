@@ -391,9 +391,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         parts.append("</ul>")
     from batch_planning import sources
     for batch in sources(menu):
-        source = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
-        recipe = next((r for r in menu.get('dishes', []) if r['recipe_key'] == source.get('recipe_key')), {})
-        parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source.get('date', ''))}</p>")
+        source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
+        recipe = next((r for r in menu.get('dishes', []) if r['recipe_key'] == source_slot.get('recipe_key')), {})
+        parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source_slot.get('date', ''))}</p>")
         guidance = batch.get('storage', {})
         parts.append(f"<p>Oppbevaring/gjenoppvarming: {escape(str(guidance))}. Egnethet: {escape(str(batch.get('suitability', {})))}</p>")
         prepared = batch["prepared_portions"]
