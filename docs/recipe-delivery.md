@@ -82,6 +82,12 @@ Explicit `retry` requires recorded not_sent and retains the original occurrence.
 Unknown Gmail results can be positively matched in sent mail when the existing
 grant permits it. A missing match proves nothing; Message-ID is not Gmail
 deduplication. SMTP cannot automatically reconcile a lost acceptance response.
+Gmail may replace Message-ID. New messages also carry a frozen random delivery
+marker: fallback inspects headers of up to 50 matching sent messages, then checks
+the marker, Date, addresses, subject and complete decoded MIME content. This is
+not an exhaustive mailbox scan; missing/rewritten markers or a message outside
+that bounded result remain unknown. Older messages without a marker retain only
+the original Message-ID check.
 Unknown and required-action outcomes must be surfaced, not silently retried.
 
 The private receipt directory contains original message bytes and evidence.
