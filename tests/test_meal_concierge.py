@@ -2413,19 +2413,25 @@ form.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:
 const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
 global.location=new URL(c.url);
 global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:'1'});
-const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
+const main=node(text),component=node(),phoneOnly=node(),buttonOnly=node();
+phone.parentElement=c.shared===false?phoneOnly:component;next.parentElement=c.shared===false?buttonOnly:component;
+component.parentElement=main;phoneOnly.parentElement=main;buttonOnly.parentElement=main;
+component.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
+phoneOnly.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:[];
+buttonOnly.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
+main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False, shared=True):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=expected_url or url,
                     ),
-                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form},
+                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form, "shared": shared},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2444,6 +2450,10 @@ process.stdout.write(eval(script));
         self.assertEqual(evaluate("90000000", in_form=True), {
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
+        })
+        self.assertEqual(evaluate("90000000", shared=False), {
+            "identity": True, "ready": False, "sent": False, "expired": False,
+            "fillable": False, "phone_matches": False,
         })
         self.assertEqual(evaluate("90000000", text="ODA 256.50 NOK", button="OK"), {
             "identity": True, "ready": True, "sent": False, "expired": False,
