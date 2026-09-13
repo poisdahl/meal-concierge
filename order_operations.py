@@ -2907,9 +2907,20 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
-        prior_vipps_request_status = (
-            previous.get("vipps_request_status") if isinstance(previous, Mapping) else None
-        )
+        prior_vipps_request_status = previous.get("vipps_request_status") if isinstance(previous, Mapping) else None
+        if (
+            prior_vipps_request_status not in {"expired", "verifying", "not_sent"}
+            and isinstance(previous, Mapping)
+            and previous.get("status") == "awaiting_confirmation"
+            and previous.get("order_id") == order_id
+            and previous.get("prior_vipps_request_status") in {"expired", "verifying", "not_sent"}
+            and previous.get("vipps_request_context") is None
+            and previous.get("vipps_request_attempted_at") is None
+            and previous.get("payment_requested_at") is None
+            and previous.get("owner_vipps_approval_completed_at") is None
+            and previous.get("payment_failure") is None
+        ):
+            prior_vipps_request_status = previous["prior_vipps_request_status"]
         if prior_vipps_request_status in {"expired", "verifying", "not_sent"}:
             child["prior_vipps_request_status"] = prior_vipps_request_status
         if requested_order_id is not None or carried_owner_no_request:
