@@ -177,6 +177,11 @@ class WeeklyFlowTests(unittest.TestCase):
             self.assertIn(recipe['name'], text)
         self.assertEqual(menu, original)
         self.assertEqual(self.store.read()['menu'], original)
+        partial = deepcopy(menu)
+        partial['dishes'][0]['ingredients'][0]['scalable'] = False
+        fallback = render_menu(partial, self.app.recipes.assets, images=False)['text']
+        self.assertIn('kan ikke skaleres automatisk', fallback)
+        self.assertIn('200 g gulrot', fallback)
 
     def test_explicit_dates_and_one_plan_portions_preserve_profile(self):
         self.batch(4)

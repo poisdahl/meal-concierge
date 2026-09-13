@@ -431,6 +431,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             for batch, cooking_date in batches:
                 try:
                     cooked = scale_recipe(recipe, float(fraction(batch['prepared_portions'])))
+                    if not cooked['readiness']['scaling_ready']:
+                        raise RecipeError('batch recipe has unscalable quantities')
                     label = f"Tilbered {format_portions(batch['prepared_portions'])} porsjoner {cooking_date}. Mengdene nedenfor gjelder hele tilberedningen."
                 except RecipeError:
                     cooked = recipe
