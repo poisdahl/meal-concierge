@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 import batch_planning as bp
 import menu_planning as mp
 from core import HouseholdError, StateStore
+from product_planner import ingredient_search
 from service import Application
 from test_meal_concierge_products import observation, option, product
 
@@ -112,7 +113,7 @@ class ProductCapacityTests(unittest.TestCase):
         return self.app.handle({"operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(self.menu), **kwargs})["product_plan"]
 
     def approvals(self, plan):
-        return [{"requirement_id": row["requirement_id"], "candidate_refs": [p["product_ref"] for p in self.provider.entry(row["identity"])["products"]]} for row in plan["requirements"]]
+        return [{"requirement_id": row["requirement_id"], "candidate_refs": [p["product_ref"] for p in self.provider.entry(ingredient_search(row["identity"], self.app.provider))["products"]]} for row in plan["requirements"]]
 
     def complete(self):
         initial = self.prepare()
@@ -141,18 +142,18 @@ class ProductCapacityTests(unittest.TestCase):
             self.assertEqual(row["selection"]["package_count"], counts[row["identity"]])
         return counts
 
-    def test_full_week_unresolved_pantry_then_apply_all_37_needs(self):
+    def test_full_week_pantry_defaults_to_purchase_then_explicit_stock_applies(self):
         self.save_week(unresolved=True)
         first = self.prepare()
-        self.assertEqual(len(first["requirements"]), 37)
-        structural = [row for row in first["unresolved_requirements"] if "ingredient_index" in row]
-        self.assertEqual({row["item"] for row in structural}, {"salt", "sugar", "sesame"})
-        self.assertEqual(sum(len(row["sources"]) for row in first["requirements"]) + len(structural), 52)
-        decisions = [{"source": {k: row[k] for k in ("collection", "recipe_index", "ingredient_index")},
-                      "action": "omit" if row["item"] == "sesame" else "have_all"} for row in structural]
+        self.assertEqual(len(first["requirements"]), 40)
+        self.assertEqual(sum(len(row["sources"]) for row in first["requirements"]), 52)
+        decisions = [{"source": {"collection":"dishes", "recipe_index":i, "ingredient_index":7},
+                      "action": "omit" if item == "sesame" else "have_all"}
+                     for i, item in enumerate(("salt","sugar","sesame"))]
         decisions.append({"source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 5},
                           "action": "have_quantity", "quantity": {"numerator": 101, "denominator": 2}, "unit": "g"})
-        plan = self.prepare(candidate_approvals=self.approvals(first), ingredient_decisions=decisions)
+        included = self.prepare(ingredient_decisions=decisions)
+        plan = self.prepare(candidate_approvals=self.approvals(included), ingredient_decisions=decisions)
         counts = self.assert_totals(plan, DINNERS, pantry_onion=Fraction(101, 2))
         self.provider.calls.clear()
         result = self.apply(plan)
@@ -249,8 +250,8 @@ class ProductCapacityTests(unittest.TestCase):
         refs = self.save_recipes([recipe("Boundary", [(f"food{i}", 100) for i in range(63)], undecided="salt")])
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
         first = self.prepare()
-        self.assertEqual(len(first["requirements"]), 63)
-        self.assertEqual(len(self.provider.calls), 63)
+        self.assertEqual(len(first["requirements"]), 64)
+        self.assertEqual(len(self.provider.calls), 64)
         # Include the source's exact salt amount: the complete real plan has 64.
         decision = {"source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 63}, "action": "include"}
         included = self.prepare(ingredient_decisions=[decision])

@@ -297,7 +297,7 @@ def shortlist(candidates: list[Mapping[str, Any]], request: Mapping[str, Any], p
         chosen = ordered[0]
         status = chosen["hard_constraints"]["status"]
         (representatives if status == "pass" else unknown if candidate_needs_input(chosen) else rejected).append(chosen)
-    dates = request["dates"]
+    dates = [s["source_date"] for s in request["recurring_batch"]["sources"]] if request.get("recurring_batch") else request["dates"]
     def score(item):
         return sum(reason["weight"] for index, day in enumerate(dates)
                    for reason in _slot_reasons(item, day, index, len(dates), profile))
@@ -414,9 +414,10 @@ def collect_candidates(*, source_queries: Mapping[str, list[str] | None], fetch_
     enabled = [state for state in states.values() if state["enabled"]]
     ai_eligible = (bool(enabled) and selection["suitable_count"] == 0 and not selection["unknown"]
                    and all(state["status"] in {"empty", "unsuitable"} and state["rejected_details"] == 0 and state["needs_input"] == 0 for state in enabled))
-    status = "ready" if len(selection["candidates"]) >= len(request["dates"]) else "needs_input" if selection["unknown"] else "shortfall" if selection["suitable_count"] else "no_candidates"
+    needed = len(request["recurring_batch"]["sources"]) if request.get("recurring_batch") else len(request["dates"])
+    status = "ready" if len(selection["candidates"]) >= needed else "needs_input" if selection["unknown"] else "shortfall" if selection["suitable_count"] else "no_candidates"
     return {**selection, "status": status, "sources": list(states.values()), "ai_fallback_eligible": ai_eligible,
-            "shortfall": max(0, len(request["dates"]) - len(selection["candidates"])),
+            "shortfall": max(0, needed - len(selection["candidates"])),
             "work": {"detail_calls": detail_count, "elapsed_seconds": clock() - start,
                      "maximum_details": MAX_DETAILS, "maximum_pages_per_source": MAX_SOURCE_PAGES,
                      "search_seconds": SEARCH_SECONDS}}

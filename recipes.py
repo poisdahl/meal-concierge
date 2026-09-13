@@ -367,7 +367,7 @@ def _format_number(value: float) -> str:
 def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
     if isinstance(value, str):
         text = _bounded_text(value, f"ingredients[{index}]", required=True, maximum=500)
-        return {"raw": text, "item": text, "quantity": None, "unit": None, "scalable": False, "notes": None, "optional": False, "pantry": False}
+        return {"raw": text, "item": text, "quantity": None, "unit": None, "scalable": False, "notes": None, "optional": bool(re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", text, re.I)), "pantry": False}
     if not isinstance(value, Mapping):
         raise RecipeError(f"ingredients[{index}] must be text or an object")
     raw = _bounded_text(value.get("raw"), f"ingredients[{index}].raw", maximum=500)
@@ -385,6 +385,8 @@ def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
     elif quantity is not None:
         quantity = _finite_positive(quantity, f"ingredients[{index}].quantity")
     optional = value.get("optional", False)
+    if optional is False and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (raw, item) if v), re.I):
+        optional = True
     pantry = value.get("pantry", False)
     if not isinstance(optional, bool) or not isinstance(pantry, bool):
         raise RecipeError(f"ingredients[{index}].optional and pantry must be true or false")
@@ -489,6 +491,8 @@ def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
     if not isinstance(scalable, bool) or (scalable and (quantity is None or unit is None)):
         raise RecipeError(f"{field} scalable quantity requires a positive amount and unit")
     flags = {key: value.get(key, False) for key in ("optional", "pantry")}
+    if flags["optional"] is False and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (original, raw, item) if v), re.I):
+        flags["optional"] = True
     if any(not isinstance(flag, bool) for flag in flags.values()):
         raise RecipeError(f"{field} optional and pantry must be true or false")
     amount = f"{quantity_text(quantity)} {unit}" if quantity is not None and unit else _bounded_text(value.get("amount"), f"{field}.amount", maximum=100)

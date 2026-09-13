@@ -47,7 +47,41 @@ def _identity(value: Any) -> str | None:
     text = " ".join(unicodedata.normalize("NFC", value).split())
     if not text or len(text.encode("utf-8")) > 300:
         return None
-    return text.casefold()
+    text = text.casefold()
+    # Preparation wording does not create another stock allocation. Keep food
+    # form (dried/cooked, powder/fresh) distinct; only these culinary synonyms
+    # are normalized, not arbitrary comma-separated source text.
+    aliases = {
+        'onion, finely chopped': 'onion', 'onion , finely chopped': 'onion',
+        'garlic (cloves)': 'garlic cloves', 'garlic , minced (cloves)': 'garlic cloves',
+        'green bell pepper , diced': 'green pepper',
+        'red bell pepper , diced': 'red pepper',
+    }
+    return aliases.get(text, text)
+
+
+def ingredient_search(identity, provider):
+    """Short Norwegian retail queries; the recipe and its quantities stay intact."""
+    if provider == 'mathem':
+        return identity
+    aliases = {'black beans': 'sorte bønner', 'black pepper': 'svart pepper',
+               'celery': 'stangselleri', 'fish stock': 'fiskebuljong',
+               'garlic cloves': 'hvitløk', 'green pepper': 'grønn paprika',
+               'red pepper': 'rød paprika', 'onion': 'gul løk',
+               'ground cayenne pepper': 'cayennepepper', 'ground coriander': 'malt koriander',
+               'ground cumin': 'spisskummen', 'ground paprika': 'paprikapulver',
+               'vegetable oil': 'matolje', 'tomatoes, diced': 'tomater',
+               'tomatoes , diced': 'tomater', 'salt': 'salt', 'water': 'vann'}
+    if identity.startswith('fish (e.g. tilapia'):
+        return 'hvit fisk filet'
+    if identity.startswith('hot pepper (optional'):
+        return 'chili'
+    return aliases.get(identity, identity)
+
+
+def nonfood_candidate(product):
+    name = str(product.get('name') or '').casefold()
+    return bool(re.search(r'\b(?:cat food|dog food|pet food|kattemat|hundemat|våtfôr|tørrfôr|whiskas|ansiktsservietter|lommetørklær|lommetørkler|tørkepapir|toalettpapir)\b', name))
 
 
 def _positive_fraction(value: Any) -> Fraction | None:
@@ -205,14 +239,6 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 reason = None
                 if raw.get("unresolved_reason"):
                     reason = str(raw["unresolved_reason"])
-                elif raw.get("pantry") is True and action is None and not (
-                    identity in stock and stock[identity].get("quantity") is not None
-                    and conversion is not None
-                    and _UNITS.get(_normalized_unit(stock[identity].get("unit")), (None,))[0] == conversion[0]
-                ):
-                    reason = "pantry_state_needs_input"
-                elif raw.get("optional") is True and action is None:
-                    reason = "optional_requirement_needs_input"
                 elif not scalable:
                     reason = "non_scalable_quantity_unresolved"
                 elif identity is None:
@@ -293,7 +319,7 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         raise HouseholdError("candidate_approvals must be a bounded list")
     approvals = {}
     for raw in value:
-        if not isinstance(raw, Mapping) or set(raw).difference({"requirement_id", "candidate_refs", "max_excess"}):
+        if not isinstance(raw, Mapping) or set(raw).difference({"requirement_id", "candidate_refs", "max_excess", "search_query"}):
             raise HouseholdError("candidate approval has unknown fields")
         requirement_id = raw.get("requirement_id")
         refs = raw.get("candidate_refs")
@@ -310,8 +336,13 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         approval: dict[str, Any] = {
             "requirement_id": requirement_id,
             "candidate_refs": sorted(refs, key=_ref_sort_key),
-            "source": "current_user_exact_candidate_scope",
+            "source": "selected_exact_candidate_scope",
         }
+        if raw.get("search_query") is not None:
+            query = raw["search_query"]
+            if not isinstance(query, str) or not 1 <= len(query.strip()) <= 150:
+                raise HouseholdError("search_query must be a short ingredient search")
+            approval["search_query"] = query.strip()
         if raw.get("max_excess") is not None:
             maximum = _read_fraction(raw["max_excess"])
             if maximum > 100:
@@ -693,7 +724,7 @@ def build_product_plan(
             continue
         approval = approvals.get(requirement_id)
         if approval is None:
-            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "exact_candidate_scope_needs_user_approval"})
+            unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "exact_candidate_scope_needs_selection"})
             item["status"] = "needs_input"
             planned.append(item)
             continue
@@ -711,7 +742,8 @@ def build_product_plan(
         product_findings = {p['product_ref']: assess(dietary_profile or {'diet': hard_constraints}, p) for p in observation['products']}
         item['dietary_assessments'] = [f for values in product_findings.values() for f in values]
         filtered = deepcopy(approval)
-        filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if not any(f['blocked'] for f in product_findings.get(ref, []))]
+        nonfood = {p['product_ref'] for p in observation['products'] if nonfood_candidate(p)}
+        filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if ref not in nonfood and not any(f['blocked'] for f in product_findings.get(ref, []))]
         evaluated_observation = deepcopy(observation)
         for product in evaluated_observation['products']:
             product['dietary_findings'] = product_findings[product['product_ref']]

@@ -49,7 +49,9 @@ def rules(profile):
     result = deepcopy(diet.get('rules', []))
     # Preserve old ambiguous statements and exclusions; never infer a diagnosis.
     result += [{'kind': 'allergy_or_sensitivity', 'term': term} for term in diet.get('allergies_or_sensitivities', [])]
-    result += [{'kind': 'never_buy', 'term': term} for term in diet.get('avoid', [])]
+    # Legacy "avoid" describes food preferences. Absolute exclusions belong in
+    # explicit never_buy/allergy rules, not in a preference's translated label.
+    result += [{'kind': 'preference', 'term': term} for term in diet.get('avoid', [])]
     return result
 
 
@@ -85,8 +87,12 @@ def assess(profile, item, *, recipe=False):
     findings = []
     for rule in rules(profile):
         term, kind = rule['term'], rule['kind']
-        aliases = {'milk': ['milk', 'melk', 'mjölk', 'fløte', 'casein', 'whey'], 'melk': ['melk', 'milk', 'mjölk', 'fløte', 'casein', 'whey']}
-        terms = aliases.get(text(term), [term]) if kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'} else [term]
+        aliases = {'milk': ['milk', 'melk', 'mjölk', 'fløte', 'casein', 'whey'], 'melk': ['melk', 'milk', 'mjölk', 'fløte', 'casein', 'whey'],
+                   'smoked food': ['smoked', 'røkt', 'røkte', 'rökt'],
+                   'red meat': ['beef', 'pork', 'lamb', 'storfe', 'svin', 'lam', 'oksekjøtt'],
+                   'white rice': ['white rice', 'hvit ris', 'vit ris'],
+                   'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'tørre bønner', 'tørkede bønner']}
+        terms = aliases.get(text(term), [term])
         present = any(matches(t, evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'}) for field in ('ingredients', 'allergens', 'may_contain') for t in terms)
         # An unlisted term is not an allergen-free claim (synonyms/compound ingredients).
         free = not recipe and any(text(v) == text(term) for v in evidence.get('allergen_free_from', []) if isinstance(v, str)) if isinstance(evidence.get('allergen_free_from', []), list) else False

@@ -2034,3 +2034,6 @@ package rounding. Unknown amounts or incompatible units leave purchase needs
 unchanged. Later `ingredient_decisions` replace that ingredient's request stock
 for the entire menu; do not pass the same stock as another independent amount.
 No inventory, cart or cooked-history mutation accompanies planning.
+
+Weekly shop continuity, equipment, compact dietary review and one-plan batch
+adjustments are described in [the recurring workflow contract](recurring-batch-dietary.md#weekly-shop-continuity).

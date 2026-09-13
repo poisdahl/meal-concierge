@@ -1561,6 +1561,8 @@ class OrderOperations:
                 job.pop("subject", None)
         if provider is not None and provider != active_provider:
             return
+        state['recurring_fulfilled'] = {key: value for key, value in state.get('recurring_fulfilled', {}).items()
+            if not (value.get('order_id') == order_id and value.get('provider', active_provider) == active_provider)}
         for usage in state.get("recipe_usage", {}).values():
             if isinstance(usage, dict) and usage.get("order_id") == order_id and usage.get("status") == "ordered":
                 usage["previous_status"] = "ordered"
@@ -1614,10 +1616,13 @@ class OrderOperations:
 
     def _checkout_dietary(self, summary, deadline=None):
         from dietary_assessment import assess, digest, rules
+        from product_planner import nonfood_candidate
         profile = self.store.read()['profile']
         findings = []
         if rules(profile):
             for item in summary.get('items', []):
+                if nonfood_candidate(item):
+                    continue
                 reference = item.get('product_id')
                 product = {'product_ref': reference, 'name': item.get('name'), 'dietary_evidence': {}}
                 try:
@@ -1635,8 +1640,11 @@ class OrderOperations:
                             product = {**product, 'dietary_evidence': {**product.get('dietary_evidence', {}), **details}}
                     except HouseholdError:
                         pass
-                findings.extend(assess(profile, product))
-        value = {'findings': findings, 'profile_digest': digest(profile['diet'])}
+                # Unknown preferences are not actionable findings. In particular,
+                # a tissue box need not certify that it contains no white rice.
+                findings.extend(f for f in assess(profile, product)
+                                if not (f['kind'] == 'preference' and f['condition'] == 'unknown'))
+        value = {'findings': findings, 'profile_digest': digest({'diet': profile['diet'], 'equipment': profile['meals'].get('equipment', [])})}
         value['assessment_digest'] = digest(value)
         return value
 
@@ -1711,13 +1719,20 @@ class OrderOperations:
         reviewed = request.get('dietary_review') or []
         if not isinstance(reviewed, list) or any(not isinstance(v, str) for v in reviewed) or len(reviewed) != len(set(reviewed)) or not set(reviewed) <= {f['finding_id'] for f in findings}:
             raise HouseholdError('dietary_review must contain distinct current-summary finding IDs actually reviewed in the final confirmation')
+        review_digest = request.get('dietary_review_digest')
+        if review_digest is not None:
+            if review_digest != pending.get('dietary_assessment', {}).get('assessment_digest'):
+                raise HouseholdError('dietary review changed; review the current checkout summary')
+            # The enclosing confirm binds the exact pending confirmation and
+            # revalidates its cart/profile/evidence before reaching this gate.
+            reviewed = [f['finding_id'] for f in material]
         manually_reviewed = bool(reviewed) and {f['finding_id'] for f in material} <= set(reviewed)
         automatic = pending.get('automatic_checkout') or (self.confirmation_policy == 'standing' and not manually_reviewed)
         profile = self.store.read()['profile']
         if automatic:
             uncovered = [f for f in material if not covered(profile, f)]
         else:
-            uncovered = [f for f in material if f['kind'] in {'allergy', 'never_buy', 'allergy_or_sensitivity'} and f['finding_id'] not in reviewed]
+            uncovered = [f for f in material if f['kind'] in {'allergy', 'never_buy', 'allergy_or_sensitivity', 'preference'} and f['finding_id'] not in reviewed]
         if uncovered:
             return {'confirmed': False, 'dietary_review_required': True, 'findings': uncovered,
                     'reason': 'Affected-item review or an explicitly covering standing uncertainty rule is required; other work may continue.'}
@@ -1792,6 +1807,26 @@ class OrderOperations:
         if request.get('action') == 'notice_result':
             return self._checkout_notice_result(request)
         return self._checkout_result_notice(self._checkout_operation(request))
+
+    def _weekly_checkout_problem(self):
+        state = self.store.read()
+        pending = state.get('pending_checkout') or {}
+        if state.get('order_change') or (pending and pending.get('status') != 'awaiting_confirmation'):
+            return None  # Existing dispatches must reconcile before any new planning.
+        menu, plan = state.get('menu'), state.get('cart_plan') or {}
+        if (self._checkout_menu_attribution(menu, plan) != 'menu_bound'
+                or not plan.get('product_plan_digest')):
+            return {'confirmed': False, 'status': 'needs_input', 'reason': 'weekly_menu_products_incomplete',
+                    'next': 'Apply the saved menu product plan and synchronize weekly goods before ordering.'}
+        equipment = [i for i in assess_menu(state).get('issues', []) if i.get('code') == 'equipment_unavailable']
+        if equipment:
+            return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': equipment}
+        year, week = map(int, menu['week'].split('-W'))
+        due = self._due_recurring(state, date.fromisocalendar(year, week, 1))
+        if canonical(due) != canonical(plan.get('recurring_items', [])):
+            return {'confirmed': False, 'status': 'needs_input', 'reason': 'weekly_goods_changed',
+                    'next': 'Synchronize cart action=weekly for this menu before preparing checkout.'}
+        return None
 
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
@@ -1869,6 +1904,8 @@ class OrderOperations:
                 request.get("confirmation_id"),
             )
         if action == "prepare":
+            if request.get("weekly") and (problem := self._weekly_checkout_problem()):
+                return problem
             occurrence = str(request.get("occurrence") or "") or None
             state = self.store.read()
             observation = state.get("delivery_selection")
@@ -1918,6 +1955,8 @@ class OrderOperations:
                     }
                 else:
                     return self._checkout_reconcile(deadline, bound_confirmation)
+            elif request.get("weekly") and (problem := self._weekly_checkout_problem()):
+                return problem
             elif pending and pending.get("status") == "awaiting_confirmation" and not expired_awaiting_confirmation(pending, self._now()):
                 prepared = {
                     "confirmation_id": pending["confirmation_id"],
@@ -1937,7 +1976,7 @@ class OrderOperations:
                     self._bind_protected_request(state, "checkout", idempotency_key, prepared["confirmation_id"])
                 elif existing.get("confirmation_id") != prepared["confirmation_id"]:
                     raise HouseholdError("checkout idempotency_key is bound to another attempt")
-            result = self._checkout_confirm(deadline, prepared["confirmation_id"])
+            result = self._checkout_confirm(deadline, prepared["confirmation_id"], request=request)
             if result.get("reprepared") is True:
                 replacement_id = str(result.get("confirmation_id") or "")
                 if not replacement_id:
@@ -2944,7 +2983,7 @@ class OrderOperations:
                 "confirmation_id": child["confirmation_id"], "original_confirmation_id": pending["confirmation_id"],
                 "confirmation_policy": self.confirmation_policy, "confirmation_required": True,
                 "summary": self._recovery_summary(pending, review, assessment),
-                "next": "Review this same merchant order and authorize its recovery payment. Confirm only with this fresh confirmation_id and actually reviewed dietary finding IDs. No goods have been restaged or payment sent."}
+                "next": "Review this same merchant order and authorize its recovery payment. Confirm only with this fresh confirmation_id and the reviewed summary dietary_assessment.assessment_digest as dietary_review_digest. No goods have been restaged or payment sent."}
 
     def _checkout_recovery_confirm(self, pending, deadline, request):
         confirmation_id = pending["recovery"]["confirmation_id"]
@@ -3109,6 +3148,12 @@ class OrderOperations:
             raise HouseholdError("no fresh checkout confirmation is pending")
         if not pending.get("order_change"):
             self._require_menu_provider(pending.get("menu"))
+        if not pending.get('order_change') and self._checkout_menu_attribution(pending.get('menu'), pending.get('cart_plan')) == 'menu_bound':
+            equipment_state = self.store.read()
+            equipment_state['menu'] = pending['menu']
+            issues = [i for i in assess_menu(equipment_state).get('issues', []) if i.get('code') == 'equipment_unavailable']
+            if issues:
+                return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': issues}
         if confirmation_id != pending.get("confirmation_id"):
             raise HouseholdError("checkout confirmation does not match the prepared summary")
         if current_payment != pending.get("checkout_payment"):
@@ -3221,7 +3266,7 @@ class OrderOperations:
                                 raise CheckoutPreconditionError("the target order changed before the final click")
                     from dietary_assessment import digest
                     with self.store.locked() as state:
-                        if pending.get('dietary_assessment') and digest(state['profile']['diet']) != pending['dietary_assessment']['profile_digest']:
+                        if pending.get('dietary_assessment') and digest({'diet': state['profile']['diet'], 'equipment': state['profile']['meals'].get('equipment', [])}) != pending['dietary_assessment']['profile_digest']:
                             raise CheckoutPreconditionError('dietary rules changed before dispatch; prepare a new summary')
                         try:
                             self._pending_scheduler_guard(state, pending)
@@ -3391,6 +3436,13 @@ class OrderOperations:
                 record["completed_at"] = self._now().isoformat()
         if pending.get("order_change"):
             return
+        plan = pending.get('cart_plan') or {}
+        purchased, _ = self._cart_lines(pending.get('summary') or {})
+        for item in plan.get('recurring_items', []):
+            product_id = str(item['product_id'])
+            required = plan.get('required_quantities', {}).get(product_id, item['quantity'])
+            if purchased.get(product_id, 0) >= required:
+                state.setdefault('recurring_fulfilled', {})[item['fulfillment_key']] = {'order_id': order_id, 'provider': self.provider, 'recorded_at': self._now().isoformat()}
         attribution = pending.get("summary", {}).get("menu_attribution") or self._checkout_menu_attribution(
             pending.get("menu"), pending.get("cart_plan"))
         if attribution != "menu_bound":

@@ -147,3 +147,35 @@ Existing batch/replan, product, scheduler, payment uncertainty and provider test
 remain part of the fleet profile. These tests and the anonymous Oda detail read
 do not claim authenticated dietary checkout, live purchases or native external
 recipient acceptance. Those require separate authorization.
+
+## Weekly shop continuity
+
+`products apply` includes due recurring goods once; a shared product adds the
+menu quantity and the recurring quantity. `cart weekly` refreshes that scope
+with the exact current menu reference. Checkout `weekly=true` requires applied
+menu product evidence. Completed orders fulfill only quantities actually bought;
+cancellation releases that fulfillment. Original idempotency keys always recover
+existing results before evaluating a new shop.
+
+Review material dietary findings with the current confirmation and
+`dietary_review_digest=summary.dietary_assessment.assessment_digest`. Legacy
+finding lists remain supported. Missing information about an ordinary preference
+is advisory. Known allergy and explicit never-buy conflicts remain blocking.
+Legacy `avoid` values are preferences; explicit exclusions use `diet.rules`.
+
+`meals.equipment` records available specialist appliances. Ordinary pots, pans,
+oven and basic utensils are defaults; recognized required specialist equipment
+must be available or have an explicit usable alternative in the recipe. Planning,
+materialization, saved-menu assessment and bound checkout honor this constraint.
+
+Explicit dates preserve recurring batch planning. A one-plan
+`planner_input.prepared_portion_range` adjustment is retained in the handoff and
+does not mutate the permanent profile. Optional ingredient markers in source
+text are retained. Unconfirmed pantry stock is purchased by default, not assumed
+at home. Exact candidate selection accepts an optional localized `search_query`
+to recover irrelevant search results while retaining provider evidence binding.
+
+Partial replans preserve complete frozen batch components and their original eating
+portions even after household defaults change. Explicit `meal_mode=fresh` requests
+fresh replacements without changing that default. Fractional or unequal batch
+projections need a specific adjustment; they are never rounded silently.

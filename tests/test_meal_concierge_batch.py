@@ -146,7 +146,7 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(before,self.store.path.read_bytes())
         menu=self.apply(prepared)['menu']
         repl=self.app.handle({'operation':'menu','action':'replan_prepare','menu_ref':mp.menu_ref(menu),
-            'remaining_dates':[s['date'] for s in menu['slots']], 'planner_input':{'candidates':self.candidates}})['replan']
+            'remaining_dates':[s['date'] for s in menu['slots']], 'planner_input':{'candidates':self.candidates,'meal_mode':'fresh'}})['replan']
         successor=self.app.handle({'operation':'menu','action':'replan_apply','replan':repl})['menu']
         self.assertNotIn('batch',successor)
         self.assertTrue(all('source_slot_id' not in s for s in successor['slots']))

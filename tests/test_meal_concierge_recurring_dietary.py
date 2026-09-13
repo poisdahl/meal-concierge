@@ -98,8 +98,8 @@ class RecurringDietaryTests(unittest.TestCase):
         return menu, product_plan
 
     def test_complete_recurring_plan_shopping_and_verified_automatic_checkout(self):
-        self.profile(diet={'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
-            {'kind': 'preference', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
+        self.profile(diet={'rules': [{'kind': 'sensitivity', 'term': 'sugar'}], 'uncertainty_permissions': [
+            {'kind': 'sensitivity', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
         plan = self.batch()
         self.assertEqual(plan['status'], 'planned')
         menu, products = self.shop(plan)
@@ -209,8 +209,8 @@ class RecurringDietaryTests(unittest.TestCase):
 
     def test_scheduled_notice_resume_and_completed_recovery(self):
         menu, _ = self.shop(self.batch())
-        self.profile(diet={'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
-            {'kind': 'preference', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
+        self.profile(diet={'rules': [{'kind': 'sensitivity', 'term': 'sugar'}], 'uncertainty_permissions': [
+            {'kind': 'sensitivity', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
         self.app.confirmation_policy = 'standing'
         self.app.handle({'operation': 'schedule', 'action': 'update', 'changes': {'enabled': True, 'maximum_total': 200,
             'auto_checkout': True, 'delivery': {'weekday': 'Saturday', 'strategy': 'keep_selected'}}})
@@ -254,8 +254,8 @@ class RecurringDietaryTests(unittest.TestCase):
 
     def test_scheduled_changed_assessment_preserves_amount_scope(self):
         self.shop(self.batch())
-        self.profile(diet={'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
-            {'kind': 'preference', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
+        self.profile(diet={'rules': [{'kind': 'sensitivity', 'term': 'sugar'}], 'uncertainty_permissions': [
+            {'kind': 'sensitivity', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
         self.app.confirmation_policy = 'standing'
         self.app.handle({'operation': 'schedule', 'action': 'update', 'changes': {'enabled': True, 'maximum_total': 200,
             'auto_checkout': True, 'delivery': {'weekday': 'Saturday', 'strategy': 'keep_selected'}}})
@@ -273,8 +273,8 @@ class RecurringDietaryTests(unittest.TestCase):
         self.assertEqual(self.browser.checkout_clicks, 0)
 
     def test_lost_payment_result_keeps_journal_and_never_dispatches_again(self):
-        self.profile(diet={'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
-            {'kind': 'preference', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
+        self.profile(diet={'rules': [{'kind': 'sensitivity', 'term': 'sugar'}], 'uncertainty_permissions': [
+            {'kind': 'sensitivity', 'term': 'sugar', 'product_ref': '10', 'condition': 'unknown', 'accepted': True, 'notify': True}]})
         self.app.confirmation_policy = 'standing'
         notice = self.call('submit', idempotency_key='lost-payment')['notice']
         self.deliver(notice)
