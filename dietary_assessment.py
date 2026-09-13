@@ -91,15 +91,20 @@ def assess(profile, item, *, recipe=False):
                    'smoked food': ['smoked', 'røkt', 'røkte', 'rökt'],
                    'red meat': ['beef', 'pork', 'lamb', 'storfe', 'svin', 'lam', 'oksekjøtt'],
                    'white rice': ['white rice', 'hvit ris', 'vit ris'],
-                   'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'tørre bønner', 'tørkede bønner']}
+                   'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'dry chickpeas', 'dried lentils', 'dry lentils', 'dried peas', 'dry peas', 'tørre bønner', 'tørkede bønner', 'tørkede kikerter', 'tørre kikerter', 'tørkede linser', 'tørre linser', 'tørkede erter', 'tørre erter']}
         terms = aliases.get(text(term), [term])
-        present = any(matches(t, evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'}) for field in ('ingredients', 'allergens', 'may_contain') for t in terms)
+        # Culinary form exclusions can be stated in the retail name even when
+        # the ingredient label just says 'lentils'. Names are not allergen proof.
+        rule_evidence = {**evidence}
+        if text(term) == 'dry whole legumes':
+            rule_evidence['product_name'] = item.get('name', '')
+        present = any(matches(t, rule_evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'}) for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms)
         # An unlisted term is not an allergen-free claim (synonyms/compound ingredients).
         free = not recipe and any(text(v) == text(term) for v in evidence.get('allergen_free_from', []) if isinstance(v, str)) if isinstance(evidence.get('allergen_free_from', []), list) else False
         condition = ('preference_deviation' if kind == 'preference' else 'sensitivity_conflict' if kind == 'sensitivity' else 'conflict') if present else 'compatible_label' if free else 'unknown'
         finding = {**rule, 'condition': condition, 'product_ref': item.get('product_ref'), 'item': item.get('name'),
                    'source': 'recipe_ingredients' if recipe else 'retailer_fields' if any(k in evidence for k in ('ingredients', 'allergens', 'may_contain', 'allergen_free_from')) else 'unavailable',
-                   'evidence': deepcopy(evidence), 'blocked': condition == 'conflict',
+                   'evidence': deepcopy(rule_evidence), 'blocked': condition == 'conflict',
                    'unknown': 'Exact retail ingredient/allergen suitability remains unresolved.' if condition == 'unknown' else None}
         finding['finding_id'] = digest(finding)
         findings.append(finding)

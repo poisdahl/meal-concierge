@@ -1643,7 +1643,7 @@ class OrderOperations:
                 # Unknown preferences are not actionable findings. In particular,
                 # a tissue box need not certify that it contains no white rice.
                 findings.extend(f for f in assess(profile, product)
-                                if not (f['kind'] == 'preference' and f['condition'] == 'unknown'))
+                                if not (f['kind'] in {'preference', 'never_buy'} and f['condition'] == 'unknown'))
         value = {'findings': findings, 'profile_digest': digest({'diet': profile['diet'], 'equipment': profile['meals'].get('equipment', [])})}
         value['assessment_digest'] = digest(value)
         return value
@@ -2462,6 +2462,11 @@ class OrderOperations:
                 summary["menu_attribution"] = self._checkout_menu_attribution(menu_baseline, cart_plan_baseline)
                 if menu_baseline and summary["menu_attribution"] == "cart_only":
                     summary["menu_coverage"] = "not_assessed"
+                elif summary["menu_attribution"] == "menu_bound":
+                    product_summary = cart_plan_baseline.get("product_plan_summary", {})
+                    if product_summary.get("coverage_status") == "practical_estimate":
+                        summary["menu_coverage"] = "practical_estimate"
+                        summary["quantity_estimates"] = deepcopy(product_summary.get("quantity_estimates", []))
             if self.provider == "meny":
                 review = deepcopy(dict(review))
                 review["delivery_guard"] = deepcopy(dict(delivery_binding))

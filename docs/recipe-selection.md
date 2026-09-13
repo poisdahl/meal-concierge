@@ -111,8 +111,8 @@ version. Immutable snapshots retain their existing expiry and storage limits;
 expired details are not reused. Conversion action `convert` requires
 `discovery_ref`, its `recipe_digest`, `source_schema_version`, and a schema-2
 `recipe`. It preserves source attribution and cannot assert new source/user
-quantity evidence. Estimates remain unaccepted until the separate exact
-`accept_estimates` operation. Accepted conversions remain reachable on the next
+quantity evidence. Usable estimates remain visibly estimated and need no separate approval for
+planning; optional personal acceptance uses the exact `accept_estimates` operation. Accepted conversions remain reachable on the next
 automatic request. No personal save/favorite or additional model service occurs.
 
 The runtime test exercises real MCP 2.1.1 over stdio, Unix Server/Application,

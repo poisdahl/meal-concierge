@@ -1794,7 +1794,7 @@ class PlanningOperations:
             if isinstance(approval, Mapping):
                 values.append({
                     key: deepcopy(approval[key])
-                    for key in ("requirement_id", "candidate_refs", "max_excess", "search_query")
+                    for key in ("requirement_id", "candidate_refs", "max_excess", "search_query", "package_count", "quantity_basis")
                     if key in approval
                 })
         return values
@@ -1982,6 +1982,8 @@ class PlanningOperations:
                 "non_price_selection": deepcopy(handoff["selection"]), "save_handoff": deepcopy(handoff),
                 "product_plan": product_plan,
             })
+            if product_plan.get("coverage_status") == "practical_estimate":
+                comparison["unavailable"].append({"reason": "practical_package_estimate_not_exact_comparison"})
             if product_plan["status"] != "prepared":
                 comparison["unavailable"].append({"selection_digest": handoff["selection_digest"],
                                                    "requirements": product_plan["unresolved_requirements"]})
@@ -2164,8 +2166,14 @@ class PlanningOperations:
                 state.pop("product_plan_completion", None)
                 state["cart_plan"]["product_plan_digest"] = supplied["product_plan_digest"]
                 state["cart_plan"]["product_plan_summary"] = {
-                    key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions")
+                    key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions", "coverage_status")
                 }
+                state["cart_plan"]["product_plan_summary"]["quantity_estimates"] = [
+                    {"item": row["item"], "quantity": deepcopy(row["quantity"]), "unit": row["unit"],
+                     "quantity_basis": row["selection"]["quantity_basis"],
+                     "packages": [{"name": p["name"], "quantity": p["quantity"]} for p in row["selection"]["products"]]}
+                    for row in supplied["requirements"] if row.get("selection", {}).get("coverage_status") == "practical_estimate"
+                ]
             price_verification = self._verified_cart_product_amounts(
                 supplied, cart_result.get("cart")
             )

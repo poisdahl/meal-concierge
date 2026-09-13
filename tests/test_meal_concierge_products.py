@@ -388,6 +388,51 @@ class ProductObservationTests(unittest.TestCase):
 
 
 class ProductPlannerTests(unittest.TestCase):
+    def test_plain_cooking_water_stays_in_recipe_but_is_not_default_shopping(self):
+        value = menu({'item':'vann','quantity':600,'unit':'ml'}, {'item':'mineral water','quantity':500,'unit':'ml'})
+        needs, unresolved = menu_requirements(value)
+        self.assertEqual([r['item'] for r in needs], ['mineral water'])
+        self.assertEqual(unresolved, [])
+        self.assertEqual(value['dishes'][0]['shopping_requirements'][0]['quantity'],600)
+        needs, unresolved = menu_requirements(value, ingredient_decisions=[{'source':{'collection':'dishes','recipe_index':0,'ingredient_index':0},'action':'include'}])
+        self.assertEqual({r['item'] for r in needs},{'vann','mineral water'})
+
+    def test_practical_spice_and_produce_packages_preserve_units_and_price(self):
+        for item, amount, unit, retail, size in [('spisskummen', 1, 'tsp', 'Spisskummen', 35), ('gul løk', 3, 'count', 'Gul løk', 500)]:
+            value = menu({'item': item, 'quantity': amount, 'unit': unit})
+            req = menu_requirements(value)[0][0]
+            selected = product('10', retail, size, 'g', [option(2500)])
+            approval = {'requirement_id': req['requirement_id'], 'candidate_refs': ['10'],
+                        'package_count': 1, 'quantity_basis': 'One ordinary retail package is estimated to cover this cooking quantity.'}
+            def plan(candidate=selected, choice=approval):
+                return build_product_plan(provider='oda', binding={}, menu=value,
+                    observations={req['requirement_id']: observation(item, [candidate])}, candidate_approvals=[choice])
+            result = plan()
+            self.assertEqual(result['status'], 'prepared')
+            self.assertEqual(result['coverage_status'], 'practical_estimate')
+            self.assertIsNone(result['comparison_claim'])
+            row = result['requirements'][0]['selection']
+            self.assertEqual(row['unit'], req['unit'])
+            self.assertEqual(row['observed_package']['unit'], 'g')
+            self.assertIsNone(row['coverage']); self.assertIsNone(row['surplus_quantity'])
+            self.assertEqual(result['totals']['total_payable_ore'], 2500)
+            self.assertEqual(cart_requirements(result)[0]['quantity'], 1)
+            changed = deepcopy(selected); changed['availability'] = 'unavailable'
+            self.assertEqual(plan(changed)['status'], 'needs_input')
+            changed = deepcopy(selected); changed['package_limit'] = {'count': 0}
+            self.assertEqual(plan(changed)['status'], 'needs_input')
+            for count in (True, 0, 101):
+                with self.assertRaises(HouseholdError): plan(choice={**approval, 'package_count': count})
+
+    def test_practical_package_cannot_exchange_dry_and_cooked_forms(self):
+        value = menu({'item': 'hermetiske bønner', 'quantity': 1, 'unit': 'count'})
+        req = menu_requirements(value)[0][0]
+        result = build_product_plan(provider='oda', binding={}, menu=value,
+            observations={req['requirement_id']: observation('bønner', [product('10', 'Tørkede bønner', 500, 'g', [option(2500)])])},
+            candidate_approvals=[{'requirement_id': req['requirement_id'], 'candidate_refs': ['10'],
+                                 'package_count': 1, 'quantity_basis': 'Estimate one pack.'}])
+        self.assertEqual(result['status'], 'needs_input')
+
     def test_requirements_aggregate_only_exact_identity_and_dimensions(self):
         requirements, unresolved = menu_requirements(menu(
             {"item": "Havregryn", "quantity": 0.5, "unit": "kg"},

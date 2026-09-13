@@ -256,7 +256,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                     elif all(e.get("acceptance") or e.get("project_review") for e in estimates):
                         text += " (anslag fra Meal Concierge)"
                     else:
-                        text += " (anslag; må avklares)"
+                        text += " (anslag)"
             else:
                 text = str(value).strip()
             if text:
@@ -416,7 +416,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 elif portion_evidence.get("project_review"):
                     portions_text += " (anslag fra Meal Concierge)"
                 else:
-                    portions_text += " (anslag; må avklares)"
+                    portions_text += " (anslag)"
                 if portion_evidence.get("assumptions"):
                     portions_text += ": " + portion_evidence["assumptions"]
             source_yield = recipe.get("yield") or {}

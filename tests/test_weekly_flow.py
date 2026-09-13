@@ -54,6 +54,16 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(result['dietary_review_required'])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    def test_unknown_culinary_exclusion_is_advisory_but_known_dry_lentils_block(self):
+        from dietary_assessment import assess
+        self.profile(diet={'rules': [{'kind': 'never_buy', 'term': 'dry whole legumes'}]})
+        self.assertEqual(self.call('prepare')['summary']['dietary_assessment']['findings'], [])
+        profile = self.store.read()['profile']
+        findings = assess(profile, {'name': 'Tørkede linser', 'dietary_evidence': {'ingredients': 'Grønne linser'}})
+        self.assertTrue(any(f['blocked'] for f in findings))
+        findings = assess(profile, {'name': 'Hermetiske linser', 'dietary_evidence': {'ingredients': 'Linser, vann'}})
+        self.assertFalse(any(f['blocked'] for f in findings))
+
     def test_recurring_shared_sku_is_additive_idempotent_and_fulfilled(self):
         self.recurring()
         menu, products = self.shop(self.batch())

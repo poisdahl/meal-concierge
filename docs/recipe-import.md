@@ -344,7 +344,8 @@ with the same discovery snapshot.
 
 An ingredient may add `estimated_amount: {quantity, unit, assumptions}`; a yield
 selection may add `estimated_portions: {quantity, assumptions}`. These values
-always become unaccepted estimates, independently of the physical yield. The
+always remain labeled estimates, independently of the physical yield. Usable
+estimates with stated assumptions can be planned without separate acceptance. The
 input cannot supply evidence, acceptance, rights, provider, managed image or
 trusted source-context assertions. Optional attribution permits only URL,
 publisher, title and author; known store attribution retains effective binding.

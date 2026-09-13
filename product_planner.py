@@ -232,6 +232,10 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 if decision:
                     used.add(canonical(position))
                     explicit_stock.add(identity)
+                # Plain cooking water is a preparation input, not inferred stock.
+                # An explicit include still permits a requested water purchase.
+                if identity in {'water', 'vann', 'tap water', 'springvann', 'kranvann'} and action != 'include':
+                    continue
                 if action == "omit" and raw.get("optional") is not True:
                     raise HouseholdError("only an optional ingredient can be omitted")
                 if action == "omit" or (action == "have_all" and (quantity is None or conversion is None or identity is None or not scalable)):
@@ -319,7 +323,7 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         raise HouseholdError("candidate_approvals must be a bounded list")
     approvals = {}
     for raw in value:
-        if not isinstance(raw, Mapping) or set(raw).difference({"requirement_id", "candidate_refs", "max_excess", "search_query"}):
+        if not isinstance(raw, Mapping) or set(raw).difference({"requirement_id", "candidate_refs", "max_excess", "search_query", "package_count", "quantity_basis"}):
             raise HouseholdError("candidate approval has unknown fields")
         requirement_id = raw.get("requirement_id")
         refs = raw.get("candidate_refs")
@@ -343,6 +347,13 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             if not isinstance(query, str) or not 1 <= len(query.strip()) <= 150:
                 raise HouseholdError("search_query must be a short ingredient search")
             approval["search_query"] = query.strip()
+        if "package_count" in raw or "quantity_basis" in raw:
+            count, basis = raw.get("package_count"), raw.get("quantity_basis")
+            if len(refs) != 1 or type(count) is not int or not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT or not isinstance(basis, str) or not 1 <= len(basis.strip()) <= 600:
+                raise HouseholdError("practical package choice needs one exact candidate, bounded package_count and quantity_basis")
+            if raw.get("max_excess") is not None:
+                raise HouseholdError("practical package coverage cannot claim an exact maximum excess")
+            approval.update(package_count=count, quantity_basis=basis.strip())
         if raw.get("max_excess") is not None:
             maximum = _read_fraction(raw["max_excess"])
             if maximum > 100:
@@ -651,6 +662,59 @@ def _estimated_single_product(requirement, observation, approval):
             "merchandise_ore": merchandise, "mandatory_deposit_ore": None, "total_payable_ore": None}
 
 
+def _form_conflict(requirement, product):
+    # Never use a package estimate as a dry/cooked legume substitution.
+    dry = r"\b(?:dry|dried|tørre|tørket|tørkede)\b"
+    cooked = r"\b(?:cooked|canned|jarred|kokte|ferdigkokte|hermetiske|hermetisk|avrent|drained)\b"
+    wanted, offered = str(requirement['item']).casefold(), str(product.get('name', '')).casefold()
+    return bool((re.search(dry, wanted) and re.search(cooked, offered)) or
+                (re.search(cooked, wanted) and re.search(dry, offered)))
+
+
+def _practical_packages(requirement, observation, approval, price_mode):
+    """Select observed whole packages without claiming a physical conversion."""
+    refs = approval['candidate_refs']
+    if 'package_count' not in approval or len(refs) != 1:
+        return None
+    products = [p for p in observation['products'] if p['product_ref'] == refs[0]]
+    if len(products) != 1:
+        return None
+    product = products[0]
+    count = approval['package_count']
+    package = product.get('package')
+    if (product.get('availability') != 'available' or not isinstance(package, Mapping)
+            or _package_quantity(package, package.get('unit')) is None
+            or _package_quantity(package, requirement['unit']) is not None
+            or _form_conflict(requirement, product)
+            or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
+        return None
+    options = product.get('purchase_options', [])
+    if not options:
+        return None
+    try:
+        cost = _option_costs(product, count)[count]
+    except HouseholdError:
+        cost = None
+    if cost is None and price_mode == 'estimate' and len(options) == 1:
+        option = options[0]
+        if (option.get('price_kind') == 'exact' and option.get('eligibility') == 'confirmed'
+                and option.get('offer_kind') == 'regular' and option.get('package_count') == 1
+                and type(option.get('merchandise_ore')) is int and option['merchandise_ore'] >= 0
+                and option.get('mandatory_deposit_ore') is None):
+            cost = {'merchandise_ore': count * option['merchandise_ore'],
+                    'mandatory_deposit_ore': None, 'total_payable_ore': None, 'bundles': []}
+    if cost is None:
+        return None
+    amounts = {k: cost[k] for k in ('merchandise_ore', 'mandatory_deposit_ore', 'total_payable_ore')}
+    return {'products': [{'product_ref': refs[0], 'name': product['name'], 'quantity': count,
+                         'dietary_assessments': deepcopy(product.get('dietary_findings', [])),
+                         'purchase_options': cost['bundles'], **amounts}],
+            'coverage_status': 'practical_estimate', 'quantity_basis': approval['quantity_basis'],
+            'observed_package': deepcopy(package), 'coverage': None,
+            'required': deepcopy(requirement['quantity']), 'unit': requirement['unit'],
+            'excess_score': None, 'package_count': count, **amounts}
+
+
 def _candidate_diagnostics(requirement, observation, approval):
     """Explain observed size/unit/price blockers without inventing conversions."""
     result = []
@@ -742,7 +806,7 @@ def build_product_plan(
         product_findings = {p['product_ref']: assess(dietary_profile or {'diet': hard_constraints}, p) for p in observation['products']}
         item['dietary_assessments'] = [f for values in product_findings.values() for f in values]
         filtered = deepcopy(approval)
-        nonfood = {p['product_ref'] for p in observation['products'] if nonfood_candidate(p)}
+        nonfood = {p['product_ref'] for p in observation['products'] if nonfood_candidate(p) or _form_conflict(requirement, p)}
         filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if ref not in nonfood and not any(f['blocked'] for f in product_findings.get(ref, []))]
         evaluated_observation = deepcopy(observation)
         for product in evaluated_observation['products']:
@@ -755,6 +819,10 @@ def build_product_plan(
             estimated = _estimated_single_product(requirement, evaluated_observation, filtered)
             if estimated is not None:
                 selection, reason, eligible_count = estimated, None, 1
+        if reason == "candidate_package_incompatible":
+            practical = _practical_packages(requirement, evaluated_observation, filtered, price_mode)
+            if practical is not None:
+                selection, reason, eligible_count = practical, None, 1
         item["eligible_candidate_count"] = eligible_count
         if reason is not None:
             problem = {"requirement_id": requirement_id, "item": requirement["item"], "reason": reason}
@@ -766,7 +834,7 @@ def build_product_plan(
         else:
             item["status"] = "selected"
             item["selection"] = selection
-            selection["surplus_quantity"] = _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
+            selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
             merchandise += selection["merchandise_ore"]
             if selection["total_payable_ore"] is None:
                 payable_known = False
@@ -774,12 +842,14 @@ def build_product_plan(
                 deposit += selection["mandatory_deposit_ore"]
                 payable += selection["total_payable_ore"]
             packages += selection["package_count"]
-            excess += _read_fraction(selection["excess_score"])
+            if selection["excess_score"] is not None:
+                excess += _read_fraction(selection["excess_score"])
         planned.append(item)
     stock_covers_menu = bool(menu.get("available_ingredients")) and any(
         recipe.get("shopping_requirements") for collection in ("dishes", "salads") for recipe in menu[collection]
     )
     status = "prepared" if (requirements or ingredient_decisions or stock_covers_menu) and not unresolved else "needs_input"
+    practical_coverage = any(r.get("selection", {}).get("coverage_status") == "practical_estimate" for r in planned)
     plan: dict[str, Any] = {
         "product_plan_version": PRODUCT_PLAN_VERSION,
         "provider": provider,
@@ -789,6 +859,7 @@ def build_product_plan(
         **({"available_ingredients": deepcopy(menu["available_ingredients"])} if menu.get("available_ingredients") else {}),
         "budget_ore": budget_ore,
         "price_mode": price_mode,
+        "coverage_status": "practical_estimate" if practical_coverage else "exact",
         "cost_status": "exact_product_payable" if payable_known and status == "prepared" else "merchandise_estimate_only" if status == "prepared" else "unresolved",
         "status": status,
         "scope": {
@@ -802,7 +873,7 @@ def build_product_plan(
         "unresolved_requirements": unresolved,
         "comparison_claim": (
             f"best dietary fit, then lowest verified total payable amount among the approved, exactly priced candidates observed for {len(requirements)} bounded {provider.upper()} searches"
-            if status == "prepared" and payable_known else None
+            if status == "prepared" and payable_known and not practical_coverage else None
         ),
         "excluded_costs": ["delivery", "cart_level_bags", "cart_level_fees", "checkout_price_drift"],
     }
@@ -811,7 +882,7 @@ def build_product_plan(
             "merchandise_ore": merchandise,
             "mandatory_deposit_ore": deposit if payable_known else None,
             "total_payable_ore": payable if payable_known else None,
-            "excess_score": _fraction_json(excess),
+            "excess_score": None if practical_coverage else _fraction_json(excess),
             "package_count": packages,
         }
         plan["budget_status"] = "not_set" if budget_ore is None else "exceeded" if merchandise + deposit > budget_ore else "unverified" if not payable_known else "within_budget"

@@ -621,7 +621,8 @@ class ApplicationSelectionTests(unittest.TestCase):
         conversion = self.app.handle({"operation": "recipes", "action": "convert", "discovery_ref": exact,
             "recipe_digest": recipe_digest(full), "source_schema_version": 2, "recipe": changed})
         pending = self.app.handle(request_value)["plan"]
-        self.assertNotEqual(pending["status"], "planned")
+        self.assertEqual(pending["status"], "planned")
+        self.assertEqual(pending["selection"]["slots"][0]["reference"]["discovery_ref"], conversion["discovery_ref"])
         self.assertFalse(pending["discovery"]["ai_fallback_eligible"])
         accepted = self.app.handle({"operation": "recipes", "action": "accept_estimates",
             "discovery_ref": conversion["discovery_ref"], "recipe_digest": conversion["recipe_digest"],

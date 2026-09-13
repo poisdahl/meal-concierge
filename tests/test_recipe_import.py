@@ -1848,7 +1848,7 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(recipe['portions_evidence']['basis'], 'estimate')
         self.assertEqual(recipe['ingredients'][2]['evidence']['quantity']['basis'], 'estimate')
         self.assertNotIn('acceptance', json.dumps(recipe))
-        self.assertFalse(scale_recipe(recipe)['readiness']['scaling_ready'])
+        self.assertTrue(scale_recipe(recipe)['readiness']['scaling_ready'])
         del value['interpretation']['yield']['estimated_portions']
         self.assertIsNone(read_transcript(value)['candidate']['portions'])
 
@@ -1987,7 +1987,7 @@ class ImportApplicationTests(unittest.TestCase):
     def test_estimate_acceptance_preserves_source_and_no_personal_entry(self):
         self.source['interpretation']['ingredients'][2]['estimated_amount'] = {'quantity': 1, 'unit': 'stk', 'assumptions': 'One medium tomato.'}
         preview = self.preview()
-        self.assertEqual(preview['suggested_status'], 'draft')
+        self.assertEqual(preview['suggested_status'], 'active')
         accepted = self.call('accept_estimates', discovery_ref=preview['discovery_ref'], recipe_digest=preview['recipe_digest'],
             estimate_fields=['ingredients.2.quantity', 'ingredients.2.unit'], confirmation_statement='I accept these exact recipe estimates and their stated assumptions.')
         self.assertEqual(accepted['source_identity'], preview['source_identity'])
