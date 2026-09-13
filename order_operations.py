@@ -3054,6 +3054,24 @@ class OrderOperations:
                     if canonical(current) == canonical(expected):
                         current.pop("recovery")
                 raise
+            except HouseholdError:
+                if (dispatch_claimed and vipps_dispatched is None
+                        and self.provider == "oda"
+                        and child["browser_review"]["payment_choice"]["method"] == "vipps"):
+                    # before_vipps_request persists its fence synchronously
+                    # before the hosted submit mouse events. An error with no
+                    # fence is therefore a known no-request outcome.
+                    with self.store.locked() as state:
+                        if canonical(state.get("pending_checkout")) == canonical(dispatched):
+                            current = state["pending_checkout"]["recovery"]
+                            current["status"] = "uncertain"
+                            current["vipps_request_status"] = "not_sent"
+                            current["payment_failure"] = {
+                                "payment_failed": True,
+                                "order_id": safe_order_id(child["order_id"]),
+                                "reason": "payment_handoff_failed_before_vipps_request",
+                            }
+                raise
             if vipps_request_sent:
                 return {
                     "confirmed": False,

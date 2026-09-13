@@ -74,6 +74,12 @@ class MerchantBrowser:
             raise CheckoutPreconditionError("recovery navigation changed before click")
         self.clicks += 1
         if self.lost_response:
+            before_vipps_request = kwargs.get("before_vipps_request")
+            if before_vipps_request:
+                before_vipps_request({
+                    "tab_id": "vipps-tab", "expected_total": 24640,
+                    "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
+                })
             raise HouseholdError("response lost after dispatch")
         self.merchant.status = "paid_and_modifiable"
 
@@ -191,6 +197,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.browser.clicks, 1)
         self.assertIsNone(self.app.store.read()["pending_checkout"])
         self.assertNotIn("get_cart", self.merchant.calls)
+
+    def test_contextless_recovery_failure_is_retryable_without_an_owner_report(self):
+        prepared = self.prepare()
+
+        def fail_before_vipps_request(_cart, _review, before_click, **_kwargs):
+            before_click()
+            self.browser.clicks += 1
+            raise HouseholdError("payment page was slow")
+
+        self.browser.submit_payment_recovery = fail_before_vipps_request
+        with self.assertRaisesRegex(HouseholdError, "payment page was slow"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+
+        reconciled = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(reconciled["payment_failed"])
+        self.assertEqual(reconciled["payment_request_state"], "not_sent")
+        self.assertTrue(reconciled["recovery_preparation_available"])
+        failed = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(failed["payment_failure"], {
+            "payment_failed": True,
+            "order_id": "order-1",
+            "reason": "payment_handoff_failed_before_vipps_request",
+        })
+        self.assertNotIn("owner_reported_no_vipps_request_after_attempt_at", failed)
+        self.assertEqual(self.browser.clicks, 1)
 
     def test_exact_owner_report_accepts_the_paid_tracking_conflict(self):
         for tracking_status in ("paid_and_modifiable", "paid_and_not_modifiable"):

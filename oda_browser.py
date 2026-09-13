@@ -1761,7 +1761,7 @@ class OdaBrowser:
             raise HouseholdError("The Oda/Vipps payment has no reviewed source page; do not send payment")
         source_url = _oda_https_gateway_url(source_url)
         gateway_url = None
-        for attempt in range(40):
+        for attempt in range(120):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             try:
@@ -1780,7 +1780,7 @@ class OdaBrowser:
                         break
             except HouseholdError:
                 pass
-            if attempt < 39:
+            if attempt < 119:
                 self._settle(0.25)
         if gateway_url is None:
             raise HouseholdError("The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment")
