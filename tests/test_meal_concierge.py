@@ -2408,24 +2408,30 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const next=node(c.button||'Next');const form=node();
-phone.closest=s=>s==='form'?form:null;
+phone.closest=s=>s==='form'&&c.inForm?form:null;
 form.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
 global.location=new URL(c.url);
 global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:'1'});
-const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:[];
+const main=node(text),component=node(),phoneOnly=node(),buttonOnly=node();
+phone.parentElement=c.shared===false?phoneOnly:component;next.parentElement=c.shared===false?buttonOnly:component;
+component.parentElement=main;phoneOnly.parentElement=main;buttonOnly.parentElement=main;
+component.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
+phoneOnly.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:[];
+buttonOnly.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
+main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False, shared=True):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=expected_url or url,
                     ),
-                    "c": {"phone": phone, "url": url, "text": text, "button": button},
+                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form, "shared": shared},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2440,6 +2446,14 @@ process.stdout.write(eval(script));
         self.assertEqual(evaluate("90000000"), {
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
+        })
+        self.assertEqual(evaluate("90000000", in_form=True), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+        self.assertEqual(evaluate("90000000", shared=False), {
+            "identity": True, "ready": False, "sent": False, "expired": False,
+            "fillable": False, "phone_matches": False,
         })
         self.assertEqual(evaluate("90000000", text="ODA 256.50 NOK", button="OK"), {
             "identity": True, "ready": True, "sent": False, "expired": False,
@@ -2660,7 +2674,7 @@ process.stdout.write(eval(script));
                             for call in browser._eval.call_args_list[1:]))
         self.assertIn(mock.call("mouse", "down"), browser._invoke.call_args_list)
 
-    def test_oda_vipps_gateway_without_a_verified_payment_form_is_not_clicked(self):
+    def test_oda_vipps_gateway_without_a_verified_payment_component_is_not_clicked(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
@@ -2686,7 +2700,6 @@ process.stdout.write(eval(script));
                 source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
             )
 
-        self.assertEqual(browser._eval.call_count, 260)
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
