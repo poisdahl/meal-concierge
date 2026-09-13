@@ -684,8 +684,7 @@ def _practical_packages(requirement, observation, approval, price_mode):
     product = products[0]
     count = approval['package_count']
     package = product.get('package')
-    if (product.get('availability') != 'available' or not isinstance(package, Mapping)
-            or _package_quantity(package, package.get('unit')) is None
+    if (product.get('availability') != 'available'
             or _form_conflict(requirement, product)
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
@@ -714,7 +713,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
                          'dietary_assessments': deepcopy(product.get('dietary_findings', [])),
                          'purchase_options': cost['bundles'], **amounts}],
             'coverage_status': 'practical_estimate', 'quantity_basis': approval['quantity_basis'],
-            'observed_package': deepcopy(package), 'coverage': None,
+            'observed_package': deepcopy(package),
+            'observed_package_description': product.get('display', {}).get('package'), 'coverage': None,
             'required': deepcopy(requirement['quantity']), 'unit': requirement['unit'],
             'excess_score': None, 'package_count': count, **amounts}
 

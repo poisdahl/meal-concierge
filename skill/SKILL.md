@@ -645,6 +645,8 @@ Use the complete required amount when estimating enough packages. The same
 products prepare/apply path records `coverage_status=practical_estimate`,
 rechecks observed price/availability and includes recurring goods. Explain the
 estimate briefly; never invent gram/ml equality, stock, or dry/cooked equivalence.
+Missing numeric package metadata does not block a deliberate count of observed
+retailer units; keep its size and exact coverage unknown.
 Observed package limits bound this selection; they do not establish remaining customer eligibility
 after prior purchases or account for separate cart extras.
 

@@ -385,7 +385,7 @@ def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
     elif quantity is not None:
         quantity = _finite_positive(quantity, f"ingredients[{index}].quantity")
     optional = value.get("optional", False)
-    if optional is False and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (raw, item) if v), re.I):
+    if "optional" not in value and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (raw, item) if v), re.I):
         optional = True
     pantry = value.get("pantry", False)
     if not isinstance(optional, bool) or not isinstance(pantry, bool):
@@ -491,7 +491,7 @@ def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
     if not isinstance(scalable, bool) or (scalable and (quantity is None or unit is None)):
         raise RecipeError(f"{field} scalable quantity requires a positive amount and unit")
     flags = {key: value.get(key, False) for key in ("optional", "pantry")}
-    if flags["optional"] is False and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (original, raw, item) if v), re.I):
+    if "optional" not in value and re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", " ".join(v for v in (original, raw, item) if v), re.I):
         flags["optional"] = True
     if any(not isinstance(flag, bool) for flag in flags.values()):
         raise RecipeError(f"{field} optional and pantry must be true or false")

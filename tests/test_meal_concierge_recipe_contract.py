@@ -101,6 +101,23 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(normalize_recipe(reread), native)
         self.assertEqual(restarted.recipes.resolve_discovery(frozen["discovery_ref"])["recipe"], native)
 
+    def test_stored_optional_false_remains_canonical_and_new_import_can_infer(self):
+        from recipes import _stored_recipe_document, _canonical
+        # Simulate the complete document emitted before optional-marker inference:
+        # an explicit stored flag is a versioned fact, even if its text differs.
+        for schema in (1, 2):
+            value = authored_recipe()
+            value['schema_version'] = schema
+            value['ingredients'] = [{'item':'chili (optional, for heat)', 'quantity':1, 'unit':'count', 'optional':False}]
+            recipe = normalize_recipe(value)
+            self.assertFalse(recipe['ingredients'][0]['optional'])
+            frozen = _canonical(recipe)
+            self.assertEqual(_canonical(_stored_recipe_document(frozen)), frozen)
+            saved = self.save(recipe, key='old-optional-'+str(schema))
+            self.assertFalse(self.app.recipes.get(saved['id'], saved['revision'])['ingredients'][0]['optional'])
+            del value['ingredients'][0]['optional']
+            self.assertTrue(normalize_recipe(value)['ingredients'][0]['optional'])
+
     def test_literal_old_document_and_discovery_digests_survive_restart(self):
         old = json.loads(LEGACY)
         self.assertEqual(recipe_digest(old), LEGACY_DIGEST)
@@ -156,6 +173,12 @@ class RecipeContractTests(unittest.TestCase):
             self.app.handle({"operation": "recipes", "action": "update", "recipe_id": saved["id"], "expected_revision": 2, "recipe": changed})
 
     def test_generated_cooking_estimate_reaches_menu_and_practical_cart(self):
+        self._exercise_practical_cart()
+
+    def test_observed_retail_units_without_numeric_package_metadata_reach_cart(self):
+        self._exercise_practical_cart(package_unknown=True)
+
+    def _exercise_practical_cart(self, *, package_unknown=False):
         from unittest.mock import patch
         recipe = authored_recipe()
         recipe.update(name='Estimated ordinary-pot dinner', portions=2,
@@ -174,21 +197,33 @@ class RecipeContractTests(unittest.TestCase):
         req = menu_requirements(menu)[0][0]
         original_call = self.provider.call
         observed_price = [1000]
+        observed_description = ["35 g"]
         def observe(tool, arguments, **kwargs):
             if tool == 'product_search':
-                return observation(arguments['queries'][0], [product('10','Spisskummen',35,'g',[option(observed_price[0])])])
+                chosen = product('10','Spisskummen',35,'g',[option(observed_price[0])])
+                if package_unknown:chosen['package'] = None
+                chosen['display']['package'] = observed_description[0]
+                return observation(arguments['queries'][0], [chosen])
             return original_call(tool, arguments, **kwargs)
         with patch.object(self.provider,'call',side_effect=observe):
             prepared = self.app.handle({'operation':'products','action':'prepare','menu_ref':ref,
                 'candidate_approvals':[{'requirement_id':req['requirement_id'],'candidate_refs':['10'],
                     'package_count':1,'quantity_basis':'One 35 g jar is estimated to cover three teaspoons.'}]})
             self.assertEqual(prepared['product_plan']['status'],'prepared')
+            if package_unknown:
+                self.assertIsNone(prepared['product_plan']['requirements'][0]['selection']['observed_package'])
             observed_price[0] = 1100
             drift = self.app.handle({'operation':'products','action':'apply',
                 **prepared['apply_arguments'], 'cart_change_requested':True})
             self.assertFalse(drift['applied'])
             self.assertEqual(self.provider.cart['items'], [])
             observed_price[0] = 1000
+            observed_description[0] = 'Changed retail unit size'
+            drift = self.app.handle({'operation':'products','action':'apply',
+                **prepared['apply_arguments'], 'cart_change_requested':True})
+            self.assertFalse(drift['applied'])
+            self.assertEqual(self.provider.cart['items'], [])
+            observed_description[0] = '35 g'
             result = self.app.handle({'operation':'products','action':'apply',
                 **prepared['apply_arguments'], 'cart_change_requested':True})
             self.assertTrue(result['applied'], result)
