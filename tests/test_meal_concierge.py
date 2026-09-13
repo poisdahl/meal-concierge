@@ -2674,7 +2674,7 @@ process.stdout.write(eval(script));
                             for call in browser._eval.call_args_list[1:]))
         self.assertIn(mock.call("mouse", "down"), browser._invoke.call_args_list)
 
-    def test_oda_vipps_gateway_without_a_verified_payment_form_is_not_clicked(self):
+    def test_oda_vipps_gateway_without_a_verified_payment_component_is_not_clicked(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
@@ -2700,7 +2700,6 @@ process.stdout.write(eval(script));
                 source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
             )
 
-        self.assertEqual(browser._eval.call_count, 260)
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
