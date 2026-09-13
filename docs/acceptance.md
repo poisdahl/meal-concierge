@@ -200,7 +200,7 @@ provider outcome.
 | Recipe search and details | `recipes`, `recipe_discovery` | `test_meal_concierge_recipes.py`, `test_meal_concierge_retailer_recipes.py`, `test_meal_concierge_recipe_selection.py`; native seven-day store scenarios below; authenticated MENY adapter search/detail and Oda/Mathem MCP search plus exact public details | Later Oda calls returned MCP internal error -32603; a repeat MENY search timed out rendering; no exact native bulk-cart preview exists |
 | Import and migration | `recipe_import`, `migration`; `import_recipes.py` | `test_recipe_import.py`, `test_meal_concierge_migration.py`; authenticated real Mealie 3.24.0 import and independent bank readback; prior scoped MC-07 extraction acceptance | New imports target builtin. RecipeSage source-account and further client/input acceptance remain unverified/deferred; fixture formats are documented separately |
 | Recipe writes, favorites and labels | `recipe_write`, `recipe_favorite`, `recipe_labels`, `recipe_lifecycle` | `test_meal_concierge_recipes.py`, `test_meal_concierge_private_recipes.py`, `test_meal_concierge_acceptance.py`; new builtin saves and exact original-operation recovery covered | External labels/lifecycle writes exist only for exact retained recovery, not new primary-library use |
-| Covers, attachments and archives | `recipe_cover`, `recipe_image`; private export/restore and consistent installation backup | `test_recipe_import.py`, `test_meal_concierge_recipe_assets.py`, `test_meal_concierge_recipe_contract.py`; prior scoped MC-07 attachment/image/local-sender acceptance | Original attachment extraction is client-specific. New Mealie source-account test covered text fields, not native image upload; remaining MC-wide client matrix is #52 |
+| Covers, attachments and archives | `recipe_cover`, `recipe_image`; private export/restore and consistent installation backup | `test_recipe_import.py`, `test_meal_concierge_recipe_assets.py`, `test_meal_concierge_recipe_contract.py`; prior scoped MC-07 attachment/image/local-sender acceptance | Original attachment extraction is client-specific. New Mealie source-account test covered text fields, not native image upload; residual client-specific boundaries are qualified in the [platform matrix](platform-acceptance.md) and are not inferred by #52's owner-rescoped closure |
 | Dinner/week planning and alternatives | `menu`: plan, resolve_handoff, save/get, assess | `test_meal_concierge_planner.py`, `test_meal_concierge_recipe_selection.py`, `test_recipe_selection_runtime.py`; native store, mixed-bank and installed-pack menus below | Ranking is bounded; unknown safety facts and unsupported preferences are not satisfied by model assertions |
 | Replanning, batches and leftovers | `menu`: lock, replan, batch actions | `test_meal_concierge_replanning.py`, `test_meal_concierge_batch.py` | Shared synthetic Application coverage plus native Mathem two-source menu and once-per-source shopping allocation below; cooking/storage safety remains unknown |
 | Cooking and learning | `cooking`, `feedback` | `test_meal_concierge_replanning.py`, `test_meal_concierge_feedback.py`, `test_meal_concierge_batch.py` | Cooking/history and preference evidence do not establish food safety or authorize order changes |
@@ -210,7 +210,7 @@ provider outcome.
 | Cart and delivery | `cart`, `delivery` | `test_meal_concierge.py`, `test_meal_concierge_products.py`, `test_meal_concierge_mathem.py`; seven-day manual-quantity/replay fixtures; authenticated Mathem readiness and exact Application add/remove | Native Mathem whole-week cart17 packages and exact Sep13 slot selection/readback passed; earlier Sep9 reservation release remains unverified |
 | Checkout, orders and recovery | `checkout`, `orders` | `test_meal_concierge.py`, `test_meal_concierge_mathem.py`, `test_meal_concierge_acceptance.py`; existing provider journal and drift/uncertainty fixtures | Historical native Mathem original order accepted after one dispatch and reconciliation. Bound addition accepted after one failed native payment and one operator-assisted recovery; Free delivery change accepted through native prepare/confirm/reconcile after scoped UI preparation, with unchanged18 packages/582.51 SEK and zero payable. Native cancellation accepted after two pre-dispatch stops and a persisted-review comparison fix; independent receipt/tracking confirmed the result with unrelated order preserved. Oda/MENY guards and external phone approval retained |
 | Scheduling and email | `schedule`, `email` | `test_meal_concierge.py`, `test_weekly_scheduler.py`, `test_email_scheduler.py`; recorded local-sender/occurrence/recovery checks | One owned systemd occurrence ran ordinary Hermes with standing Mathem checkout and verified local pre/result notices; no real recipients or Hermes-native-cron claim |
-| Finalized menu presentation | `recipe_delivery`; maintained CLI byte export | `test_recipe_delivery.py`; current shared frozen text/PDF/image/email, begin/ack and unknown-send recovery contracts | #53's original Codex PDF opened/read and image preview are confirmed; its unknown transport acknowledgments remain unchanged. Other destinations/senders retain their own limits; see [platform matrix](platform-acceptance.md) |
+| Finalized menu presentation | `recipe_delivery`; maintained CLI byte export | `test_recipe_delivery.py`; current shared frozen text/PDF/image/email, begin/ack and unknown-send recovery contracts | #53's original Codex PDF/image presentation and one Claude Desktop full text/PDF/two-image occurrence are confirmed. Grok accepted complete text but definitively rejected PDF/images at its group-room boundary. Other destinations/senders retain their own limits; see [platform matrix](platform-acceptance.md) |
 
 ## Mathem installation and continuity — 2026-09-07
 
@@ -610,3 +610,25 @@ matched these results (CLI exit0; reply SHA256
 `4f7d38f988d52d8d0cb754a433c455f66214db60cdf152bb048f3b267a0c7156`).
 The owned temporary noVNC SSH forward was stopped; browser, proxy and VNC
 services were unchanged.
+
+## Current Bob client parity — 2026-09-13
+
+Bob's Meal Concierge sidecar already ran the current public source at
+`bb34755c988dd41fa15b7e7da9e1e76005104531`, but the Hermes client still mounted
+an older release. A checksum comparison now finds no difference between public
+`bb34755` and Bob's mounted release across every root Python module,
+`runtime-requirements.txt` and the maintained skill tree. Only the idle
+`hermes-bob` client was recreated; its Meal Concierge sidecar and browser kept
+their original container identities.
+
+The first fresh read-only native conversation exposed and preserved a real
+connection failure: the MCP command pointed to absent
+`/opt/meal-concierge/venv/bin/python`. Bob's trusted configuration now uses the
+existing compatible `/opt/hermes/.venv/bin/python`. Direct stdio initialization
+then reported Meal Concierge server 2.0.0, protocol 2025-11-25 and exactly 27
+tools, and completed a native status read. A second fresh Hermes conversation
+loaded the installed skill and read household Bob, provider Oda, complete setup,
+ready integration and the installed builtin recipe pack. It found no verified
+outbound sender inventory and sent nothing. The scoped live fleet audit passed
+314/314 checks; the ordinary fleet profile also passed. No household state,
+provider data, credentials, recipient, scheduler or delivery outcome changed.

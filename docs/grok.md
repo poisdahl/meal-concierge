@@ -185,3 +185,43 @@ observed by the operator. A native 645-second read timed out even though
 the service completed it. Fully unattended setup, real Grok checkout and the
 complete saved-menu-to-PDF workflow remain unverified. Computer use is optional
 for setup handoff; normal use is Grok calling Meal Concierge's MCP tools.
+
+## Current-target retained-installation result — 13 September 2026
+
+An owner-approved native Grok Bot 0.44.0 conversation reconciled the retained
+incomplete Dean installation before changing it. The normal stopped update path
+fetched immutable public commit
+`bb34755c988dd41fa15b7e7da9e1e76005104531`, started the exact external service
+and attached only the dedicated Dean MCP and pointer skill. The service was
+listening with PID `329354` and reported start identity `9781417`; native MCP
+discovery found 27 tools. Key installed files matched the fetched release.
+
+The invoked installed skill then read household `MC09-DEAN-20260912`, provider
+`mathem`, setup `needs_review`, authentication `awaiting_login` with no tokens,
+and browser `not_configured`. It read recipe pack `wikibooks-themealdb-en`
+version `2026-09-06.5` with 4,599 recipes and 1,570 assets, plus Arrabiata
+revision 1 and its actual managed JPEG. The unrelated broken
+`user-meal-concierge` registration was preserved. This is a current-source
+update/start/attach of a retained home, not a clean empty-VM or fully unattended
+installation. Mathem login still requires the owner to complete OAuth in the
+dedicated visible browser; no credentials can be copied from another host.
+
+The same test conversation saved one bank-only seven-dinner week for two and
+created one frozen same-chat delivery with request ID
+`issue52-grok-final-20260913-a`. Its exact menu is
+`menu_0162193d6ce0eb841f317d45` revision 1, digest
+`5657fde91b2d4a108fae3ddcef9ddd3f9370eae01c2c541aabc5e75260836f87`.
+The 15,719-byte complete text part was accepted once with native `SendToUser`
+evidence. It is produced by the maintained deterministic plain-text renderer,
+which separates section titles with line breaks, prefixes list rows with bullets
+and retains source URLs in parentheses. The final delivered group-room bubble
+was not exposed in the available Bot transcripts, so exact visual styling and a
+recipient-read result were not independently observed. The 585,065-byte PDF and
+three managed images of 148,547, 194,232 and 79,209 bytes were each definitively
+`not_sent`: the native client reported that Bot group rooms drop attachments.
+No part remained unknown and no dispatch was retried. This verifies the
+structured text payload, accepted transport submission and a concrete
+current-client attachment limit; repeating the same request cannot turn that
+transport into a PDF/image-capable destination. Use another independently
+verified native client or the owner-accepted text-only scope until the platform
+adds that support.

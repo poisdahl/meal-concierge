@@ -1,15 +1,17 @@
-# Platform acceptance — 8 September 2026
+# Platform acceptance — 13 September 2026
 
 This is the final MC10 aggregation of the resumed client tasks. It distinguishes
-published source from the source actually exercised by each native client.
-**Issue [#52](https://github.com/poisdahl/meal-concierge/issues/52) remains open**
-for the explicit unverified gates below. MC01–08 remain complete within their
-recorded scope; the additional Desktop and scheduler checks do not certify every
-host, sender, provider or physical-sleep scenario.
+published source from the source actually exercised by each native client. On
+13 September 2026 the owner explicitly accepted [#52](https://github.com/poisdahl/meal-concierge/issues/52)
+as complete within the closure scope below. Unverified surfaces were excluded
+from that scope rather than represented as passed. MC01–08 remain complete
+within their recorded scope; the additional Desktop and scheduler checks do not
+certify every host, sender, provider or physical-sleep scenario.
 
 ## Source and release
 
-The selected public checkout is `20bbfc47a0e2995d9031fca5b27e5f45237c9025`.
+The 8 September MC10 aggregation selected public checkout
+`20bbfc47a0e2995d9031fca5b27e5f45237c9025`.
 Its runtime and tests are byte-identical to #50's accepted final runtime
 `b8cc15f3cbaa54fc86d14d1c921e69da6c423503`; only four documentation files differ.
 The reviewed #50 public suite accounted for 1,262 tests with nine skips, and its final
@@ -35,17 +37,27 @@ are reused. It is not rebuilt. Original pending-effect backup/restore,
 provider-binding and historical recipe/menu-reference checks remain evidence
 from their actual synthetic scenarios, not proof of a new live payment outcome.
 
+The 13 September closure check selected current public
+`bb34755c988dd41fa15b7e7da9e1e76005104531`. Its exact Python 3.12.12 pinned
+suite passed 1,455 tests with nine optional skips; the real MCP 2.1.1/Unix
+RPC/CLI probe passed with 27 tools, reconnect and lost-response reconciliation.
+This newer source was deployed to Bob and to the retained Grok test household as
+recorded below. Claude Desktop remains on the separately accepted `20bbfc47`
+installation; current public source is not inferred there. No public runtime
+code was changed by this closure check.
+
 ## Actual client and host matrix
 
 | Surface | Actually exercised source and host | Accepted result and boundary |
 |---|---|---|
 | Codex CLI 0.153.4 | MC05 public `4f7a027`, macOS; #54 repo-URL install `3982f62`, macOS 26.6.2/launchd | Original text/photo/PDF imports, explicit drafts, seven dated dinners for two, saved refs/images and subprocess restart; separately, fresh/repeat install, second-client attachment and native manager lifecycle. Host CLI cover upload and native observability qualifications remain. This is the named CLI, not every Codex surface. |
 | Claude Code CLI 2.1.241 | MC05 private `058aabe4`/public runtime `b58618e`; #54 `3982f62`, macOS 26.6.2/launchd | Original imports, saved seven-dinner menu, exact image/ref readback after subprocess restart; separately repo-URL install/reuse/cross-client and native manager checks. Session-local scheduling is not durable weekly scheduling. |
-| Claude Desktop 1.46388.4, embedded Code 2.1.260 | Original import/PDF fallback packages; #54 `e36815fd`, macOS 26.6.2 Apple Silicon/launchd; MC10 current-source upgrade below | Original native attachment/image tests and #54 fresh/repeat install, full app restart and separate service restart are reused. New menu, local image presentation and upgrade readback are recorded below. |
+| Claude Desktop 1.46388.4, embedded Code 2.1.260 | Original import/PDF fallback packages; #54 `e36815fd`, macOS 26.6.2 Apple Silicon/launchd; MC10 `20bbfc47` upgrade and delivery below | Original native attachment/image tests and #54 fresh/repeat install, full app restart and separate service restart are reused. New menu, local image presentation and upgrade readback passed. A later exact saved-week delivery presented complete text, a readable ten-page PDF and two native image previews; all four parts were accepted. |
+| Hermes/Bob current client | Public `bb34755`, actual installed Linux client and sidecar | The client mount now matches all current root Python modules, runtime requirements and maintained skill files. A missing MCP-interpreter path was exposed by the first native read, repaired to Bob's existing Hermes runtime, then direct MCP discovery found 27 tools and a fresh read-only native conversation loaded the skill and read Bob/Oda/setup/recipe status. Sidecar/browser identities were unchanged; no send or provider write occurred. |
 | Hermes/Mathem | #50 final runtime `b8cc15f3`, actual installed Linux services and ordinary Hermes conversation | Two batch sources plus one fresh dinner, real cart and one systemd-owned checkout occurrence; recovery-assisted addition, UI-prepared/native-confirmed free delivery change, and native cancellation with independent terminal verification. Bank charge/refund and older slot-reservation release remain unknown. See [provider acceptance](acceptance.md). |
 | OpenClaw | Recorded MC07 native client/synthetic provider/local sender; scheduler component from OpenClaw 2026.9.2 `3928bad9` on macOS | Accepted native workflow/local sender remains qualified. New real-clock CronService/process/store tests use synthetic local callbacks, not a complete current Gateway/model/sender installation. |
 | NanoClaw | Recorded MC08 native isolated container/synthetic provider/local sender; NanoClaw 2.3.0 `b76fcb3d` SQLite/scheduler components | Accepted workflow is recovery-assisted; image presentation required a human follow-up. New pause/resume/recurrence persistence uses native components and synthetic completion acknowledgment, not a complete current container/model/sender run. |
-| Grok Bot 0.44.0 | Historical guided canonical install `9599097`; synthetic `8333ae16`; Oda `7ad6e5a`, 35 pins/26 tools | Original text/photo/three-page PDF imports, pooled seven-dinner week, external service restart/readback and synthetic lost-write reconciliation passed within the recorded scope. Guided browser/OAuth/catalog/cart reads and bounded native routine results are separate. These frozen results do not certify current source or unattended installation; current cloud retention is not asserted. See [Grok evidence](grok.md). |
+| Grok Bot 0.44.0 | Historical `9599097`/`8333ae16`/`7ad6e5a`; retained Dean home updated to current public `bb34755` | Historical imports/planning/restart/reconciliation and bounded routines retain their scope. The new native update/start/attach found 27 tools, invoked the dedicated skill, read exact Mathem/household/setup/auth/browser status, the full recipe pack and a managed image. One current-source bank-only saved-week text delivery was accepted; its PDF and three images were definitively not sent because Bot group rooms drop attachments. This is not a clean empty-VM install, unattended completion or authenticated provider run. See [Grok evidence](grok.md). |
 
 [Client installation](client-install.md#verified-installation-lifecycle),
 [original CLI/Desktop workflows](../clients/README.md#client-contract-and-checks)
@@ -109,6 +121,21 @@ order, payment, recipient or scheduler setting was changed. The upgraded test
 installation, original backup, menu, images and two native conversations remain
 available.
 
+The same retained Desktop installation then performed one owner-confirmed
+chat-only finalized-menu delivery from that exact preserved menu. Request
+`issue52-claude-final-20260913-a` froze 19,172 bytes of complete text, a
+276,833-byte ten-page PDF and two managed JPEGs of 32,546 and 140,434 bytes.
+All exported hashes matched their frozen metadata. The native conversation
+showed the complete text, returned file receipts for all three attachments and
+rendered both image previews. The operator opened the PDF in Claude's built-in
+viewer, observed readable pages 1 and 10 and the complete 1–10 page structure.
+Each part was begun, presented and acknowledged once with its original token;
+terminal `get` reported all four accepted and `all_accepted=true`. The API's
+separate `recipient_read` field remained unknown. A first read-only binary
+export failed before dispatch on the default Linux socket and was corrected to
+the actual Desktop socket before any begin; no send was repeated. Email was
+absent and no provider, recipient, profile, scheduler or purchase state changed.
+
 ## Scheduler and delivery integration
 
 The completed [scheduler matrix](scheduler-acceptance.md) is reused without
@@ -129,25 +156,32 @@ journal still contains accepted text and unknown PDF/image transport
 acknowledgments. It was neither rewritten, resent nor retargeted. This result
 certifies that occurrence and destination, not every client's outgoing PDF,
 email, recurring chat or sender transport. Grok's separately opened three-page
-PDF verifies attachment transport; it is not a saved-menu-to-PDF workflow.
+PDF verifies attachment transport; it is not a saved-menu-to-PDF workflow. The
+13 September Grok saved-menu result verifies one complete text fallback and a
+definite current-client attachment failure, not PDF/image presentation.
 
-## Remaining gates
+## Accepted closure scope and retained limits
 
-- Grok's current-target whole-VM repo-URL installation and any required
-  unattended completion remain separate from its historical guided success.
-  The owner's separate clean-install work is not taken over by MC10. Current
-  website-login/provider workflows and full saved-menu PDF presentation remain
-  unverified where not covered by the bounded MC09 results.
-- Actual physical-sleep/wake and complete current-host model/sender behavior
-  remain unverified where the scheduler matrix records only component or
-  local-app tests. A host that requires its application/computer awake has that
-  operating condition; these tests do not add a wake guarantee.
-- Native outgoing frozen weekly-recipe PDF/image delivery is demonstrated for
-  #53's original Codex destination. Other transports must retain their own
-  supported text fallback or unverified status until actually exercised.
+- #52 accepts current public test/runtime evidence, current Bob native
+  read/parity, the retained current-source Grok update/read and supported text
+  fallback, and the independently observed Codex and Claude PDF/image paths.
+- The Grok text payload uses the maintained deterministic plain-text renderer:
+  section titles are separated by line breaks, list rows have bullet prefixes
+  and source URLs are preserved in parentheses. `SendToUser` accepted all
+  15,719 bytes once. The final delivered group-room bubble was not exposed in
+  the available Bot transcripts, so exact visual styling and recipient-read
+  status are not claimed.
+- A clean empty-VM or fully unattended Grok install, account-specific Mathem
+  OAuth/browser/provider writes, Grok group-room attachments until the platform
+  supports them, physical sleep/wake, and untested current-host sender/email
+  transports are explicitly outside #52 closure. They remain platform-specific
+  follow-up work, not inferred successes.
+- A host that requires its application or computer awake retains that operating
+  condition. These tests add no wake guarantee and do not broaden historical
+  scheduler evidence.
 
-These are explicit open or qualified surfaces, not new purchase requirements
-for the completed synthetic milestones. No new real recipient, checkout,
-provider-login change, production deployment or historical-effect replay is
-included in MC10. Close #52 only when its remaining required gates are
-observed or the owner explicitly rescopes them.
+Apart from the scoped current-source Bob client mount and MCP-interpreter repair
+recorded above, no broader live rollout, real recipient, checkout,
+provider-login change or historical-effect replay is included in this closure.
+Future work must cite the specific retained boundary above rather than reopening
+accepted evidence or presenting an excluded surface as failed acceptance.
