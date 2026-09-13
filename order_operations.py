@@ -2907,6 +2907,11 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
+        prior_vipps_request_status = (
+            previous.get("vipps_request_status") if isinstance(previous, Mapping) else None
+        )
+        if prior_vipps_request_status in {"expired", "verifying", "not_sent"}:
+            child["prior_vipps_request_status"] = prior_vipps_request_status
         if requested_order_id is not None or carried_owner_no_request:
             child["owner_reported_no_vipps_request"] = True
             child["original_confirmation_id"] = pending["confirmation_id"]
@@ -2979,6 +2984,11 @@ class OrderOperations:
                         and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                         and child["browser_review"]["payment_choice"]["method"] == "vipps"):
                     original_status = pending.get("vipps_request_status")
+                    prior_recovery_closed = (
+                        original_status is None
+                        and child.get("prior_vipps_request_status")
+                        in {"expired", "verifying", "not_sent"}
+                    )
                     legacy_offer = (
                         original_status is None
                         and pending.get("vipps_request_context") is None
@@ -2986,7 +2996,8 @@ class OrderOperations:
                         and child.get("owner_reported_no_vipps_request") is True
                         and child.get("original_confirmation_id") == pending.get("confirmation_id")
                     )
-                    if original_status not in {"expired", "verifying", "not_sent"} and not legacy_offer:
+                    if (original_status not in {"expired", "verifying", "not_sent"}
+                            and not prior_recovery_closed and not legacy_offer):
                         raise HouseholdError("The original Oda/Vipps request is not positively closed; do not retry payment")
                 if self._checkout_recovery_target(
                     pending, deadline, verify_retry_page=False
