@@ -236,11 +236,8 @@ order using its existing saved card after a hosted Vipps timeout; the shared
 Mathem new-order route is implemented but not demonstrated live; the shared
 recovery logic has isolated coverage.
 
-Oda's hosted payment redirect may take up to 30 seconds. If that transition
-fails before the synchronous Vipps dispatch fence is written, reconciliation
-records the request as not sent and permits a fresh review of the same merchant
-order without requiring a separate phone-side no-request report. Once the fence
-exists, the attempt remains locked until its exact outcome is reconciled.
+Oda's hosted payment redirect may take up to 30 seconds before the current
+attempt is retained for reconciliation.
 
 For Oda/Vipps, the final reviewed checkout is followed through its one controlled
 click and same browser tab to a credential-free HTTPS page. The hosted page must

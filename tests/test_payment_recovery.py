@@ -74,12 +74,6 @@ class MerchantBrowser:
             raise CheckoutPreconditionError("recovery navigation changed before click")
         self.clicks += 1
         if self.lost_response:
-            before_vipps_request = kwargs.get("before_vipps_request")
-            if before_vipps_request:
-                before_vipps_request({
-                    "tab_id": "vipps-tab", "expected_total": 24640,
-                    "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
-                })
             raise HouseholdError("response lost after dispatch")
         self.merchant.status = "paid_and_modifiable"
 
@@ -198,29 +192,25 @@ class RecoveryTests(unittest.TestCase):
         self.assertIsNone(self.app.store.read()["pending_checkout"])
         self.assertNotIn("get_cart", self.merchant.calls)
 
-    def test_contextless_recovery_failure_is_retryable_without_an_owner_report(self):
+    def test_prefence_sent_error_remains_locked(self):
         prepared = self.prepare()
 
-        def fail_before_vipps_request(_cart, _review, before_click, **_kwargs):
+        def already_sent(_cart, _review, before_click, **_kwargs):
             before_click()
             self.browser.clicks += 1
-            raise HouseholdError("payment page was slow")
+            raise HouseholdError("request was already sent")
 
-        self.browser.submit_payment_recovery = fail_before_vipps_request
-        with self.assertRaisesRegex(HouseholdError, "payment page was slow"):
+        self.browser.submit_payment_recovery = already_sent
+        with self.assertRaisesRegex(HouseholdError, "already sent"):
             self.call("confirm", confirmation_id=prepared["confirmation_id"])
 
         reconciled = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
-        self.assertTrue(reconciled["payment_failed"])
-        self.assertEqual(reconciled["payment_request_state"], "not_sent")
-        self.assertTrue(reconciled["recovery_preparation_available"])
-        failed = self.app.store.read()["pending_checkout"]["recovery"]
-        self.assertEqual(failed["payment_failure"], {
-            "payment_failed": True,
-            "order_id": "order-1",
-            "reason": "payment_handoff_failed_before_vipps_request",
-        })
-        self.assertNotIn("owner_reported_no_vipps_request_after_attempt_at", failed)
+        self.assertTrue(reconciled["awaiting_user_payment"])
+        self.assertEqual(reconciled["payment_request_state"], "unknown")
+        self.assertFalse(reconciled["retry_allowed"])
+        recovery = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertIsNone(recovery.get("vipps_request_status"))
+        self.assertNotIn("payment_failure", recovery)
         self.assertEqual(self.browser.clicks, 1)
 
     def test_exact_owner_report_accepts_the_paid_tracking_conflict(self):
@@ -2235,6 +2225,38 @@ class RetryAmountTests(unittest.TestCase):
                 "summary_only": True,
                 "payment_choice": {"method": "saved_card"},
             }, lambda: None)
+
+    def test_vipps_recovery_reserves_the_full_handoff_before_click(self):
+        from unittest import mock
+        from oda_browser import OdaBrowser
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser.checkout_provider = "oda"
+        browser._checkout_deadline = None
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._cart_expectation = mock.Mock(return_value={
+            "delivery_address": "Eksempelveien 1", "delivery_text": "12. september 09:00–12:00",
+            "lines": [], "product_count": 1, "total_minor": 4550,
+        })
+        review = {
+            "order_id": "order-1", "binding": {}, "payment_choice": {"method": "vipps"},
+            "surface": {"url": "https://oda.com/no/checkout/retry/?orderNumber=order-1"},
+            "amounts_minor": {}, "summary_only": True,
+        }
+        browser.review_payment_recovery = mock.Mock(return_value=deepcopy(review))
+        browser._eval = mock.Mock()
+        browser._capture_checkout_payment = mock.Mock()
+        before_click = mock.Mock()
+
+        with mock.patch("oda_browser.time.monotonic", return_value=10.0):
+            with self.assertRaisesRegex(CheckoutPreconditionError, "deadline reached"):
+                browser.submit_payment_recovery(
+                    {}, review, before_click, deadline=64.0,
+                )
+
+        before_click.assert_not_called()
+        browser._eval.assert_not_called()
+        browser._capture_checkout_payment.assert_not_called()
 
     def test_recovery_browser_rejects_same_count_and_total_with_changed_product(self):
         import json
