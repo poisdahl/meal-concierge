@@ -2226,7 +2226,7 @@ class RetryAmountTests(unittest.TestCase):
                 "payment_choice": {"method": "saved_card"},
             }, lambda: None)
 
-    def test_vipps_recovery_reserves_the_full_handoff_before_click(self):
+    def test_vipps_recovery_reserves_the_form_and_final_click_window(self):
         from unittest import mock
         from oda_browser import OdaBrowser
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -2251,7 +2251,7 @@ class RetryAmountTests(unittest.TestCase):
         with mock.patch("oda_browser.time.monotonic", return_value=10.0):
             with self.assertRaisesRegex(CheckoutPreconditionError, "deadline reached"):
                 browser.submit_payment_recovery(
-                    {}, review, before_click, deadline=64.0,
+                    {}, review, before_click, deadline=35.0,
                 )
 
         before_click.assert_not_called()

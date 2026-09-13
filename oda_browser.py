@@ -38,13 +38,9 @@ CHECKOUT_URL = "https://oda.com/no/checkout/confirm/"
 CHECKOUT_BROWSER_TIMEOUT = 90
 CANCELLATION_BROWSER_TIMEOUT = 105
 FINAL_CLICK_MARGIN = 15
-VIPPS_GATEWAY_POLLS = 120
 VIPPS_FORM_POLLS = 40
 VIPPS_POLL_INTERVAL = 0.25
-VIPPS_HANDOFF_MARGIN = (
-    (VIPPS_GATEWAY_POLLS + VIPPS_FORM_POLLS) * VIPPS_POLL_INTERVAL
-    + FINAL_CLICK_MARGIN
-)
+VIPPS_POST_GATEWAY_MARGIN = VIPPS_FORM_POLLS * VIPPS_POLL_INTERVAL + FINAL_CLICK_MARGIN
 DEFAULT_BROWSER_ARGS = "--disable-quic"
 CANCELLATION_BROWSER_ARGS = "--disable-quic,--disable-http2,--blink-settings=imagesEnabled=false"
 ODA_CHECKOUT_AMOUNT_LABELS = {
@@ -1117,7 +1113,10 @@ class OdaBrowser:
                     and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
                 raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
             vipps = review.get("payment_choice", {}).get("method") == "vipps"
-            required_time = VIPPS_HANDOFF_MARGIN if vipps else FINAL_CLICK_MARGIN
+            required_time = (
+                VIPPS_POST_GATEWAY_MARGIN + VIPPS_POLL_INTERVAL
+                if vipps else FINAL_CLICK_MARGIN
+            )
             try:
                 current = self.review_payment_recovery(cart, review["order_id"],
                     payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline,
@@ -1769,7 +1768,16 @@ class OdaBrowser:
             raise HouseholdError("The Oda/Vipps payment has no reviewed source page; do not send payment")
         source_url = _oda_https_gateway_url(source_url)
         gateway_url = None
-        for attempt in range(VIPPS_GATEWAY_POLLS):
+        checkout_deadline = getattr(self, "_checkout_deadline", None)
+        remaining = (
+            CHECKOUT_BROWSER_TIMEOUT
+            if checkout_deadline is None else max(0, checkout_deadline - time.monotonic())
+        )
+        gateway_polls = max(
+            1,
+            math.ceil(max(0, remaining - VIPPS_POST_GATEWAY_MARGIN) / VIPPS_POLL_INTERVAL),
+        )
+        for attempt in range(gateway_polls):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             try:
@@ -1788,7 +1796,13 @@ class OdaBrowser:
                         break
             except HouseholdError:
                 pass
-            if attempt < VIPPS_GATEWAY_POLLS - 1:
+            if attempt < gateway_polls - 1:
+                try:
+                    self._require_checkout_time(
+                        VIPPS_POST_GATEWAY_MARGIN + VIPPS_POLL_INTERVAL
+                    )
+                except HouseholdError:
+                    break
                 self._settle(VIPPS_POLL_INTERVAL)
         if gateway_url is None:
             raise HouseholdError("The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment")
@@ -2200,7 +2214,10 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         before_vipps_request=None,
     ) -> None:
         vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
-        required_time = VIPPS_HANDOFF_MARGIN if vipps else FINAL_CLICK_MARGIN
+        required_time = (
+            VIPPS_POST_GATEWAY_MARGIN + VIPPS_POLL_INTERVAL
+            if vipps else FINAL_CLICK_MARGIN
+        )
         try:
             self._require_checkout_time(required_time)
         except HouseholdError as exc:

@@ -2686,7 +2686,7 @@ process.stdout.write(eval(script));
                 source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
             )
 
-        self.assertEqual(browser._eval.call_count, 120)
+        self.assertEqual(browser._eval.call_count, 260)
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
