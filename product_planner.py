@@ -496,6 +496,8 @@ def _select_requirement(
             return None, "candidate_availability_unresolved", 0
         package = product.get("package")
         package_quantity = _package_quantity(package, requirement["unit"])
+        if re.search(r'\b(?:drained|avrent)\b', requirement['item'], re.I):
+            package_quantity = None  # Retail net mass is not edible drained mass.
         if package_quantity is None:
             return None, "candidate_package_incompatible", 0
         options = product.get("purchase_options")
@@ -684,10 +686,12 @@ def _practical_packages(requirement, observation, approval, price_mode):
     package = product.get('package')
     if (product.get('availability') != 'available' or not isinstance(package, Mapping)
             or _package_quantity(package, package.get('unit')) is None
-            or _package_quantity(package, requirement['unit']) is not None
             or _form_conflict(requirement, product)
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
+    size = _package_quantity(package, requirement['unit'])
+    if requirement['unit'] in {'g', 'ml'} and size is not None and count * size < _read_fraction(requirement['quantity'], positive=True):
+        return None  # Even the full observed package cannot cover this amount.
     options = product.get('purchase_options', [])
     if not options:
         return None
@@ -819,10 +823,9 @@ def build_product_plan(
             estimated = _estimated_single_product(requirement, evaluated_observation, filtered)
             if estimated is not None:
                 selection, reason, eligible_count = estimated, None, 1
-        if reason == "candidate_package_incompatible":
+        if 'package_count' in filtered and filtered['candidate_refs']:
             practical = _practical_packages(requirement, evaluated_observation, filtered, price_mode)
-            if practical is not None:
-                selection, reason, eligible_count = practical, None, 1
+            selection, reason, eligible_count = (practical, None, 1) if practical is not None else (None, 'practical_package_choice_unavailable', 0)
         item["eligible_candidate_count"] = eligible_count
         if reason is not None:
             problem = {"requirement_id": requirement_id, "item": requirement["item"], "reason": reason}

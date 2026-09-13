@@ -424,6 +424,21 @@ class ProductPlannerTests(unittest.TestCase):
             for count in (True, 0, 101):
                 with self.assertRaises(HouseholdError): plan(choice={**approval, 'package_count': count})
 
+    def test_practical_drained_count_is_honored_and_obvious_undercoverage_rejected(self):
+        value = menu({'item':'hermetiske bønner, avrent vekt','quantity':600,'unit':'g'})
+        req = menu_requirements(value)[0][0]
+        def prepare(count=None):
+            choice = {'requirement_id':req['requirement_id'],'candidate_refs':['10']}
+            if count is not None:choice.update(package_count=count,quantity_basis='Three net-weight cans estimated for 600 g drained beans.')
+            return build_product_plan(provider='oda',binding={},menu=value,
+                observations={req['requirement_id']:observation('bønner',[product('10','Hermetiske bønner',380,'g',[option(1000)])])},candidate_approvals=[choice])
+        self.assertEqual(prepare()['status'],'needs_input')
+        plan=prepare(3)
+        self.assertEqual(plan['status'],'prepared')
+        self.assertEqual(plan['totals']['package_count'],3)
+        self.assertEqual(plan['coverage_status'],'practical_estimate')
+        self.assertEqual(prepare(1)['status'],'needs_input')
+
     def test_practical_package_cannot_exchange_dry_and_cooked_forms(self):
         value = menu({'item': 'hermetiske bønner', 'quantity': 1, 'unit': 'count'})
         req = menu_requirements(value)[0][0]

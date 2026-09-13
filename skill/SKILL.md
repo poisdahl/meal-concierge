@@ -636,7 +636,8 @@ is not. Never mark ingredients as already at home to hide unresolved coverage. P
 cooking water stays in the recipe but is excluded from shopping by default;
 explicit `include` can request it, and named bottled/mineral water is distinct.
 For a normal culinary package decision where a source tsp/count requirement
-cannot be converted exactly to the retailer's grams, keep the source amount and
+cannot be converted exactly to the retailer's grams, or drained content differs
+from the package's net weight, keep the source amount and
 select one observed candidate with `package_count` and a concise `quantity_basis`
 in its `candidate_approvals` entry. This follows the existing grocery request;
 do not add another approval just for a sensible spice jar or produce pack.
