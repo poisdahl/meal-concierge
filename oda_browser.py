@@ -736,9 +736,8 @@ def _oda_vipps_gateway_script(
  const expired=identity&&((merchant&&amountBound&&/betalingen (?:har )?(?:utløpt|gått ut)/i.test(text))||(/your payment timed out/i.test(text)&&/Go back and try again/i.test(text)));
  const phones=root?[...root.querySelectorAll('input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]')].filter(visible):[];
  const national=phones.length===1?phones[0].value.replace(/\D/g,''):'';
- const form=phones.length===1?phones[0].closest('form'):null;
- const buttons=form?[...form.querySelectorAll('button[type="submit"],input[type="submit"],button:not([type])')].filter(enabled):[];
- const fillable=identity&&!sent&&!expired&&merchant&&amountBound&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&form&&buttons.length===1;
+ const buttons=root?[...root.querySelectorAll('button[type="submit"],input[type="submit"],button:not([type])')].filter(enabled):[];
+ const fillable=identity&&!sent&&!expired&&merchant&&amountBound&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&buttons.length===1;
  const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
  const exact=fillable&&phoneMatches;
  if(fillable)phones[0].setAttribute('data-oda-household-vipps-phone','');

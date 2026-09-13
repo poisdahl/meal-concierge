@@ -2408,24 +2408,24 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const next=node(c.button||'Next');const form=node();
-phone.closest=s=>s==='form'?form:null;
+phone.closest=s=>s==='form'&&c.inForm?form:null;
 form.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
 global.location=new URL(c.url);
 global.getComputedStyle=e=>({display:'block',visibility:'visible',opacity:'1'});
-const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:[];
+const main=node(text);main.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?[phone]:s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=expected_url or url,
                     ),
-                    "c": {"phone": phone, "url": url, "text": text, "button": button},
+                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2438,6 +2438,10 @@ process.stdout.write(eval(script));
             "fillable": True, "phone_matches": False,
         })
         self.assertEqual(evaluate("90000000"), {
+            "identity": True, "ready": True, "sent": False, "expired": False,
+            "fillable": True, "phone_matches": True,
+        })
+        self.assertEqual(evaluate("90000000", in_form=True), {
             "identity": True, "ready": True, "sent": False, "expired": False,
             "fillable": True, "phone_matches": True,
         })
