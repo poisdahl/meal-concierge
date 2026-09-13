@@ -236,6 +236,9 @@ order using its existing saved card after a hosted Vipps timeout; the shared
 Mathem new-order route is implemented but not demonstrated live; the shared
 recovery logic has isolated coverage.
 
+Oda's hosted payment redirect may take up to 30 seconds before the current
+attempt is retained for reconciliation.
+
 For Oda/Vipps, the final reviewed checkout is followed through its one controlled
 click and same browser tab to a credential-free HTTPS page. The hosted page must
 show Oda, the exact total and one usable phone form before the configured phone

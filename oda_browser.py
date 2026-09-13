@@ -38,6 +38,13 @@ CHECKOUT_URL = "https://oda.com/no/checkout/confirm/"
 CHECKOUT_BROWSER_TIMEOUT = 90
 CANCELLATION_BROWSER_TIMEOUT = 105
 FINAL_CLICK_MARGIN = 15
+VIPPS_GATEWAY_POLLS = 120
+VIPPS_FORM_POLLS = 40
+VIPPS_POLL_INTERVAL = 0.25
+VIPPS_HANDOFF_MARGIN = (
+    (VIPPS_GATEWAY_POLLS + VIPPS_FORM_POLLS) * VIPPS_POLL_INTERVAL
+    + FINAL_CLICK_MARGIN
+)
 DEFAULT_BROWSER_ARGS = "--disable-quic"
 CANCELLATION_BROWSER_ARGS = "--disable-quic,--disable-http2,--blink-settings=imagesEnabled=false"
 ODA_CHECKOUT_AMOUNT_LABELS = {
@@ -1109,6 +1116,8 @@ class OdaBrowser:
             if (review.get("payment_choice", {}).get("method") == "vipps"
                     and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
                 raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
+            vipps = review.get("payment_choice", {}).get("method") == "vipps"
+            required_time = VIPPS_HANDOFF_MARGIN if vipps else FINAL_CLICK_MARGIN
             try:
                 current = self.review_payment_recovery(cart, review["order_id"],
                     payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline,
@@ -1117,13 +1126,12 @@ class OdaBrowser:
                     raise HouseholdError("Recovery changed after its confirmation")
                 bound_cart = self._order_cart(cart, review["order_id"], addition["before"]["order"], review["binding"]) if addition else cart
                 expected = self._cart_expectation(bound_cart)
-                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                self._require_checkout_time(required_time)
                 dispatch_tab = self._checkout_dispatch_tab()
-                vipps = review["payment_choice"]["method"] == "vipps"
                 if vipps and dispatch_tab is None:
                     raise HouseholdError("The Oda/Vipps payment tab is unavailable; do not send payment")
                 before_click()
-                self._require_checkout_time(FINAL_CLICK_MARGIN)
+                self._require_checkout_time(required_time)
                 surface = _oda_checkout_surface_script(
                     expected,
                     review["payment_choice"],
@@ -1761,7 +1769,7 @@ class OdaBrowser:
             raise HouseholdError("The Oda/Vipps payment has no reviewed source page; do not send payment")
         source_url = _oda_https_gateway_url(source_url)
         gateway_url = None
-        for attempt in range(40):
+        for attempt in range(VIPPS_GATEWAY_POLLS):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             try:
@@ -1780,14 +1788,14 @@ class OdaBrowser:
                         break
             except HouseholdError:
                 pass
-            if attempt < 39:
-                self._settle(0.25)
+            if attempt < VIPPS_GATEWAY_POLLS - 1:
+                self._settle(VIPPS_POLL_INTERVAL)
         if gateway_url is None:
             raise HouseholdError("The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment")
         order_id = expected_order_id
         observed: dict[str, Any] = {}
         phone_filled = False
-        for _ in range(40):
+        for _ in range(VIPPS_FORM_POLLS):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             observed = self._eval(_oda_vipps_gateway_script(
@@ -1801,11 +1809,11 @@ class OdaBrowser:
                 )) != {"filled": True}:
                     raise HouseholdError("The Oda/Vipps phone field changed before it could be filled")
                 phone_filled = True
-                self._settle(0.25)
+                self._settle(VIPPS_POLL_INTERVAL)
                 continue
             if observed.get("identity") is True and (observed.get("ready") is True or observed.get("expired") is True):
                 break
-            self._settle(0.25)
+            self._settle(VIPPS_POLL_INTERVAL)
         if observed.get("expired") is True:
             raise HouseholdError("The Oda/Vipps payment expired before a mobile request was sent; reconcile the same order")
         if observed.get("identity") is not True or observed.get("ready") is not True:
@@ -1844,7 +1852,7 @@ class OdaBrowser:
         self._invoke("mouse", "move", str(round(x)), str(round(y)))
         self._invoke("mouse", "down")
         self._invoke("mouse", "up")
-        for _ in range(40):
+        for _ in range(VIPPS_FORM_POLLS):
             if self._checkout_dispatch_tab() != dispatch_tab:
                 break
             result = self._eval(_oda_vipps_gateway_script(
@@ -1852,7 +1860,7 @@ class OdaBrowser:
             ))
             if result.get("sent") is True:
                 return request_context
-            self._settle(0.25)
+            self._settle(VIPPS_POLL_INTERVAL)
         raise HouseholdError("Vipps did not confirm the Oda mobile payment request; the outcome is uncertain; do not retry")
 
     def checkout_vipps_request_state(self, context, *, deadline=None):
@@ -2191,12 +2199,13 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         authentication_expected: bool = True,
         before_vipps_request=None,
     ) -> None:
+        vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
+        required_time = VIPPS_HANDOFF_MARGIN if vipps else FINAL_CLICK_MARGIN
         try:
-            self._require_checkout_time(FINAL_CLICK_MARGIN)
+            self._require_checkout_time(required_time)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         dispatch_tab = self._checkout_dispatch_tab()
-        vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
         if vipps and dispatch_tab is None:
             raise CheckoutPreconditionError("The Oda/Vipps payment tab is unavailable; do not send payment")
         if before_click:
@@ -2205,7 +2214,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
         try:
-            self._require_checkout_time(FINAL_CLICK_MARGIN)
+            self._require_checkout_time(required_time)
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         if addition_expectation is not None:
