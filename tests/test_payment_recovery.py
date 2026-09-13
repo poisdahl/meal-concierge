@@ -173,6 +173,73 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(result["payment_failed"])
         self.assertTrue(result["recovery_preparation_available"])
 
+    def prepare_after_expired_exact_vipps_recovery(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+
+        first = self.call("prepare", recovery=True, order_id="order-1")
+
+        def submit(_cart, review, before_click, **kwargs):
+            before_click()
+            self.browser.clicks += 1
+            kwargs["before_vipps_request"]({
+                "tab_id": "vipps-tab", "expected_total": 24640,
+                "gateway_url_digest": "a" * 64, "order_id": review["order_id"],
+            })
+            return {"vipps_request_sent": True}
+
+        self.browser.submit_payment_recovery = submit
+        self.assertTrue(self.call(
+            "confirm", confirmation_id=first["confirmation_id"],
+        )["payment_request_sent"])
+
+        self.browser.vipps_request_state = "expired"
+        expired = self.call("reconcile", confirmation_id=first["confirmation_id"])
+        self.assertTrue(expired["payment_request_expired"])
+        self.assertTrue(expired["recovery_preparation_available"])
+
+        return self.call("prepare", recovery=True)
+
+    def test_expired_exact_vipps_recovery_survives_review_expiry(self):
+        fresh = self.prepare_after_expired_exact_vipps_recovery()
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["prior_vipps_request_status"], "expired")
+
+        self.now += timedelta(minutes=21)
+        with self.assertRaisesRegex(HouseholdError, "confirmation expired"):
+            self.call("confirm", confirmation_id=fresh["confirmation_id"])
+
+        successor = self.call("prepare", recovery=True)
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["prior_vipps_request_status"], "expired")
+
+        waiting = self.call("confirm", confirmation_id=successor["confirmation_id"])
+        self.assertTrue(waiting["payment_request_sent"])
+        self.assertEqual(self.browser.clicks, 2)
+
+    def test_expired_exact_vipps_recovery_survives_dietary_reprepare(self):
+        fresh = self.prepare_after_expired_exact_vipps_recovery()
+        with self.app.store.locked() as state:
+            state["profile"]["diet"]["allergies_or_sensitivities"] = ["mustard"]
+
+        reprepared = self.call("confirm", confirmation_id=fresh["confirmation_id"])
+        self.assertTrue(reprepared["reprepared"])
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["prior_vipps_request_status"], "expired")
+        self.assertEqual(self.browser.clicks, 1)
+
+        findings = reprepared["summary"]["dietary_assessment"]["findings"]
+        waiting = self.call(
+            "confirm", confirmation_id=reprepared["confirmation_id"],
+            dietary_review=[finding["finding_id"] for finding in findings],
+        )
+        self.assertTrue(waiting["payment_request_sent"])
+        self.assertEqual(self.browser.clicks, 2)
+
     def test_same_order_recovery_and_both_confirmation_replays(self):
         prepared = self.prepare()
         self.assertEqual(prepared["order_id"], "order-1")
