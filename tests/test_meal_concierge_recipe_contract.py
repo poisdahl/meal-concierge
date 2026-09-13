@@ -173,6 +173,12 @@ class RecipeContractTests(unittest.TestCase):
             self.app.handle({"operation": "recipes", "action": "update", "recipe_id": saved["id"], "expected_revision": 2, "recipe": changed})
 
     def test_generated_cooking_estimate_reaches_menu_and_practical_cart(self):
+        self._exercise_practical_cart()
+
+    def test_observed_retail_units_without_numeric_package_metadata_reach_cart(self):
+        self._exercise_practical_cart(package_unknown=True)
+
+    def _exercise_practical_cart(self, *, package_unknown=False):
         from unittest.mock import patch
         recipe = authored_recipe()
         recipe.update(name='Estimated ordinary-pot dinner', portions=2,
@@ -193,13 +199,17 @@ class RecipeContractTests(unittest.TestCase):
         observed_price = [1000]
         def observe(tool, arguments, **kwargs):
             if tool == 'product_search':
-                return observation(arguments['queries'][0], [product('10','Spisskummen',35,'g',[option(observed_price[0])])])
+                chosen = product('10','Spisskummen',35,'g',[option(observed_price[0])])
+                if package_unknown:chosen['package'] = None
+                return observation(arguments['queries'][0], [chosen])
             return original_call(tool, arguments, **kwargs)
         with patch.object(self.provider,'call',side_effect=observe):
             prepared = self.app.handle({'operation':'products','action':'prepare','menu_ref':ref,
                 'candidate_approvals':[{'requirement_id':req['requirement_id'],'candidate_refs':['10'],
                     'package_count':1,'quantity_basis':'One 35 g jar is estimated to cover three teaspoons.'}]})
             self.assertEqual(prepared['product_plan']['status'],'prepared')
+            if package_unknown:
+                self.assertIsNone(prepared['product_plan']['requirements'][0]['selection']['observed_package'])
             observed_price[0] = 1100
             drift = self.app.handle({'operation':'products','action':'apply',
                 **prepared['apply_arguments'], 'cart_change_requested':True})

@@ -684,8 +684,7 @@ def _practical_packages(requirement, observation, approval, price_mode):
     product = products[0]
     count = approval['package_count']
     package = product.get('package')
-    if (product.get('availability') != 'available' or not isinstance(package, Mapping)
-            or _package_quantity(package, package.get('unit')) is None
+    if (product.get('availability') != 'available'
             or _form_conflict(requirement, product)
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
