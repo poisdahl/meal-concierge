@@ -404,7 +404,10 @@ def main():
         meta = json.loads((home / 'runtime.json').read_text())
         health(meta)
         current = Path(meta['code_root']) / 'current'
-        print(json.dumps({'command': str(current / 'venv/bin/python'), 'args': ['-I', str(current / 'mcp_server.py')], 'env': {'MEAL_CONCIERGE_SOCKET': meta['paths']['socket']}, 'skill': str(current / 'skill/SKILL.md')}, indent=2)); return
+        env = {'MEAL_CONCIERGE_SOCKET': meta['paths']['socket']}
+        if os.environ.get('MEAL_CONCIERGE_EMAIL_CONFIG'):
+            env['MEAL_CONCIERGE_EMAIL_CONFIG'] = str(Path(os.environ['MEAL_CONCIERGE_EMAIL_CONFIG']).expanduser().resolve())
+        print(json.dumps({'command': str(current / 'venv/bin/python'), 'args': ['-I', str(current / 'mcp_server.py')], 'env': env, 'skill': str(current / 'skill/SKILL.md')}, indent=2)); return
     home.mkdir(parents=True, mode=0o700, exist_ok=True)
     with file_lock(home / '.installer.lock'):
         path = home / 'runtime.json'

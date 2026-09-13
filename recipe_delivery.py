@@ -192,9 +192,12 @@ def render_pdf(rendered):
     return output.getvalue()
 
 
-def render_email(rendered, *, recipient, sender, subject, pdf=None):
+def render_email(rendered, *, recipient, sender, subject, pdf=None, message_id=None):
+    from email.utils import formatdate, make_msgid
     message = EmailMessage(policy=SMTP)
     message["To"], message["From"], message["Subject"] = recipient, sender, subject
+    message["Message-ID"] = message_id or make_msgid(domain="meal-concierge.local")
+    message["Date"] = formatdate(localtime=False, usegmt=True)
     message.set_content(rendered["text"])
     message.add_alternative(rendered["html"], subtype="html")
     body = message.get_payload()[-1]

@@ -48,11 +48,15 @@ def main() -> int:
         print(json.dumps({'ok': False, 'error': str(exc), 'dispatched': False}))
         return 2
     try:
-        result = rpc(operation, **request)
+        if operation == "email_sender":
+            from email_sender import email_sender
+            result = email_sender(rpc, **request)
+        else:
+            result = rpc(operation, **request)
     except ServiceError as exc:
         print(json.dumps({'ok': False, 'error': str(exc)}))
         return 1
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(json.dumps({'ok': False, 'error': str(exc), 'outcome': 'unknown',
                           'recovery': 'Do not retry a mutation. Reconcile the original attempt/ref/key.'}))
         return 1

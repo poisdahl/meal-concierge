@@ -125,6 +125,21 @@ plan after verifying native state; old acknowledgments cannot resume it.
 
 ## Dispatch and reconciliation
 
+With a saved email sender, newly scheduled jobs freeze that connection and the
+email format preferences alongside their original recipient/menu. Their native
+prompt calls `meal_concierge_email_sender send_order` with the exact provider,
+order_id and scheduler invocation. The executor owns the following protocol and
+adds frozen PDF/MIME transfer and durable sender receipts. Do not send manually
+after invoking it. `reconcile_order` never resends; explicit `retry_order` needs
+affirmative no-send evidence. The original scheduler/date/pause checks remain.
+
+Old pending jobs are not silently assigned a sender: explicitly use
+`email_sender adopt_order`, preserving the original recipient, then replan and
+verify the native scheduler's new prompt. A connection configured `on_request`
+does not authorize new delivery-day jobs. Sender setup creates no timers.
+
+The low-level protocol below remains for existing native integrations.
+
 Use `due -> begin_send -> sender -> mark_sent`. Both `due` and `begin_send`
 must carry the exact returned `invocation` as `scheduler`, including the
 binding, generation and `occurrence_id`. The service verifies the fresh bound

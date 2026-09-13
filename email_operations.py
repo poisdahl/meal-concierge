@@ -32,6 +32,53 @@ from service_common import (
 
 
 class EmailOperations:
+    def _freeze_sender_message(self, job):
+        """Freeze order-day MIME in the existing asset store for checked RPC export."""
+        import hashlib
+        import os
+        from recipe_delivery import render_menu, render_pdf, render_email, limit_images
+        binding = job.get("sender_binding")
+        if not binding or binding["recipient"] != job["recipient_snapshot"]:
+            raise HouseholdError("order email needs its explicitly bound original sender and recipient")
+        if job.get("sender_part"):
+            return
+        cap = binding["capabilities"]
+        preferences = job["sender_preferences"]
+        assets = RecipeAssets(self.store.directory / "recipe-assets")
+        rendered = render_menu(job["menu_snapshot"], assets, images=preferences["images"] and cap.get("images", False))
+        rendered = limit_images(rendered, cap["attachment_limit"])
+        warnings = list(rendered["warnings"])
+        for field in ("pdf", "images"):
+            if preferences[field] and not cap.get(field):
+                warnings.append(field + " unsupported by the selected email connection; complete recipe text retained")
+        pdf = None
+        if preferences["pdf"] and cap.get("pdf"):
+            try:
+                pdf = render_pdf(rendered)
+                if len(pdf) > cap["attachment_limit"]:
+                    pdf = None
+                    warnings.append("PDF exceeds the selected email connection's attachment limit")
+            except Exception:
+                warnings.append("PDF generation failed; complete recipe text remains available")
+        raw = render_email(rendered, recipient=binding["recipient"], sender=binding["sender"], subject=job["subject"], pdf=pdf)
+        if len(raw) > cap["message_limit"]:
+            rendered = render_menu(job["menu_snapshot"], assets, images=False)
+            raw = render_email(rendered, recipient=binding["recipient"], sender=binding["sender"], subject=job["subject"])
+            warnings.append("Attachments omitted to fit the sender limit; complete recipe text retained")
+            if len(raw) > cap["message_limit"]:
+                raise HouseholdError("complete order email text exceeds sender limit; no email dispatched")
+        root = self.store.directory / "recipe-deliveries"
+        root.mkdir(mode=0o700, exist_ok=True)
+        filename = "order-" + secrets.token_hex(24)
+        fd = os.open(root / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        job["sender_part"] = {"file": filename, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                              "filename": "ukesmeny.eml", "content_type": "message/rfc822"}
+        job["sender_warnings"] = warnings
+
     def _email_media_payload(self, menu: Mapping[str, Any], fallback_html: str,
                              request: Mapping[str, Any], *, test: bool = False) -> dict[str, Any]:
         supported = request.get("images_supported", False)
@@ -108,6 +155,13 @@ class EmailOperations:
                    + canonical(invocation) + ". Preserve the same occurrence on every retry. "
                    "An uncertain sender result stays locked; reconcile_send requires the original claim_token "
                    "and affirmative sender evidence before recording sent or not_sent.")
+        if job.get("sender_binding"):
+            prompt = ("Deliver the existing order-day recipe email through meal_concierge_email_sender action=send_order "
+                      "with provider=" + email_job_provider(job) + ", order_id=" + job["order_id"] +
+                      " and this exact scheduler=" + canonical(invocation) + ". "
+                      "The executor performs due checks, one send and receipt acknowledgment. "
+                      "After an uncertain result call reconcile_order with the same provider/order; never create another send. "
+                      "Report meaningful failures, omissions or required action. Complete exact native timer cleanup after sent/cancelled; preserve unrelated jobs.")
         return {"scheduler": deepcopy(scheduler), "invocation": invocation,
                 "cron_prompt": prompt, "automation_digest": hashlib.sha256(prompt.encode()).hexdigest(),
                 "delivery_date": job["delivery_date"], "scheduler_protocol": 1}
@@ -447,12 +501,16 @@ class EmailOperations:
                 created = not existing
                 rescheduled = False
                 if not existing:
+                    sender_binding = locked["recipe_delivery"].get("sender_binding")
+                    if sender_binding and sender_binding["timing"] == "on_request":
+                        raise HouseholdError("email is configured on request only; select delivery-day email explicitly first")
                     locked["email_jobs"].append({
                         "order_id": order_id, "delivery_date": delivery_date, "status": "pending", "sent_at": None,
                         "provider": self.provider,
                         "recipient_snapshot": recipient, "menu_snapshot": snapshot,
                         "subject": f"Ukesmeny og oppskrifter – {period}", "html": menu_email_html(snapshot),
                         "automation_key": automation_key, "automation_protocol": 0,
+                        **({"sender_binding": deepcopy(sender_binding), "sender_preferences": deepcopy(locked["recipe_delivery"]["preferences"]["email"])} if sender_binding else {}),
                         **({"delivery_hold": True} if legacy_held(locked) else {}),
                     })
                 elif len(existing) == 1:
@@ -493,6 +551,27 @@ class EmailOperations:
                 result.update(scheduler=self._scheduler_invocation(job) if "scheduler" in job else None, scheduler_update_required=True,
                               next="Call scheduler_plan for the managed job, apply and verify its native update, then ack_scheduler.")
             return result
+        if action == "read_message":
+            state = self.store.read()
+            jobs = matching_jobs(state, safe_order_id(request.get("order_id")))
+            if len(jobs) != 1 or not jobs[0].get("sender_part") or request.get("claim_token") != (jobs[0].get("claim_token") or jobs[0].get("sent_claim_token")):
+                raise HouseholdError("original order email and claim token required for message export")
+            return self._delivery_read(jobs[0], jobs[0]["sender_part"], request)
+        if action in {"sender_binding", "bind_sender"}:
+            order_id = safe_order_id(request.get("order_id"))
+            with self.store.locked() as state:
+                jobs = matching_jobs(state, order_id)
+                if len(jobs) != 1:
+                    raise HouseholdError("select one exact existing order email")
+                job = jobs[0]
+                if action == "bind_sender":
+                    binding = state["recipe_delivery"].get("sender_binding")
+                    if job.get("status") != "pending" or job.get("sender_binding") or not binding or binding["recipient"] != job["recipient_snapshot"]:
+                        raise HouseholdError("adoption requires an unbound pending email and its unchanged selected recipient")
+                    job["sender_binding"] = deepcopy(binding)
+                    job["sender_preferences"] = deepcopy(state["recipe_delivery"]["preferences"]["email"])
+                    job["automation_protocol"] = 0
+                return {"binding": deepcopy(job.get("sender_binding")), "status": job["status"]}
         if action == "test":
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()
@@ -675,6 +754,12 @@ class EmailOperations:
                     payload["occurrence_id"] = self._email_occurrence(jobs[0])
                 if self.email_automation_profile:
                     payload["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
+                if request.get("managed_sender") is True:
+                    self._freeze_sender_message(jobs[0])
+                    payload = {k: v for k, v in payload.items() if k not in {"html", "html_without_images", "inline_images"}}
+                    payload.update(message=deepcopy(jobs[0]["sender_part"]),
+                                   warnings=deepcopy(jobs[0]["sender_warnings"]),
+                                   sender_binding=deepcopy(jobs[0]["sender_binding"]))
                 self._email_payload_within_transport(payload)
                 jobs[0]["status"] = "sending"
                 jobs[0].pop("sender_receipt", None)
@@ -735,6 +820,9 @@ class EmailOperations:
             if not isinstance(claim_token, str) or not claim_token:
                 raise HouseholdError("the email claim_token is required")
             with self.store.locked() as state:
+                original = matching_jobs(state, order_id)
+                if len(original) == 1 and original[0].get("released_claim_token") == claim_token:
+                    return {"released": True, "idempotent": True}
                 jobs = matching_jobs(state, order_id, {"claimed", "sending"})
                 if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match a claimed or sending job")
@@ -744,6 +832,7 @@ class EmailOperations:
                         raise HouseholdError("dispatched email requires affirmative not_sent sender evidence; uncertainty stays locked")
                     jobs[0]["sender_receipt"] = receipt
                 jobs[0]["status"] = "pending"
+                jobs[0]["released_claim_token"] = claim_token
                 jobs[0].pop("claim_token", None)
                 jobs[0].pop("claim_expires_at", None)
                 jobs[0].pop("dispatch_started_at", None)

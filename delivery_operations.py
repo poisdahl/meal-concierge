@@ -57,7 +57,7 @@ def summary(job, offset=0, part_id=None, *, include_parts=True):
         "next_offset": offset + 25 if part_id is None and offset + 25 < len(job["parts"]) else None,
         "all_accepted": bool(job["parts"]) and all(p["status"] == "accepted" for p in job["parts"]),
         "omissions_reported": bool(job["warnings"]),
-        "recipient_read": "unknown"}
+        "recipient_read": "unknown", "sender_binding": deepcopy(job.get("sender_binding"))}
 
 
 def capabilities(value, channel, destination):
@@ -97,9 +97,18 @@ class DeliveryOperations:
         action = request.get("action", "status")
         with self.store.locked() as state:
             delivery = state["recipe_delivery"]
+            installation_id = delivery.setdefault("installation_id", secrets.token_hex(16))
             jobs = delivery["jobs"]
             held = sorted([j["id"] + "/" + p["id"] for j in jobs.values() for p in j["parts"] if p.get("held")]
                           + [legacy_id(j) for j in state["email_jobs"] if j.get("delivery_hold") and j.get("status") in {"pending", "claimed", "sending"}])
+            if action == "sender":
+                return {"binding": deepcopy(delivery.get("sender_binding")),
+                        "installation_id": installation_id,
+                        "recipient": state.get("email_recipient"), "paused": delivery["paused"],
+                        "enabled": delivery["preferences"]["email"]["enabled"]}
+            if action == "lookup":
+                key = identifier(request.get("job_id"), "job_id")
+                return {"job": summary(jobs[key]) if key in jobs else None}
             if action == "status":
                 offset = request.get("offset", 0)
                 if type(offset) is not int or offset < 0:
@@ -126,6 +135,26 @@ class DeliveryOperations:
                             raise HouseholdError("email opt-in requires selected destination and verified sender capabilities")
                         capabilities(caps.get("email"), "email", destinations.get("email"))
                     new[channel].update(values)
+                binding = request.get("sender_binding")
+                if binding is not None:
+                    required = {"installation_id", "connection_id", "runtime_id", "account", "sender", "recipient", "capabilities", "unattended", "timing"}
+                    if not isinstance(binding, dict) or set(binding) != required:
+                        raise HouseholdError("sender binding needs the inspected connection, account and explicit delivery choices")
+                    for field in ("connection_id", "runtime_id"):
+                        identifier(binding[field], field)
+                    if binding["installation_id"] != installation_id:
+                        raise HouseholdError("email binding belongs to another household installation")
+                    evidence(binding["account"])
+                    destination = {k: binding[k] for k in ("sender", "recipient")}
+                    capabilities(binding["capabilities"], "email", destination)
+                    if type(binding["unattended"]) is not bool or binding["timing"] not in {"on_request", "delivery_day", "both"}:
+                        raise HouseholdError("invalid email timing or unattended support")
+                    if binding["timing"] != "on_request" and not binding["unattended"]:
+                        raise HouseholdError("this connection is not configured for unattended execution")
+                    if destination != request.get("destinations", {}).get("email"):
+                        raise HouseholdError("sender binding must match the selected email destination")
+                    delivery["sender_binding"] = deepcopy(binding)
+                    state["email_recipient"] = binding["recipient"]
                 delivery["preferences"] = new
                 if new["email"]["enabled"]:
                     delivery["legacy_email_disabled"] = False
@@ -212,6 +241,12 @@ class DeliveryOperations:
                     part["held"] = False
                 return summary(job)
             if action == "retry":
+                original_token = request.get("token")
+                if original_token is not None:
+                    if original_token != part.get("token"):
+                        raise HouseholdError("retry token does not match the original no-send attempt")
+                    if part["status"] == "ready":
+                        return summary(job)
                 if part["status"] != "not_sent":
                     raise HouseholdError("retry requires affirmative evidence that the original send did not occur")
                 part["status"] = "ready"
@@ -223,7 +258,11 @@ class DeliveryOperations:
                     return {"dispatch": False, "status": part["status"], "next": "Reconcile the original attempt; never blindly retry."}
                 # Check exact frozen bytes before granting permission to dispatch.
                 self._delivery_read(job, part, {"offset": 0})
+                attempt_id = request.get("executor_attempt")
+                if attempt_id is not None:
+                    identifier(attempt_id, "executor_attempt")
                 part["status"], part["token"] = "attempting", secrets.token_hex(24)
+                part["executor_attempt"] = attempt_id
                 part.setdefault("attempts", []).append({"token": part["token"], "outcome": "unknown"})
                 return {"dispatch": True, "token": part["token"], "job_id": job["id"], "part_id": part["id"],
                         "destination": deepcopy(job["destinations"][part["channel"]]),
@@ -270,6 +309,8 @@ class DeliveryOperations:
         if request.get("delivery_requested") is not True:
             raise HouseholdError("request requires an explicit user intent to deliver this saved menu")
         intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities")}
+        if request.get("channel") is not None:
+            intent["channel"] = request["channel"]
         if request_id in delivery["jobs"]:
             job = delivery["jobs"][request_id]
             if job["intent_digest"] != digest(intent):
@@ -281,6 +322,10 @@ class DeliveryOperations:
             raise HouseholdError("recipe delivery history is full; retain receipts and archive it explicitly")
         menu = deepcopy(exact_menu(state, request.get("menu_ref")))
         selected = {c for c, p in delivery["preferences"].items() if p["enabled"]}
+        if request.get("channel") is not None:
+            if request["channel"] not in selected:
+                raise HouseholdError("requested delivery channel is not enabled")
+            selected = {request["channel"]}
         destinations = request.get("destinations")
         if not selected or not isinstance(destinations, dict) or set(destinations) != selected:
             raise HouseholdError("supply exactly the enabled channel destinations; at least one channel is required")
@@ -291,6 +336,11 @@ class DeliveryOperations:
         job = {"id": request_id, "purpose": "explicit_finalized_menu", "menu_ref": menu_ref(menu),
                "menu_snapshot": menu, "intent_digest": digest(intent), "destinations": deepcopy(destinations),
                "capabilities": caps, "preferences": deepcopy(delivery["preferences"]), "parts": [], "warnings": []}
+        binding = delivery.get("sender_binding")
+        if "email" in selected and binding:
+            if destinations["email"] != {k: binding[k] for k in ("recipient", "sender")}:
+                raise HouseholdError("email destination differs from the saved sender connection; configure an explicit change first")
+            job["sender_binding"] = deepcopy(binding)
         root = self.store.directory / "recipe-deliveries"
         root.mkdir(mode=0o700, exist_ok=True)
         directory = secrets.token_hex(16)

@@ -11,7 +11,94 @@ queued order emails and receipts; chat is not retroactively enabled. `status`,
 `configure` and `request` show the separate order-delivery-day email so an
 immediate delivery and the configured later occurrence remain intentional.
 
+## Email connection setup
+
+The managed `meal_concierge_email_sender` tool provides status, one-time
+configure, send and reconciliation. It uses the host's existing email integration;
+the grocery service never receives credentials. CLI clients use the same runner
+with `operation=email_sender`. Agent brands do not select a transport.
+
+Start with status. If the connection exists, configure its selected sender,
+recipient and timing (`on_request`, `delivery_day`, `both`) once. This stores a
+non-secret connection/account reference in this household. It sends nothing,
+creates no schedule and does not release held work or rewrite pending recipients.
+For multiple accounts, select connection_id explicitly. No default-account switch
+is performed later. Enabling email does not disable chat; managed send selects
+email only. Low-level request also accepts an explicit enabled `channel` subset.
+
+For a host without a connection, an installing agent can run the release's
+`email_sender.py` with the existing integration's details. Substitute verified
+absolute paths, never credentials in command arguments. Gmail example:
+
+```sh
+python3 /absolute/meal-concierge/email_sender.py --runtime-id my-household \
+  --gmail-python /absolute/hermes/.venv/bin/python \
+  --gmail-credentials /absolute/existing/google_token.json --unattended
+```
+
+This requires the existing Google Python environment (`google-auth` and
+`google-api-python-client`) and a recorded grant with Gmail read and send access.
+It neither copies nor writes the credential file; access-token refresh stays in
+memory. Login and revoked-grant repair belong to the existing integration.
+**If that integration has its own write policy, use its guarded JSON command
+instead** (`--command /absolute/helper ...`); the standalone example is not a
+way to bypass policy. Bob uses his guarded Workspace helper this way.
+
+SMTP example, using a password already supplied by the host's secret environment:
+
+```sh
+python3 /absolute/meal-concierge/email_sender.py --runtime-id my-household \
+  --smtp-host smtp.example.test --smtp-sender sender@example.test \
+  --smtp-username sender@example.test --smtp-password-env EXISTING_SMTP_PASSWORD \
+  --unattended
+```
+
+SMTP defaults to STARTTLS/587; implicit TLS supports `--smtp-tls implicit
+--smtp-port 465`. Sender identity is explicitly configured, not independently
+proven by SMTP. Endpoint/username changes invalidate the original account binding.
+Inspection connects/authenticates but sends no MAIL/RCPT/DATA. Set unattended
+only when the same runtime's scheduled jobs have the connection/secret access.
+This flag does not establish a native scheduler or make an asleep host available.
+
+Setup writes one new owner-private `$XDG_CONFIG_HOME/meal-concierge/email-sender.json`
+(default `~/.config/...`) and never overwrites an existing connection. A custom
+`MEAL_CONCIERGE_EMAIL_CONFIG` must be supplied to both MCP and CLI/scheduled
+processes. The file contains runtime_id, receipt_dir and connections with stable
+id, type (`command` or `smtp`) and unattended support. Commands are fixed argument
+lists, not shell strings. Native command protocol is one JSON request on stdin
+and one bounded JSON result on stdout: inspect returns actual account/sender and
+capabilities; check(binding) returns ready; send/reconcile receive binding and
+message_base64 without passing bytes through model text. Outcomes are accepted
+with a receipt, affirmative not_sent with evidence, or unknown. Native guards
+must check the actual MIME, not separate address arguments. Unsupported native
+connectors remain unsupported; no public file links or invented PDF support.
+
+Managed send requires exact menu_ref, delivery_requested=true and stable
+request_id. The executor serializes attempts per household and occurrence,
+exports exact MIME, begins through the service, sends once, persists its receipt,
+then acknowledges. It freezes Date/Message-ID with the content. `reconcile`
+reuses the original account and message; lost acknowledgment never resends.
+Explicit `retry` requires recorded not_sent and retains the original occurrence.
+Unknown Gmail results can be positively matched in sent mail when the existing
+grant permits it. A missing match proves nothing; Message-ID is not Gmail
+deduplication. SMTP cannot automatically reconcile a lost acceptance response.
+Unknown and required-action outcomes must be surfaced, not silently retried.
+
+The private receipt directory contains original message bytes and evidence.
+Preserve it across upgrades and include it in the host's private backup policy.
+Do not delete it to fix an uncertain send. The service's existing outcome journal
+remains authoritative; local receipts bridge the network-send/ack crash window.
+
+Synthetic acceptance exercises setup/restart, PDF/MIME, duplicate calls, account
+changes, unknown/accepted reconciliation, concurrent executors, explicit retry,
+order-day scheduler gates and a real loopback SMTP sink. This is not evidence of
+a live Gmail recipient accepting email; that requires a separately authorized send.
+
 ## Normal native host path
+
+Use this lower-level path for chat or an explicitly supported external sender
+without the managed executor. Do not also run it for an email already managed
+by email_sender.
 
 1. Read the saved menu's exact `menu_ref={menu_id,revision,digest}` and delivery
    status. Inspect the actual host's native output tools and their limits.
