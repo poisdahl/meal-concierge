@@ -2759,6 +2759,16 @@ class PlanningOperations:
             if not isinstance(current, dict) or current.get("pending_cart_digest") != supplied_digest:
                 raise HouseholdError("cart plan changed while applying the decision")
             self._reduce_supplements(current, first_live, verified_live)
+            # Excluding a surplus also withdraws its extra-purpose allocation.
+            # The same physical units may now cover the new menu, with no
+            # quantity decrease (for example two existing fish packages).
+            for product_id in excluded:
+                supplements = current.get("supplemental_quantities", {})
+                remaining = min(supplements.get(product_id, 0), max(0, verified_live.get(product_id, 0) - requirements.get(product_id, 0)))
+                if remaining:
+                    supplements[product_id] = remaining
+                else:
+                    supplements.pop(product_id, None)
             current["added_quantities"] = {
                 product_id: min(quantity, verified_live.get(product_id, 0))
                 for product_id, quantity in current["added_quantities"].items()

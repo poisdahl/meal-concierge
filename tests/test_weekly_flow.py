@@ -114,6 +114,27 @@ class WeeklyFlowTests(unittest.TestCase):
             self.app._record_order_snapshot(state, pending, '1234567')
         self.assertEqual(len(self.app.handle({'operation': 'recurring', 'action': 'due', 'date': '2026-09-07'})['due']), 1)
 
+    def test_reconcile_existing_manual_menu_goods_does_not_readd_them_as_extras(self):
+        plan = self.batch()
+        menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_handoff': plan['save_handoff']})['menu']
+        self.provider.cart.update(items=[], count=0, subtotal=0)
+        self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+            {'product_id': '10', 'product_name': 'Gulrot', 'quantity': 2},
+            {'product_id': '50', 'product_name': 'Spirer', 'quantity': 1}]})
+        preview = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})['product_plan']
+        approved = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu),
+            'candidate_approvals': [{'requirement_id': r['requirement_id'], 'candidate_refs': ['10']} for r in preview['requirements']]})
+        pending = self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})
+        self.assertTrue(pending['cart_reconciliation_required'])
+        reconciled = self.app.handle({'operation': 'cart', 'action': 'reconcile', 'menu_ref': mp.menu_ref(menu),
+            'cart_digest': pending['cart_plan']['cart_digest'], 'decision': 'restore_missing', 'exclude_product_ids': ['10']})
+        self.assertTrue(reconciled['reconciled'])
+        self.assertFalse(any(i['missing_quantity'] for i in reconciled['cart_plan']['items']))
+        self.assertTrue(self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})['applied'])
+        self.recurring('20')  # Changed requirements must not revive withdrawn extras.
+        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
+        self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'10': 2, '50': 1, '20': 1})
+
     def test_saved_menu_equipment_is_checked_at_confirmation(self):
         self.profile(meals={'equipment': ['pot','pan','oven','blender']})
         self.shop(self.batch())
