@@ -794,8 +794,12 @@ def evidence_inputs(evidence: Any) -> list[Mapping[str, Any]]:
     return [evidence] + ([dependency] if isinstance(dependency, Mapping) else [])
 
 
-def _unaccepted(evidence: Any) -> bool:
-    return any(item.get("basis") == "estimate" and not item.get("acceptance") and not item.get("project_review") for item in evidence_inputs(evidence))
+def _unresolved_evidence(evidence: Any) -> bool:
+    # An explicit cooking estimate is usable data, not personal acceptance.
+    # Preserve its basis/assumptions through arithmetic and presentation.
+    return any(item.get("basis") == "unknown" or (item.get("basis") == "estimate"
+               and not item.get("assumptions") and not item.get("acceptance") and not item.get("project_review"))
+               for item in evidence_inputs(evidence))
 
 
 def recipe_digest(recipe: Mapping[str, Any]) -> str:
@@ -902,9 +906,9 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
     target = base if portions is None else _finite_positive(portions, "target portions")
     if base is None and portions is not None:
         raise RecipeError("unknown portions: resolve person servings explicitly before scaling")
-    missing = [path for path, evidence in recipe_evidence_fields(result).items() if _unaccepted(evidence) or any(item.get("basis") == "unknown" for item in evidence_inputs(evidence))]
+    missing = [path for path, evidence in recipe_evidence_fields(result).items() if _unresolved_evidence(evidence)]
     if portions is not None and any(path == "portions" or path.startswith("ingredients.") for path in missing):
-        raise RecipeError("explicit estimate acceptance is required before scaling: " + ", ".join(missing))
+        raise RecipeError("unresolved quantity evidence before scaling: " + ", ".join(missing))
     if base is None:
         missing.insert(0, "portions")
     try:

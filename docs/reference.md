@@ -849,7 +849,7 @@ or inside a state-root container mount, without exposing either path through MCP
 
 The [versioned recipe contract](recipe-contract.md) defines exact quantities,
 original source wording, separate yield/person servings, field evidence and
-explicit estimate acceptance. New typed writers use recipe schema 2. Existing
+visible cooking-estimate provenance; optional personal acceptance is separate. New typed writers use recipe schema 2. Existing
 schema-1 documents, revisions and discovery digests retain their exact content.
 Schema-2 external-library writes remain unsupported. The built-in bank supports
 explicit local [managed cover imports](recipe-assets.md), versioned image
@@ -2037,3 +2037,15 @@ No inventory, cart or cooked-history mutation accompanies planning.
 
 Weekly shop continuity, equipment, compact dietary review and one-plan batch
 adjustments are described in [the recurring workflow contract](recurring-batch-dietary.md#weekly-shop-continuity).
+
+### Practical package quantities
+
+For a recipe measured in teaspoons or pieces and a retail package measured in
+grams, one `candidate_approvals` entry may supply one observed `candidate_refs`
+value, `package_count` (1–100) and `quantity_basis` (a short culinary estimate).
+The product plan retains the source requirement and observed package, records
+`coverage_status=practical_estimate`, and leaves exact coverage/surplus unknown.
+The usual apply path rechecks retailer facts, price and package limits; known
+dietary or dry/cooked form conflicts still fail. These plans make no exact
+lowest-cost comparison claim. Unknown nonmedical preference/never-buy evidence
+is advisory; known exclusions and medical uncertainty retain their checks.

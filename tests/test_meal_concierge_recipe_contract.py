@@ -134,8 +134,10 @@ class RecipeContractTests(unittest.TestCase):
         recipe = authored_recipe()
         recipe["portions_evidence"] = {"basis": "estimate", "input": "2 loaves", "assumptions": "Six slices per loaf, one slice per person."}
         saved = self.save(recipe)
-        with self.assertRaisesRegex(RecipeError, "acceptance"):
-            self.save_menu({"recipe_ref": {"id": saved["id"], "revision": 1}, "portions": 2})
+        estimated = self.save_menu({"recipe_ref": {"id": saved["id"], "revision": 1}, "portions": 2})
+        self.assertTrue(estimated["dishes"][0]["readiness"]["scaling_ready"])
+        self.assertIn("(anslag)", menu_email_html(estimated))
+        self.assertNotIn("acceptance", json.dumps(estimated))
         request = {"operation": "recipes", "action": "accept_estimates", "recipe_id": saved["id"], "expected_revision": 1, "recipe_digest": saved["recipe_digest"], "estimate_fields": ["portions"], "confirmation_statement": ESTIMATE_CONFIRMATION, "idempotency_key": "estimate"}
         with self.assertRaisesRegex(RecipeError, "digest"):
             self.app.handle({**request, "recipe_digest": "0" * 64})
@@ -152,6 +154,52 @@ class RecipeContractTests(unittest.TestCase):
         changed["portions"] = 99
         with self.assertRaisesRegex(RecipeError, "service-owned"):
             self.app.handle({"operation": "recipes", "action": "update", "recipe_id": saved["id"], "expected_revision": 2, "recipe": changed})
+
+    def test_generated_cooking_estimate_reaches_menu_and_practical_cart(self):
+        from unittest.mock import patch
+        recipe = authored_recipe()
+        recipe.update(name='Estimated ordinary-pot dinner', portions=2,
+            portions_evidence={'basis':'estimate', 'assumptions':'Two ordinary dinner servings.'},
+            source={'kind':'adaptation', 'relationship':'generated'}, steps=['Simmer in an ordinary pot.'],
+            ingredients=[{'item':'spisskummen', 'quantity':1, 'unit':'tsp',
+                'evidence':{field:{'basis':'estimate','assumptions':'Culinary seasoning estimate for two servings.'} for field in ('quantity','unit')}}])
+        saved = self.save(recipe)
+        menu = self.save_menu({'recipe_ref':{'id':saved['id'],'revision':saved['revision']}, 'portions':6})
+        dish = menu['dishes'][0]
+        self.assertTrue(dish['readiness']['scaling_ready'])
+        self.assertEqual(dish['ingredients'][0]['quantity'], {'numerator':3,'denominator':1})
+        self.assertNotIn('acceptance', json.dumps(dish))
+        self.assertIn('(anslag)', menu_email_html(menu))
+        ref = self.app._cart_menu_ref(menu)
+        req = menu_requirements(menu)[0][0]
+        original_call = self.provider.call
+        observed_price = [1000]
+        def observe(tool, arguments, **kwargs):
+            if tool == 'product_search':
+                return observation(arguments['queries'][0], [product('10','Spisskummen',35,'g',[option(observed_price[0])])])
+            return original_call(tool, arguments, **kwargs)
+        with patch.object(self.provider,'call',side_effect=observe):
+            prepared = self.app.handle({'operation':'products','action':'prepare','menu_ref':ref,
+                'candidate_approvals':[{'requirement_id':req['requirement_id'],'candidate_refs':['10'],
+                    'package_count':1,'quantity_basis':'One 35 g jar is estimated to cover three teaspoons.'}]})
+            self.assertEqual(prepared['product_plan']['status'],'prepared')
+            observed_price[0] = 1100
+            drift = self.app.handle({'operation':'products','action':'apply',
+                **prepared['apply_arguments'], 'cart_change_requested':True})
+            self.assertFalse(drift['applied'])
+            self.assertEqual(self.provider.cart['items'], [])
+            observed_price[0] = 1000
+            result = self.app.handle({'operation':'products','action':'apply',
+                **prepared['apply_arguments'], 'cart_change_requested':True})
+            self.assertTrue(result['applied'], result)
+            self.assertEqual(self.provider.cart['items'][0]['quantity'],1)
+            again = self.app.handle({'operation':'products','action':'apply',
+                **prepared['apply_arguments'], 'cart_change_requested':True})
+            self.assertTrue(again['applied'])
+            self.assertEqual(self.provider.cart['items'][0]['quantity'],1)
+            summary = self.store.read()['cart_plan']['product_plan_summary']
+            self.assertEqual(summary['coverage_status'],'practical_estimate')
+            self.assertEqual(summary['quantity_estimates'][0]['quantity_basis'],'One 35 g jar is estimated to cover three teaspoons.')
 
     def test_unknown_units_and_mass_volume_stay_unresolved_and_fractions_aggregate(self):
         recipe = authored_recipe()

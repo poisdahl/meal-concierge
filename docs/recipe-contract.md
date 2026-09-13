@@ -147,14 +147,17 @@ or replace original attribution. Generated new input is estimated. Editable
 external-library metadata cannot establish local user acceptance or publisher review.
 
 Recipes can be read and saved with unknown servings or unaccepted estimates.
-Automatic scaling rejects unresolved relevant evidence. Product preparation
+Automatic scaling accepts positive cooking estimates with stated assumptions,
+explicit units and person servings, retaining estimated provenance without
+fabricating user acceptance. Unknown relevant evidence remains unresolved. Product preparation
 returns explicit unresolved ingredient/serving reasons rather than zero or
 invented quantities. A direct inline menu never fills missing source servings
 from the household profile. Explicit authored person servings remain supported.
 Existing allergy/avoid/strict-time/nutrition evidence rules are unchanged; these
 quantity records do not establish safety or nutritional compliance.
 
-Recipe get/discovery responses expose `recipe_digest`. After the calling agent
+Recipe get/discovery responses expose `recipe_digest`. Personal estimate
+acceptance is optional, not a prerequisite for ordinary planning. After the calling agent
 shows the exact estimates and obtains explicit current-user acceptance, recipe
 write `accept_estimates` takes either `recipe_id` plus `expected_revision`, or
 `discovery_ref`; the digest; exact `estimate_fields`; and this statement:
