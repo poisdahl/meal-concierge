@@ -2453,8 +2453,8 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertTrue(manual['manual_checkout_required'])
         self.assertEqual(manual['summary']['menu_shortfall'], automatic['summary']['menu_shortfall'])
         self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
-            'rules': [{'kind': 'preference', 'term': 'organic'}], 'uncertainty_permissions': [
-                {'kind': 'preference', 'term': 'organic', 'product_ref': '10', 'condition': 'unknown',
+            'rules': [{'kind': 'sensitivity', 'term': 'organic'}], 'uncertainty_permissions': [
+                {'kind': 'sensitivity', 'term': 'organic', 'product_ref': '10', 'condition': 'unknown',
                  'accepted': True, 'notify': True}]}}})
         self.shop.product_dietary_evidence = lambda *a, **kw: {'unavailable': 'synthetic'}
         prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
@@ -2504,8 +2504,8 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
             'confirmation_id': prepared['confirmation_id'], 'dietary_review': [finding['finding_id']]})
         self.assertTrue(blocked['dietary_review_required']); self.assertEqual(self.browser.checkout_clicks, 0)
         self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {
-            'rules': [{'kind': 'preference', 'term': 'sugar'}], 'uncertainty_permissions': [
-                {'kind': 'preference', 'term': 'sugar', 'product_ref': '4694', 'condition': 'unknown', 'accepted': True, 'notify': True}]}}})
+            'rules': [{'kind': 'sensitivity', 'term': 'sugar'}], 'uncertainty_permissions': [
+                {'kind': 'sensitivity', 'term': 'sugar', 'product_ref': '4694', 'condition': 'unknown', 'accepted': True, 'notify': True}]}}})
         self.shop.product_dietary_evidence = lambda reference, **kw: {'unavailable': 'synthetic_detail_unavailable'}
         prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
         notice = self.app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})['notice']

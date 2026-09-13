@@ -23,7 +23,7 @@ from recipe_selection import history_source_index, family_history_usage, compact
 from planner import _validate_request
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
 from product_planner import normalize_available_ingredients
-from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
+from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, ingredient_search, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
 import menu_planning as mp
 import planning_feedback as pf
@@ -305,7 +305,40 @@ class PlanningOperations:
         if planner_input.get("dates", replacement_dates) != replacement_dates:
             raise HouseholdError("planner dates must exactly match the unlocked remaining dates")
         planner_input.update({"week": current["week"], "dates": replacement_dates, "as_of_date": today, "alternatives": 1})
-        effective = self._effective_planner_request(planner_input, planning_state, anchor_current_date=True)
+        # Replacements inherit complete frozen batch components, not the full
+        # household week. Retain the accepted prepared amount for this menu.
+        replacement_state = deepcopy(planning_state)
+        replacement_state['profile']['meals']['meal_mode'] = 'fresh'
+        effective = self._effective_planner_request(planner_input, replacement_state, anchor_current_date=True)
+        if planner_input.get('meal_mode') != 'fresh':
+            allocations = []
+            batch_by_source = {b['source_slot_id']: b for b in batches}
+            for slot in replacing:
+                if slot.get('kind') == 'leftover':
+                    continue
+                batch = batch_by_source.get(slot['slot_id'])
+                if batch:
+                    amounts = [bp.fraction(batch[k]) for k in ('prepared_portions', 'consumed_at_source')]
+                    dependents = [bp.fraction(s['portions']) for s in replacing if s.get('source_slot_id') == slot['slot_id']]
+                    if any(a.denominator != 1 for a in amounts) or any(a != amounts[1] for a in dependents):
+                        return {'status': 'needs_input', 'reason': 'This batch has fractional or unequal eating portions; retain it or explicitly request fresh replacements.',
+                                'prepared_portions': batch['prepared_portions'], 'consumed_at_source': batch['consumed_at_source']}
+                days = sorted([slot['date']] + [s['date'] for s in replacing if s.get('source_slot_id') == slot['slot_id']])
+                allocations.append({'source_date': slot['date'], 'eating_dates': days, 'batch': bool(batch),
+                    'prepared_portions': int(bp.fraction(batch['prepared_portions'])) if batch else slot['portions'],
+                    'consumed_at_source': int(bp.fraction(batch['consumed_at_source'])) if batch else slot['portions']})
+            covered = {d for a in allocations for d in a['eating_dates']}
+            if any(a['batch'] for a in allocations) and covered != set(replacement_dates):
+                return {'status': 'needs_input', 'reason': 'Replan the complete batch separately from leftover-only dates whose cooking source is retained.'}
+            if any(a['batch'] for a in allocations) and covered == set(replacement_dates):
+                consumption = {a['consumed_at_source'] for a in allocations}
+                if len(consumption) != 1:
+                    return {'status': 'needs_input', 'reason': 'These components have different eating portions; replan each component separately or explicitly choose fresh meals.'}
+                effective['portions'] = next(iter(consumption))
+                effective['recurring_batch'] = {'sources': allocations, 'shortages': [],
+                    'required_portions': sum(len(a['eating_dates']) * a['consumed_at_source'] for a in allocations),
+                    'available_portions': sum(a['prepared_portions'] for a in allocations),
+                    'accepted_settings': {**deepcopy(state['profile']['meals']), 'portions': effective['portions']}}
         candidates = self._resolve_planner_candidates(effective, planning_state)
         carried_keys = {s["recipe_key"] for s in carried}
         candidates = [c for c in candidates if c["recipe_key"] not in carried_keys]
@@ -317,8 +350,17 @@ class PlanningOperations:
             return {"status": "needs_input", "plan": result}
         replacement = self._materialize_planner_menu(result["save_handoff"], candidates)
         # Stable IDs are scoped to this exact predecessor; only carried slots keep IDs.
-        for slot in replacement["slots"]:
-            slot["slot_id"] = "slot_" + mp.digest({"source": mp.menu_ref(current), "replacement": slot})[:32]
+        remap = {slot['slot_id']: 'slot_' + mp.digest({'source': mp.menu_ref(current), 'replacement': slot})[:32]
+                 for slot in replacement['slots']}
+        for slot in replacement['slots']:
+            slot['slot_id'] = remap[slot['slot_id']]
+            if slot.get('source_slot_id') in remap:
+                slot['source_slot_id'] = remap[slot['source_slot_id']]
+        for batch in replacement.get('batches', []):
+            batch['source_slot_id'] = remap[batch['source_slot_id']]
+            for leftover in batch['leftovers']:
+                leftover['slot_id'] = remap[leftover['slot_id']]
+            batch['spec_digest'] = mp.digest({k: v for k, v in batch.items() if k != 'spec_digest'})
         successor = {"week": current["week"], "dishes": [], "salads": [],
                      "slots": sorted(deepcopy(carried) + replacement["slots"], key=mp.slot_order),
                      "historical_slot_ids": sorted(historical), "supersedes": mp.menu_ref(current),
@@ -330,6 +372,7 @@ class PlanningOperations:
         recipes = {r["recipe_key"]: r for r in current["dishes"] + current["salads"] + replacement["dishes"]}
         successor["dishes"] = [deepcopy(recipes[key]) for key in dict.fromkeys(s["recipe_key"] for s in successor["slots"])]
         retained_batches = [deepcopy(b) for b in batches if b["source_slot_id"] not in {s["slot_id"] for s in replacing}]
+        retained_batches += deepcopy(replacement.get('batches', []))
         if retained_batches:
             successor["batches"] = retained_batches
             if current.get("batch") in retained_batches:
@@ -382,10 +425,11 @@ class PlanningOperations:
         if canonical(fresh) != canonical(supplied):
             raise HouseholdError("replan is stale or altered; prepare again")
         with self.store.locked() as state:
-            if any(state.get(k) for k in ("pending_checkout", "pending_cancellation", "order_change")):
+            if any(state.get(k) for k in ("pending_cancellation", "order_change")):
                 raise HouseholdError("reconcile pending protected operations before replan apply")
             if self._household_today(state).isoformat() != supplied["as_of_date"] or self._replan_state_digest(state) != supplied["state_digest"]:
                 raise HouseholdError("replan date or state changed; prepare again")
+            self._abandon_predispatch(state, reason="menu replanned before checkout")
             return self._commit_successor(state, supplied)
 
     def _prepare_batch(self, request):
@@ -648,6 +692,9 @@ class PlanningOperations:
                     document = normalize_recipe(candidate) if trusted_snapshots else self.recipes.prepare_input(candidate)
                     recipe = scale_recipe(document, candidate.get("portions"))
                 self._require_recipe_provider(recipe)
+                from planner import equipment_conflicts
+                if missing := equipment_conflicts(self.store.read()["profile"], recipe):
+                    raise HouseholdError("recipe requires unavailable equipment: " + ", ".join(missing))
                 materialized.append(recipe)
                 count += 1
             result[collection] = materialized
@@ -708,7 +755,7 @@ class PlanningOperations:
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value).difference({
             "week", "dates", "portions", "candidates", "strict_targets",
-            "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch",
+            "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode",
         }):
             raise PlannerError("planner input has unknown fields")
         available = normalize_available_ingredients(value.get("available_ingredients"))
@@ -734,17 +781,34 @@ class PlanningOperations:
         if not isinstance(meals, Mapping):
             raise PlannerError("profile meals are invalid")
         dates = deepcopy(value.get('dates')) if value.get('dates') is not None else self._default_planner_dates(week, profile)
-        layout = bp.recurring_layout(profile, dates) if value.get('dates') is None or value.get('recurring_batch') else None
+        if not isinstance(dates, list) or not all(isinstance(d, str) for d in dates):
+            raise PlannerError('planner dates must be ISO dates')
+        dates = sorted(dates)
+        mode = value.get('meal_mode')
+        if mode is not None:
+            if mode not in {'fresh', 'batch', 'mixed'}:
+                raise PlannerError('meal_mode must be fresh, batch or mixed')
+            profile = deepcopy(profile)
+            profile['meals']['meal_mode'] = mode
+        override = value.get('prepared_portion_range')
+        if override is not None:
+            if (not isinstance(override, list) or len(override) != 2
+                    or any(type(v) is not int or not 1 <= v <= 100 for v in override) or override[0] > override[1]):
+                raise PlannerError('prepared_portion_range must be two ordered positive portion counts')
+            profile = deepcopy(profile)
+            profile['meals']['prepared_portion_range'] = override
+        layout = bp.recurring_layout(profile, dates)
         if layout and value.get('portions', meals['portions']) != meals['portions']:
             raise PlannerError('recurring batch consumption must match accepted profile portions; update that explicit setting or use fresh dates')
         if value.get('recurring_batch') is not None and canonical(layout) != canonical(value['recurring_batch']):
             raise PlannerError('recurring batch settings changed; plan again')
         return {
             **({'recurring_batch': layout} if layout else {}),
+            **({'prepared_portion_range': deepcopy(override)} if override is not None else {}),
+            **({'meal_mode': mode} if mode is not None else {}),
             **({"available_ingredients": available} if available else {}),
             "week": week,
-            "dates": deepcopy(value.get("dates")) if value.get("dates") is not None
-            else self._default_planner_dates(week, profile),
+            "dates": dates,
             "portions": value.get("portions", meals.get("portions")),
             "candidates": deepcopy(value.get("candidates")),
             "strict_targets": deepcopy(value.get("strict_targets", [])),
@@ -1661,13 +1725,15 @@ class PlanningOperations:
     def _product_observations(
         self, menu: Mapping[str, Any], *, deadline: float | None,
         search_cache: dict[str, dict[str, Any]] | None = None,
-        ingredient_decisions: Any = None,
+        ingredient_decisions: Any = None, candidate_approvals: Any = None,
     ) -> dict[str, dict[str, Any]]:
         requirements, _unresolved = exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=ingredient_decisions)
+        from product_planner import normalize_approvals, ingredient_search
+        approvals = normalize_approvals(candidate_approvals, {r["requirement_id"] for r in requirements})
         observations = {}
         cache = search_cache if search_cache is not None else {}
         for requirement in requirements:
-            query = requirement["identity"]
+            query = approvals.get(requirement["requirement_id"], {}).get("search_query") or ingredient_search(requirement["identity"], self.provider)
             if query in cache:
                 observations[requirement["requirement_id"]] = deepcopy(cache[query])
                 continue
@@ -1728,7 +1794,7 @@ class PlanningOperations:
             if isinstance(approval, Mapping):
                 values.append({
                     key: deepcopy(approval[key])
-                    for key in ("requirement_id", "candidate_refs", "max_excess")
+                    for key in ("requirement_id", "candidate_refs", "max_excess", "search_query")
                     if key in approval
                 })
         return values
@@ -1813,7 +1879,7 @@ class PlanningOperations:
         candidate_approvals: Any, deadline: float | None,
         ingredient_decisions: Any = None, budget_ore: int | None = None, price_mode: str = "exact",
     ) -> dict[str, Any]:
-        observations = self._product_observations(menu, deadline=deadline, ingredient_decisions=ingredient_decisions)
+        observations = self._product_observations(menu, deadline=deadline, ingredient_decisions=ingredient_decisions, candidate_approvals=candidate_approvals)
         profile = self.store.read().get("profile")
         diet = profile.get("diet") if isinstance(profile, Mapping) else None
         hard_constraints = {
@@ -1883,11 +1949,12 @@ class PlanningOperations:
         diet = profile.get("diet", {})
         hard = {key: deepcopy(diet[key]) for key in ("allergies_or_sensitivities", "avoid") if diet.get(key)}
         cache = {}
-        # All alternatives share one canonical query per ingredient identity. Search
-        # dispatch order is independent of planner rank and caller candidate order.
-        for query in sorted(queries):
-            synthetic = {"dishes": [{"shopping_requirements": [{"item": query, "unit": "g", "quantity": 1, "scalable": True}]}], "salads": []}
-            self._product_observations(synthetic, deadline=request.get("_deadline"), search_cache=cache)
+        menu_observations = []
+        for menu, rows in zip(menus, requirements, strict=True):
+            selected = [{key: value for key, value in approvals[r['requirement_id']].items() if key != 'source'}
+                        for r in rows if r['requirement_id'] in approvals]
+            menu_observations.append(self._product_observations(menu, deadline=request.get('_deadline'),
+                search_cache=cache, candidate_approvals=selected))
         from dietary_assessment import rules
         reader = getattr(self.provider_client, 'product_dietary_evidence', None)
         if reader is not None and rules(profile):
@@ -1897,7 +1964,12 @@ class PlanningOperations:
                     if str(product['product_ref']) in refs:
                         product['dietary_evidence'] = {**product.get('dietary_evidence', {}), **reader(product['product_ref'], deadline=request.get('_deadline'))}
         for rank, (handoff, menu, rows) in enumerate(zip(result["save_handoffs"], menus, requirements, strict=True), 1):
-            observations = {r["requirement_id"]: cache[r["identity"]] for r in rows if r["identity"] in cache}
+            observations = menu_observations[rank - 1]
+            # Reuse enriched observations for the exact translated/overridden query.
+            for row in rows:
+                query = approvals.get(row['requirement_id'], {}).get('search_query') or ingredient_search(row['identity'], self.provider)
+                if query in cache:
+                    observations[row['requirement_id']] = deepcopy(cache[query])
             selected_approvals = [{key: value for key, value in approvals[r["requirement_id"]].items() if key != "source"}
                                   for r in rows if r["requirement_id"] in approvals]
             product_plan = build_product_plan(
@@ -2056,7 +2128,7 @@ class PlanningOperations:
                     "fresh_product_plan": final,
                 }
 
-            if not prepared_cart_requirements(supplied):
+            if not prepared_cart_requirements(supplied) and not self.store.read()["recurring_items"]:
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref, "_allow_empty_requirements": True}, deadline)
                 if not cart_result.get("synced"):
                     return {"applied": False, **cart_result}
@@ -2074,6 +2146,7 @@ class PlanningOperations:
                 return {"applied": True, "cart_changed": False, "nothing_to_buy": True, "product_plan": supplied}
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
+                "_allow_empty_requirements": True,
                 "start_as_extra_product_ids": [],
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
@@ -2374,6 +2447,17 @@ class PlanningOperations:
         with self.store.locked() as state:
             state.pop("product_plan_completion", None)
         requirements, requirement_names = self._cart_requirements(request.get("requirements"), allow_empty=request.get("_allow_empty_requirements") is True)
+        menu_requirements = dict(requirements)
+        snapshot = self.store.read()
+        menu = snapshot.get('menu') or {}
+        recurring = []
+        if snapshot['recurring_items']:
+            year, week = map(int, menu['week'].split('-W'))
+            recurring = self._due_recurring(snapshot, date.fromisocalendar(year, week, 1))
+        for item in recurring:
+            key = self._product_id(item['product_id'])
+            requirements[key] = requirements.get(key, 0) + item['quantity']
+            requirement_names.setdefault(key, item['product_name'])
         extra_values = request.get("start_as_extra_product_ids") or []
         if not isinstance(extra_values, list):
             raise HouseholdError("start_as_extra_product_ids must be a list")
@@ -2409,7 +2493,8 @@ class PlanningOperations:
                     canonical(current.get("required_quantities")) != canonical(requirements)
                     or set(current.get("start_as_extra_product_ids", [])) != start_as_extra
                 )
-                if requirements_changed:
+                if (current.get("menu_required_quantities", current.get("required_quantities")) != menu_requirements
+                        or set(current.get("start_as_extra_product_ids", [])) != start_as_extra):
                     current.pop("product_plan_digest", None)
                     current.pop("product_plan_summary", None)
                 current["required_quantities"] = dict(requirements)
@@ -2428,9 +2513,10 @@ class PlanningOperations:
                     self._set_cart_needs_input(current, first_live, first_names)
                 elif requirements_changed:
                     current["approved_cart_digest"] = None
-                    current.pop("product_plan_digest", None)
-                    current.pop("product_plan_summary", None)
                 state["cart_plan"] = deepcopy(current)
+            current['menu_required_quantities'] = menu_requirements
+            current['recurring_items'] = recurring
+            state['cart_plan'] = deepcopy(current)
         if current["status"] == "needs_input":
             return {"synced": False, **self._cart_question(current, first_summary, reason="cart_or_menu_changed_before_sync")}
         if approved_idempotent:
@@ -2817,6 +2903,18 @@ class PlanningOperations:
 
     def _cart(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "get")
+        if action == 'weekly':
+            state = self.store.read()
+            plan = state.get('cart_plan') or {}
+            reference = self._cart_menu_ref(state.get('menu'))
+            if (not reference or canonical(request.get('menu_ref')) != canonical(reference)
+                    or canonical(plan.get('menu_ref')) != canonical(reference)
+                    or not plan.get('product_plan_digest')):
+                return {'synced': False, 'status': 'needs_input', 'reason': 'Prepare and apply the menu product plan first; weekly goods are included there.'}
+            required = plan.get('menu_required_quantities', plan['required_quantities'])
+            return self._cart({**request, 'action': 'sync', 'requirements': [
+                {'product_id': key, 'product_name': plan['product_names'][key], 'quantity': value}
+                for key, value in required.items()], '_allow_empty_requirements': True})
         if action in {"sync", "reconcile"}:
             deadline = time.monotonic() + MENY_CART_TIMEOUT if self.provider == "meny" else request.get("_deadline")
             with self._browser_operation(deadline):

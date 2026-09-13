@@ -187,6 +187,8 @@ approval and reconciliation of that exact payment, never another submission.
 
 ### Deliver a finalized menu
 
+An explicit request for email/PDF delivery authorizes completing its saved-recipient
+setup and requested delivery. A saved recipient alone does not enable delivery.
 For email, start with `meal_concierge_email_sender status`. It inspects the
 host's existing sender without sending a probe. If available, use `configure`
 once for the user's selected sender, recipient and timing (`on_request`,
@@ -482,10 +484,22 @@ reconstruct it from display fields. Resolution does not save a menu.
 Stale facts require a fresh plan. Never invent structured time, nutrition,
 variety, perishability or safety facts from prose. Missing generic safety data
 is advisory; known allergy/never-buy conflicts require alternatives. Keep legacy
-allergies_or_sensitivities ambiguous and avoid entries as exclusions. Use explicit
+allergies_or_sensitivities ambiguous. Legacy avoid entries are preferences; an
+explicit never_buy rule remains an exclusion. Use explicit
 diet.rules kind/term only when stated by the user; never diagnose or weaken rules.
 Never send facts.safety or claim unknown products verified safe. Actual product
 findings remain visible through the final checkout summary.
+Use `meals.equipment` for known specialist equipment. Ordinary pots, pans, oven
+and basic utensils need no setup interview. Do not assume a pressure cooker,
+blender/food processor, mixer, air fryer, slow/rice cooker or other specialist
+appliance. Prefer a suitable recipe or its explicit ordinary-tool method; ask
+about one necessary appliance only when it materially affects the user's choice.
+Never invent an alternative cooking time. A user's equipment correction also
+applies to the current saved menu and its shopping/email output.
+
+Accepted recurring batch settings apply even with explicit dates. An accepted
+one-week quantity adjustment belongs in planner_input.prepared_portion_range;
+never temporarily edit and restore the permanent profile to obtain a plan.
 A cooldown override needs the exact recipe key and the user's current reason.
 
 Menu get/assess shows coverage, explicit ingredient conflicts and unknowns.
@@ -586,12 +600,29 @@ and require finishing checkout and user payment approval through Vipps, the
 mobile payment service used by the MENY integration. Resolve a
 pending payment or uncertain change before editing; do not discard it.
 
+For a weekly shop, retain the user's full request across follow-up messages:
+adding sprouts or requesting a PDF does not cancel already requested staples.
+Favorite products and recurring products live in their actual service lists;
+memory alone is not persistence. Products apply includes due recurring items
+once, in addition to menu quantities for shared products. Use cart `weekly` with
+the current menu_ref after changes to recurring goods; do not add the same list
+again as supplemental goods. Show menu goods, due staples and extras together.
+Use checkout `weekly=true` for this intent, so a raw cart cannot masquerade as a
+complete menu shop. Existing order edits and ordinary top-ups keep their scope.
+
 ## Ingredients, packages and cart
 
 Products `prepare` is read-only and requires the exact menu reference or complete
-planner handoff. Show observed candidate packages; pass only explicitly approved
-exact interchangeable `candidate_refs` for each requirement. A search hit is
-not proof of ingredient equivalence. Raw quantities, incompatible units,
+planner handoff. Select observed exact interchangeable `candidate_refs` using the
+user's meal and grocery request; routine equivalent package choices do not need
+separate user approval. Show the useful product/quantity/cost overview before
+ordering. A search hit is not proof of ingredient equivalence. Searches use the
+retailer's language. If returned hits are irrelevant, pass a concise localized
+`search_query` with that requirement's candidate selection and prepare again;
+only references returned by that exact search can be selected. Exclude pet food
+and other nonfood hits. Canned/cooked versus dry ingredients require compatible
+quantities and cooking instructions; never replace dry beans with canned beans
+while retaining a pressure-cooking method. Raw quantities, incompatible units,
 unknown availability and eligibility remain unresolved. Use returned
 `candidate_diagnostics` to explain the actual blocker: unreadable package size,
 incompatible units, unknown pant or an observed package limit. Estimate pricing
@@ -603,7 +634,11 @@ keep the menu coverage unresolved where it remains unproven. Observed package
 limits bound this selection; they do not establish remaining customer eligibility
 after prior purchases or account for separate cart extras.
 
-Ask once about unknown pantry/optional ingredients. Pass `ingredient_decisions`
+Unconfirmed pantry goods remain on the shopping list; pantry flags do not justify
+claiming the user owns them. Avoid stopping the flow for each spice or optional
+garnish. Follow a clear request to omit optional ingredients; source text such as
+"(optional)" is preserved. Ask one combined stock question only when useful to
+the requested shop, and continue independent planning. Pass `ingredient_decisions`
 with the returned source position `{collection,recipe_index,ingredient_index}`:
 `include`, `omit` for optional ingredients only, `have_all`, or `have_quantity`
 with exact quantity/unit. Pantry flags never prove stock. Quantities describe
@@ -667,7 +702,9 @@ Show affected items, source information, allergy/sensitivity unknowns and materi
 preference deviations in the ordinary final summary before its existing
 confirmation. Offer alternatives for exclusions. Unknown allergy/exclusion
 information needs affected-item review in that same confirmation: pass only
-actually reviewed finding_id values as dietary_review on confirm. Never fabricate
+the reviewed summary’s `dietary_assessment.assessment_digest` as
+`dietary_review_digest` on confirm or submit. Do not copy lists of finding IDs.
+Unknown ordinary preferences are advisory and require no acknowledgment. Never fabricate
 review, and never override a documented allergy/never-buy conflict. A substitution
 or changed finding requires a revised summary.
 

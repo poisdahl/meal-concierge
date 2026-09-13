@@ -110,7 +110,7 @@ class PantrySelectionTests(unittest.TestCase):
         plan = self.plan(available_ingredients=[{'item': 'brokkoli', 'use_first': True}])
         self.assertEqual(plan['selection']['slots'][0]['reference'], b)
         with self.store.locked() as state:
-            state['profile']['diet']['avoid'] = ['brokkoli']
+            state['profile']['diet']['rules'] = [{'kind':'never_buy', 'term':'brokkoli'}]
         blocked = self.plan([b], available_ingredients=[{'item': 'brokkoli', 'use_first': True}])
         self.assertNotEqual(blocked['status'], 'planned')
         self.assertFalse(self.provider.calls)

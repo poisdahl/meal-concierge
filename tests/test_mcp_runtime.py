@@ -208,7 +208,7 @@ async def sdk_checks(root, process):
         menu_ref = {key: saved_menu[key] for key in ("menu_id", "revision", "digest")}
         plan = (await call(client, "products", menu_ref=menu_ref))["product_plan"]
         assert plan["binding"]["menu_ref"] == menu_ref and plan["status"] == "needs_input"
-        assert any(r["reason"] == "exact_candidate_scope_needs_user_approval" for r in plan["unresolved_requirements"]), plan
+        assert any(r["reason"] == "exact_candidate_scope_needs_selection" for r in plan["unresolved_requirements"]), plan
         approval = {"requirement_id": plan["requirements"][0]["requirement_id"], "candidate_refs": [product["product_ref"]]}
         approved_plan = (await call(client, "products", menu_ref=menu_ref, candidate_approvals=[approval]))["product_plan"]
         assert approved_plan["binding"]["menu_ref"] == menu_ref

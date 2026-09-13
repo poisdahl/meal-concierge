@@ -54,6 +54,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "eat_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
         "leftovers": "Plan one different dinner for each dinner day; leftovers are optional lunches, not repeated dinners.",
         "storage": ["fridge"],
+        "equipment": ["pot", "pan", "oven"],
     },
     "cuisine": {
         "base_style": "Varied weekday cooking",
@@ -798,7 +799,7 @@ def _migrate_state(
     profile = state.get("profile")
     if not isinstance(profile, dict):
         raise HouseholdError("household profile is invalid")
-    for section, fields in (("meals", ("meal_mode", "prepared_portion_range", "recurring_batch_accepted")), ("diet", ("rules", "uncertainty_permissions"))):
+    for section, fields in (("meals", ("meal_mode", "prepared_portion_range", "recurring_batch_accepted", "equipment")), ("diet", ("rules", "uncertainty_permissions"))):
         for field in fields:
             profile[section].setdefault(field, deepcopy(DEFAULT_PROFILE[section][field]))
     profile.setdefault("recipes", deepcopy(DEFAULT_PROFILE["recipes"]))

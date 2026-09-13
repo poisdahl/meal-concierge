@@ -338,6 +338,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 operation == "profile" and action in {"update", "reset"}
             ) or (
                 operation == "setup" and action == "apply"
+            ) or (
+                operation == "recurring" and action in {"add", "remove"}
             ):
                 with self.product_plan_lock:
                     result = self._handle(request)
@@ -740,6 +742,19 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError(f"saved product_id does not match the configured {self.provider.capitalize()} provider")
         return product_id
 
+    def _due_recurring(self, state, when):
+        due = []
+        for item in state['recurring_items']:
+            self._product_id(item['product_id'])
+            if not due_recurring(item, when):
+                continue
+            period = when.strftime('%G-W%V') if item['schedule']['unit'] == 'weeks' else when.strftime('%Y-%m')
+            key = canonical({'provider': self.provider, 'product_id': item['product_id'],
+                             'schedule': item['schedule'], 'period': period})
+            if key not in state.get('recurring_fulfilled', {}):
+                due.append({**deepcopy(item), 'fulfillment_key': key})
+        return due
+
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
         if action == "due":
@@ -747,10 +762,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 when = date.fromisoformat(str(request.get("date") or self._household_today().isoformat()))
             except ValueError as exc:
                 raise HouseholdError("due date is invalid") from exc
-            items = self.store.read()["recurring_items"]
-            for item in items:
-                self._product_id(item.get("product_id") if isinstance(item, Mapping) else None)
-            return {"date": when.isoformat(), "due": [item for item in items if due_recurring(item, when)]}
+            return {"date": when.isoformat(), "due": self._due_recurring(self.store.read(), when)}
         return self._items({**request, "action": action}, "recurring_items")
 
 

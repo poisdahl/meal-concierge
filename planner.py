@@ -298,11 +298,74 @@ def _non_dinner_role(recipe: Mapping[str, Any]) -> str | None:
     return None
 
 
+SPECIAL_EQUIPMENT = {
+    'pressure cooker': r'pressure[- ]cook(?:er|ing)?|instant pot|trykkoker(?:en)?|tryckkokare(?:n)?',
+    'blender': r'blender(?:en)?|liquidiser|liquidizer|stavmikser|immersion blender|hand blender',
+    'food processor': r'food processor|foodprosessor|matprosessor|matberedare',
+    'stand mixer': r'stand mixer|kitchen ?aid|kjøkkenmaskin(?:en)?|eltemaskin',
+    'hand mixer': r'hand mixer|electric (?:hand )?(?:mixer|whisk)|håndmikser|elvisp',
+    'air fryer': r'air[- ]?fryer|varmluftfrityrkoker',
+    'slow cooker': r'slow[- ]cooker|crock[- ]?pot',
+    'rice cooker': r'rice cooker|riskoker|riskokare',
+    'deep fryer': r'deep fryer|frityrkoker|fritös',
+    'sous vide': r'sous[- ]vide|immersion circulator',
+    'ice cream maker': r'ice[- ]cream (?:maker|machine)|ismaskin',
+    'waffle iron': r'waffle (?:iron|maker)|vaffeljern|våffeljärn',
+    'pasta machine': r'pasta (?:machine|maker|roller)|pastamaskin',
+    'bread machine': r'bread (?:machine|maker)|brødbakemaskin',
+    'grill': r'(?:barbecue|barbeque)(?! sauce)|(?:outdoor|charcoal|gas|electric|the) grill|grill outdoors|utendørsgrill|grillen',
+    'microwave': r'microwave|mikrobølgeovn(?:en)?|mikrovågsugn(?:en)?',
+    'smoker': r'smoker|røykeovn|røykovn',
+    'juicer': r'juicer|juice extractor|juicemaskin|saftpresse',
+    'dehydrator': r'dehydrator|mattørker',
+}
+
+
+def equipment_conflicts(profile, recipe):
+    """Require known specialist equipment, with explicit ordinary alternatives allowed.
+
+    Pot, pan, oven and basic utensils need no inventory interview. Omitted
+    specialist equipment is unknown/unavailable, not a claim the owner has it.
+    """
+    available = {str(v).casefold() for v in profile['meals'].get('equipment', ['pot', 'pan', 'oven'])}
+    known = {name for name, aliases in SPECIAL_EQUIPMENT.items()
+             if any(re.fullmatch(aliases, value) or value == name for value in available)}
+    steps = recipe.get('steps') or []
+    parts = [str(step.get('text', '') if isinstance(step, Mapping) else step) for step in steps]
+    # Titles are useful when the imported recipe has no method yet.
+    if not parts:
+        parts = [str(recipe.get('name') or '')]
+    missing = set()
+    for part in parts:
+        for sentence in re.split(r'[.!?\n]', part.casefold()):
+            for name, aliases in SPECIAL_EQUIPMENT.items():
+                if name in known:
+                    continue
+                for match in re.finditer(r'\b(?:' + aliases + r')\b', sentence):
+                    before, after = sentence[:match.start()], sentence[match.end():]
+                    if (re.search(r'(?:without|uten|no|ingen|not need|don.t need)\s+(?:an?\s+)?$', before)
+                            or re.match(r'\s*(?:\(optional\)|(?:is\s+)?(?:optional|not needed|not required|trengs ikke))', after)):
+                        continue
+                    # An actual method alternative is required, not an invented substitution.
+                    alternatives = re.split(r'\bor\b|\beller\b|alternatively', sentence)
+                    if len(alternatives) > 1 and any(
+                        not re.search(aliases, alt) and (
+                            re.search(r'\b(?:by hand|for hånd|simmer|stovetop|ordinary pot|covered pot|vanlig kjele|småkok|bake in (?:an? |the )?oven|stek i (?:en |vanlig )?stekovn)\b', alt)
+                            or any(re.search(SPECIAL_EQUIPMENT[k], alt) for k in known))
+                        for alt in alternatives):
+                        continue
+                    missing.add(name)
+    return sorted(missing)
+
+
 def _hard_evaluation(
     candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], *, meal_type: str = "dinner"
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     status = "pass"
+    if missing := equipment_conflicts(profile, candidate['recipe']):
+        status = 'fail'
+        reasons.append({'code': 'equipment_unavailable', 'status': 'fail', 'detail': missing})
     if meal_type == "dinner" and (role := _non_dinner_role(candidate["recipe"])):
         status = "fail"
         reasons.append({"code": "meal_role:non_dinner", "status": "fail", "detail": role})
@@ -729,7 +792,7 @@ def _selection(
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
         "week", "dates", "portions", "candidates", "strict_targets",
-        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch",
+        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode",
     }):
         raise PlannerError("planner input has unknown fields")
     available = normalize_available_ingredients(value.get("available_ingredients"))
@@ -794,6 +857,8 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
     return {
         "planner_version": PLANNER_VERSION,
         **({"recurring_batch": deepcopy(value["recurring_batch"])} if value.get("recurring_batch") else {}),
+        **({"prepared_portion_range": deepcopy(value["prepared_portion_range"])} if value.get("prepared_portion_range") is not None else {}),
+        **({"meal_mode": value['meal_mode']} if value.get('meal_mode') is not None else {}),
         **({"available_ingredients": available} if available else {}),
         "week": week,
         "dates": dates,

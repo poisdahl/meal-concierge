@@ -51,6 +51,9 @@ def assess_menu(state):
     rules = [*diet["allergies_or_sensitivities"], *diet["avoid"]]
     for recipe in recipes:
         key = recipe.get("recipe_key")
+        from planner import equipment_conflicts
+        if missing := equipment_conflicts(profile, recipe):
+            issues.append({"code": "equipment_unavailable", "recipe_key": key, "equipment": missing})
         findings.extend({**f, "recipe_key": key} for f in assess(profile, recipe, recipe=True))
         if not slots and recipe.get("portions") != expected_portions:
             issues.append({"code": "portion_mismatch", "recipe_key": key, "expected": expected_portions, "actual": recipe.get("portions")})

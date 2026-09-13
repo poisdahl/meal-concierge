@@ -452,6 +452,10 @@ class CoreTestsBase:
         self.assertEqual(module.rpc_timeout("cart", {"action": "get"}), 120)
         self.assertEqual(module.rpc_timeout("delivery", {"action": "list"}), 300)
         self.assertEqual(module.rpc_timeout("checkout", {"action": "submit"}), 660)
+        module.rpc = mock.Mock(return_value={})
+        module.meal_concierge_checkout(action='confirm', confirmation_id='review-one', dietary_review_digest='digest-one', weekly=True)
+        self.assertEqual(module.rpc.call_args.kwargs['dietary_review_digest'], 'digest-one')
+        self.assertTrue(module.rpc.call_args.kwargs['weekly'])
         scheduler = {"binding": {"platform": "test", "scope": "private", "job_id": "one"}, "generation": "one"}
         module.rpc = mock.Mock(return_value={})
         module.meal_concierge_schedule("ack_scheduler", scheduler=scheduler, automation_digest="digest")

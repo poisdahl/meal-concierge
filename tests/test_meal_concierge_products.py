@@ -776,7 +776,7 @@ class ProductRuntimeTests(unittest.TestCase):
     def test_prepare_is_read_only_and_requires_exact_candidate_scope(self):
         plan = self.prepare(approve=False)
         self.assertEqual(plan["status"], "needs_input")
-        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "exact_candidate_scope_needs_user_approval")
+        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "exact_candidate_scope_needs_selection")
         self.assertEqual([name for name, _arguments in self.provider.calls], ["product_search"])
         self.assertEqual(self.provider.cart["items"], [])
 
