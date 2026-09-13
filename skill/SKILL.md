@@ -187,6 +187,28 @@ approval and reconciliation of that exact payment, never another submission.
 
 ### Deliver a finalized menu
 
+For email, start with `meal_concierge_email_sender status`. It inspects the
+host's existing sender without sending a probe. If available, use `configure`
+once for the user's selected sender, recipient and timing (`on_request`,
+`delivery_day` or `both`). Reuse the saved connection; missing capability is not
+proof that Gmail needs a new login. If no connection is configured, follow the
+returned email setup guide using the host's existing integration. Preserve its
+authorization guard; never switch to an unguarded sender to bypass a denial.
+
+Use email_sender `send` with the exact saved menu_ref, delivery_requested=true
+and one stable request_id. The executor exports frozen MIME/PDF, claims, sends
+once and records its receipt. Do not perform separate begin/send/ack calls for
+this managed email. Email-only delivery leaves chat preferences unchanged; use
+recipe_delivery request with channel=chat for separately requested chat delivery.
+After a lost response, repeat that request_id or use `reconcile`; do not create
+a replacement. Only explicit `retry` after recorded `not_sent` can repeat the
+original occurrence. Unknown is not failure or permission to resend. Report
+omissions and meaningful unresolved outcomes. Account changes need an explicit
+new selection; already frozen jobs retain their original sender and recipient.
+
+The lower-level native-delivery procedure below remains for chat and explicitly
+supported external integrations without the managed email executor.
+
 An explicit “plan and give me next week's recipes” request includes delivery;
 a menu read, save or edit alone does not. Use `recipe_delivery status` to show
 selected channels/formats and the separate existing order-delivery-day email.
@@ -775,7 +797,14 @@ provider state. Do not retry selection while unresolved. Preserve checkout
 confirmation/idempotency references and reconcile dispatched payment separately.
 
 After a confirmed order, schedule its recipe email for the verified delivery
-date when a recipient is configured. Use the selected native scheduler and
+date when delivery-day email is selected (or a legacy recipient is configured).
+For a bound sender, use email_sender `send_order` with the exact provider,
+order_id and scheduler invocation. It owns due/begin/send/ack; do not also send
+through Gmail manually. `reconcile_order` recovers its original attempt;
+`retry_order` requires an explicit retry request and affirmative no-send evidence.
+Old pending emails need explicit `adopt_order` without changing their recipient,
+then scheduler_plan and native verification to activate the updated prompt.
+Use the selected native scheduler and
 recover unfinished jobs with automation_plan. Due claims a job; begin_send with
 the exact invocation and token must return dispatch=true before the sender is
 called. Send that frozen payload once, then mark_sent only after confirmed

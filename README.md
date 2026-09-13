@@ -87,7 +87,11 @@ result is unclear, ask the agent to check it before trying again.
 
 Ask to receive the saved menu's recipes. New installations default to chat text,
 with PDF and available images where the agent supports them. Email is optional
-and needs a connected sender and your chosen recipient. Delivery channels and
+and reuses an existing Gmail or SMTP connection with your chosen recipient.
+Ask “Set up recipe email” to inspect the connection and select sender, recipient
+and timing once. A missing host connection has a separate optional
+[email setup step](docs/recipe-delivery.md#email-connection-setup); installing
+Meal Concierge does not create a mailbox. Delivery channels and
 formats are configurable; automatic schedules need support in the host agent.
 See [recipe delivery](docs/recipe-delivery.md) for host-specific limits.
 

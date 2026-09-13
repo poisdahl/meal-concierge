@@ -10,6 +10,15 @@ This guide uses the existing [installer and service](runtime.md) and
 [client package builder](../clients/README.md). It does not enable purchases,
 outgoing messages or schedules. Store login is separate from core installation.
 
+Email is a separate optional setup after attaching the client. Use
+`meal_concierge_email_sender status` first: an existing selected connection is
+reused, not reauthenticated automatically. When no sender is available, follow
+[email connection setup](recipe-delivery.md#email-connection-setup). The sender
+executes on the MCP/CLI host, not in the grocery service or a cloud connector
+that the host cannot access. Do not create a second mailbox or bypass an existing
+integration's write policy. The same host configuration is available in later
+conversations and same-user scheduled invocations.
+
 ## Agent procedure
 
 ### Identify the host and existing installation
