@@ -101,6 +101,23 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(normalize_recipe(reread), native)
         self.assertEqual(restarted.recipes.resolve_discovery(frozen["discovery_ref"])["recipe"], native)
 
+    def test_stored_optional_false_remains_canonical_and_new_import_can_infer(self):
+        from recipes import _stored_recipe_document, _canonical
+        # Simulate the complete document emitted before optional-marker inference:
+        # an explicit stored flag is a versioned fact, even if its text differs.
+        for schema in (1, 2):
+            value = authored_recipe()
+            value['schema_version'] = schema
+            value['ingredients'] = [{'item':'chili (optional, for heat)', 'quantity':1, 'unit':'count', 'optional':False}]
+            recipe = normalize_recipe(value)
+            self.assertFalse(recipe['ingredients'][0]['optional'])
+            frozen = _canonical(recipe)
+            self.assertEqual(_canonical(_stored_recipe_document(frozen)), frozen)
+            saved = self.save(recipe, key='old-optional-'+str(schema))
+            self.assertFalse(self.app.recipes.get(saved['id'], saved['revision'])['ingredients'][0]['optional'])
+            del value['ingredients'][0]['optional']
+            self.assertTrue(normalize_recipe(value)['ingredients'][0]['optional'])
+
     def test_literal_old_document_and_discovery_digests_survive_restart(self):
         old = json.loads(LEGACY)
         self.assertEqual(recipe_digest(old), LEGACY_DIGEST)
