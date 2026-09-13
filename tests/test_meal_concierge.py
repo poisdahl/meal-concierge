@@ -1092,6 +1092,18 @@ class CoreTestsBase:
         self.assertFalse(cancellation_delivery_matches(expected, ["Lør 5. september, 07:00 - 13:00:99"]))
         self.assertFalse(cancellation_delivery_matches(expected, ["Lør 5. september, 07:00 - 13:00.99"]))
 
+    def test_cancellation_delivery_accepts_observed_oda_tomorrow_label(self):
+        with mock.patch("oda_browser.datetime") as clock:
+            clock.now.side_effect = lambda zone: datetime(2026, 9, 13, 9, tzinfo=timezone.utc).astimezone(zone)
+            self.assertTrue(cancellation_delivery_matches(
+                "Man 14. sep 16:00 - 21:00",
+                ["I morgen, 16:00 - 21:00"],
+            ))
+            self.assertFalse(cancellation_delivery_matches(
+                "Man 14. sep 16:00 - 21:00",
+                ["I morgen, 16:00 - 20:00"],
+            ))
+
     def test_cancellation_total_is_bound_to_one_total_row(self):
         self.assertTrue(cancellation_total_matches(123456, ["Total inkl. MVA Kortbetaling, NOK, kr 1234,56"]))
         self.assertTrue(cancellation_total_matches(123456, ["Totalt 1 234,56 kr"]))
@@ -1167,6 +1179,7 @@ class CoreTestsBase:
         self.assertTrue(all(browser_args == CANCELLATION_BROWSER_ARGS for _script, browser_args in scripts))
         self.assertIn("document.querySelectorAll('[data-oda-household-cancel-review]')", scripts[0][0])
         self.assertIn("marked.length!==1", scripts[0][0])
+        self.assertIn("(?:dag|morgen)", scripts[0][0])
 
         browser._eval = lambda _script, **_kwargs: {"available": True, "delivery_lines": ["Lør 6. september, 07:00 - 13:00"]}
         invoked.clear()

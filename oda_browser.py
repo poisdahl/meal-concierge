@@ -2300,7 +2300,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
  const root=roots[0];
  const lines=(root.innerText||'').split(/\n+/).map(norm).filter(Boolean);
  if(!lines.includes(`Bestilling ${expected.order_id}`)&&!lines.includes(`Order ${expected.order_id}`))return JSON.stringify({available:false,reason:'Ordredetaljene avviker'});
- const deliveryLines=lines.filter(x=>/\b\d{1,2}\.?\s*(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\b/i.test(x)&&/\b\d{1,2}(?::\d{2})?\s*(?:-|–|og|til)\s*\d{1,2}(?::\d{2})?(?![:.]\d)\b/i.test(x));
+ const deliveryLines=lines.filter(x=>(/\b\d{1,2}\.?\s*(?:jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\b/i.test(x)||/\bi\s+(?:dag|morgen)\b/i.test(x))&&/\b\d{1,2}(?::\d{2})?\s*(?:-|–|og|til)\s*\d{1,2}(?::\d{2})?(?![:.]\d)\b/i.test(x));
  const totalPattern=/^(?:Total|Totalt)(?: inkl\.? MVA)?$/i;
  const totalLabels=[...root.querySelectorAll('*')].filter(visible).filter(x=>totalPattern.test(norm(x.innerText||''))).filter(x=>![...x.children].some(child=>visible(child)&&totalPattern.test(norm(child.innerText||''))));
  const totalRows=totalLabels.map(label=>{let row=label.parentElement;while(row&&row!==root){const text=norm(row.innerText||'');if(hasMoney(text))return text;row=row.parentElement;}return null;}).filter(Boolean);
