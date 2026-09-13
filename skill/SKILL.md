@@ -501,7 +501,12 @@ about one necessary appliance only when it materially affects the user's choice.
 Never invent an alternative cooking time. A user's equipment correction also
 applies to the current saved menu and its shopping/email output.
 
-Accepted recurring batch settings apply even with explicit dates. An accepted
+Accepted recurring batch settings apply even with explicit dates. Eating dates
+and portions consumed per dinner determine how much must be prepared. The
+preferred preparation range is not a maximum: six/eight portions covering seven
+two-portion dinners need no conflict warning or extra approval even if the profile
+prefers three/four. Report actual cooking amounts; do not repeat an old planner
+conflict when a fresh menu assessment is ready. An accepted
 one-week quantity adjustment belongs in planner_input.prepared_portion_range;
 never temporarily edit and restore the permanent profile to obtain a plan.
 A cooldown override needs the exact recipe key and the user's current reason.
