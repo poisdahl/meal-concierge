@@ -1768,42 +1768,44 @@ class OdaBrowser:
             raise HouseholdError("The Oda/Vipps payment has no reviewed source page; do not send payment")
         source_url = _oda_https_gateway_url(source_url)
         gateway_url = None
+        started_at = time.monotonic()
         checkout_deadline = getattr(self, "_checkout_deadline", None)
-        remaining = (
-            CHECKOUT_BROWSER_TIMEOUT
-            if checkout_deadline is None else max(0, checkout_deadline - time.monotonic())
-        )
+        gateway_deadline = (
+            started_at + CHECKOUT_BROWSER_TIMEOUT
+            if checkout_deadline is None else checkout_deadline
+        ) - VIPPS_POST_GATEWAY_MARGIN
+        if gateway_deadline <= started_at:
+            raise HouseholdError("The Oda/Vipps payment page has no time left to load; do not send payment")
         gateway_polls = max(
-            1,
-            math.ceil(max(0, remaining - VIPPS_POST_GATEWAY_MARGIN) / VIPPS_POLL_INTERVAL),
+            1, math.ceil((gateway_deadline - started_at) / VIPPS_POLL_INTERVAL),
         )
-        for attempt in range(gateway_polls):
-            if self._checkout_dispatch_tab() != dispatch_tab:
-                raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
-            try:
-                current_url = _oda_https_gateway_url(
-                    str(self._invoke("get", "url").get("url") or "")
-                )
-                if current_url != source_url:
-                    candidate = self._eval(_oda_vipps_gateway_script(
-                        expected_total, self.vipps_phone_number, expected_url=current_url,
-                    ))
-                    if (candidate.get("identity") is True
-                            and (candidate.get("fillable") is True
-                                 or candidate.get("sent") is True
-                                 or candidate.get("expired") is True)):
-                        gateway_url = current_url
-                        break
-            except HouseholdError:
-                pass
-            if attempt < gateway_polls - 1:
+        # Cap every browser command at the gateway deadline. Restoring the
+        # outer deadline afterward preserves the reserved form/click budget.
+        with self._checkout_operation(gateway_deadline, preserve_session=True):
+            for attempt in range(gateway_polls):
+                if self._checkout_dispatch_tab() != dispatch_tab:
+                    raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
                 try:
-                    self._require_checkout_time(
-                        VIPPS_POST_GATEWAY_MARGIN + VIPPS_POLL_INTERVAL
+                    current_url = _oda_https_gateway_url(
+                        str(self._invoke("get", "url").get("url") or "")
                     )
+                    if current_url != source_url:
+                        candidate = self._eval(_oda_vipps_gateway_script(
+                            expected_total, self.vipps_phone_number, expected_url=current_url,
+                        ))
+                        if (candidate.get("identity") is True
+                                and (candidate.get("fillable") is True
+                                     or candidate.get("sent") is True
+                                     or candidate.get("expired") is True)):
+                            gateway_url = current_url
+                            break
                 except HouseholdError:
-                    break
-                self._settle(VIPPS_POLL_INTERVAL)
+                    pass
+                if attempt < gateway_polls - 1:
+                    try:
+                        self._settle(VIPPS_POLL_INTERVAL)
+                    except HouseholdError:
+                        break
         if gateway_url is None:
             raise HouseholdError("The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment")
         order_id = expected_order_id
