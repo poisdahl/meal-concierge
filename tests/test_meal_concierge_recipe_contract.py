@@ -197,10 +197,12 @@ class RecipeContractTests(unittest.TestCase):
         req = menu_requirements(menu)[0][0]
         original_call = self.provider.call
         observed_price = [1000]
+        observed_description = ["35 g"]
         def observe(tool, arguments, **kwargs):
             if tool == 'product_search':
                 chosen = product('10','Spisskummen',35,'g',[option(observed_price[0])])
                 if package_unknown:chosen['package'] = None
+                chosen['display']['package'] = observed_description[0]
                 return observation(arguments['queries'][0], [chosen])
             return original_call(tool, arguments, **kwargs)
         with patch.object(self.provider,'call',side_effect=observe):
@@ -216,6 +218,12 @@ class RecipeContractTests(unittest.TestCase):
             self.assertFalse(drift['applied'])
             self.assertEqual(self.provider.cart['items'], [])
             observed_price[0] = 1000
+            observed_description[0] = 'Changed retail unit size'
+            drift = self.app.handle({'operation':'products','action':'apply',
+                **prepared['apply_arguments'], 'cart_change_requested':True})
+            self.assertFalse(drift['applied'])
+            self.assertEqual(self.provider.cart['items'], [])
+            observed_description[0] = '35 g'
             result = self.app.handle({'operation':'products','action':'apply',
                 **prepared['apply_arguments'], 'cart_change_requested':True})
             self.assertTrue(result['applied'], result)

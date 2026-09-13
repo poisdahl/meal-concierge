@@ -713,7 +713,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
                          'dietary_assessments': deepcopy(product.get('dietary_findings', [])),
                          'purchase_options': cost['bundles'], **amounts}],
             'coverage_status': 'practical_estimate', 'quantity_basis': approval['quantity_basis'],
-            'observed_package': deepcopy(package), 'coverage': None,
+            'observed_package': deepcopy(package),
+            'observed_package_description': product.get('display', {}).get('package'), 'coverage': None,
             'required': deepcopy(requirement['quantity']), 'unit': requirement['unit'],
             'excess_score': None, 'package_count': count, **amounts}
 
