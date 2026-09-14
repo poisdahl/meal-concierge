@@ -722,6 +722,7 @@ def _oda_vipps_gateway_script(
     expected_phone: str,
     *,
     expected_url: str,
+    allow_post_dispatch_ack: bool = False,
     require_hit: bool = False,
     hit_x: float = 0,
     hit_y: float = 0,
@@ -743,7 +744,15 @@ def _oda_vipps_gateway_script(
  const amounts=[...text.matchAll(/(?:\bNOK\s*(\d+(?:[ .]\d{3})*)[,.](\d{2})\b|\b(\d+(?:[ .]\d{3})*)[,.](\d{2})\s*(?:kr|NOK)\b)/gi)].map(m=>Number((m[1]||m[3]).replace(/[ .]/g,''))*100+Number(m[2]||m[4]));
  const merchant=/(?:^|\s)Oda(?:\s|$)/i.test(text);
  const amountBound=amounts.length>0&&amounts.every(value=>value===EXPECTED_TOTAL);
- const sent=identity&&merchant&&amountBound&&/We've sent a payment request to/i.test(text)&&/Open Vipps/i.test(text);
+ const receipts=[...text.matchAll(/We've sent a payment request to\s+([+\d][\d ()-]*)(?=\s|$)/gi)];
+ const receiptPhone=receipts.length===1?receipts[0][1].replace(/\D/g,''):'';
+ const receiptPhoneMatches=receiptPhone===EXPECTED_PHONE||receiptPhone==='47'+EXPECTED_PHONE;
+ // The observed post-click acknowledgement omits the merchant and amount.
+ // Only a journalled dispatch may use its exact recipient as confirmation;
+ // any displayed amount must still match the original reviewed payment.
+ const receiptOnly=receiptPhoneMatches&&/^Open Vipps You have \d{1,2} minutes? and \d{1,2} seconds? to open Vipps and complete the payment\. \d{1,2}:[0-5]\d ACK$/.test(norm(text.replace(receipts[0][0],'ACK ')));
+ const sent=identity&&/We've sent a payment request to/i.test(text)&&/Open Vipps/i.test(text)&&(
+   ALLOW_POST_DISPATCH_ACK?receiptPhoneMatches&&((merchant&&amountBound)||(receiptOnly&&amounts.length===0)):merchant&&amountBound);
  const expired=identity&&((merchant&&amountBound&&/betalingen (?:har )?(?:utløpt|gått ut)/i.test(text))||(/your payment timed out/i.test(text)&&/Go back and try again/i.test(text)));
  const phoneSelector='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]';
  const buttonSelector='button[type="submit"],input[type="submit"],button:not([type])';
@@ -768,7 +777,7 @@ def _oda_vipps_gateway_script(
 })()
 """.replace("EXPECTED_TOTAL", str(expected_total)).replace("EXPECTED_PHONE", json.dumps(expected_phone)).replace(
         "EXPECTED_URL", json.dumps(expected_url),
-    ).replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
+    ).replace("ALLOW_POST_DISPATCH_ACK", "true" if allow_post_dispatch_ack else "false").replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
 
 
 def _oda_vipps_phone_fill_script(phone_number: str, expected_url: str) -> str:
@@ -1894,6 +1903,7 @@ class OdaBrowser:
                 break
             result = self._eval(_oda_vipps_gateway_script(
                 expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                allow_post_dispatch_ack=True,
             ))
             if result.get("sent") is True:
                 return request_context
@@ -1923,6 +1933,7 @@ class OdaBrowser:
                     return {"status": "unknown"}
                 observed = self._eval(_oda_vipps_gateway_script(
                     context["expected_total"], self.vipps_phone_number, expected_url=current_url,
+                    allow_post_dispatch_ack=True,
                 ))
             except HouseholdError:
                 return {"status": "unknown"}

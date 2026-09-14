@@ -2581,6 +2581,114 @@ process.stdout.write(eval(script));
             {"status": "unknown"},
         )
 
+    @unittest.skipUnless(shutil.which("node"), "Node executes observed Vipps acknowledgement")
+    def test_oda_vipps_post_dispatch_ack_requires_exact_receipt_phone_and_context(self):
+        from contextlib import nullcontext
+        harness = r"""
+const {script,text,url}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location=new URL(url);
+global.getComputedStyle=()=>({display:'block',visibility:'visible',opacity:'1'});
+const main={innerText:text,parentElement:null,getBoundingClientRect:()=>({width:100,height:100}),querySelectorAll:()=>[]};
+global.document={querySelectorAll:s=>s==='main,[role="main"]'?[main]:[]};
+process.stdout.write(eval(script));
+"""
+        gateway = "https://pay.vipps.no/hosted?token=synthetic"
+        receipt = ("Open Vipps\nYou have 7 minutes and 0 seconds to open Vipps and complete the payment.\n"
+                   "07:05\n\nWe've sent a payment request to +47 900\u00a000\u00a0000")
+
+        def evaluate(script, text=receipt, url=gateway):
+            result = subprocess.run([shutil.which("node"), "-e", harness],
+                input=json.dumps({"script": script, "text": text, "url": url}),
+                text=True, capture_output=True, check=True)
+            return json.loads(result.stdout)
+
+        strict = _oda_vipps_gateway_script(25650, "90000000", expected_url=gateway)
+        observed = _oda_vipps_gateway_script(25650, "90000000", expected_url=gateway,
+                                              allow_post_dispatch_ack=True)
+        self.assertFalse(evaluate(strict)["sent"])
+        self.assertEqual(evaluate(observed), {"identity": True, "sent": True, "expired": False,
+                         "ready": False, "fillable": False, "phone_matches": False})
+        for text in (receipt.replace("900", "911"), "Other merchant " + receipt,
+                     "Oda NOK 256.51 " + receipt,
+                     receipt + " We've sent a payment request to 91111111",
+                     receipt.replace("Open Vipps", "Other app")):
+            with self.subTest(text=text):
+                self.assertFalse(evaluate(observed, text)["sent"])
+        self.assertFalse(evaluate(observed, url=gateway + "-other")["sent"])
+
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_operation = lambda *a, **kw: nullcontext()
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._invoke = mock.Mock(return_value={"url": gateway})
+        browser._eval = mock.Mock(side_effect=evaluate)
+        context = {"tab_id": "tab-1", "expected_total": 25650, "order_id": "order-1",
+                   "gateway_url_digest": hashlib.sha256(gateway.encode()).hexdigest()}
+        self.assertEqual(browser.checkout_vipps_request_state(context), {"status": "sent"})
+        browser._eval.reset_mock()
+        for invalid in (None, {**context, "tab_id": "tab-other"},
+                        {**context, "gateway_url_digest": "a" * 64}):
+            self.assertEqual(browser.checkout_vipps_request_state(invalid), {"status": "unknown"})
+        browser._eval.assert_not_called()
+
+
+    def test_oda_vipps_request_click_requires_positive_gateway_acknowledgement(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._settle = mock.Mock()
+        browser._require_checkout_time = mock.Mock()
+        gateway = "https://payments.example/hosted/opaque"
+
+        def invoke(action, *args, **_kwargs):
+            if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
+                return {"x": 10, "y": 20, "width": 30, "height": 40}
+            if (action, args) == ("get", ("url",)):
+                return {"url": gateway}
+            return {}
+
+        browser._invoke = mock.Mock(side_effect=invoke)
+        browser._eval = mock.Mock(side_effect=[
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"identity": True, "ready": False, "sent": False, "expired": False, "fillable": True, "phone_matches": False},
+            {"filled": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": True, "sent": False, "expired": False, "fillable": True, "phone_matches": True},
+            {"identity": True, "ready": False, "sent": True, "expired": False, "fillable": False, "phone_matches": False},
+        ])
+
+        with mock.patch("oda_browser._oda_vipps_gateway_script", wraps=_oda_vipps_gateway_script) as gateway_script:
+            browser._complete_oda_vipps_request(
+                "tab-1", 25650, source_url="https://oda.com/no/checkout/confirm/",
+            )
+        self.assertTrue(gateway_script.call_args_list[-1].kwargs["allow_post_dispatch_ack"])
+        self.assertTrue(all(not call.kwargs.get("allow_post_dispatch_ack")
+                            for call in gateway_script.call_args_list[:-1]))
+
+        self.assertEqual(browser._invoke.call_args_list, [
+            mock.call("get", "url"),
+            mock.call("scrollintoview", "[data-oda-household-vipps-next]"),
+            mock.call("get", "box", "[data-oda-household-vipps-next]"),
+            mock.call("get", "url"),
+            mock.call("mouse", "move", "25", "40"),
+            mock.call("mouse", "down"),
+            mock.call("mouse", "up"),
+        ])
+        browser._require_checkout_time.assert_called_once()
+
+        browser._eval = mock.Mock(return_value={"identity": True, "ready": False, "sent": False, "expired": True,
+                                                "fillable": False, "phone_matches": False})
+        browser._invoke.reset_mock()
+        with self.assertRaisesRegex(HouseholdError, "expired before a mobile request"):
+            browser._complete_oda_vipps_request(
+                "tab-1", 25650, source_url="https://oda.com/no/checkout/confirm/",
+            )
+        self.assertEqual(browser._invoke.call_args_list, [
+            mock.call("get", "url"),
+        ])
+
+
     def test_oda_vipps_request_fills_the_phone_before_next(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
