@@ -79,7 +79,7 @@ remember/save-card option. A mandatory first order has not been established for
 every account: do not instruct the user to buy and cancel as a required setup
 step or perform such actions yourself. Explain cancellation only when available
 within the store's actual deadline, without promising immediate release of funds.
-For Oda new orders, ordinary checkout prepare automatically selects the
+For Oda new orders and additions to an existing order, checkout prepare selects the
 configured method. For saved cards it preserves a verified selected card or
 selects the sole usable saved card; if several remain ambiguous, ask once which
 masked card to use and save `card_last4`. Never substitute another payment
@@ -89,8 +89,13 @@ Vipps selection also happens during prepare, without sending payment. After an
 authorized submit, an unconfirmed Oda/Vipps result needs follow-up on the
 original payment page and any requested phone approval, then reconciliation of
 the same attempt. Do not claim a phone request was delivered, payment succeeded,
-or a retry is safe. Oda Vipps support here is for new orders; existing-order
-changes retain their separate saved-card flow.
+or a retry is safe. Oda additions support Vipps and saved cards. For an explicitly
+requested payment-method change before submission, prepare the active addition
+with `checkout_payment={method: saved_card}` (or `vipps`); this applies to this
+checkout without changing the household's saved preference. An already-paid
+original order does not prove its additions were paid. Keep the same pending
+attempt until its added goods and new total are verified; never send another
+payment merely because an app notification is missing.
 
 For Oda/Mathem card payments, `authentication_required=true` means the retained
 payment is showing a visible 3D Secure bank challenge. Call checkout
@@ -617,6 +622,18 @@ midnight cutoff. An unavailable order read is not proof there is no order.
 If changes are closed, report that the goods cannot join that delivery and
 clarify the next delivery when necessary; never cancel/reorder to get around it.
 
+For removal or reduction of goods already on an Oda order, use `orders
+remove_prepare` with its exact `order_id` and `items=[{product_id,quantity}]`.
+Use one stable `idempotency_key` for this removal intent. Here quantity is the desired remaining number of packages: zero removes the
+product. Do not send this to cart change: the addition cart is separate from
+the paid order. Resolve the requested product from that order, preserve unrelated
+goods and staged additions, and use the returned `confirmation_id` with
+`remove_confirm` under the user's explicit removal request. Use `remove_reconcile`
+after an uncertain response, never repeat the removal. Report the verified
+remaining quantities and merchant total; do not promise a settled bank refund.
+For both removals and additions, finish and verify the removal first, then prepare
+the additions against the updated order. These are separate merchant changes.
+
 Use cart ensure with exact requirements=[{product_id,product_name,quantity}].
 Quantity is the desired minimum, not an increment. Existing cart quantities
 count; in an Oda order edit, already ordered quantities also count. Repeating
@@ -644,6 +661,13 @@ it is already included. MENY edits reopen the whole order, may update all prices
 and require finishing checkout and user payment approval through Vipps, the
 mobile payment service used by the MENY integration. Resolve a
 pending payment or uncertain change before editing; do not discard it.
+
+Meal Concierge uses its own dedicated logged-in browser. A `/shared/browser`
+session, desktop browser or general browser tool is not that session. Do not
+diagnose the Meal Concierge login from another browser's logged-out page or ask
+the user to log in there. Use the adapter's actual result, distinguish a missing
+feature or checkout mismatch from an authentication failure, and explain the
+concrete blocker without presenting integration restrictions as Oda policy.
 
 For a weekly shop, retain the user's full request across follow-up messages:
 adding sprouts or requesting a PDF does not cancel already requested staples.

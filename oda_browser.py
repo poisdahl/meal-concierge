@@ -372,12 +372,14 @@ def _mathem_checkout_payment_script(expected_url: str = "https://www.mathem.se/s
 """.replace("EXPECTED_URL", json.dumps(expected_url))
 
 
-def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool = False, provider: str = "mathem") -> str:
+def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool = False, provider: str = "mathem", vipps: bool = False) -> str:
     """Observed Oda/Mathem addition overview; charge only the reviewed delta.
 
     These four rows report the original order, added goods, amount due now and
     combined order. They do not supply the new-order fee/discount breakdown.
     """
+    if vipps and (provider != "oda" or expected.get("delivery_change") or not isinstance(expected.get("total_minor"), int) or expected["total_minor"] <= 0):
+        raise HouseholdError("Oda/Vipps additions require a positive reviewed amount")
     return r"""
 (() => {
  const expected=EXPECTED;
@@ -422,7 +424,7 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
     ).replace("Varor tillagda i efterhand", "Nye varer lagt til" if provider == "oda" else "Varor tillagda i efterhand").replace(
         "Att betala nu", "Å betale" if provider == "oda" else "Att betala nu",
     ).replace("Totalsumma för beställning", "Ny totalsum" if provider == "oda" else "Totalsumma för beställning").replace(
-        "Bekräfta och betala", "Bekreft og betal" if provider == "oda" else "Bekräfta och betala",
+        "Bekräfta och betala", "Betal med" if vipps else "Bekreft og betal" if provider == "oda" else "Bekräfta och betala",
     ).replace("SEK", "NOK" if provider == "oda" else "SEK").replace(
         "(vara|varor)", "(vare|varer)" if provider == "oda" else "(vara|varor)",
     ).replace("==='vara'", "==='vare'" if provider == "oda" else "==='vara'").replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False))
@@ -1206,12 +1208,13 @@ class OdaBrowser:
             raise HouseholdError("Retail original order currency or delivery is unavailable")
         return expected
 
-    def review_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None) -> dict[str, Any]:
+    def review_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], *, deadline: float | None = None, expected_binding=None, payment=None, select_payment: bool = False) -> dict[str, Any]:
         with self._checkout_operation(deadline):
             binding = self._read_order_binding(order_id, order, deadline=self._checkout_deadline, expected_binding=expected_binding)
             bound_cart = self._order_cart(cart, order_id, order, binding)
             review = self._review_checkout(bound_cart, order_id=order_id, delivery_text=self._order_expectation(order_id, order)["delivery_text"],
-                addition_expectation=self._addition_expectation(cart, order_id, order, binding))
+                addition_expectation=self._addition_expectation(cart, order_id, order, binding),
+                payment=payment, select_payment=select_payment)
             review["binding"] = binding
             return review
 
@@ -1291,7 +1294,7 @@ class OdaBrowser:
         if order_id is None:
             self._navigate_to_checkout(payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout()
         else:
-            self._navigate_to_checkout(order_id)
+            self._navigate_to_checkout(order_id, payment=payment, select_payment=select_payment) if payment is not None else self._navigate_to_checkout(order_id)
         self._expand_checkout_items(len(expected["lines"]))
         self._expand_checkout_amount_summary()
         script = _oda_checkout_surface_script(expected, payment)
@@ -1314,7 +1317,7 @@ class OdaBrowser:
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
             raise OdaCheckoutMismatchError("Oda checkout does not match the reviewed cart")
         if addition_expectation is not None:
-            amounts = self._eval(_retail_addition_amount_script(addition_expectation, provider=self.checkout_provider))
+            amounts = self._eval(_retail_addition_amount_script(addition_expectation, provider=self.checkout_provider, vipps=bool(payment and payment.get("method") == "vipps")))
             if amounts.get("amounts_valid") is not True:
                 raise OdaCheckoutMismatchError("Oda original, added and combined order amounts do not match")
             result["order_amounts"] = amounts["order_amounts"]
@@ -1392,7 +1395,7 @@ class OdaBrowser:
         if order_id is None:
             self._advance_checkout_path(payment=payment, select_payment=select_payment) if payment is not None else self._advance_checkout_path()
         else:
-            self._advance_checkout_path(order_id)
+            self._advance_checkout_path(order_id, payment=payment, select_payment=select_payment) if payment is not None else self._advance_checkout_path(order_id)
 
     def _continue_checkout_cart(self) -> str:
         store_url = _retail_store_url(self.checkout_provider)
@@ -1619,7 +1622,7 @@ class OdaBrowser:
                     self._settle(0.5)
                     continue
                 dispatched.add("select-payment")
-                selected = self._eval(_oda_checkout_payment_script(payment, select=True, expected_url=CHECKOUT_URL))
+                selected = self._eval(_oda_checkout_payment_script(payment, select=True, expected_url=CHECKOUT_URL if order_id is None else f"{CHECKOUT_URL}?orderNumber={order_id}"))
                 if selected.get("selected") is not True and selected.get("verified") is not True:
                     raise HouseholdError("Oda configured payment is unavailable or ambiguous; choose checkout_payment in setup, with card_last4 if several saved cards exist")
                 self._settle(1)
@@ -1832,11 +1835,14 @@ class OdaBrowser:
                     except HouseholdError:
                         break
         if gateway_url is None:
+            addition = bool(expected_order_id and source_url == f"{CHECKOUT_URL}?orderNumber={expected_order_id}")
             raise HouseholdError(
                 "The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment. "
                 "No guarded Vipps phone-request click was made. Reconcile the existing order; "
-                "if the owner received no request, review recovery for that same order with the requested payment method. "
-                "Do not submit a new order."
+                + ("retain this addition attempt; automated payment recovery is not yet available for this addition. "
+                   "The original paid order alone does not confirm the added goods. " if addition else
+                   "if the owner received no request, review recovery for that same order with the requested payment method. ")
+                + "Do not submit a new order or repeat the addition."
             )
         order_id = expected_order_id
         observed: dict[str, Any] = {}
@@ -2010,11 +2016,14 @@ class OdaBrowser:
         with self._checkout_operation(deadline, preserve_session=vipps):
             return self._submit_checkout(cart, review, before_click, before_vipps_request=before_vipps_request)
 
-    def submit_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None) -> None:
-        with self._checkout_operation(deadline):
+    def submit_order_change(self, cart: Mapping[str, Any], order_id: str, order: Mapping[str, Any], review: Mapping[str, Any], before_click: Callable[[], None] | None = None, *, deadline: float | None = None, before_vipps_request=None) -> None:
+        payment = review.get("payment_choice")
+        vipps = bool(payment and payment.get("method") == "vipps")
+        with self._checkout_operation(deadline, preserve_session=vipps):
             try:
                 binding = require_order_binding(review.get("binding"))
-                current = self.review_order_change(cart, order_id, order, expected_binding=binding)
+                current = self.review_order_change(cart, order_id, order, expected_binding=binding,
+                    **({"payment": payment, "select_payment": False} if payment is not None else {}))
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
@@ -2026,8 +2035,11 @@ class OdaBrowser:
                 before_click,
                 expected_product_count=expected_cart["product_count"],
                 expected_amounts=review.get("amounts"),
-                review_surface=(_oda_checkout_surface_script(expected_cart), review["surface"]),
+                review_surface=(_oda_checkout_surface_script(expected_cart, payment), review["surface"]),
                 addition_expectation=self._addition_expectation(cart, order_id, order, binding),
+                authentication_expected=not vipps,
+                before_vipps_request=before_vipps_request,
+                order_id=order_id,
             )
 
     def _navigate_delivery_change(self, order_id, expected, slot):
@@ -2246,6 +2258,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         addition_expectation: Mapping[str, Any] | None = None,
         authentication_expected: bool = True,
         before_vipps_request=None,
+        order_id=None,
     ) -> None:
         vipps = review_surface is not None and review_surface[1].get("payment_display") == "Vipps"
         required_time = (
@@ -2271,7 +2284,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         if addition_expectation is not None:
             # Existing-order reviews bind their own original/final totals and
             # signed adjustment; new-order fee validation does not apply.
-            script = _retail_addition_amount_script(addition_expectation, submit=True, provider=self.checkout_provider)
+            script = _retail_addition_amount_script(addition_expectation, submit=True, provider=self.checkout_provider, vipps=vipps)
         else:
             try:
                 amounts_minor = _oda_checkout_amounts_minor(expected_amounts)
@@ -2298,6 +2311,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             raise CheckoutPreconditionError("Oda checkout button changed before click")
         return self._capture_checkout_payment(
             dispatch_tab,
+            **({"order_id": order_id} if order_id is not None else {}),
             authentication_expected=authentication_expected,
             vipps_expected_total=(expected_total if vipps else None),
             vipps_source_url=(expected_url if vipps else None),

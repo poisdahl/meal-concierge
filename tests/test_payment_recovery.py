@@ -2280,6 +2280,239 @@ class MathemAdditionRecoveryTests(unittest.TestCase):
         self.assertEqual(self.browser.clicks, 0)
 
 
+class OdaAdditionPaymentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.merchant = Merchant()
+        self.merchant.status = "paid_and_modifiable"
+        self.original = deepcopy(self.merchant.order)
+        self.cart = {"items": deepcopy(CART["items"]), "count": 1, "totalGrossAmount": 16.70}
+        original_call = self.merchant.call
+        self.merchant.call = lambda name, args, **kwargs: deepcopy(self.cart) if name == "get_cart" else original_call(name, args, **kwargs)
+        self.browser = MerchantBrowser(self.merchant)
+        self.settings = {"provider": "oda", "household": "Synthetic", "checkout_payment": {"method": "vipps"}}
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.app._now = lambda: datetime(2026, 9, 9, 20, tzinfo=timezone.utc)
+        self.binding = {"account_reference_digest": "a" * 64, "receipt_address": "Example street 1"}
+        self.choices = []
+        self.context_change = None
+        self.lost_response = False
+        with self.app.store.locked() as state:
+            state["order_change"] = {"provider": "oda", "order_id": "order-1", "status": "editing",
+                "binding": deepcopy(self.binding), "expected_cart_quantities": {"67626": 1},
+                "before": {"order": deepcopy(self.original), "tracking": {"orderNumber": "order-1", "status": "paid_and_modifiable"}}}
+            state["order_snapshots"] = {"order-1": {"original": "menu receipt"}}
+        self.snapshots = self.app.store.read()["order_snapshots"]
+
+        def review(cart, order_id, order, *, payment, select_payment, expected_binding, **kwargs):
+            self.assertEqual(order_id, "order-1")
+            self.assertEqual(order, self.original)
+            self.assertEqual(expected_binding, self.binding)
+            self.choices.append((deepcopy(payment), select_payment))
+            amounts = {key: None for key in AMOUNTS}
+            amounts.update(product_subtotal=16.70, provider_total=16.70)
+            return {"binding": deepcopy(self.binding), "payment_choice": deepcopy(payment),
+                "payment_display": "Vipps" if payment["method"] == "vipps" else "•••• 1234",
+                "amounts": amounts, "order_amounts": {"original_minor": 24640, "original_count": 1,
+                    "added_minor": 1670, "added_count": 1, "payable_minor": 1670,
+                    "combined_minor": 26310, "combined_count": 2}}
+
+        def submit(cart, order_id, order, prepared, before_click, **kwargs):
+            before_click()
+            self.browser.clicks += 1
+            if prepared["payment_choice"]["method"] == "saved_card":
+                self.accept_addition()
+                return {}
+            context = {"tab_id": "owned", "expected_total": 1670, "gateway_url_digest": "b" * 64, "order_id": order_id}
+            if self.context_change:
+                context.update(self.context_change)
+            kwargs["before_vipps_request"](context)
+            self.browser.vipps_request_state = "sent"
+            if self.lost_response:
+                raise HouseholdError("lost after Vipps dispatch")
+            return {"vipps_request_sent": True}
+        self.browser.review_order_change = review
+        self.browser.submit_order_change = submit
+
+    def call(self, action, **kwargs):
+        return self.app.handle({"operation": "checkout", "action": action, **kwargs})
+
+    def accept_addition(self):
+        self.merchant.order["grossAmount"] = 263.10
+        self.merchant.order["products"][0]["quantity"] = 2
+
+    def test_vipps_addition_retains_original_until_exact_delta_is_accepted(self):
+        prepared = self.call("prepare")
+        self.assertEqual(prepared["summary"]["payment_method"], "vipps")
+        self.assertEqual(prepared["summary"]["total"], 16.70)
+        result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["payment_request_sent"])
+        pending = self.app.store.read()["pending_checkout"]
+        self.assertEqual(pending["vipps_request_context"]["order_id"], "order-1")
+        self.assertEqual(pending["vipps_request_context"]["expected_total"], 1670)
+        self.assertNotIn("authentication_unresolved", pending)
+        self.assertFalse(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["confirmed"])
+        self.assertEqual(self.merchant.order, self.original)
+        self.assertTrue(self.call("prepare", recovery=True, checkout_payment={"method": "saved_card"})["awaiting_user_payment"])
+        with self.assertRaisesRegex(HouseholdError, "reconcile the pending"):
+            self.call("prepare", checkout_payment={"method": "saved_card"})
+        self.accept_addition()
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["changed_existing_order"])
+        self.assertEqual(self.call("confirm", confirmation_id=prepared["confirmation_id"])["order_id"], "order-1")
+        self.assertEqual(self.browser.clicks, 1)
+        self.assertIsNone(self.app.store.read()["order_change"])
+        self.assertEqual(self.app.store.read()["order_snapshots"], self.snapshots)
+
+    def test_saved_card_override_is_frozen_without_changing_global_vipps(self):
+        prepared = self.call("prepare", checkout_payment={"method": "saved_card", "card_last4": "1234"})
+        self.assertEqual(prepared["summary"]["payment_method"], "saved_card")
+        self.assertEqual(self.app.store.read()["checkout_payment"]["method"], "vipps")
+        repeated = self.call("prepare")
+        self.assertEqual(repeated["summary"]["payment"], "•••• 1234")
+        result = self.call("confirm", confirmation_id=repeated["confirmation_id"])
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(self.browser.clicks, 1)
+        self.assertEqual(self.app.store.read()["checkout_payment"]["method"], "vipps")
+        self.assertEqual(self.app.store.read()["order_snapshots"], self.snapshots)
+
+    def test_prepare_accepts_only_the_exact_active_order_id(self):
+        result = self.call("prepare", order_id="order-1")
+        self.assertEqual(result["summary"]["total"], 16.70)
+        for target in ("other", ""):
+            with self.subTest(target=target), self.assertRaises(HouseholdError):
+                self.call("prepare", order_id=target)
+        with self.app.store.locked() as state:
+            state["order_change"] = None
+            state["pending_checkout"] = None
+        with self.assertRaisesRegex(HouseholdError, "active Oda order change"):
+            self.call("prepare", order_id="order-1")
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_override_global_preference_change_invalidates_confirmation(self):
+        prepared = self.call("prepare", checkout_payment={"method": "saved_card"})
+        with self.app.store.locked() as state:
+            state["checkout_payment"] = {"method": "saved_card", "card_last4": "1234"}
+        with self.assertRaisesRegex(HouseholdError, "payment preference changed"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_lost_vipps_response_and_expiry_never_repeat_addition(self):
+        prepared = self.call("prepare")
+        self.lost_response = True
+        with self.assertRaisesRegex(HouseholdError, "lost after Vipps"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.app = Application(StateStore(self.temp.name, self.settings), self.merchant, self.browser)
+        self.assertTrue(self.call("reconcile", confirmation_id=prepared["confirmation_id"])["awaiting_user_payment"])
+        self.browser.vipps_request_state = "expired"
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(result["payment_request_state"], "expired")
+        self.assertFalse(result["recovery_preparation_available"])
+        with self.assertRaisesRegex(HouseholdError, "original merchant change"):
+            self.call("prepare", recovery=True, checkout_payment={"method": "saved_card"})
+        self.assertEqual(self.browser.clicks, 1)
+        self.assertEqual(self.merchant.order, self.original)
+
+    def test_vipps_callback_rejects_other_order_or_full_order_amount(self):
+        for change in ({"order_id": None}, {"order_id": "other"}, {"expected_total": 26310}):
+            with self.subTest(change=change):
+                with self.app.store.locked() as state:
+                    state["pending_checkout"] = None
+                self.context_change = change
+                prepared = self.call("prepare")
+                with self.assertRaisesRegex(HouseholdError, "reviewed order and payable"):
+                    self.call("confirm", confirmation_id=prepared["confirmation_id"])
+                self.assertNotIn("vipps_request_context", self.app.store.read()["pending_checkout"])
+
+    def test_override_rejects_unrelated_checkout_and_vipps_zero_delta(self):
+        with self.app.store.locked() as state:
+            original = deepcopy(state["order_change"])
+            state["order_change"] = None
+        with self.assertRaisesRegex(HouseholdError, "active manual Oda addition"):
+            self.call("prepare", checkout_payment={"method": "saved_card"})
+        with self.app.store.locked() as state:
+            state["order_change"] = original
+        self.cart["totalGrossAmount"] = 0
+        with self.assertRaisesRegex(HouseholdError, "positive reviewed amount"):
+            self.call("prepare")
+        self.assertEqual(self.browser.clicks, 0)
+
+
+class OdaAdditionBrowserTests(unittest.TestCase):
+    def test_actual_addition_review_selection_and_final_click_bind_method_order_and_delta(self):
+        import json
+        import shutil
+        import subprocess
+        from contextlib import nullcontext
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node executes the actual Oda addition controls")
+        rows = [["Opprinnelig bestilling", "1 vare", "100,00 kr"],
+                ["Nye varer lagt til", "1 vare", "45,50 kr"],
+                ["Å betale", "45,50 kr"], ["Ny totalsum", "2 varer", "145,50 kr"]]
+        url = "https://oda.com/no/checkout/confirm/?orderNumber=order-1"
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
+        order = {"orderNumber": "order-1", "grossAmount": 100, "currency": "NOK",
+                 "products": [{"product_id": "1", "quantity": 1}],
+                 "deliverySlotDisplay": "12. september 09:00–12:00"}
+        cart = {"items": [{"product_id": "2", "name": "Pasta", "description": "500 g", "brand": "Sopps", "quantity": 1}],
+                "count": 1, "totalGrossAmount": 45.50}
+        for method in ("vipps", "saved_card"):
+            payment = {"method": method}
+            for change in ({}, {"selected": 2 if method == "vipps" else 0},
+                           {"url": url.replace("order-1", "other")},
+                           {"rows": [*rows[:2], ["Å betale", "145,50 kr"], rows[3]]},
+                           {"rows": [rows[0], ["Nye varer lagt til", "2 varer", "45,50 kr"], *rows[2:]]},
+                           {"payDisabled": True}):
+                with self.subTest(method=method, change=change):
+                    config = {"url": url, "rows": rows, "selected": 2 if method == "vipps" else 0}
+                    clicks, captures, preserves = [], [], []
+                    def evaluate(script):
+                        completed = subprocess.run([node, "-e", PAYMENT_DOM], input=json.dumps({"script": script, "c": config}),
+                            text=True, capture_output=True, check=True)
+                        result = json.loads(completed.stdout)
+                        clicks.extend(result["clicks"])
+                        selected = [i for i, checked in enumerate(result["selected"]) if checked]
+                        if len(selected) == 1:
+                            config["selected"] = selected[0]
+                        return result["result"]
+                    browser = OdaBrowser.__new__(OdaBrowser)
+                    browser._checkout_deadline = None
+                    browser._checkout_operation = lambda *a, **kw: (preserves.append(kw.get("preserve_session", False)) or nullcontext())
+                    browser._read_order_binding = lambda *a, **kw: deepcopy(binding)
+                    browser._continue_checkout_cart = lambda: None
+                    browser._expand_checkout_items = lambda *a, **kw: None
+                    browser._expand_checkout_amount_summary = lambda: None
+                    browser._settle = lambda *a: None
+                    browser._require_checkout_time = lambda *a: None
+                    browser._checkout_dispatch_tab = lambda: "owned"
+                    browser._eval = evaluate
+                    browser._capture_checkout_payment = lambda tab, **kw: captures.append((tab, kw)) or {}
+                    review = browser.review_order_change(cart, "order-1", order, payment=payment,
+                        select_payment=True, expected_binding=binding)
+                    self.assertEqual(clicks, [0 if method == "vipps" else 2])
+                    self.assertEqual(review["order_amounts"]["payable_minor"], 4550)
+                    config.update(change)
+                    clicks.clear()
+                    if change:
+                        with self.assertRaises(CheckoutPreconditionError):
+                            browser.submit_order_change(cart, "order-1", order, review, lambda: None)
+                        self.assertEqual(clicks, [])
+                        self.assertEqual(captures, [])
+                    else:
+                        browser.submit_order_change(cart, "order-1", order, review, lambda: None)
+                        self.assertEqual(clicks, ["PAY"])
+                        self.assertEqual(captures[0][1]["order_id"], "order-1")
+                        self.assertEqual(captures[0][1]["authentication_expected"], method == "saved_card")
+                        self.assertEqual(captures[0][1]["vipps_expected_total"], 4550 if method == "vipps" else None)
+                        self.assertEqual(captures[0][1]["vipps_source_url"], url if method == "vipps" else None)
+                        self.assertEqual(preserves[1], method == "vipps")
+
+
 class RetryAmountTests(unittest.TestCase):
     def test_oda_retry_accepts_exact_summary_count_without_product_controls(self):
         import json
