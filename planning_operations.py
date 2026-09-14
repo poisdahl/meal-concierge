@@ -1708,6 +1708,12 @@ class PlanningOperations:
                 {"kind": "saved_menu", "menu_ref": deepcopy(dict(menu_ref))},
                 deepcopy(dict(menu)), deepcopy(dict(menu_ref)),
             )
+        current = self.store.read().get("menu")
+        if (isinstance(current, Mapping) and planner_handoff is not None
+                and canonical(current.get("planner_selection")) == canonical(planner_handoff)):
+            self._require_menu_provider(current)
+            return ({"kind": "planner_selection", "planner_handoff": deepcopy(dict(planner_handoff))},
+                    deepcopy(dict(current)), self._cart_menu_ref(current))
         _result, resolved, _request = self._verify_planner_handoff(planner_handoff)
         menu = self._materialize_planner_menu(planner_handoff, resolved)
         saved_ref = None
@@ -1879,6 +1885,21 @@ class PlanningOperations:
         candidate_approvals: Any, deadline: float | None,
         ingredient_decisions: Any = None, budget_ore: int | None = None, price_mode: str = "exact",
     ) -> dict[str, Any]:
+        snapshot = self.store.read()
+        saved = snapshot.get("menu_ingredient_decisions") or {}
+        reference = binding.get("menu_ref")
+        if (binding.get("kind") == "planner_selection" and snapshot.get("menu")
+                and canonical(snapshot["menu"].get("planner_selection")) == canonical(binding.get("planner_handoff"))):
+            reference = self._cart_menu_ref(snapshot["menu"])
+        if reference is not None and saved.get("menu_ref") == reference:
+            binding = {**binding, "ingredient_decisions_digest": hashlib.sha256(canonical(saved["decisions"]).encode()).hexdigest()}
+            exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=ingredient_decisions)
+            merged = {canonical(d["source"]): d for d in ingredient_decisions or []}
+            # A returned stale plan must never resurrect an older stock assertion.
+            # Explicit changes go through record_ingredients; current saved facts
+            # also win when returning a newly refreshed plan after stale apply.
+            merged.update({canonical(d["source"]): deepcopy(d) for d in saved["decisions"]})
+            ingredient_decisions = list(merged.values())
         observations = self._product_observations(menu, deadline=deadline, ingredient_decisions=ingredient_decisions, candidate_approvals=candidate_approvals)
         profile = self.store.read().get("profile")
         diet = profile.get("diet") if isinstance(profile, Mapping) else None
@@ -2013,6 +2034,29 @@ class PlanningOperations:
 
     def _products(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        if action == "record_ingredients":
+            binding, menu, reference = self._product_binding(menu_ref=request.get("menu_ref"))
+            decisions = request.get("ingredient_decisions")
+            if not isinstance(decisions, list) or not decisions:
+                raise HouseholdError("record_ingredients requires the user's explicit ingredient decisions")
+            # Validate the exact source positions against this frozen menu, without
+            # requiring a provider connection or a complete shopping plan.
+            exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=decisions)
+            with self.store.locked() as state:
+                if self._cart_menu_ref(state.get("menu")) != reference:
+                    raise HouseholdError("menu changed before recording ingredients")
+                if state.get("pending_checkout") or state.get("order_change"):
+                    raise HouseholdError("finish the existing checkout before changing menu shopping requirements")
+                previous = state.get("menu_ingredient_decisions") or {}
+                merged = {canonical(d["source"]): d for d in previous.get("decisions", [])} if previous.get("menu_ref") == reference else {}
+                merged.update({canonical(d["source"]): deepcopy(d) for d in decisions})
+                state["menu_ingredient_decisions"] = {"menu_ref": deepcopy(reference), "decisions": list(merged.values())}
+                state.pop("product_plan_completion", None)
+                plan = state.get("cart_plan") or {}
+                plan.pop("product_plan_digest", None)
+                plan.pop("product_plan_summary", None)
+            return {"recorded": True, "menu_ref": reference, "ingredient_decisions": list(merged.values()),
+                    "cart_changed": False, "next": "Use these recorded ingredients for this menu; prepare/apply its updated products for an authorized shop."}
         deadline = time.monotonic() + PRODUCT_OPERATION_TIMEOUT
         if request.get("_deadline") is not None:
             deadline = min(deadline, request["_deadline"])
@@ -2047,7 +2091,8 @@ class PlanningOperations:
                     old_binding.get("kind") == "planner_selection"
                     and canonical(old_binding.get("planner_handoff")) == canonical(menu.get("planner_selection"))
                 )
-                if not same_selection and canonical(old_binding) != canonical(binding):
+                identity_binding = {k: v for k, v in old_binding.items() if k != "ingredient_decisions_digest"}
+                if not same_selection and canonical(identity_binding) != canonical(binding):
                     raise HouseholdError("previous product plan does not bind this exact menu selection")
                 old_facts = {k: v for k, v in previous.items() if k != "binding"}
                 new_facts = {k: v for k, v in plan.items() if k != "binding"}
@@ -2130,7 +2175,8 @@ class PlanningOperations:
                     "fresh_product_plan": final,
                 }
 
-            if not prepared_cart_requirements(supplied) and not self.store.read()["recurring_items"]:
+            if (not prepared_cart_requirements(supplied) and not self.store.read()["recurring_items"]
+                    and not (self.store.read().get("cart_plan") or {}).get("supplemental_quantities")):
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref, "_allow_empty_requirements": True}, deadline)
                 if not cart_result.get("synced"):
                     return {"applied": False, **cart_result}
@@ -2145,11 +2191,10 @@ class PlanningOperations:
                     if self._cart_menu_ref(state.get("menu")) != expected_menu_ref:
                         raise HouseholdError("menu changed before recording pantry coverage")
                     state["product_plan_completion"] = {"menu_ref": deepcopy(expected_menu_ref), "nothing_to_buy": True, "product_plan_digest": supplied["product_plan_digest"]}
-                return {"applied": True, "cart_changed": False, "nothing_to_buy": True, "product_plan": supplied}
+                return {"applied": True, "cart_changed": bool(cart_result.get("applied_operations")), "nothing_to_buy": True, "product_plan": supplied}
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
                 "_allow_empty_requirements": True,
-                "start_as_extra_product_ids": [],
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
             }, deadline)
@@ -2376,7 +2421,7 @@ class PlanningOperations:
         status = "active"
         if isinstance(previous, Mapping) and previous.get("provider") == self.provider:
             for product_id, quantity in previous.get("added_quantities", {}).items():
-                retained = min(quantity, live.get(product_id, 0))
+                retained = min(quantity, max(0, live.get(product_id, 0) - previous.get("supplemental_quantities", {}).get(product_id, 0)))
                 if retained:
                     retained_added[product_id] = retained
                     baseline[product_id] = live.get(product_id, 0) - retained
@@ -2389,7 +2434,9 @@ class PlanningOperations:
                     baseline[product_id] -= retained
                     if baseline[product_id] == 0:
                         baseline.pop(product_id)
-            status = "needs_input"
+            # Replacing a menu is not external cart drift. Only the quantities
+            # attributable to our previous sync may be removed automatically.
+            status = "active" if previous.get("status") == "active" and previous.get("last_synced_digest") == self._cart_digest(live) else "needs_input"
         digest = self._cart_digest(live)
         return {
             "provider": self.provider,
@@ -2399,7 +2446,7 @@ class PlanningOperations:
             "required_quantities": dict(requirements),
             "added_quantities": retained_added,
             "supplemental_quantities": supplements,
-            "start_as_extra_product_ids": sorted(start_as_extra),
+            "start_as_extra_product_ids": sorted(start_as_extra.intersection(baseline)),
             "product_names": {**dict(names), **dict(requirement_names)},
             "last_synced_quantities": dict(live),
             "last_synced_digest": digest,
@@ -2436,17 +2483,19 @@ class PlanningOperations:
         plan: dict[str, Any], before: Mapping[str, int],
         acknowledged: Mapping[str, int], live: Mapping[str, int],
     ) -> None:
+        capacity = {product_id: max(0, quantity - plan.get("supplemental_quantities", {}).get(product_id, 0))
+                    for product_id, quantity in live.items()}
         retained = {
-            product_id: min(quantity, live.get(product_id, 0))
+            product_id: min(quantity, capacity.get(product_id, 0))
             for product_id, quantity in plan["added_quantities"].items()
-            if min(quantity, live.get(product_id, 0)) > 0
+            if min(quantity, capacity.get(product_id, 0)) > 0
         }
         for product_id in set(before) | set(acknowledged):
             confirmed = acknowledged.get(product_id, 0) - before.get(product_id, 0)
             if confirmed > 0:
                 retained[product_id] = min(
                     retained.get(product_id, 0) + confirmed,
-                    live.get(product_id, 0),
+                    capacity.get(product_id, 0),
                 )
         plan["added_quantities"] = retained
 
@@ -2466,14 +2515,17 @@ class PlanningOperations:
             key = self._product_id(item['product_id'])
             requirements[key] = requirements.get(key, 0) + item['quantity']
             requirement_names.setdefault(key, item['product_name'])
-        extra_values = request.get("start_as_extra_product_ids") or []
+        extra_values = request.get("start_as_extra_product_ids")
+        if extra_values is None:
+            prior_plan = snapshot.get("cart_plan") or {}
+            extra_values = prior_plan.get("start_as_extra_product_ids", []) if prior_plan.get("provider") == self.provider else []
         if not isinstance(extra_values, list):
             raise HouseholdError("start_as_extra_product_ids must be a list")
         start_as_extra = {self._product_id(value) for value in extra_values}
         first_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
         first_summary = cart_summary(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
-        if not start_as_extra.issubset(first_live):
+        if request.get("start_as_extra_product_ids") is not None and not start_as_extra.issubset(first_live):
             raise HouseholdError("starting quantities can be extra only for exact products already in the cart")
         approved_idempotent = False
         with self.store.locked() as state:
@@ -2537,9 +2589,9 @@ class PlanningOperations:
             }
         target = self._cart_target(current)
         operations = []
-        for product_id in sorted(target):
-            missing = target[product_id] - first_live.get(product_id, 0)
-            if missing > 0:
+        for product_id in sorted(set(target) | set(first_live)):
+            missing = target.get(product_id, 0) - first_live.get(product_id, 0)
+            if missing:
                 operations.append({
                     "productId": int(product_id) if self.provider in {"oda", "mathem"} else product_id,
                     "quantity": missing,
@@ -2608,6 +2660,8 @@ class PlanningOperations:
         for operation in operations:
             product_id = str(operation["productId"])
             expected[product_id] = expected.get(product_id, 0) + operation["quantity"]
+            if expected[product_id] == 0:
+                expected.pop(product_id)
         if mutation_error is not None or verified_live != expected:
             with self.store.locked() as state:
                 plan = state["cart_plan"]
@@ -2630,7 +2684,11 @@ class PlanningOperations:
                 raise HouseholdError("cart plan changed while syncing")
             for operation in operations:
                 product_id = str(operation["productId"])
-                plan["added_quantities"][product_id] = plan["added_quantities"].get(product_id, 0) + operation["quantity"]
+                remaining = max(0, plan["added_quantities"].get(product_id, 0) + operation["quantity"])
+                if remaining:
+                    plan["added_quantities"][product_id] = remaining
+                else:
+                    plan["added_quantities"].pop(product_id, None)
             plan["required_quantities"] = dict(requirements)
             plan["product_names"].update({**verified_names, **requirement_names})
             plan["last_synced_quantities"] = dict(verified_live)

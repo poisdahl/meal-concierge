@@ -1855,6 +1855,12 @@ class OrderOperations:
             action == "reconcile" and request.get("vipps_approval_completed") is True
         ):
             raise HouseholdError("vipps_approval_completed is true only for exact Oda recovery reconciliation")
+        if "owner_payment_completed" in request and not (
+            action == "reconcile" and request.get("owner_payment_completed") is True
+            and not request.get("vipps_approval_completed")
+            and not request.get("vipps_request_not_received")
+        ):
+            raise HouseholdError("owner_payment_completed is true only for exact externally completed payment reconciliation")
         if (request.get("vipps_request_not_received") is True
                 and request.get("vipps_approval_completed") is True):
             raise HouseholdError("Vipps approval and no-request evidence cannot describe the same reconciliation")
@@ -2009,6 +2015,7 @@ class OrderOperations:
                 str(request.get("confirmation_id") or ""),
                 vipps_approval_completed=request.get("vipps_approval_completed") is True,
                 vipps_request_not_received=request.get("vipps_request_not_received") is True,
+                owner_payment_completed=request.get("owner_payment_completed") is True,
             )
         if action == "authenticate":
             return self._checkout_authenticate(deadline, str(request.get("confirmation_id") or ""))
@@ -2759,6 +2766,14 @@ class OrderOperations:
         owner_reported_no_request = bool(
             requested is not None
             or (
+                pending.get("vipps_request_status") == "not_sent"
+                and pending.get("owner_reported_no_vipps_request_after_attempt_at")
+                and pending.get("payment_failure") == {
+                    "payment_failed": True, "order_id": order_id,
+                    "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
+                }
+            )
+            or (
                 isinstance(active_recovery, Mapping)
                 and active_recovery.get("order_id") == order_id
                 and (
@@ -2857,6 +2872,8 @@ class OrderOperations:
             and active_attempt is pending
             and active_attempt.get("vipps_request_status") is None
             and active_attempt.get("vipps_request_context") is None
+            and active_attempt.get("vipps_request_attempted_at") is None
+            and active_attempt.get("payment_requested_at") is None
         )
         if (self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                 and (active_attempt is pending or active_attempt.get("status") != "awaiting_confirmation")
@@ -2890,9 +2907,6 @@ class OrderOperations:
             "receipt_address": pending["summary"]["delivery"]["address"],
         })
         payment = checkout_payment_settings(checkout_payment, self.provider) if checkout_payment is not None else pending["checkout_payment"]
-        if (pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-                and payment.get("method") != "vipps"):
-            raise HouseholdError("Exact Oda retry-page recovery must preserve Vipps")
         review = self.browser.review_payment_recovery(pending["cart"], order_id,
             payment=payment, expected_binding=binding, deadline=deadline,
             **self._recovery_browser_options(pending))
@@ -2967,7 +2981,9 @@ class OrderOperations:
             prior_vipps_request_status = previous["prior_vipps_request_status"]
         if prior_vipps_request_status in {"expired", "verifying", "not_sent"}:
             child["prior_vipps_request_status"] = prior_vipps_request_status
-        if requested_order_id is not None or carried_owner_no_request:
+        if (requested_order_id is not None or carried_owner_no_request
+                or pending.get("vipps_request_status") == "not_sent"
+                and pending.get("owner_reported_no_vipps_request_after_attempt_at")):
             child["owner_reported_no_vipps_request"] = True
             child["original_confirmation_id"] = pending["confirmation_id"]
         with self.store.locked() as state:
@@ -3036,8 +3052,7 @@ class OrderOperations:
             def before_click():
                 nonlocal dispatch_claimed
                 if (self.provider == "oda"
-                        and (pending.get("checkout_payment") or {}).get("method") == "vipps"
-                        and child["browser_review"]["payment_choice"]["method"] == "vipps"):
+                        and (pending.get("checkout_payment") or {}).get("method") == "vipps"):
                     original_status = pending.get("vipps_request_status")
                     prior_recovery_closed = (
                         original_status is None
@@ -3047,6 +3062,8 @@ class OrderOperations:
                     legacy_offer = (
                         original_status is None
                         and pending.get("vipps_request_context") is None
+                        and pending.get("vipps_request_attempted_at") is None
+                        and pending.get("payment_requested_at") is None
                         and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
                         and child.get("owner_reported_no_vipps_request") is True
                         and child.get("original_confirmation_id") == pending.get("confirmation_id")
@@ -3567,12 +3584,14 @@ class OrderOperations:
 
     def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "", *,
                             vipps_approval_completed: bool = False,
-                            vipps_request_not_received: bool = False) -> dict[str, Any]:
+                            vipps_request_not_received: bool = False,
+                            owner_payment_completed: bool = False) -> dict[str, Any]:
         with self._browser_operation(deadline):
             return self._checkout_reconcile_unlocked(
                 deadline, confirmation_id,
                 vipps_approval_completed=vipps_approval_completed,
                 vipps_request_not_received=vipps_request_not_received,
+                owner_payment_completed=owner_payment_completed,
             )
 
     def _meny_confirmation_before_navigation(self, pending, deadline):
@@ -3604,7 +3623,8 @@ class OrderOperations:
 
     def _checkout_reconcile_unlocked(self, deadline: float | None = None, confirmation_id: str = "", *,
                                      vipps_approval_completed: bool = False,
-                                     vipps_request_not_received: bool = False) -> dict[str, Any]:
+                                     vipps_request_not_received: bool = False,
+                                     owner_payment_completed: bool = False) -> dict[str, Any]:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout") if confirmation_id else None
@@ -3618,39 +3638,44 @@ class OrderOperations:
         if pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
             raise HouseholdError("checkout has not reached reconciliation")
         if pending.get("order_change"):
+            if owner_payment_completed:
+                raise HouseholdError("Owner payment completion requires the exact original Oda order")
             return self._order_change_reconcile(pending, deadline)
         if vipps_request_not_received:
             child = pending.get("recovery")
+            reported_attempt = child if isinstance(child, Mapping) else pending
+            reported_order_id = child.get("order_id") if isinstance(child, Mapping) else pending.get("unpaid_order_id")
+            reported_payment = ((child.get("browser_review") or {}).get("payment_choice", {})
+                                if isinstance(child, Mapping) else pending.get("checkout_payment", {}))
             contextless_exact_recovery = (
                 self.provider == "oda"
                 and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-                and isinstance(child, Mapping)
-                and confirmation_id == child.get("confirmation_id")
-                and child.get("status") in {"clicking", "uncertain", "awaiting_user_payment"}
-                and (child.get("browser_review") or {}).get("payment_choice", {}).get("method") == "vipps"
-                and child.get("order_id") == pending.get("unpaid_order_id")
-                and child.get("vipps_request_status") is None
-                and child.get("vipps_request_context") is None
-                and child.get("vipps_request_attempted_at") is None
-                and child.get("payment_requested_at") is None
-                and child.get("owner_vipps_approval_completed_at") is None
+                and confirmation_id == reported_attempt.get("confirmation_id")
+                and reported_attempt.get("status") in {"clicking", "uncertain", "awaiting_user_payment"}
+                and reported_payment.get("method") == "vipps"
+                and reported_order_id and reported_order_id == pending.get("unpaid_order_id")
+                and reported_attempt.get("vipps_request_status") is None
+                and reported_attempt.get("vipps_request_context") is None
+                and reported_attempt.get("vipps_request_attempted_at") is None
+                and reported_attempt.get("payment_requested_at") is None
+                and reported_attempt.get("owner_vipps_approval_completed_at") is None
             )
             recorded_owner_no_request = (
                 self.provider == "oda"
                 and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-                and isinstance(child, Mapping)
-                and confirmation_id == child.get("confirmation_id")
-                and child.get("order_id") == pending.get("unpaid_order_id")
-                and child.get("vipps_request_status") == "not_sent"
-                and child.get("vipps_request_context") is None
-                and child.get("vipps_request_attempted_at") is None
-                and child.get("payment_requested_at") is None
-                and child.get("owner_vipps_approval_completed_at") is None
-                and isinstance(child.get("owner_reported_no_vipps_request_after_attempt_at"), str)
-                and child["owner_reported_no_vipps_request_after_attempt_at"]
-                and child.get("payment_failure") == {
+                and confirmation_id == reported_attempt.get("confirmation_id")
+                and reported_order_id and reported_order_id == pending.get("unpaid_order_id")
+                and reported_payment.get("method") == "vipps"
+                and reported_attempt.get("vipps_request_status") == "not_sent"
+                and reported_attempt.get("vipps_request_context") is None
+                and reported_attempt.get("vipps_request_attempted_at") is None
+                and reported_attempt.get("payment_requested_at") is None
+                and reported_attempt.get("owner_vipps_approval_completed_at") is None
+                and isinstance(reported_attempt.get("owner_reported_no_vipps_request_after_attempt_at"), str)
+                and reported_attempt["owner_reported_no_vipps_request_after_attempt_at"]
+                and reported_attempt.get("payment_failure") == {
                     "payment_failed": True,
-                    "order_id": child.get("order_id"),
+                    "order_id": reported_order_id,
                     "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
                 }
             )
@@ -3662,16 +3687,16 @@ class OrderOperations:
             # surface again. The missing pre-request journal fence plus the
             # owner's current phone observation are both required.
             if not recorded_owner_no_request:
-                self._checkout_recovery_target(pending, deadline, child["order_id"])
+                self._checkout_recovery_target(pending, deadline, reported_order_id)
                 with self.store.locked() as state:
                     if canonical(state.get("pending_checkout")) != canonical(pending):
                         raise HouseholdError("checkout state changed while recording the missing Vipps request")
-                    current = state["pending_checkout"]["recovery"]
+                    current = state["pending_checkout"]["recovery"] if isinstance(child, Mapping) else state["pending_checkout"]
                     current["vipps_request_status"] = "not_sent"
                     current["owner_reported_no_vipps_request_after_attempt_at"] = self._now().isoformat()
                     current["payment_failure"] = {
                         "payment_failed": True,
-                        "order_id": safe_order_id(child["order_id"]),
+                        "order_id": safe_order_id(reported_order_id),
                         "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
                     }
                     pending = deepcopy(state["pending_checkout"])
@@ -3699,6 +3724,14 @@ class OrderOperations:
         recovery_attempt = pending.get("recovery")
         active_attempt = (recovery_attempt if recovery_attempt
                           and recovery_attempt.get("status") != "awaiting_confirmation" else pending)
+        if owner_payment_completed and (
+            self.provider != "oda"
+            or not confirmation_id
+            or confirmation_id != active_attempt.get("confirmation_id")
+            or not pending.get("unpaid_order_id")
+            or not (pending.get("browser_review") or {}).get("account_reference_digest")
+        ):
+            raise HouseholdError("Owner payment completion requires the current confirmation, exact Oda order and original account binding")
         active_payment = ((active_attempt.get("browser_review") or {}).get("payment_choice")
                           if active_attempt is not pending else pending.get("checkout_payment")) or {}
         oda_vipps_observation = None
@@ -3729,7 +3762,7 @@ class OrderOperations:
                         and active_attempt.get("order_id") == pending.get("unpaid_order_id")
                     )
                 )
-        if self.provider == "oda" and active_payment.get("method") == "vipps":
+        if self.provider == "oda" and active_payment.get("method") == "vipps" and not owner_payment_completed:
             request_status = active_attempt.get("vipps_request_status")
             if request_status in {"dispatching", "sent"}:
                 context = active_attempt.get("vipps_request_context")
@@ -3877,10 +3910,9 @@ class OrderOperations:
         recovery_context = ((pending.get("recovery") or {}).get("vipps_request_context")
                             if isinstance(pending.get("recovery"), Mapping) else None)
         exact_not_sent_recovery = bool(
-            recovery_dispatched
-            and isinstance(active_attempt, Mapping)
-            and active_attempt is pending.get("recovery")
-            and active_attempt.get("order_id") == pending.get("unpaid_order_id")
+            isinstance(active_attempt, Mapping)
+            and (active_attempt is pending or recovery_dispatched and active_attempt is pending.get("recovery"))
+            and (pending.get("unpaid_order_id") if active_attempt is pending else active_attempt.get("order_id")) == pending.get("unpaid_order_id")
             and active_attempt.get("vipps_request_status") == "not_sent"
             and active_attempt.get("vipps_request_context") is None
             and active_attempt.get("vipps_request_attempted_at") is None
@@ -3890,7 +3922,7 @@ class OrderOperations:
             and bool(active_attempt["owner_reported_no_vipps_request_after_attempt_at"])
             and active_attempt.get("payment_failure") == {
                 "payment_failed": True,
-                "order_id": active_attempt.get("order_id"),
+                "order_id": pending.get("unpaid_order_id") if active_attempt is pending else active_attempt.get("order_id"),
                 "reason": "owner_reported_no_vipps_request_before_dispatch_fence",
             }
         )
@@ -3910,6 +3942,7 @@ class OrderOperations:
             self.provider == "oda"
             and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
             and not exact_retry_payment_authorized
+            and not owner_payment_completed
         )
         if (
             page_bound_before_retry
@@ -3930,8 +3963,11 @@ class OrderOperations:
                 self.browser.order_payment_state(candidate_id, deadline=deadline).get("status") or "unknown"
             )
             tracking_conflict = payment_page_status in {"retry_available", "payment_started"}
-        exact_retry_review_matches = False
-        if exact_not_sent_recovery and tracking_conflict:
+        # An original pre-request failure has no frozen retry review yet. Its
+        # exact provider order and payment-started page authorize preparing
+        # that review; all account/items/fees are checked before any new click.
+        exact_retry_review_matches = exact_not_sent_recovery and active_attempt is pending
+        if exact_not_sent_recovery and active_attempt is not pending and tracking_conflict:
             try:
                 current_review = self.browser.review_payment_recovery(
                     pending["cart"], candidate_id,
@@ -4039,6 +4075,7 @@ class OrderOperations:
                     "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
                     **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
                     "payment": self._payment_evidence(tracking_status),
+                    **({"owner_payment_completed": True} if owner_payment_completed else {}),
                     "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
                     "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
                         pending.get("menu"), pending.get("cart_plan")),

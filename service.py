@@ -339,7 +339,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             ) or (
                 operation == "setup" and action == "apply"
             ) or (
-                operation == "recurring" and action in {"add", "remove"}
+                operation == "recurring" and action in {"add", "remove", "substitute"}
             ):
                 with self.product_plan_lock:
                     result = self._handle(request)
@@ -443,7 +443,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         )
         meny_read = self.provider == "meny" and (
             operation == "catalog"
-            or operation == "products"
+            or (operation == "products" and action != "record_ingredients")
             or (operation == "cart" and action in {None, "get"})
             or (operation == "delivery" and action in {None, "list"})
             or (operation == "orders" and action in {None, "list", "get"})
@@ -752,11 +752,34 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             key = canonical({'provider': self.provider, 'product_id': item['product_id'],
                              'schedule': item['schedule'], 'period': period})
             if key not in state.get('recurring_fulfilled', {}):
-                due.append({**deepcopy(item), 'fulfillment_key': key})
+                substitute = state.get('recurring_substitutions', {}).get(key, {})
+                due.append({**deepcopy(item), **deepcopy(substitute), 'fulfillment_key': key})
         return due
 
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
+        if action == "substitute":
+            original = self._product_id(request.get("product_id"))
+            raw = request.get("replacement")
+            if not isinstance(raw, Mapping) or set(raw) != {"product_id", "product_name", "quantity"}:
+                raise HouseholdError("substitute needs one exact observed replacement product and package quantity")
+            replacement = put_item([], {**raw, "product_id": self._product_id(raw.get("product_id"))})[0]
+            when = date.fromisoformat(str(request.get("date") or self._household_today().isoformat()))
+            with self.store.locked() as state:
+                if state.get("pending_checkout") or state.get("order_change"):
+                    raise HouseholdError("finish the existing checkout before replacing weekly goods")
+                # Keep the original recurrence and occurrence identity. Buying its
+                # substitute satisfies this occurrence, not a new recurring item.
+                candidates = [i for i in self._due_recurring(state, when)
+                              if i.get("original_product_id", i["product_id"]) == original]
+                if len(candidates) != 1:
+                    raise HouseholdError("the original recurring item is not due for this occurrence")
+                item = candidates[0]
+                state.setdefault("recurring_substitutions", {})[item["fulfillment_key"]] = {
+                    **replacement, "original_product_id": original}
+                due = self._due_recurring(state, when)
+            return {"substituted": True, "date": when.isoformat(), "due": due,
+                    "cart_changed": False, "next": "Synchronize the current weekly cart to replace the old item; do not add this substitute again as an extra."}
         if action == "due":
             try:
                 when = date.fromisoformat(str(request.get("date") or self._household_today().isoformat()))

@@ -135,6 +135,113 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
         self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'10': 2, '50': 1, '20': 1})
 
+    def test_recorded_home_stock_survives_restart_and_removes_menu_goods_only(self):
+        menu, products = self.shop(self.batch())
+        self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+            {'product_id': '50', 'product_name': 'Oregano extra', 'quantity': 1}]})
+        decisions = [{'source': source, 'action': 'have_all'}
+                     for row in products['requirements'] for source in row['sources']]
+        # Sources include amount detail in the plan; the decision uses its exact position.
+        decisions = [{'source': {k: d['source'][k] for k in ('collection', 'recipe_index', 'ingredient_index')},
+                      'action': 'have_all'} for d in decisions]
+        before = deepcopy(self.provider.cart)
+        recorded = self.app.handle({'operation': 'products', 'action': 'record_ingredients',
+            'menu_ref': mp.menu_ref(menu), 'ingredient_decisions': decisions})
+        self.assertTrue(recorded['recorded'])
+        self.assertEqual(before, self.provider.cart)
+        self.assertEqual(self.call('prepare', weekly=True)['reason'], 'weekly_menu_products_incomplete')
+        self.app = Application(self.store, self.provider, self.browser)
+        prepared = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})
+        self.assertEqual(prepared['product_plan']['requirements'], [])
+        compared = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu),
+            'previous_product_plan': prepared['product_plan']})
+        self.assertEqual(compared['observation_drift']['status'], 'unchanged')
+        handoff_prepared = self.app.handle({'operation': 'products', 'action': 'prepare',
+            'planner_handoff': menu['planner_selection']})
+        self.assertEqual(handoff_prepared['product_plan']['requirements'], [])
+        applied = self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})
+        self.assertTrue(applied['applied'], applied)
+        self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'50': 1})
+        self.assertTrue(self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})['applied'])
+        self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'50': 1})
+        # Reversing the assertion buys the actual menu quantity again.
+        included = [{**d, 'action': 'include'} for d in decisions]
+        self.app.handle({'operation': 'products', 'action': 'record_ingredients', 'menu_ref': mp.menu_ref(menu), 'ingredient_decisions': included})
+        self.assertTrue(self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})['product_plan']['requirements'])
+        stale = self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})
+        self.assertFalse(stale['applied'])
+        self.assertTrue(stale['fresh_product_plan']['requirements'])
+        self.assertTrue(all(d['action'] == 'include' for d in stale['fresh_product_plan']['ingredient_decisions']))
+        with self.assertRaises(HouseholdError):
+            self.app.handle({'operation': 'products', 'action': 'record_ingredients',
+                'menu_ref': {**mp.menu_ref(menu), 'revision': 999}, 'ingredient_decisions': included})
+
+    def test_replacing_menu_products_removes_old_sku_and_preserves_shared_extra(self):
+        menu, _products = self.shop(self.batch())
+        old_quantity = self.store.read()['cart_plan']['required_quantities']['10']
+        self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'product_id': '10', 'quantity': 1}]})
+        side = self.app.handle({'operation': 'recipes', 'action': 'save',
+            'recipe': fixture.recipes_fixture.recipe('Extra side', 'new-side'), 'idempotency_key': 'new-side'})['recipe']
+        with mock.patch.object(Application, '_household_today', return_value=date(2026, 9, 3)):
+            updated = self.app.handle({'operation': 'menu', 'action': 'add_slot', 'menu_ref': mp.menu_ref(menu),
+            'slot_input': {'date': '2026-09-07', 'meal_type': 'side', 'portions': 2, 'reference': {'recipe_ref': {'id': side['id'], 'revision': side['revision']}}},
+            'idempotency_key': 'menu-revision-with-side'})['menu']
+        self.assertNotEqual(mp.menu_ref(updated), mp.menu_ref(menu))
+        menu = updated
+        self.provider.product_id = 20
+        prepared = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})
+        approved = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu),
+            'candidate_approvals': [{'requirement_id': r['requirement_id'], 'candidate_refs': ['20']}
+                                    for r in prepared['product_plan']['requirements']]})
+        result = self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})
+        self.assertTrue(result['applied'], result)
+        self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'10': 1, '20': old_quantity})
+
+    def test_uncertain_menu_removal_preserves_the_remaining_extra_allocation(self):
+        menu, products = self.shop(self.batch())
+        self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'product_id': '10', 'quantity': 1}]})
+        decisions = [{'source': {k: source[k] for k in ('collection', 'recipe_index', 'ingredient_index')},
+                      'action': 'have_all'} for row in products['requirements'] for source in row['sources']]
+        prepared = self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu),
+            'ingredient_decisions': decisions})
+        original = self.provider.call
+        def lost_response(tool, arguments, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == 'manipulate_cart':
+                raise HouseholdError('synthetic lost response after deletion')
+            return result
+        with mock.patch.object(self.provider, 'call', side_effect=lost_response):
+            result = self.app.handle({'operation': 'products', **prepared['apply_arguments'], 'cart_change_requested': True})
+        self.assertFalse(result['applied'])
+        plan = self.store.read()['cart_plan']
+        self.assertEqual(plan['supplemental_quantities']['10'], 1)
+        self.assertNotIn('10', plan['added_quantities'])
+        carried = self.app._new_cart_plan({**mp.menu_ref(menu), 'revision': menu['revision']+1},
+            {'10': 1}, {'10': 'Gulrot extra'}, {}, {}, set(), previous=plan)
+        self.assertEqual(carried['supplemental_quantities'], {'10': 1})
+        self.assertEqual(carried['added_quantities'], {})
+
+    def test_recurring_substitution_replaces_one_occurrence_without_double_purchase(self):
+        self.recurring('20')
+        menu, _products = self.shop(self.batch())
+        original = deepcopy(self.store.read()['recurring_items'])
+        replacement = {'product_id': '21', 'product_name': 'Økologiske pærer 500g', 'quantity': 1}
+        request = {'operation': 'recurring', 'action': 'substitute', 'product_id': '20',
+                   'date': '2026-09-07', 'replacement': replacement}
+        self.assertTrue(self.app.handle(request)['substituted'])
+        self.assertTrue(self.app.handle(request)['substituted'])
+        self.assertEqual(self.call('prepare', weekly=True)['reason'], 'weekly_goods_changed')
+        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
+        quantities = {str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}
+        self.assertNotIn('20', quantities); self.assertEqual(quantities['21'], 1)
+        self.assertEqual(self.store.read()['recurring_items'], original)
+        next_due = self.app.handle({'operation': 'recurring', 'action': 'due', 'date': '2026-09-14'})['due']
+        self.assertEqual(next_due[0]['product_id'], '20')
+        self.app.confirmation_policy = 'standing'
+        paid = self.call('submit', weekly=True, idempotency_key='substitute-order')
+        self.assertTrue(paid['confirmed'], paid)
+        self.assertEqual(self.app.handle({'operation': 'recurring', 'action': 'due', 'date': '2026-09-07'})['due'], [])
+
     def test_saved_menu_equipment_is_checked_at_confirmation(self):
         self.profile(meals={'equipment': ['pot','pan','oven','blender']})
         self.shop(self.batch())

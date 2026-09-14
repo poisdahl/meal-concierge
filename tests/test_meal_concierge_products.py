@@ -745,6 +745,7 @@ class FakeProvider:
                     existing["quantity"] += quantity
                 else:
                     self.cart["items"].append({"product_id": product_id, "name": "Fixture Mel", "quantity": quantity, "price": self.cart_line_price * quantity})
+            self.cart["items"] = [item for item in self.cart["items"] if item["quantity"] > 0]
             self.cart["count"] = sum(item["quantity"] for item in self.cart["items"])
             self.cart["subtotal"] = sum(item["price"] * item["quantity"] for item in self.cart["items"])
             return deepcopy(self.cart)

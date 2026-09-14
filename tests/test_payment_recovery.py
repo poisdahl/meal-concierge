@@ -390,7 +390,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(child["original_confirmation_id"], "original")
         self.assertEqual(self.browser.clicks, 0)
 
-    def test_exact_retry_page_recovery_cannot_switch_away_from_vipps(self):
+    def test_exact_retry_page_recovery_can_use_saved_card_after_no_request(self):
         with self.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending.pop("vipps_request_status")
@@ -398,12 +398,123 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_binding_source")
         self.browser.payment_state = "retry_available"
 
-        with self.assertRaisesRegex(HouseholdError, "must preserve Vipps"):
-            self.call(
-                "prepare", recovery=True, order_id="order-1",
-                checkout_payment={"method": "saved_card"},
-            )
+        prepared = self.call("prepare", recovery=True, order_id="order-1",
+                             checkout_payment={"method": "saved_card"})
+        self.assertEqual(prepared["summary"]["payment_method"], "saved_card")
+        self.assertEqual(prepared["order_id"], "order-1")
+        self.assertEqual(self.app.store.read()["checkout_payment"]["method"], "vipps")
+        self.assertEqual(self.browser.clicks, 0)
+        result = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(self.browser.clicks, 1)
+        self.assertFalse(result["confirmed"])
+        # The retailer previously used a misleading paid status; retain that
+        # distinction until the owner reports completing the actual payment.
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"],
+                           owner_payment_completed=True)
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["owner_payment_completed"])
+        self.assertEqual(self.browser.clicks, 1)
 
+    def test_manual_payment_completion_reconciles_original_without_vipps_claim(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending.pop("vipps_request_status")
+        self.merchant.status = "paid_and_modifiable"
+        self.assertFalse(self.call("reconcile", confirmation_id="original")["confirmed"])
+        result = self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+        self.assertTrue(result["confirmed"])
+        self.assertTrue(result["owner_payment_completed"])
+        self.assertNotIn("vipps_approval_completed", result)
+        self.assertEqual(result["payment"]["charge"], "unknown")
+        self.assertIsNone(self.app.store.read()["pending_checkout"])
+        replay = self.call("reconcile", confirmation_id="original")
+        self.assertTrue(replay["confirmed"])
+        self.assertTrue(replay["owner_payment_completed"])
+        self.assertEqual(replay["order_id"], result["order_id"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_manual_payment_report_never_overrides_unpaid_or_changed_order(self):
+        for change in (
+            lambda: None,
+            lambda: (setattr(self.merchant, "status", "paid_and_modifiable"), self.merchant.order.update(grossAmount=247)),
+            lambda: (setattr(self.merchant, "status", "paid_and_modifiable"), self.merchant.order["products"][0].update(quantity=2)),
+            lambda: (setattr(self.merchant, "status", "paid_and_modifiable"), self.merchant.order.update(deliveryAddress="Different address")),
+        ):
+            with self.subTest(change=change):
+                self.merchant.status = "unpaid_order"
+                self.merchant.order = Merchant().order
+                change()
+                result = self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+                self.assertFalse(result["confirmed"])
+                self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_manual_payment_report_requires_exact_current_confirmation(self):
+        for arguments in ({}, {"confirmation_id": "different"}):
+            with self.subTest(arguments=arguments), self.assertRaises(HouseholdError):
+                self.call("reconcile", owner_payment_completed=True, **arguments)
+        prepared = self.prepare()
+        with self.app.store.locked() as state:
+            state["pending_checkout"]["recovery"]["status"] = "uncertain"
+        with self.assertRaisesRegex(HouseholdError, "current confirmation"):
+            self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_manual_payment_completion_requires_matching_original_account(self):
+        self.merchant.status = "paid_and_modifiable"
+        self.browser.read_order_binding = lambda *a, **kw: {
+            **kw["expected_binding"], "account_reference_digest": "b" * 64,
+        }
+        result = self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+        self.assertFalse(result["confirmed"])
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+        with self.app.store.locked() as state:
+            state["pending_checkout"]["browser_review"].pop("account_reference_digest")
+        with self.assertRaisesRegex(HouseholdError, "original account binding"):
+            self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_saved_card_recovery_never_bypasses_live_vipps_request(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending["vipps_request_status"] = "sent"
+            pending["vipps_request_context"] = {"order_id": "order-1"}
+        self.browser.vipps_request_state = "sent"
+        result = self.call("prepare", recovery=True, order_id="order-1",
+                           checkout_payment={"method": "saved_card"})
+        self.assertFalse(result["confirmed"])
+        self.assertIsNone(self.app.store.read()["pending_checkout"].get("recovery"))
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_original_no_request_report_unlocks_same_order_card_review(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending.pop("vipps_request_status")
+        self.browser.payment_state = "payment_started"
+        self.merchant.status = "paid_and_modifiable"  # Oda's known conflicting state.
+        result = self.call("reconcile", confirmation_id="original", vipps_request_not_received=True)
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["recovery_preparation_available"])
+        self.assertEqual(result["payment_request_state"], "not_sent")
+        replay = self.call("reconcile", confirmation_id="original", vipps_request_not_received=True)
+        self.assertTrue(replay["recovery_preparation_available"])
+        prepared = self.call("prepare", recovery=True, checkout_payment={"method": "saved_card"})
+        self.assertEqual(prepared["summary"]["payment_method"], "saved_card")
+        self.assertEqual(prepared["order_id"], "order-1")
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_original_no_request_report_cannot_erase_dispatch_fence(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            pending.pop("vipps_request_status")
+            pending["vipps_request_attempted_at"] = self.now.isoformat()
+        self.browser.payment_state = "payment_started"
+        with self.assertRaisesRegex(HouseholdError, "contextless exact"):
+            self.call("reconcile", confirmation_id="original", vipps_request_not_received=True)
         self.assertEqual(self.browser.clicks, 0)
 
     def test_exact_order_recovery_requires_the_payment_started_page(self):
@@ -2280,14 +2391,14 @@ class RetryAmountTests(unittest.TestCase):
         self.assertEqual(calls[0]["clicks"], ["SUMMARY"])
         self.assertEqual(calls[1]["clicks"], [])
 
-    def test_summary_only_saved_card_recovery_is_rejected_before_browser_use(self):
+    def test_summary_only_recovery_is_rejected_for_other_providers(self):
         from contextlib import nullcontext
         from oda_browser import OdaBrowser
         browser = OdaBrowser.__new__(OdaBrowser)
-        browser.checkout_provider = "oda"
+        browser.checkout_provider = "mathem"
         browser._checkout_deadline = None
         browser._checkout_operation = lambda *a, **k: nullcontext()
-        with self.assertRaisesRegex(CheckoutPreconditionError, "only for Oda/Vipps"):
+        with self.assertRaisesRegex(CheckoutPreconditionError, "only for Oda"):
             browser.submit_payment_recovery({}, {
                 "summary_only": True,
                 "payment_choice": {"method": "saved_card"},
@@ -2393,18 +2504,19 @@ class RetryAmountTests(unittest.TestCase):
         expected = {"delivery_address": "Eksempelveien 1", "total_minor": 4550, "product_count": 1}
         url = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
         rows = [["1 vare", "26,50 kr"], ["Levering", "19,00 kr"], ["Total inkl. MVA", "45,50 kr"]]
-        for method, selected in [("vipps", 0), ("saved_card", 2)]:
+        for method, selected, summary_only in [("vipps", 0, False), ("saved_card", 2, False), ("saved_card", 2, True)]:
             payment = {"method": method}
             def evaluate(script, **change):
-                c = {"url": url, "rows": rows, "selected": selected, **change}
+                c = {"url": url, "rows": rows, "selected": selected, "summaryOnly": summary_only, **change}
                 result = subprocess.run([node, "-e", PAYMENT_DOM], input=json.dumps({"script": script, "c": c}), text=True, capture_output=True, check=True)
                 return json.loads(result.stdout)
-            surface = evaluate(_oda_checkout_surface_script(expected, payment))["result"]
+            surface = evaluate(_oda_checkout_surface_script(expected, payment, summary_product_count=1 if summary_only else None))["result"]
             amounts = evaluate(_oda_checkout_amount_script(4550, expected_product_count=1, retry=True))["result"]["amounts"]
             # StateStore persists sorted object keys, including nested review fields.
             review = json.loads(json.dumps({"order_id": "order-1", "binding": {}, "payment_choice": payment,
-                "surface": surface, "amounts_minor": amounts}, sort_keys=True))
-            for change in [{}, {"selected": 2 if selected == 0 else 0}, {"quantity": 2},
+                "surface": surface, "amounts_minor": amounts, "summary_only": summary_only}, sort_keys=True))
+            for change in [{}, {"selected": 2 if selected == 0 else 0},
+                           {"rows": [["2 varer", "26,50 kr"], *rows[1:]]} if summary_only else {"quantity": 2},
                            {"payDisabled": True}, {"url": url.replace("order-1", "order-2")},
                            {"rows": [["1 vare", "25,50 kr"], ["Levering", "20,00 kr"], ["Total inkl. MVA", "45,50 kr"]]}]:
                 with self.subTest(method=method, change=change):
@@ -2458,9 +2570,14 @@ class RetryAmountTests(unittest.TestCase):
             return json.loads(result.stdout)
         normal = execute(_oda_checkout_amount_script(4550, expected_product_count=1))
         self.assertFalse(normal["result"]["amounts_valid"])
+        self.assertIn("missing_required_row", normal["result"]["amount_check_failures"])
         script = _oda_checkout_amount_script(4550, expected_product_count=1, retry=True)
         review = execute(script)
         self.assertTrue(review["result"]["amounts_valid"])
+        changed_rows = [["1 vare", "26,50 kr"], ["Levering", "20,00 kr"], ["Total inkl. MVA", "45,50 kr"]]
+        invalid = execute(script, rows=changed_rows)["result"]
+        self.assertFalse(invalid["amounts_valid"])
+        self.assertEqual(invalid["amount_check_failures"], ["row_arithmetic"])
         url = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
         click = _oda_checkout_amount_script(4550, expected_product_count=1, retry=True, vipps=True,
                     expected_amounts=review["result"]["amounts"], expected_url=url)
