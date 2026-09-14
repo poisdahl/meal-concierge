@@ -334,8 +334,8 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.call(client, "profile", action="update", changes={"meals": {"portions": 3}})
             stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_ref": choices[1]["save_ref"]})
             self.assertFalse(stale.is_error, stale)
-            self.assertEqual(stale.structured_content["status"], "rejected")
-            self.assertFalse(stale.structured_content["ok"])
+            self.assertEqual(json.loads(stale.content[0].text)["status"], "rejected")
+            self.assertFalse(json.loads(stale.content[0].text)["ok"])
             self.assertIn("stale", stale.content[0].text.lower())
             self.assertIsNone((await self.call(client, "menu"))["menu"])
             fresh = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
@@ -377,8 +377,8 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             stale = await client.call_tool("meal_concierge_menu", {
                 "action": "resolve_handoff", "planner_ref": fresh["save_ref"]})
             self.assertFalse(stale.is_error, stale)
-            self.assertEqual(stale.structured_content["status"], "rejected")
-            self.assertFalse(stale.structured_content["ok"])
+            self.assertEqual(json.loads(stale.content[0].text)["status"], "rejected")
+            self.assertFalse(json.loads(stale.content[0].text)["ok"])
             self.assertIn("stale", stale.content[0].text.lower())
             self.assertIsNone((await self.call(client, "menu"))["menu"])
         calls = [json.loads(line) for line in (self.root / "provider.jsonl").read_text().splitlines()]
