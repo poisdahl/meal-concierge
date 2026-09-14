@@ -3104,5 +3104,258 @@ class MathemRetryBrowserTests(unittest.TestCase):
                 self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
 
 
+class OdaRetryZeroFeeTests(unittest.TestCase):
+    def test_explicit_zero_bag_fee_allows_same_addition_but_nonzero_fee_stops(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import _oda_checkout_amount_script
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node executes the actual amount review")
+        script = _oda_checkout_amount_script(4370, expected_product_count=2,
+                                             provider="oda", retry=True, addition_retry=True)
+        for fee, valid in (("0,00 kr", True), ("1,00 kr", False)):
+            with self.subTest(fee=fee):
+                config = {"url": "https://oda.com/no/checkout/retry/?orderNumber=order-1&orderChangeId=123",
+                          "rows": [["2 varer", "43,70 kr"], ["Leveringsemballasje", fee], ["Total inkl. MVA", "43,70 kr"]],
+                          "selected": 2, "button": "Betal 43,70 kr"}
+                result = subprocess.run([node, "-e", PAYMENT_DOM],
+                    input=json.dumps({"script": script, "c": config}), text=True, capture_output=True, check=True)
+                observed = json.loads(result.stdout)["result"]
+                self.assertEqual(observed["amounts_valid"], valid)
+                self.assertEqual(observed["amounts"]["product_subtotal"], 4370)
+
+
+class VippsSwitchObserverTests(unittest.TestCase):
+    """Execute the actual Node observer against one synthetic CDP payment tab."""
+
+    def observe(self, **changes):
+        import json
+        import shutil
+        import subprocess
+        from oda_payment_switch import _VIPPS_OBSERVER_SCRIPT
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for the payment observer")
+        fixture = r'''
+import vm from 'node:vm';
+const test=TEST;
+let clicks=0,reads=0,socket;
+const source='https://pay.vipps.no/?token=synthetic';
+const pollUrl='https://api.vipps.no/synthetic/request';
+const auth={Authorization:test.wrongAuth?'Bearer other':'Bearer synthetic','Ocp-Apim-Subscription-Key':'DO_NOT_EMIT_SUBSCRIPTION','Content-Type':'application/json','Origin':'https://pay.vipps.no'};
+const location={origin:'https://pay.vipps.no',href:test.changedSurface?'https://pay.vipps.no/?token=other':source};
+const link={innerText:'Cancel the payment',href:'https://oda.com/no/checkout/123/synthetic/redirect-return/',
+ getAttribute:k=>k==='aria-label'?'Cancel payment and return to the webshop':null,
+ getBoundingClientRect:()=>({x:5,y:5,width:40,height:20}),contains:()=>false,scrollIntoView(){},
+ click(){clicks++;
+  for(const [method,params]of[
+   ['Network.requestWillBeSent',{requestId:'delete',request:{url:pollUrl,method:'DELETE',headers:auth}}],
+   ['Network.responseReceived',{requestId:'delete',response:{status:test.deleteHttp??204}}]
+  ])socket.fire('message',{data:JSON.stringify({sessionId:'session',method,params})});
+  // The real gateway returns even when cancellation failed.
+  location.href='https://oda.com/no/checkout/retry/?orderNumber=order-1&orderChangeId=123';
+ }};
+const document={querySelectorAll:selector=>selector==='a.cancel-link[href]'?[link]:[],elementFromPoint:()=>link};
+globalThis.fetch=async(url,options)=>{if(url!==pollUrl||options.headers['Content-Type']!=='application/json'||options.headers.Origin!=='https://pay.vipps.no')throw Error('Observed request headers were lost');const index=reads++;return {status:test.readHttp??200,
+ headers:{get:()=> 'application/json'},json:async()=>({status:(test.statuses||['SUBMITTED','SUBMITTED','REJECTED'])[Math.min(index,(test.statuses||[]).length?test.statuses.length-1:2)]})};};
+globalThis.WebSocket=class {
+ constructor(){socket=this;this.listeners={};queueMicrotask(()=>this.fire('open',{}));}
+ addEventListener(k,f){(this.listeners[k]??=[]).push(f)}
+ fire(k,v){for(const f of this.listeners[k]||[])f(v)}
+ async send(raw){const m=JSON.parse(raw);let result={};
+  if(m.method==='Target.getTargets')result={targetInfos:[{type:'page',url:test.wrongTarget?'https://pay.vipps.no/?token=other':source,targetId:'owned'}]};
+  if(m.method==='Target.createTarget'){if(m.params.url!=='https://pay.vipps.no/'||!m.params.background)throw Error('Unsafe reader page');result={targetId:'reader'}};
+  if(m.method==='Target.attachToTarget')result={sessionId:m.params.targetId==='reader'?'reader-session':'session'};
+  if(m.method==='Runtime.evaluate')result={result:{value:await vm.runInNewContext(m.params.expression,{document,location:m.sessionId==='reader-session'?{origin:'https://pay.vipps.no'}:location,URL,AbortSignal,fetch:globalThis.fetch,getComputedStyle:()=>({visibility:'visible',display:'block',opacity:'1'})})}};
+  if(m.method==='Network.getResponseBody')result={body:JSON.stringify({status:'SUBMITTED'})};
+  queueMicrotask(()=>{this.fire('message',{data:JSON.stringify({id:m.id,result})});
+   if(m.method==='Network.enable'&&!test.noPoll)for(const [method,params]of[
+    ['Network.requestWillBeSent',{requestId:'poll',request:{url:pollUrl,method:'GET',headers:auth}}],
+    ['Network.responseReceived',{requestId:'poll',response:{status:test.pollHttp??200}}],
+    ['Network.loadingFinished',{requestId:'poll'}]
+   ])this.fire('message',{data:JSON.stringify({sessionId:'session',method,params})});
+  });
+ }
+ close(){}
+};
+process.on('exit',()=>process.stderr.write(JSON.stringify({clicks,reads})));
+'''.replace('TEST', json.dumps(changes))
+        cfg = {'endpoint': 'ws://localhost/synthetic', 'url': 'https://pay.vipps.no/?token=synthetic',
+               'mode': 'cancel', 'poll_path': '/synthetic/request', 'observe_ms': 25, 'after_ms': 25,
+               'prior_attempted': changes.get('prior_attempted', False)}
+        process = subprocess.run([node, '--input-type=module', '-e', fixture + _VIPPS_OBSERVER_SCRIPT],
+                                 input=json.dumps(cfg) + '\ncancel_once\n', text=True,
+                                 capture_output=True, timeout=10)
+        self.assertNotIn('DO_NOT_EMIT', process.stdout)
+        self.assertNotIn('Bearer synthetic', process.stdout)
+        return [json.loads(row) for row in process.stdout.splitlines()], json.loads(process.stderr)
+
+    def test_native_cancel_requires_independent_terminal_status_after_redirect(self):
+        events, metrics = self.observe()
+        self.assertTrue(events[0]['ready'])
+        self.assertEqual(events[0]['payment_id'], '123')
+        self.assertEqual(events[-1]['payment_id'], '123')
+        self.assertEqual(events[-1]['status'], 'closed')
+        self.assertEqual(events[-1]['terminal_status'], 'REJECTED')
+        self.assertEqual(events[-1]['delete_http_status'], 204)
+        self.assertEqual(metrics['clicks'], 1)
+        events, metrics = self.observe(deleteHttp=500, statuses=['SUBMITTED'])
+        self.assertEqual(events[-1]['status'], 'unknown')
+        self.assertEqual(events[-1]['delete_http_status'], 500)
+        self.assertEqual(metrics['clicks'], 1)
+
+    def test_approval_race_is_paid_and_never_authorizes_replacement(self):
+        for statuses, clicks in ((['ACCEPTED'], 0), (['SUBMITTED', 'ACCEPTED'], 0),
+                                 (['SUBMITTED', 'SUBMITTED', 'ACCEPTED'], 1)):
+            with self.subTest(statuses=statuses):
+                events, metrics = self.observe(statuses=statuses)
+                self.assertEqual(events[-1]['status'], 'paid')
+                self.assertEqual(metrics['clicks'], clicks)
+
+    def test_prior_attempt_observes_without_repeating_native_cancel(self):
+        events, metrics = self.observe(prior_attempted=True, statuses=['SUBMITTED'])
+        self.assertEqual(events[-1]['status'], 'unknown')
+        self.assertEqual(metrics['clicks'], 0)
+        events, metrics = self.observe(prior_attempted=True, statuses=['FAILED'])
+        self.assertEqual(events[-1]['status'], 'closed')
+        self.assertEqual(metrics['clicks'], 0)
+
+    def test_missing_poll_unauthorized_status_and_changed_source_never_click(self):
+        for changes in ({'noPoll': True}, {'pollHttp': 401, 'readHttp': 401}, {'readHttp': 401},
+                        {'wrongTarget': True}, {'changedSurface': True}, {'wrongAuth': True}):
+            with self.subTest(changes=changes):
+                events, metrics = self.observe(**changes)
+                self.assertEqual(events[-1]['status'], 'unknown')
+                self.assertEqual(metrics['clicks'], 0)
+
+
+class OdaSamePaymentRetryTests(unittest.TestCase):
+    def test_same_payment_get_binds_target_and_rejects_changed_native_page(self):
+        from contextlib import nullcontext
+        from oda_payment_switch import prepare_oda_addition_retry, verify_oda_addition_retry
+        merchant = Merchant()
+        binding = {"account_reference_digest": "a" * 64, "receipt_address": "Example street 1"}
+        class Browser:
+            def __init__(self):
+                self.url = "https://oda.com/no/account/orders/order-1/"
+                self.api_change = 123
+                self.scripts = []
+            def _checkout_operation(self, *args, **kwargs): return nullcontext()
+            def _binding_client(self): return merchant
+            def read_order_binding(self, order_id, before, **kwargs):
+                assert kwargs["expected_binding"] == binding
+                self.url = "https://oda.com/no/account/orders/order-1/"
+            def _open(self, url): self.url = url
+            def _invoke(self, *args):
+                assert args == ("get", "url")
+                return {"url": self.url}
+            def _eval(self, script):
+                assert "method:'GET'" in script
+                assert "'/api/v1/checkout/payment/'+\"456\"+'/retry/'" in script
+                self.scripts.append(script)
+                return {"retry": {"type": "checkout-payment-retry", "params": {
+                    "order_number": "order-1", "order_change_id": self.api_change},
+                    "payload": {"extra_items_group": []}}}
+        browser = Browser()
+        closure = {"status": "closed", "terminal_status": "REJECTED", "payment_id": "456"}
+        before = deepcopy(merchant.order)
+        target = prepare_oda_addition_retry(browser, "order-1", CART, before, binding,
+                                           deadline=999999999, closure=closure)
+        self.assertEqual(target["order_change_id"], "123")
+        self.assertEqual(target["payment_id"], "456")
+        self.assertGreaterEqual(len(browser.scripts), 2)
+        verify_oda_addition_retry(browser, "order-1", CART, before, binding, target, deadline=999999999)
+        browser.url = browser.url.replace("orderChangeId=123", "orderChangeId=999")
+        with self.assertRaisesRegex(HouseholdError, "target changed"):
+            verify_oda_addition_retry(browser, "order-1", CART, before, binding, target, deadline=999999999)
+        browser.url = browser.url.replace("orderChangeId=999", "orderChangeId=123")
+        browser.api_change = 999
+        with self.assertRaisesRegex(HouseholdError, "target changed"):
+            verify_oda_addition_retry(browser, "order-1", CART, before, binding, target, deadline=999999999)
+        browser.api_change = 123
+        changed_cart = deepcopy(CART)
+        changed_cart["items"][0]["quantity"] = 2
+        with self.assertRaisesRegex(HouseholdError, "goods changed"):
+            verify_oda_addition_retry(browser, "order-1", changed_cart, before, binding, target, deadline=999999999)
+        with self.assertRaisesRegex(HouseholdError, "not proven closed"):
+            prepare_oda_addition_retry(browser, "order-1", CART, before, binding, deadline=999999999,
+                                      closure={**closure, "status": "unknown"})
+
+
+class VippsNativeTerminalTests(unittest.TestCase):
+    def fixture(self):
+        import json
+        poll_url = "https://api.vipps.no/vipps-epayment-legacy-mobile-api/landing-page"
+        validation = {"url": poll_url + "/validate-token?token=source", "method": "GET", "status": 200,
+                      "timestamp": 1, "requestId": "validation", "responseBody": json.dumps({
+                          "amount": 4370, "currency": "NOK", "url": poll_url,
+                          "fallback": "https://oda.com/no/checkout/456/synthetic/redirect-return/?r=synthetic"})}
+        poll = {"url": poll_url, "method": "GET", "status": 200, "timestamp": 2, "requestId": "poll",
+                "headers": {"authorization": "Bearer source"}, "responseBody": '{"status":"TIMEOUT"}'}
+        class Browser:
+            def __init__(self): self.rows = [validation, poll]
+            def _invoke(self, *args):
+                if args[:2] == ("network", "requests"): return {"requests": deepcopy(self.rows)}
+                assert args[:2] == ("network", "request")
+                return deepcopy(next(row for row in self.rows if row["requestId"] == args[2]))
+        return Browser(), validation, poll
+
+    def test_native_http200_timeout_is_positive_terminal_and_newer_acceptance_is_paid(self):
+        from oda_payment_switch import _native_vipps_terminal
+        browser, _, poll = self.fixture()
+        context = {"expected_total": 4370, "gateway_url_digest": "a" * 64}
+        result = _native_vipps_terminal(browser, "https://pay.vipps.no/?token=source", context)
+        self.assertEqual((result["status"], result["terminal_status"], result["source"]),
+                         ("closed", "TIMEOUT", "native_http200"))
+        self.assertEqual(result["payment_id"], "456")
+        browser.rows.append({**poll, "timestamp": 3, "requestId": "newer", "responseBody": '{"status":"ACCEPTED"}'})
+        self.assertEqual(_native_vipps_terminal(browser, "https://pay.vipps.no/?token=source", context)["status"], "paid")
+
+    def test_http401_ui_timeout_and_mismatched_source_prove_nothing(self):
+        import json
+        from oda_payment_switch import _native_vipps_terminal
+        for change in ("http401", "wrong_auth", "wrong_validation", "wrong_amount", "wrong_fallback", "not_terminal"):
+            with self.subTest(change=change):
+                browser, validation, poll = self.fixture()
+                if change == "http401": poll["status"] = 401
+                if change == "wrong_auth": poll["headers"]["authorization"] = "Bearer different"
+                if change == "wrong_validation": validation["url"] = validation["url"].replace("token=source", "token=other")
+                if change == "not_terminal": poll["responseBody"] = '{"status":"SUBMITTED"}'
+                if change in {"wrong_amount", "wrong_fallback"}:
+                    claims = json.loads(validation["responseBody"])
+                    claims["amount" if change == "wrong_amount" else "fallback"] = 1 if change == "wrong_amount" else "https://example.org/no/checkout/456/synthetic/redirect-return/"
+                    validation["responseBody"] = json.dumps(claims)
+                self.assertIsNone(_native_vipps_terminal(browser, "https://pay.vipps.no/?token=source",
+                                                       {"expected_total": 4370, "gateway_url_digest": "a" * 64}))
+
+
+    def test_redirected_owned_tab_recovers_exact_source_terminal_without_cancel(self):
+        import hashlib
+        from contextlib import nullcontext
+        from oda_payment_switch import close_vipps_request
+        browser, _, poll = self.fixture()
+        source = "https://pay.vipps.no/?token=source"
+        browser.rows.append({"url": source, "method": "GET", "resourceType": "Document"})
+        native_invoke = browser._invoke
+        browser._invoke = lambda *args: {"url": "https://oda.com/no/checkout/retry/"} if args == ("get", "url") else native_invoke(*args)
+        browser.checkout_provider = "oda"
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        browser._checkout_dispatch_tab = lambda: "owned"
+        context = {"expected_total": 4370, "gateway_url_digest": hashlib.sha256(source.encode()).hexdigest(), "tab_id": "owned"}
+        clicks = []
+        result = close_vipps_request(browser, context, clicks.append, deadline=999999999)
+        self.assertEqual(result["status"], "closed")
+        self.assertEqual(clicks, [])
+        poll["responseBody"] = '{"status":"SUBMITTED"}'
+        self.assertEqual(close_vipps_request(browser, context, clicks.append, deadline=999999999)["status"], "unknown")
+        poll["responseBody"] = '{"status":"TIMEOUT"}'
+        context["gateway_url_digest"] = "b" * 64
+        self.assertEqual(close_vipps_request(browser, context, clicks.append, deadline=999999999)["status"], "unknown")
+        self.assertEqual(clicks, [])
+
+
 if __name__ == "__main__":
     unittest.main()

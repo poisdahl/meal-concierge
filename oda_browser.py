@@ -252,7 +252,7 @@ def _oda_checkout_amount_script(
  // On addition retry the overview gross total and the payment calculation are
  // separate merchant values. The final button is the calculated amount due.
  const totalValid=ADDITION_RETRY
-   ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent')
+   ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0)
    : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
@@ -1050,12 +1050,32 @@ class OdaBrowser:
         with self._checkout_operation(deadline):
             return self._review_checkout(cart, payment=payment, select_payment=True) if payment is not None else self._review_checkout(cart)
 
+    def close_vipps_request(self, context, before_cancel, *, deadline=None, prior=None):
+        from oda_payment_switch import close_vipps_request
+        return close_vipps_request(self, context, before_cancel, deadline=deadline, prior=prior)
+
+    def prepare_oda_addition_retry(self, order_id, cart, before_order, binding,
+                                   *, deadline=None, closure, retained_target=None):
+        from oda_payment_switch import prepare_oda_addition_retry
+        return prepare_oda_addition_retry(self, order_id, cart, before_order, binding,
+                                          deadline=deadline, closure=closure, retained_target=retained_target)
+
+    def verify_oda_addition_retry(self, order_id, cart, before_order, binding, target, *, deadline=None):
+        from oda_payment_switch import verify_oda_addition_retry
+        return verify_oda_addition_retry(self, order_id, cart, before_order, binding, target, deadline=deadline)
+
     def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, deadline=None, addition=None):
         """Review the merchant's existing unpaid order, without recreating its cart."""
         with self._checkout_operation(deadline, preserve_session=True):
             binding = require_order_binding(expected_binding)
             self._order_url(order_id)
-            if addition is not None and self.checkout_provider != "mathem":
+            if addition is not None and self.checkout_provider == "oda":
+                target = addition.get("payment_switch_target")
+                if not isinstance(target, Mapping) or target.get("order_change_id") != addition.get("order_change_id"):
+                    raise HouseholdError("Oda addition recovery requires its exact payment-switch target")
+                self.verify_oda_addition_retry(order_id, cart, addition["before"]["order"],
+                                               binding, target, deadline=deadline)
+            elif addition is not None and self.checkout_provider != "mathem":
                 raise HouseholdError("Addition payment recovery is unavailable for this provider")
             bound_cart = self._order_cart(cart, order_id, addition["before"]["order"], binding) if addition else cart
             expected = self._cart_expectation(bound_cart)
