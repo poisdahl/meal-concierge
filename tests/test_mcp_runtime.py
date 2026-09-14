@@ -127,12 +127,12 @@ def household():
 
 
 @asynccontextmanager
-async def session(root, *, killable=False):
+async def session(root, *, killable=False, socket=None):
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
     args = ["-I", str(HERE), "--bridge", str(root)] if killable else ["-I", str(CORE / "mcp_server.py")]
     params = StdioServerParameters(command=sys.executable, args=args,
-                                  env={"MEAL_CONCIERGE_SOCKET": str(root / "service.sock"), "HOME": str(root)}, cwd=str(root))
+                                  env={"MEAL_CONCIERGE_SOCKET": str(socket or root / "service.sock"), "HOME": str(root)}, cwd=str(root))
     with (root / "bridge.log").open("a") as log:
         async with stdio_client(params, errlog=log) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=15) as client:
@@ -213,10 +213,18 @@ async def sdk_checks(root, process):
         approved_plan = (await call(client, "products", menu_ref=menu_ref, candidate_approvals=[approval]))["product_plan"]
         assert approved_plan["binding"]["menu_ref"] == menu_ref
         assert approved_plan["requirements"][0]["candidate_approval"]["candidate_refs"] == [10]
-        bad = await client.call_tool("meal_concierge_products", {"menu_ref": {**menu_ref, "revision": menu_ref["revision"] + 1}})
-        assert bad.is_error and "stale" in bad.content[0].text, bad
-        invalid = await client.call_tool("meal_concierge_profile", {"action": "update", "changes": {"meals": {"portions": 0}}})
-        assert invalid.is_error and "portion" in invalid.content[0].text, invalid
+        # Three ordinary domain rejections must not look like three broken MCP
+        # calls to clients that disable a server after repeated tool errors.
+        for tool, arguments, message in (
+            ("products", {"menu_ref": {**menu_ref, "revision": menu_ref["revision"] + 1}}, "stale"),
+            ("profile", {"action": "update", "changes": {"meals": {"portions": 0}}}, "portion"),
+            ("checkout", {"action": "prepare", "recovery": True, "checkout_payment": {"method": "saved_card"}}, "No original dispatched checkout"),
+        ):
+            rejected = await call(client, tool, **arguments)
+            assert rejected["ok"] is False and rejected["status"] == "rejected", rejected
+            assert message in rejected["error"], rejected
+        assert (await call(client, "status"))["household"] == marker
+        assert (await call(client, "profile"))["profile"]["meals"]["portions"] == 3
         schema_error = await client.call_tool("meal_concierge_catalog", {"action": "invalid"})
         assert schema_error.is_error, schema_error
         denied = await call(client, "products", action="apply")
@@ -224,8 +232,6 @@ async def sdk_checks(root, process):
         await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": 2}])
         manual = await call(client, "checkout", action="prepare")
         assert manual["manual_checkout_required"] and not manual["confirmed"] and manual["currency"] == "SEK"
-        recovery = await client.call_tool("meal_concierge_checkout", {"action": "prepare", "recovery": True, "checkout_payment": {"method": "saved_card"}})
-        assert recovery.is_error and "No original dispatched checkout" in recovery.content[0].text, recovery
         await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": -2}])
         await call(client, "product_favorites", action="remove", product_id="10")
         print(json.dumps({"sdk": "passed", "protocol": initialized.protocol_version, "tools": len(expected), "identity": marker}), flush=True)
@@ -270,6 +276,13 @@ async def sdk_checks(root, process):
         assert (await call(client, "status"))["household"] == marker
         await call(client, "profile", action="reset", paths=["meals.portions"])
         print(json.dumps({"reconnect": "same service/menu/profile", "interruption": "bridge killed after dispatch; Application completed once; no retry", "provider_writes": len(writes)}), flush=True)
+
+    # A working stdio bridge with an unreachable Unix service remains an MCP
+    # error, never a normal business rejection or a successful health check.
+    async with session(root, socket=root / "missing.sock") as (client, _):
+        unavailable = await client.call_tool("meal_concierge_status", {})
+        assert unavailable.is_error, unavailable
+        assert unavailable.structured_content is None, unavailable
 
 
 def cli_checks(root, service):

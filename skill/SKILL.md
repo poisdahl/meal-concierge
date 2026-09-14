@@ -57,6 +57,13 @@ checks and implementation details in the technical handoff, not routine meal
 conversation. For failures, use returned reason codes and bounded, sanitized
 details; do not paste raw provider/browser exceptions.
 
+A rejected operation is not proof that the server is down. A structured
+`status=rejected` response gives the actual blocker; do not repeat the rejected
+operation unchanged. If a client temporarily disables tools after domain
+errors, describe that client limitation without claiming a service outage.
+Lead a stopped shop with the missing goods or actual payment problem, not
+“I stopped in accordance with your choice”. Continue independent authorized work.
+
 ## Store setup and payment readiness
 
 On first store setup or the first shopping request, briefly explain the selected
@@ -134,9 +141,9 @@ fulfillment status or absent retry review.
 Include the returned payment choice and actual dietary findings in the recovery review,
 reuse applicable authorization, and confirm only its fresh confirmation ID.
 After a recovery dispatch, reconcile that same attempt even after restart or
-timeout. A later Oda paid status remains locked until the owner reports
-completing that exact phone approval; then reconcile the fresh recovery
-confirmation with `vipps_approval_completed=true`. Do not supply that flag for
+timeout. A later Oda paid status needs the owner’s completed phone approval or the
+verified manual-completion path below. For the actual Vipps approval, reconcile
+the fresh recovery confirmation with `vipps_approval_completed=true`. Do not supply that flag for
 an approval attempt, an absent or unknown reply, or an expired Vipps page.
 Picking, shipping or delivery is independent terminal fulfillment evidence.
 The earlier failure never authorizes another payment. Report the
@@ -150,6 +157,14 @@ the original goods and payable must remain unchanged. A required notice also
 includes this distinction. Missing original target evidence preserves the
 uncertain attempt for reconciliation. If the owner completes payment manually,
 reconcile it and attribute that payment to the owner.
+
+For an Oda order the owner says they paid manually, reconcile its exact current
+confirmation with `owner_payment_completed=true`. The service still verifies
+the same order, account, delivery, goods, amount and provider paid status. This
+does not mean the earlier Vipps request succeeded or prove a settled bank charge.
+Never start another payment for this report. An explicit request to switch an
+unpaid order to an existing saved card uses the same-order recovery prepare with
+`checkout_payment={"method":"saved_card"}`; retain the original order and payment fence.
 
 If a Mathem new-order or addition recovery itself fails, another review is available only
 when reconciliation positively verifies that current attempt's own terminal
@@ -485,7 +500,28 @@ For feedback on an unsaved proposal or product preparation before saving, call
 menu `resolve_handoff` with the chosen `save_ref` as `planner_ref`. Pass its
 returned complete `planner_handoff` unchanged to feedback/products; do not
 reconstruct it from display fields. Resolution does not save a menu.
-Stale facts require a fresh plan. Never invent structured time, nutrition,
+Stale facts require a fresh plan.
+
+Before presenting a weekly menu as ready, inspect its actual ingredients and
+methods against the household preferences and the selected store. Resolve the
+selected handoff and use read-only products prepare/search to check specialty
+ingredients and required variants. A structurally ready offline recipe is not
+proof that its ingredients can be bought locally. Fullgrain preferences apply
+when choosing recipes, not only at checkout: search for the actual fullgrain
+pasta/noodles, and choose a suitable recipe or a concrete adapted method if the
+original shape is unavailable. Do not merely warn that vermicelli might not be
+fullgrain and leave the problem to the user. Never invent product availability.
+
+Apply this check to both Wikibooks and TheMealDB. Preserve their attribution;
+do not assume Norwegian availability from pack readiness. Dried ground crayfish
+and a named regional spice blend are not interchangeable with fresh shellfish
+or an arbitrary spice mix. If a defining ingredient has no appropriate observed
+product or credible ordinary adaptation, replace the affected dish before
+finalizing the proposal. Prefer suitable recipes from the selected store as the
+fallback and replan with their exact resolved references. Individual imported
+recipes still need the same preference, equipment and product checks. Explain
+an actual unresolved selection briefly if no suitable replacement is found;
+never substitute an incomplete cart for the selected menu. Never invent structured time, nutrition,
 variety, perishability or safety facts from prose. Missing generic safety data
 is advisory; known allergy/never-buy conflicts require alternatives. Keep legacy
 allergies_or_sensitivities ambiguous. Legacy avoid entries are preferences; an
@@ -619,6 +655,31 @@ again as supplemental goods. Show menu goods, due staples and extras together.
 Use checkout `weekly=true` for this intent, so a raw cart cannot masquerade as a
 complete menu shop. Existing order edits and ordinary top-ups keep their scope.
 
+A clear “order” after selecting a menu authorizes completing its ingredient
+selection, synchronizing the menu and due goods, and proceeding under the active
+checkout policy. Do not ask whether to finish the menu, order an incomplete cart,
+or stop; continue the requested complete shop. Ask only for a material choice
+that remains unresolved, such as a changed delivery date or the active policy's
+required final confirmation. A follow-up never erases the selected menu.
+
+When replacing dishes during an active shop, prepare/apply the replacement
+menu's products as part of that request. Cart sync removes quantities attributable
+to the previous menu and retains explicit extras and starting goods; do not ask
+the user to identify old fish, spices and vegetables manually. A planning-only
+request does not itself edit the store cart. Genuine outside cart changes still
+need reconciliation, but a new menu alone is not outside drift.
+
+For an unavailable generic recurring product, choose a suitable observed
+replacement automatically when it preserves the requested food, form, quantity,
+preferences and reasonable cost. Ordinary fresh pear varieties, small pears or
+organic pears can replace generic fresh pears; canned pears cannot silently do
+so. Record recurring `substitute` with the original product_id, this occurrence's
+date and exact replacement={product_id,product_name,quantity}, then synchronize
+cart weekly or apply the menu products. This replaces the unavailable item for
+this shop and fulfils the original occurrence without changing the permanent
+list or buying both variants. Mention the substitution briefly; ask only for a
+material unresolved difference. Product evidence and checkout checks still apply.
+
 ## Ingredients, packages and cart
 
 Products `prepare` is read-only and requires the exact menu reference or complete
@@ -667,6 +728,20 @@ stock allocated to that specific recipe requirement; do not allocate the same
 stock twice. The plan exposes gross need, confirmed allocation, net need,
 package count and surplus. Existing provider-cart goods are not pantry stock.
 
+When the user names a menu ingredient they already have, acknowledge that it
+will be used from home first. Persist that explicit assertion immediately with
+products `record_ingredients`, the current menu_ref and have_all (or their stated
+have_quantity) for its exact ingredient sources, even if no product is in the
+cart yet. Do not claim it was recorded after merely reading the cart. Subsequent
+product preparation reuses it for that exact menu revision. Change a recorded
+assertion through record_ingredients; old preparation arguments cannot override it. Rebind an unchanged
+one-shop stock assertion to the new exact sources if the menu is revised; never
+turn it into permanent unlimited inventory. For an authorized shop, reprepare
+and apply to remove now-unneeded menu purchases. Usually answer “Da bruker vi
+fullkornsspaghettien du har hjemme og kjøper ikke mer denne gangen.” Do not lead
+with “nothing to remove” or an unchanged total package count; those details do
+not explain the user's result.
+
 `price_mode=exact` requires known payable product totals. `estimate` can use one
 explicitly approved available regular-price package despite unknown pant; show
 its merchandise estimate and unknown total separately. Never claim it is the
@@ -686,8 +761,8 @@ Apply only for an authorized cart update: send the returned compact
 `apply_arguments` unchanged and add `cart_change_requested=true`. The complete
 unchanged product plan/digest also remains supported. The compact route
 regenerates the exact plan and requires the reviewed digest. Drift requires a new review;
-never silently substitute another plan. All-at-home completion is possible only
-after any existing cart contents have been surfaced for explicit reconciliation.
+never silently substitute another plan. All-at-home completion retains explicit extras and removes earlier menu purchases.
+Unattributed existing cart contents still require reconciliation.
 
 Raw cart sync/reconcile always requires the exact current
 `menu_ref={menu_id,revision,digest}`. Supply complete product requirements, not
@@ -696,8 +771,8 @@ owner explicitly marks extra use starting+required quantities. Different brands
 and packages remain different IDs. MENY shares one household browser: perform
 provider-facing calls sequentially, including recipe discovery.
 
-Cart drift returns one digest-bound question with extras, shortages and starting
-goods. Suggest keep_current but require an explicit answer; silence is not one.
+Genuine outside cart drift returns one digest-bound question with extras, shortages and starting
+goods; a verified menu replacement is synchronized automatically. Suggest keep_current but require an explicit answer; silence is not one.
 Reconcile with the exact returned digest and current menu ref. Exclude only
 named product IDs, restore missing quantities, or explicitly accept named
 shortfalls. Reread after changed state. Scheduled work stops for unresolved cart

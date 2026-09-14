@@ -314,7 +314,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(found["library_recipe_ref"]["recipe_id"], fixture.recipe_id)
         self.assertEqual([method for method, _ in calls], ["GET", "GET"])
 
-    def test_pantry_completion_cannot_hide_existing_or_later_cart_goods(self):
+    def test_pantry_completion_removes_owned_menu_goods_and_later_sync_invalidates_it(self):
         import test_meal_concierge_products as products
         case = products.ProductRuntimeTests()
         case.setUp()
@@ -324,10 +324,11 @@ class ReviewAcceptanceTests(unittest.TestCase):
         plan = case.app.handle({"operation": "products", "action": "prepare", "menu_ref": case.menu_ref,
             "ingredient_decisions": [{"source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 0}, "action": "have_all"}]})["product_plan"]
         result = apply(plan)
-        self.assertFalse(result["applied"])
-        self.assertEqual(result["reason"], "menu_fully_covered_review_existing_cart")
-        self.assertNotIn("product_plan_completion", case.store.read())
-        self.assertEqual(case.provider.cart["items"][0]["quantity"], 1)
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["nothing_to_buy"])
+        self.assertTrue(result["cart_changed"])
+        self.assertIn("product_plan_completion", case.store.read())
+        self.assertEqual(case.provider.cart["items"], [])
         with case.store.locked() as state:
             state["product_plan_completion"] = {"menu_ref": case.menu_ref, "nothing_to_buy": True}
         case.app.handle({"operation": "cart", "action": "sync", "menu_ref": case.menu_ref,

@@ -255,7 +255,18 @@ def _oda_checkout_amount_script(
    ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent')
    : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
- if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,amounts_valid:amountsValid});
+ const amountFailures=amountsValid?[]:[
+   ...Object.entries(states).filter(([,row])=>row.state==='invalid').map(([key])=>'ambiguous_'+key),
+   ...(!required.every(row=>row.state==='value')?['missing_required_row']:[]),
+   ...(!signsValid?['invalid_sign']:[]),
+   ...(!deliveryDiscountValid?['delivery_discount']:[]),
+   ...(!contained?['separate_summary_rows']:[]),
+   ...(!discountedValid?['discounted_subtotal']:[]),
+   ...(!totalValid?['row_arithmetic']:[]),
+   ...(unknownRows.length?['unrecognized_amount_row']:[]),
+   ...(!ADDITION_RETRY&&amounts.provider_total!==TOTAL?['original_total_changed']:[]),
+ ];
+ if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,amounts_valid:amountsValid,...(amountFailures.length?{amount_check_failures:amountFailures}:{})});
  const expectedAmounts=EXPECTED_AMOUNTS;
  const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|CURRENCY_CODE)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
  const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|CURRENCY_CODE)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||''))).filter(x=>{const values=money(x.innerText||x.getAttribute('aria-label')||'');return values.length===1&&values[0]===TOTAL;});
@@ -1070,13 +1081,10 @@ class OdaBrowser:
             item_review = self._expand_checkout_items(
                 len(expected["lines"]),
                 # Oda's current retry page can omit product controls entirely.
-                # That reduced review is used only for the exact Oda/Vipps
-                # recovery URL after its order, receipt and cart were bound.
-                # A saved card can dispatch immediately, so it must retain the
-                # detailed item review.
-                allow_summary_only=(
-                    self.checkout_provider == "oda" and payment.get("method") == "vipps"
-                ),
+                # The service verifies the exact existing order's goods before
+                # review and again before dispatch. Bind this reduced surface
+                # to that order, its account, count, delivery and full amounts.
+                allow_summary_only=self.checkout_provider == "oda",
                 expected_product_count=expected["product_count"],
             )
             self._expand_checkout_amount_summary()
@@ -1102,7 +1110,8 @@ class OdaBrowser:
                 expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True,
                 addition_retry=bool(addition)))
             if amounts.get("amounts_valid") is not True:
-                raise HouseholdError("The merchant recovery amounts differ from the original order")
+                failures = amounts.get("amount_check_failures") or ["unverified_summary"]
+                raise HouseholdError("The merchant recovery amounts cannot be verified (" + ", ".join(failures) + "); review the same order without sending payment")
             return {"order_id": order_id, "binding": dict(binding), "payment_choice": dict(payment),
                     "payment_display": surface["payment_display"], "surface": surface,
                     "amounts_minor": amounts["amounts"], "summary_only": summary_only}
@@ -1110,10 +1119,9 @@ class OdaBrowser:
     def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None, before_vipps_request=None):
         with self._checkout_operation(deadline, preserve_session=True):
             if (review.get("summary_only") is True
-                    and (self.checkout_provider != "oda"
-                         or review.get("payment_choice", {}).get("method") != "vipps")):
+                    and self.checkout_provider != "oda"):
                 raise CheckoutPreconditionError(
-                    "Summary-only payment recovery is available only for Oda/Vipps"
+                    "Summary-only payment recovery is available only for Oda"
                 )
             if (review.get("payment_choice", {}).get("method") == "vipps"
                     and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
@@ -1813,7 +1821,12 @@ class OdaBrowser:
                     except HouseholdError:
                         break
         if gateway_url is None:
-            raise HouseholdError("The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment")
+            raise HouseholdError(
+                "The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment. "
+                "No guarded Vipps phone-request click was made. Reconcile the existing order; "
+                "if the owner received no request, review recovery for that same order with the requested payment method. "
+                "Do not submit a new order."
+            )
         order_id = expected_order_id
         observed: dict[str, Any] = {}
         phone_filled = False

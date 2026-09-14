@@ -6462,6 +6462,12 @@ class CartPlanTests(unittest.TestCase):
             self.assertEqual(plan["required_quantities"][product_id], 2)
             self.assertEqual(plan["added_quantities"][product_id], 2)
             self.assertEqual(provider.cart["items"][0]["quantity"], 3)
+            self.assertTrue(self.sync(application, product_id)["idempotent"])
+            self.assertEqual(provider.cart["items"][0]["quantity"], 3)
+            with store.locked() as state:
+                state["menu"] = self.menu(revision=2, digest="b" * 64)
+            self.assertTrue(self.sync(application, product_id)["synced"])
+            self.assertEqual(provider.cart["items"][0]["quantity"], 3)
 
     def test_start_as_extra_rejects_a_product_that_was_not_in_the_starting_cart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6733,12 +6739,13 @@ class CartPlanTests(unittest.TestCase):
 
             result = self.sync(application, product_id, quantity=1)
 
-            self.assertFalse(result["synced"])
+            self.assertTrue(result["synced"])
             plan = store.read()["cart_plan"]
             self.assertEqual(plan["menu_ref"]["revision"], 2)
             self.assertEqual(plan["baseline_quantities"][product_id], 1)
-            self.assertEqual(plan["added_quantities"][product_id], 1)
-            self.assertEqual(plan["status"], "needs_input")
+            self.assertNotIn(product_id, plan["added_quantities"])
+            self.assertEqual(plan["status"], "active")
+            self.assertEqual(cart_summary(result["cart"])["items"][0]["quantity"], 1)
 
     def test_scheduled_checkout_stops_cart_ready_for_unapproved_digest(self):
         with tempfile.TemporaryDirectory() as directory:

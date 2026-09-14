@@ -94,7 +94,9 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
             confirmation = prepared['confirmation_id']
             wrong = await client.call_tool('meal_concierge_orders', {
                 'action': 'cancel_confirm', 'order_id': 'mc09-unrelated-order', 'confirmation_id': confirmation})
-            self.assertTrue(wrong.is_error)
+            self.assertFalse(wrong.is_error, wrong)
+            self.assertEqual(wrong.structured_content["status"], "rejected")
+            self.assertFalse(wrong.structured_content["ok"])
             self.assertIn('cancellation confirmation does not match the prepared order', wrong.content[0].text)
             self.assertFalse((self.root / 'data/browser.jsonl').exists())
             before = json.loads((self.root / 'data/synthetic-provider.json').read_text())
@@ -117,7 +119,9 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(mode=mode):
                     (self.root / 'data/fault').write_text(mode)
                     result = await client.call_tool('meal_concierge_cart', {'action': 'get'})
-                    self.assertTrue(result.is_error, result)
+                    self.assertFalse(result.is_error, result)
+                    self.assertEqual(result.structured_content["status"], "rejected")
+                    self.assertFalse(result.structured_content["ok"])
             # Read-only cart get intentionally returns the provider document.
             # A partial document must retain missing totals, never invent zero.
             (self.root / 'data/fault').write_text('partial')
