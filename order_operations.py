@@ -2242,11 +2242,30 @@ class OrderOperations:
                 if isinstance(menu_baseline, Mapping)
                 else None
             )
-            if not order_change and isinstance(menu_baseline, Mapping) and (
+            menu_already_ordered = isinstance(menu_baseline, Mapping) and (
                 menu_baseline.get("phase") == "ordered"
                 or menu_baseline.get("order_id")
                 or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered")
-            ):
+            )
+            # A completed menu remains available for recipes and its receipt.
+            # A separately reviewed manual cart containing only extra goods
+            # does not buy that menu again or replace its order snapshot.
+            independent_cart_plan = deepcopy(state.get("cart_plan"))
+            extras_only = (
+                not independent_cart_plan
+                or isinstance(independent_cart_plan, Mapping)
+                and independent_cart_plan.get("provider") == self.provider
+                and independent_cart_plan.get("menu_ref") == self._cart_menu_ref(menu_baseline)
+                and not independent_cart_plan.get("required_quantities")
+                and not independent_cart_plan.get("menu_required_quantities")
+                and not independent_cart_plan.get("recurring_items")
+            )
+            independent_cart = bool(
+                menu_already_ordered and extras_only
+                and not order_change and not occurrence and not automatic_checkout
+                and not scheduler_context and not cart_ready_continuation
+            )
+            if not order_change and menu_already_ordered and not independent_cart:
                 raise HouseholdError("the current menu already belongs to an order; save or select a new menu before a new checkout")
             if expired_awaiting_confirmation(state.get("pending_cancellation"), self._now()):
                 state["pending_cancellation"] = None
@@ -2267,8 +2286,8 @@ class OrderOperations:
         summary = cart_summary(cart)
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
             raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
-        cart_plan_baseline = None
-        if not order_change and isinstance(menu_baseline, Mapping):
+        cart_plan_baseline = independent_cart_plan if independent_cart else None
+        if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart:
             cart_gate = self._cart_checkout_gate(summary, menu_baseline)
             if cart_gate is not None:
                 return cart_gate
@@ -2334,7 +2353,7 @@ class OrderOperations:
                         refreshed_summary = cart_summary(refreshed_cart)
                         if canonical(refreshed_summary) == canonical(summary):
                             raise
-                        if isinstance(menu_baseline, Mapping):
+                        if isinstance(menu_baseline, Mapping) and not independent_cart:
                             cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                             if cart_gate is not None:
                                 return cart_gate
@@ -2416,7 +2435,7 @@ class OrderOperations:
                 refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 refreshed_summary = cart_summary(refreshed_cart)
                 if canonical(refreshed_summary) != canonical(summary):
-                    if isinstance(menu_baseline, Mapping):
+                    if isinstance(menu_baseline, Mapping) and not independent_cart:
                         cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                         if cart_gate is not None:
                             return cart_gate
@@ -2487,12 +2506,13 @@ class OrderOperations:
                     raise HouseholdError("order change state changed while preparing the summary")
                 if canonical(state.get("menu")) != canonical(menu_baseline):
                     raise HouseholdError("menu changed while preparing checkout; prepare a new summary")
-                if cart_plan_baseline is not None and canonical(state.get("cart_plan")) != canonical(cart_plan_baseline):
+                if (cart_plan_baseline is not None or independent_cart) and canonical(state.get("cart_plan")) != canonical(cart_plan_baseline):
                     raise HouseholdError("cart plan changed while preparing checkout; prepare a new summary")
                 self._guard_scheduled_context(state, scheduler_context)
                 if state["checkout_payment"] != checkout_payment:
                     raise HouseholdError("payment preference changed while preparing checkout; prepare a new summary")
                 state["pending_checkout"] = {
+                    **({"independent_cart": True} if independent_cart else {}),
                     "checkout_payment": checkout_payment,
                     "scheduler_context": deepcopy(scheduler_context),
                     "status": "awaiting_confirmation",
@@ -3223,7 +3243,7 @@ class OrderOperations:
         with self.store.locked() as state:
             if canonical(state.get("order_change")) != canonical(pending.get("order_change")):
                 raise HouseholdError("order change changed; show a new summary")
-            if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
+            if (pending.get("cart_plan") is not None or pending.get("independent_cart")) and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                 raise HouseholdError("cart plan changed; show a new summary")
         try:
             with self._browser_operation(deadline):
@@ -3237,7 +3257,7 @@ class OrderOperations:
                         raise HouseholdError("reconcile the pending cancellation before checkout")
                     if canonical(state.get("order_change")) != canonical(pending.get("order_change")):
                         raise HouseholdError("order change changed; show a new summary")
-                    if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
+                    if (pending.get("cart_plan") is not None or pending.get("independent_cart")) and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                         raise HouseholdError("cart plan changed; show a new summary")
                     if state["checkout_payment"] != pending.get("checkout_payment"):
                         raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
@@ -3294,7 +3314,7 @@ class OrderOperations:
                             self._pending_scheduler_guard(state, pending)
                         except HouseholdError as exc:
                             raise CheckoutPreconditionError(str(exc)) from exc
-                        if pending.get("cart_plan") is not None and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
+                        if (pending.get("cart_plan") is not None or pending.get("independent_cart")) and canonical(state.get("cart_plan")) != canonical(pending.get("cart_plan")):
                             raise CheckoutPreconditionError("cart plan changed before the final click")
                         if state["checkout_payment"] != pending.get("checkout_payment"):
                             raise CheckoutPreconditionError("payment preference changed before dispatch; prepare a new summary")
@@ -3468,6 +3488,8 @@ class OrderOperations:
         attribution = pending.get("summary", {}).get("menu_attribution") or self._checkout_menu_attribution(
             pending.get("menu"), pending.get("cart_plan"))
         if attribution != "menu_bound":
+            if pending.get("independent_cart") and canonical(state.get("cart_plan")) == canonical(pending.get("cart_plan")):
+                state["cart_plan"] = None
             return
         if isinstance(pending.get("cart_plan"), Mapping) and canonical(state.get("cart_plan")) == canonical(pending.get("cart_plan")):
             state["cart_plan"] = None
