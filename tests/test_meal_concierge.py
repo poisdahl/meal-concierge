@@ -200,9 +200,11 @@ class FakeBrowser:
     def checkout_vipps_request_state(self, context, *, deadline=None):
         return {"status": self.vipps_request_state}
 
-    def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None):
+    def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None, payment=None, select_payment=False):
         self.review_deadlines.append(deadline)
-        return {"binding": self.read_order_binding(order_id, order, expected_binding=expected_binding), "page_digest": "b" * 64, "target_order_id": order_id, "payment_display": "•••• 1234"}
+        return {"binding": self.read_order_binding(order_id, order, expected_binding=expected_binding), "page_digest": "b" * 64, "target_order_id": order_id,
+                "payment_display": "Vipps" if payment and payment["method"] == "vipps" else "•••• 1234",
+                **({"payment_choice": deepcopy(payment)} if payment is not None else {})}
 
     def submit_order_change(self, cart, order_id, order, review, before_click=None, *, deadline=None):
         self.submit_deadlines.append(deadline)

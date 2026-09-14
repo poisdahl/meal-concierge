@@ -180,6 +180,9 @@ async def sdk_checks(root, process):
         schemas = {t.name: t.input_schema for t in discovered.tools}
         assert schemas["meal_concierge_checkout"]["properties"]["recovery"]["type"] == "boolean"
         assert "checkout_payment" in schemas["meal_concierge_checkout"]["properties"]
+        order_properties = schemas["meal_concierge_orders"]["properties"]
+        assert {"remove_prepare", "remove_confirm", "remove_reconcile"} <= set(order_properties["action"]["enum"])
+        assert "items" in order_properties
         assert schemas["meal_concierge_catalog"]["required"] == ["action"]
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
         assert "mathem" in json.dumps(schemas["meal_concierge_email"]["properties"]["provider"])

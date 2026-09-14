@@ -3027,6 +3027,8 @@ class PlanningOperations:
             if pending:
                 raise HouseholdError("reconcile_change before another cart write; do not repeat an uncertain delta")
             change = deepcopy(state.get("order_change"))
+            if change and change.get("kind") == "reduction":
+                raise HouseholdError("finish or reconcile the order removal before changing the addition cart")
             if change and change.get("status") != "editing":
                 raise HouseholdError("the order change is still starting")
             if self.provider in {"oda", "mathem"} and change and change.get("requested_delivery"):
