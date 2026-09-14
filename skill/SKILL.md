@@ -97,6 +97,25 @@ original order does not prove its additions were paid. Keep the same pending
 attempt until its added goods and new total are verified; never send another
 payment merely because an app notification is missing.
 
+When the owner asks to switch an already-dispatched Oda Vipps payment to an
+existing saved card, use `checkout action=switch_payment` with the current
+`confirmation_id` and `checkout_payment={"method":"saved_card"}` (plus an
+explicitly selected `card_last4` when needed). This also applies to additions.
+The service first reconciles the original payment, then closes its retained
+Vipps request and verifies the terminal outcome before preparing the same
+merchant payment with a card. Do not ask the owner to reject the mobile request
+or wait for expiry as a routine prerequisite. An absent notification, a timeout,
+or returning from Vipps to Oda is not proof that the request ended.
+If already paid, report that result without another payment. If closure remains
+unknown, explain that the original request's status could not yet be verified
+and resume the same switch confirmation; never repeat a cancellation or payment
+whose effect is uncertain. A successful switch returns a fresh card review,
+without charging it. Reuse the owner's authorization for the unchanged goods
+and amount, then confirm that returned confirmation ID. Preserve the original
+order and addition; never cancel the order, discard its added goods, or rebuild
+a replacement cart to change payment method. Global payment preferences remain
+unchanged. Follow any actual bank approval and reconcile the active card attempt.
+
 For Oda/Mathem card payments, `authentication_required=true` means the retained
 payment is showing a visible 3D Secure bank challenge. Call checkout
 `authenticate` with that exact confirmation once to select the supported
@@ -134,7 +153,8 @@ same-order retry route then reproduces the complete frozen account, goods,
 delivery, total and Vipps review. An exact `Betal` link is preferred but may be
 absent while that direct same-order review remains available. A user report or
 coarse tracking status alone is insufficient. A recorded Vipps request
-that is sent, dispatching or otherwise unresolved remains locked.
+that is sent, dispatching or otherwise unresolved remains locked against ordinary
+recovery; an explicit payment change uses the verified `switch_payment` flow above.
 If the exact recovery stops before recording any request context, attempted
 timestamp or sent marker and the owner still received nothing, reconcile that
 fresh recovery confirmation once with `vipps_request_not_received=true`. The
