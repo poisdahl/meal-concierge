@@ -1262,45 +1262,37 @@ class OdaBrowser:
             ) if self.checkout_provider == "mathem" else (
                 "1 vare" if expected_product_count == 1 else f"{expected_product_count} varer"
             )
-        expanded = self._eval(r"""
-(() => {
- const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
- const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
- const itemLabel=ITEM_CONTROL_LABEL,summaryLabel=SUMMARY_CONTROL_LABEL;
- const buttons=[...document.querySelectorAll('button')].filter(enabled);
- const itemControls=buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===itemLabel);
- const summaryControls=summaryLabel===null?[]:buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===summaryLabel);
- const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
- if(itemControls.length>1)return JSON.stringify({expanded:false,mode:null});
- if(inputs.length>0)return JSON.stringify({expanded:true,mode:'items'});
- if(itemControls.length===1){itemControls[0].click();return JSON.stringify({expanded:true,mode:'items'});}
- if(summaryLabel!==null){
-   if(summaryControls.length>1)return JSON.stringify({expanded:false,mode:null});
-   if(summaryControls.length===1)summaryControls[0].click();
-   return JSON.stringify({expanded:true,mode:'summary'});
- }
- return JSON.stringify({expanded:true,mode:'items'});
-})()
-""".replace("ITEM_CONTROL_LABEL", json.dumps(item_control_label, ensure_ascii=False)).replace("SUMMARY_CONTROL_LABEL", json.dumps(summary_control_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
-        if (expanded.get("expanded") is not True
-                or expanded.get("mode") not in {"items", "summary"}):
-            raise HouseholdError("Oda checkout items cannot be reviewed")
-        mode = expanded["mode"]
+        clicked_modes = set()
+        item_mode = False
         for _ in range(20):
             ready = self._eval(r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
- const mode=MODE,controlLabel=mode==='items'?ITEM_CONTROL_LABEL:SUMMARY_CONTROL_LABEL;
- const show=[...document.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===controlLabel);
+ const enabled=x=>visible(x)&&!x.disabled&&x.getAttribute('aria-disabled')!=='true';
+ const itemLabel=ITEM_CONTROL_LABEL,summaryLabel=SUMMARY_CONTROL_LABEL,clicked=CLICKED_MODES;
+ const buttons=[...document.querySelectorAll('button')].filter(visible);
+ const itemControls=buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===itemLabel);
+ const summaryControls=summaryLabel===null?[]:buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===summaryLabel);
  const inputs=[...document.querySelectorAll('input[type="number"]')].filter(visible).filter(input=>ITEM_MATCH);
- const summaryLabel=SUMMARY_LABEL;
- const summaryNodes=summaryLabel===null?[]:[...document.querySelectorAll('*')].filter(visible).filter(node=>norm(node.innerText||'')===summaryLabel).filter(node=>![...node.children].some(child=>visible(child)&&norm(child.innerText||'')===summaryLabel));
- const ready=show.length===0&&(mode==='items'?inputs.length===COUNT:inputs.length===0&&summaryNodes.length===1);
+ const mode=ITEM_MODE||inputs.length>0||itemControls.length>0||summaryLabel===null?'items':'summary';
+ const controls=mode==='items'?itemControls:summaryControls;
+ if(itemControls.length>1||controls.length>1)return JSON.stringify({ambiguous:true});
+ // Retry discovery while the page loads, but never toggle an expansion twice.
+ if(controls.length===1&&enabled(controls[0])&&!clicked.includes(mode)&&(mode!=='items'||inputs.length===0)){
+   controls[0].click();return JSON.stringify({ready:false,mode,clicked:mode});
+ }
+ const countLabel=SUMMARY_LABEL;
+ const summaryNodes=countLabel===null?[]:[...document.querySelectorAll('*')].filter(visible).filter(node=>norm(node.innerText||'')===countLabel).filter(node=>![...node.children].some(child=>visible(child)&&norm(child.innerText||'')===countLabel));
+ const ready=controls.length===0&&(mode==='items'?inputs.length===COUNT:inputs.length===0&&summaryNodes.length===1);
  return JSON.stringify({ready,mode});
 })()
-""".replace("COUNT", str(expected_line_count)).replace("MODE", json.dumps(mode)).replace("ITEM_CONTROL_LABEL", json.dumps(item_control_label, ensure_ascii=False)).replace("SUMMARY_CONTROL_LABEL", json.dumps(summary_control_label, ensure_ascii=False)).replace("SUMMARY_LABEL", json.dumps(summary_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
+""".replace("COUNT", str(expected_line_count)).replace("ITEM_MODE", json.dumps(item_mode)).replace("CLICKED_MODES", json.dumps(sorted(clicked_modes))).replace("ITEM_CONTROL_LABEL", json.dumps(item_control_label, ensure_ascii=False)).replace("SUMMARY_CONTROL_LABEL", json.dumps(summary_control_label, ensure_ascii=False)).replace("SUMMARY_LABEL", json.dumps(summary_label, ensure_ascii=False)).replace("ITEM_MATCH", "[...(input.labels||[])].some(label=>norm(label.textContent)==='Antal')" if self.checkout_provider == "mathem" else "/\\bAntall\\b/i.test(norm(input.closest('li,article')?.innerText||''))"))
+            if ready.get("ambiguous"):
+                raise HouseholdError("Oda checkout items cannot be reviewed")
+            if ready.get("clicked") in {"items", "summary"}:
+                clicked_modes.add(ready["clicked"])
+            item_mode = item_mode or ready.get("mode") == "items"
             if ready.get("ready") is True and ready.get("mode") in {"items", "summary"}:
                 return ready["mode"]
             self._settle(0.25)
@@ -2042,8 +2034,10 @@ class OdaBrowser:
         with self._checkout_operation(deadline, preserve_session=vipps):
             try:
                 binding = require_order_binding(review.get("binding"))
+                # Re-navigation can reset the method. Restore only the frozen
+                # choice, then require the entire review to match before paying.
                 current = self.review_order_change(cart, order_id, order, expected_binding=binding,
-                    **({"payment": payment, "select_payment": False} if payment is not None else {}))
+                    **({"payment": payment, "select_payment": True} if payment is not None else {}))
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
             if current != dict(review):
