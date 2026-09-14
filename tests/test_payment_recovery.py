@@ -2463,11 +2463,12 @@ class OdaAdditionBrowserTests(unittest.TestCase):
                 "count": 1, "totalGrossAmount": 45.50}
         for method in ("vipps", "saved_card"):
             payment = {"method": method}
-            for change in ({}, {"selected": 2 if method == "vipps" else 0},
+            for change in ({}, {"selected": 2 if method == "vipps" else 0}, {"navigation_reset": True},
                            {"url": url.replace("order-1", "other")},
                            {"rows": [*rows[:2], ["Å betale", "145,50 kr"], rows[3]]},
                            {"rows": [rows[0], ["Nye varer lagt til", "2 varer", "45,50 kr"], *rows[2:]]},
-                           {"payDisabled": True}):
+                           {"payDisabled": True},
+                           *([{"options": ["Vipps", "Nytt kort", "•••• 5678"]}] if method == "saved_card" else [])):
                 with self.subTest(method=method, change=change):
                     config = {"url": url, "rows": rows, "selected": 2 if method == "vipps" else 0}
                     clicks, captures, preserves = [], [], []
@@ -2484,7 +2485,10 @@ class OdaAdditionBrowserTests(unittest.TestCase):
                     browser._checkout_deadline = None
                     browser._checkout_operation = lambda *a, **kw: (preserves.append(kw.get("preserve_session", False)) or nullcontext())
                     browser._read_order_binding = lambda *a, **kw: deepcopy(binding)
-                    browser._continue_checkout_cart = lambda: None
+                    def navigate_cart():
+                        if config.get("navigation_reset"):
+                            config["selected"] = 2 if method == "vipps" else 0
+                    browser._continue_checkout_cart = navigate_cart
                     browser._expand_checkout_items = lambda *a, **kw: None
                     browser._expand_checkout_amount_summary = lambda: None
                     browser._settle = lambda *a: None
@@ -2498,14 +2502,14 @@ class OdaAdditionBrowserTests(unittest.TestCase):
                     self.assertEqual(review["order_amounts"]["payable_minor"], 4550)
                     config.update(change)
                     clicks.clear()
-                    if change:
+                    if change and not ("selected" in change or "navigation_reset" in change):
                         with self.assertRaises(CheckoutPreconditionError):
                             browser.submit_order_change(cart, "order-1", order, review, lambda: None)
                         self.assertEqual(clicks, [])
                         self.assertEqual(captures, [])
                     else:
                         browser.submit_order_change(cart, "order-1", order, review, lambda: None)
-                        self.assertEqual(clicks, ["PAY"])
+                        self.assertEqual(clicks, ([0 if method == "vipps" else 2] if change else []) + ["PAY"])
                         self.assertEqual(captures[0][1]["order_id"], "order-1")
                         self.assertEqual(captures[0][1]["authentication_expected"], method == "saved_card")
                         self.assertEqual(captures[0][1]["vipps_expected_total"], 4550 if method == "vipps" else None)
@@ -2514,6 +2518,59 @@ class OdaAdditionBrowserTests(unittest.TestCase):
 
 
 class RetryAmountTests(unittest.TestCase):
+    def test_late_item_expansion_waits_for_controls_and_items_without_toggling_twice(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import OdaBrowser
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node executes the actual item expansion controls")
+        harness = PAYMENT_DOM.replace("itemExpand.hideOnClick=true;", "itemExpand.hideOnClick=false;itemExpand.disabled=!!c.itemButtonDisabled;")
+        harness = harness.replace("...expand,...(c.summaryOnly", "...expand,...(c.duplicateItems?[itemExpand]:[]),...(c.summaryOnly")
+        for provider in ("oda", "mathem"):
+            for scenario in ("late", "duplicate", "disabled", "wrong_count", "transient_summary", "visible_items"):
+                with self.subTest(provider=provider, scenario=scenario):
+                    cases = [
+                        {"summaryOnly": True},
+                        {"summaryOnly": True, "expandButtons": "item", "itemButtonDisabled": True},
+                        {"summaryOnly": True, "expandButtons": "item"},
+                        {"summaryOnly": True, "expandButtons": "item"},
+                        {"summaryOnly": False, "expandButtons": "item", "itemButtonHidden": True},
+                    ]
+                    if scenario == "duplicate":
+                        cases = [{"summaryOnly": True, "expandButtons": "item", "duplicateItems": True}]
+                    if scenario == "disabled":
+                        cases = [cases[1]]
+                    if scenario == "transient_summary":
+                        cases = [cases[2], {"summaryOnly": True}, cases[4]]
+                    if scenario == "visible_items":
+                        cases = [{"expandButtons": "item"}, cases[4]]
+                    browser = OdaBrowser.__new__(OdaBrowser)
+                    browser.checkout_provider = provider
+                    calls = []
+                    def evaluate(script):
+                        config = {"provider": provider, **cases[min(len(calls), len(cases) - 1)]}
+                        result = subprocess.run([node, "-e", harness], input=json.dumps({"script": script, "c": config}),
+                            text=True, capture_output=True, check=True, timeout=10)
+                        value = json.loads(result.stdout)
+                        calls.append(value)
+                        return value["result"]
+                    browser._eval = evaluate
+                    browser._settle = lambda seconds: None
+                    if scenario in {"late", "transient_summary", "visible_items"}:
+                        self.assertEqual(browser._expand_checkout_items(1,
+                            allow_summary_only=scenario == "transient_summary",
+                            expected_product_count=1 if scenario == "transient_summary" else None), "items")
+                        self.assertEqual(len(calls), len(cases))
+                    else:
+                        with self.assertRaises(HouseholdError):
+                            browser._expand_checkout_items(2 if scenario == "wrong_count" else 1)
+                    self.assertEqual([click for call in calls for click in call["clicks"]],
+                                     ["ITEM"] if scenario in {"late", "wrong_count", "transient_summary"} else [])
+                    self.assertLessEqual(len(calls), 20)
+
     def test_oda_retry_accepts_exact_summary_count_without_product_controls(self):
         import json
         import shutil

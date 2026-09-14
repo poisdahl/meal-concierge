@@ -97,6 +97,18 @@ original order does not prove its additions were paid. Keep the same pending
 attempt until its added goods and new total are verified; never send another
 payment merely because an app notification is missing.
 
+A request such as “get it added” continues the existing payment choice; it does
+not authorize switching from Vipps to a card after a technical failure. Restore
+the reviewed choice, never substitute a different method to make checkout pass.
+If checkout prepare reports that its item list did not finish rendering, retry
+that non-submitting prepare once with the same order and payment choice within
+the current request. Follow the returned confirmation policy if it succeeds.
+This does not authorize retrying confirm/submit after an uncertain result.
+Describe a failed local readiness/payment-selection check as the checkout page
+not being ready or the selected method not being verifiable, not as Oda rejecting
+the payment. If the bounded recovery still fails, lead with the actual blocker
+and state what remains staged versus confirmed.
+
 When the owner asks to switch an already-dispatched Oda Vipps payment to an
 existing saved card, use `checkout action=switch_payment` with the current
 `confirmation_id` and `checkout_payment={"method":"saved_card"}` (plus an
