@@ -4759,6 +4759,10 @@ class RecipeFlowTests(unittest.TestCase):
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_separate_manual_cart_preserves_completed_menu_and_its_order(self):
+        self.oda = MutableFakeOda()
+        self.oda.cart.update(items=[], count=0, subtotal=0)
+        self.browser.oda = self.oda
+        self.app = Application(self.store, self.oda, self.browser)
         planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         with self.store.locked() as state:
             self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
@@ -4766,11 +4770,15 @@ class RecipeFlowTests(unittest.TestCase):
                 "required_quantities": {"10": 1}}}, "original-menu-order")
         before = self.store.read()
         self.assertIsNone(before.get("cart_plan"))
-        self.oda.cart["items"][0]["name"] = "Oregano extra"
+        self.app.handle({"operation": "cart", "action": "ensure", "requirements": [
+            {"product_id": "10", "product_name": "Oregano extra", "quantity": 1}]})
+        extras = deepcopy(self.store.read()["cart_plan"])
+        self.assertEqual(extras["supplemental_quantities"], {"10": 1})
+        self.assertEqual(extras["required_quantities"], {})
         prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
         self.assertEqual(prepared["summary"]["menu_attribution"], "cart_only")
         self.assertEqual(prepared["summary"]["menu_coverage"], "not_assessed")
-        self.assertIsNone(self.store.read()["pending_checkout"]["cart_plan"])
+        self.assertEqual(self.store.read()["pending_checkout"]["cart_plan"], extras)
         result = self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
         self.assertTrue(result["confirmed"], result)
         self.assertEqual(result["menu_attribution"], "cart_only")
@@ -4782,6 +4790,11 @@ class RecipeFlowTests(unittest.TestCase):
         replay = self.app.handle({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
         self.assertTrue(replay["confirmed"])
         self.assertEqual(self.browser.checkout_clicks, 1)
+        self.app.handle({"operation": "cart", "action": "change", "operations": [
+            {"product_id": "10", "quantity": 1}]})
+        self.assertEqual(self.store.read()["cart_plan"]["supplemental_quantities"], {"10": 1})
+        self.app.handle({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
+        self.assertEqual(self.store.read()["cart_plan"]["supplemental_quantities"], {"10": 1})
 
     def test_completed_menu_without_plan_still_blocks_weekly_and_automatic_checkout(self):
         planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]

@@ -2248,10 +2248,20 @@ class OrderOperations:
                 or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered")
             )
             # A completed menu remains available for recipes and its receipt.
-            # With no remaining shopping plan, a separately reviewed manual
-            # cart does not buy that menu again or replace its order snapshot.
+            # A separately reviewed manual cart containing only extra goods
+            # does not buy that menu again or replace its order snapshot.
+            independent_cart_plan = deepcopy(state.get("cart_plan"))
+            extras_only = (
+                not independent_cart_plan
+                or isinstance(independent_cart_plan, Mapping)
+                and independent_cart_plan.get("provider") == self.provider
+                and independent_cart_plan.get("menu_ref") == self._cart_menu_ref(menu_baseline)
+                and not independent_cart_plan.get("required_quantities")
+                and not independent_cart_plan.get("menu_required_quantities")
+                and not independent_cart_plan.get("recurring_items")
+            )
             independent_cart = bool(
-                menu_already_ordered and not state.get("cart_plan")
+                menu_already_ordered and extras_only
                 and not order_change and not occurrence and not automatic_checkout
                 and not scheduler_context and not cart_ready_continuation
             )
@@ -2276,7 +2286,7 @@ class OrderOperations:
         summary = cart_summary(cart)
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
             raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
-        cart_plan_baseline = None
+        cart_plan_baseline = independent_cart_plan if independent_cart else None
         if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart:
             cart_gate = self._cart_checkout_gate(summary, menu_baseline)
             if cart_gate is not None:
@@ -3478,6 +3488,8 @@ class OrderOperations:
         attribution = pending.get("summary", {}).get("menu_attribution") or self._checkout_menu_attribution(
             pending.get("menu"), pending.get("cart_plan"))
         if attribution != "menu_bound":
+            if pending.get("independent_cart") and canonical(state.get("cart_plan")) == canonical(pending.get("cart_plan")):
+                state["cart_plan"] = None
             return
         if isinstance(pending.get("cart_plan"), Mapping) and canonical(state.get("cart_plan")) == canonical(pending.get("cart_plan")):
             state["cart_plan"] = None
