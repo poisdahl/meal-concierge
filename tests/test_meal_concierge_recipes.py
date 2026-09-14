@@ -4749,11 +4749,68 @@ class RecipeFlowTests(unittest.TestCase):
             self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
                 "provider": "oda", "menu_ref": self.app._cart_menu_ref(planned),
                 "required_quantities": {"10": 1}}}, "order-1")
+            state["cart_plan"] = {"provider": "oda", "menu_ref": self.app._cart_menu_ref(state["menu"]),
+                                  "required_quantities": {"10": 1}}
         with self.assertRaisesRegex(HouseholdError, "already belongs to an order"):
             self.app.handle({"operation": "checkout", "action": "prepare"})
         state = self.store.read()
         self.assertEqual(state["menu"]["order_id"], "order-1")
         self.assertNotIn("order-2", state["order_snapshots"])
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_separate_manual_cart_preserves_completed_menu_and_its_order(self):
+        planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
+        with self.store.locked() as state:
+            self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(planned),
+                "required_quantities": {"10": 1}}}, "original-menu-order")
+        before = self.store.read()
+        self.assertIsNone(before.get("cart_plan"))
+        self.oda.cart["items"][0]["name"] = "Oregano extra"
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertEqual(prepared["summary"]["menu_attribution"], "cart_only")
+        self.assertEqual(prepared["summary"]["menu_coverage"], "not_assessed")
+        self.assertIsNone(self.store.read()["pending_checkout"]["cart_plan"])
+        result = self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
+        self.assertTrue(result["confirmed"], result)
+        self.assertEqual(result["menu_attribution"], "cart_only")
+        self.assertEqual(self.browser.checkout_clicks, 1)
+        after = self.store.read()
+        for key in ("menu", "recipe_usage", "order_snapshots", "order_snapshot_times", "order_snapshot_providers", "recurring_fulfilled"):
+            self.assertEqual(after.get(key), before.get(key), key)
+        self.assertIsNone(after.get("cart_plan"))
+        replay = self.app.handle({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
+        self.assertTrue(replay["confirmed"])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+
+    def test_completed_menu_without_plan_still_blocks_weekly_and_automatic_checkout(self):
+        planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
+        with self.store.locked() as state:
+            self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(planned),
+                "required_quantities": {"10": 1}}}, "original-menu-order")
+        result = self.app.handle({"operation": "checkout", "action": "prepare", "weekly": True})
+        self.assertFalse(result["confirmed"])
+        self.assertEqual(result["reason"], "weekly_menu_products_incomplete")
+        with self.assertRaisesRegex(HouseholdError, "already belongs to an order"):
+            self.app._checkout_prepare(automatic_checkout=True)
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_separate_cart_cannot_ignore_a_new_shopping_plan_before_confirmation(self):
+        planned = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
+        with self.store.locked() as state:
+            self.app._record_order_snapshot(state, {"menu": planned, "cart_plan": {
+                "provider": "oda", "menu_ref": self.app._cart_menu_ref(planned),
+                "required_quantities": {"10": 1}}}, "original-menu-order")
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        with self.store.locked() as state:
+            state["cart_plan"] = {"provider": "oda", "menu_ref": self.app._cart_menu_ref(state["menu"]),
+                                  "required_quantities": {"10": 1}}
+        with self.assertRaisesRegex(HouseholdError, "cart plan changed"):
+            self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.store.read()["menu"]["order_id"], "original-menu-order")
 
     def test_recent_unscheduled_order_snapshot_survives_a_later_order(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]

@@ -752,14 +752,16 @@ def _oda_vipps_gateway_script(
  let paymentRoot=null,buttons=[];
  if(phones.length===1)for(let candidate=phones[0].parentElement;candidate&&candidate!==root;candidate=candidate.parentElement){
    const candidatePhones=[...candidate.querySelectorAll(phoneSelector)].filter(visible);
-   const candidateButtons=[...candidate.querySelectorAll(buttonSelector)].filter(enabled);
+   const candidateButtons=[...candidate.querySelectorAll(buttonSelector)].filter(visible);
    if(candidatePhones.length===1&&candidatePhones[0]===phones[0]&&candidateButtons.length===1){paymentRoot=candidate;buttons=candidateButtons;break;}
  }
  const fillable=identity&&!sent&&!expired&&merchant&&amountBound&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1;
  const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
  const exact=fillable&&phoneMatches;
  if(fillable)phones[0].setAttribute('data-oda-household-vipps-phone','');
- const target=exact?buttons[0]:null;
+ // The hosted form may disable Next until the phone is filled. Identifying
+ // that form permits filling; only an enabled control permits dispatch.
+ const target=exact&&enabled(buttons[0])?buttons[0]:null;
  if(target)target.setAttribute('data-oda-household-vipps-next','');
  const hit=REQUIRE_HIT?document.elementFromPoint(HIT_X,HIT_Y):target;
  return JSON.stringify({identity,ready:Boolean(target&&hit&&(hit===target||target.contains(hit))),sent,expired,fillable,phone_matches:phoneMatches});

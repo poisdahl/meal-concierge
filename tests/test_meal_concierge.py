@@ -2425,6 +2425,8 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 const next=node(c.button||'Next');const form=node();
+next.disabled=!!c.nextDisabled;
+next.getAttribute=name=>name==='aria-disabled'&&c.nextAriaDisabled?'true':null;
 phone.closest=s=>s==='form'&&c.inForm?form:null;
 form.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?[next]:[];
 const text=c.text||'Continue to pay with Vipps Oda NOK 256.50';
@@ -2441,14 +2443,14 @@ global.document={body:{innerText:text},elementFromPoint:()=>next,querySelectorAl
 process.stdout.write(eval(script));
 """
 
-        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False, shared=True):
+        def evaluate(phone, url="https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque", expected_url=None, text=None, button=None, in_form=False, shared=True, next_disabled=False, next_aria_disabled=False, require_hit=False):
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
-                        25650, "90000000", expected_url=expected_url or url,
+                        25650, "90000000", expected_url=expected_url or url, require_hit=require_hit,
                     ),
-                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form, "shared": shared},
+                    "c": {"phone": phone, "url": url, "text": text, "button": button, "inForm": in_form, "shared": shared, "nextDisabled": next_disabled, "nextAriaDisabled": next_aria_disabled},
                 }),
                 text=True, capture_output=True, check=False,
             )
@@ -2456,6 +2458,17 @@ process.stdout.write(eval(script));
                 self.fail(result.stderr)
             return json.loads(result.stdout)
 
+        for disabled in ({"next_disabled": True}, {"next_aria_disabled": True}):
+            with self.subTest(disabled=disabled):
+                blank = evaluate("", **disabled)
+                self.assertTrue(blank["fillable"])
+                self.assertFalse(blank["phone_matches"])
+                self.assertFalse(blank["ready"])
+                filled = evaluate("90000000", require_hit=True, **disabled)
+                self.assertTrue(filled["fillable"])
+                self.assertTrue(filled["phone_matches"])
+                self.assertFalse(filled["ready"])
+        self.assertTrue(evaluate("90000000", require_hit=True)["ready"])
         self.assertEqual(evaluate(""), {
             "identity": True, "ready": False, "sent": False, "expired": False,
             "fillable": True, "phone_matches": False,
