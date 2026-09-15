@@ -157,6 +157,23 @@ publisher, including the local revisions and favorite attached to that exact
 entry. Recipes and favorites outside this collection are never part of that
 cleanup. An invalid pack or an interruption before the complete record pass
 does not delete absent entries.
+
+### Remove the recipe collection
+
+To remove the whole optional collection, ask:
+
+> Permanently remove the Optional Recipe Collection from my Meal Concierge
+> installation. Preserve every other local recipe and favorite, and reclaim
+> storage used only by the collection.
+
+The agent updates Meal Concierge first, stops the exact installation, runs
+`remove-recipe-collection`, and starts it again. This hard-deletes every entry
+owned by the collection, including its local revisions, archive state and exact
+favorite. It cannot select user recipes or another collection. Unreferenced
+collection images and retained pack reports are removed, and the recipe database
+is compacted. Images still referenced by another recipe or retained household
+history remain. The offline command performs no release lookup or download and
+is safe to repeat after an interruption.
 See [recipe import](docs/recipe-import.md) for this and other ways to add recipes.
 
 ## Help and privacy

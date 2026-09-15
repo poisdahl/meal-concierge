@@ -530,8 +530,29 @@ with `membership_mode: authoritative` has been read, one bank transaction delete
 all bundled entries with that exact `pack_id` whose pack recipe identity is
 absent. Their revisions, bindings, metadata and exact favorite are removed;
 entries and favorites belonging to users or other packs cannot match the delete.
+Idempotency keys for those entries remain as compact identifier-only tombstones
+so a retry is still rejected as permanently deleted, while stale full-recipe
+responses and cover references do not retain the removed collection.
 Managed assets remain content-addressed because frozen menus or deliveries may
 still reference them.
+
+Whole-collection removal is a separate installed-runtime maintenance path, not
+an empty pack and not an MCP recipe deletion operation. The installer owns the
+stopped installation and calls `remove_collection` with its fixed reviewed pack
+identity; the user cannot provide a pack identifier. The function preflights all
+retained pack metadata before changing the bank. It atomically uses the same
+exact bundled-identity deletion with an empty retained membership, then finds
+managed references across every remaining SQLite text column, current and
+migration-backup household JSON, and retained recipe-bank migration backups.
+Only assets listed by a target manifest and absent from that retained reference
+set are unlinked. Foreign orphan files are outside its candidate set.
+
+SQLite `VACUUM` follows asset cleanup so deletion actually releases database
+pages. Target reports and immutable notices are removed with `manifest.json`
+last. Thus a process interruption before metadata cleanup leaves the exact
+candidate inventory for a safe retry; a completed rerun is a no-op. The command
+does not delete household state, delivery artifacts, installation backups, user
+recipes, other packs or their favorites. It accesses no release API or network.
 
 The absent-entry transaction is not attempted after a record failure or
 interruption. Committed records remain available after interruption, and

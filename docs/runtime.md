@@ -213,6 +213,31 @@ still requires internet access for verification. It is not an offline import
 mode or a selector for older packs. If the latest release is invalid or
 incompatible, the command reports the error instead of choosing an older one.
 
+### Remove the recipe collection
+
+> Permanently remove the Optional Recipe Collection from my Meal Concierge
+> installation. Preserve every other local recipe and favorite, and reclaim
+> storage used only by the collection.
+
+Update an older Meal Concierge runtime first. When the exact installation is
+idle, stop it, run the removal, then start it through the same owner:
+
+```sh
+./install.sh stop --home /absolute/data-home
+./install.sh remove-recipe-collection --home /absolute/data-home
+./install.sh start --home /absolute/data-home
+```
+
+The removal command is offline: it does not resolve or download a release. It
+hard-deletes all bundled entries carrying the collection's fixed internal
+identity, including local edits, archive state and favorites on those exact
+entries. Other user recipes, other collections and their favorites remain. It
+then removes collection assets that no remaining recipe, household-state
+snapshot or retained migration backup references, removes the collection's
+stored pack metadata and compacts the recipe database. Delivery artifacts and
+household history remain. Rerun the same command if storage cleanup was
+interrupted; it is idempotent.
+
 ## Externally managed hosts
 
 Grok's cloud service uses `--manager external` and its native background

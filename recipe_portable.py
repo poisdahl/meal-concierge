@@ -7,6 +7,7 @@ descriptor and holds offline ownership before calling the bank application API.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
@@ -42,6 +43,15 @@ MAX_MEMBERS = MAX_IMPORT_RECORDS + 4
 CHUNK_BYTES = 128 * 1024
 _ASSET = re.compile(r"assets/([0-9a-f]{64})\.jpg\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_ASSET_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ASSET_ID_BYTES = re.compile(rb"sha256:[0-9a-f]{64}")
+_PACK_METADATA_DIRECTORY = re.compile(r"[0-9a-f]{64}\Z")
+_PACK_METADATA_TEMPORARY = re.compile(r"\.pack-[0-9a-f]{32}\Z")
+_PACK_METADATA_FILES = {
+    "manifest.json", "attribution.json", "coverage.json", "status.json", "results.json",
+}
+_STATE_BACKUP = re.compile(r"state-v[1-9][0-9]*\.backup\.json\Z")
+_RECIPE_BACKUP = re.compile(r"recipes-v[1-9][0-9]*\.backup\.sqlite3\Z")
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -916,6 +926,179 @@ def _pack_directory(state: Path, manifest: Mapping):
             os.close(descriptor)
 
 
+def _read_regular_at(directory: int, name: str, maximum: int | None = None) -> bytes:
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or (maximum is not None and info.st_size > maximum):
+                raise RecipeError("retained recipe collection metadata is irregular or oversized")
+            value = handle.read() if maximum is None else handle.read(maximum + 1)
+            if maximum is not None and len(value) > maximum:
+                raise RecipeError("retained recipe collection metadata is oversized")
+            return value
+    except OSError as exc:
+        raise RecipeError("retained recipe collection metadata is unavailable") from exc
+
+
+def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
+    """Preflight retained manifests and collect only assets ever shipped by one pack."""
+    directories = []
+    empty_directories = []
+    assets = set()
+    descriptors = []
+    try:
+        root = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(root)
+        try:
+            metadata = os.open("pack-metadata", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+        except FileNotFoundError:
+            return {"directories": [], "empty_directories": [], "assets": set()}
+        descriptors.append(metadata)
+        for name in sorted(os.listdir(metadata)):
+            if not _PACK_METADATA_DIRECTORY.fullmatch(name):
+                raise RecipeError("retained recipe collection metadata has an invalid directory")
+            directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=metadata)
+            descriptors.append(directory)
+            entries = sorted(os.listdir(directory))
+            if not entries:
+                empty_directories.append(name)
+                descriptors.pop()
+                os.close(directory)
+                continue
+            if "manifest.json" not in entries:
+                raise RecipeError("retained recipe collection metadata is missing its manifest")
+            manifest = _manifest(_json(_read_regular_at(directory, "manifest.json", MAX_MANIFEST_BYTES)))
+            identity = hashlib.sha256(canonical_bytes([
+                manifest["pack_id"], manifest["pack_version"],
+            ])).hexdigest()
+            if identity != name:
+                raise RecipeError("retained recipe collection metadata identity differs")
+            if manifest["pack_id"] == pack_id:
+                for entry in entries:
+                    if entry not in _PACK_METADATA_FILES and not _PACK_METADATA_TEMPORARY.fullmatch(entry):
+                        raise RecipeError("retained recipe collection metadata has an unexpected file")
+                    info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT_BYTES:
+                        raise RecipeError("retained recipe collection metadata is irregular or oversized")
+                directories.append({"name": name, "manifest": manifest})
+                assets.update(
+                    "sha256:" + match[1]
+                    for item in manifest["files"]
+                    if (match := _ASSET.fullmatch(item["path"]))
+                )
+            descriptors.pop()
+            os.close(directory)
+        return {"directories": directories, "empty_directories": empty_directories, "assets": assets}
+    except OSError as exc:
+        raise RecipeError("retained recipe collection metadata is unavailable") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _state_asset_references(state: Path) -> set[str]:
+    """Protect asset identifiers retained by current or migration-backup state."""
+    references = set()
+
+    def collect(value: Any) -> None:
+        if isinstance(value, str):
+            if _ASSET_ID.fullmatch(value):
+                references.add(value)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+
+    try:
+        with os.scandir(state) as entries:
+            names = [entry.name for entry in entries]
+        json_names = sorted(
+            name for name in names if name == "state.json" or _STATE_BACKUP.fullmatch(name)
+        )
+        recipe_backups = sorted(name for name in names if _RECIPE_BACKUP.fullmatch(name))
+        directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for name in json_names:
+                collect(_json(_read_regular_at(directory, name)))
+            for name in recipe_backups:
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory,
+                )
+                with os.fdopen(descriptor, "rb") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        raise RecipeError("recipe bank migration backup is irregular")
+                    overlap = b""
+                    while chunk := handle.read(CHUNK_BYTES):
+                        value = overlap + chunk
+                        references.update(match.group().decode("ascii") for match in _ASSET_ID_BYTES.finditer(value))
+                        overlap = value[-70:]
+        finally:
+            os.close(directory)
+        return references
+    except OSError as exc:
+        raise RecipeError("household state asset references are unavailable") from exc
+
+
+def _remove_pack_metadata(state: Path, inventory: Mapping[str, Any], pack_id: str) -> dict[str, int]:
+    """Delete preflighted target metadata, leaving each manifest until last."""
+    deleted_directories = deleted_bytes = 0
+    descriptors = []
+    try:
+        root = os.open(state, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        descriptors.append(root)
+        metadata = os.open("pack-metadata", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+        descriptors.append(metadata)
+        for item in inventory["directories"]:
+            name = item["name"]
+            try:
+                directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=metadata)
+            except FileNotFoundError:
+                continue
+            descriptors.append(directory)
+            entries = sorted(os.listdir(directory))
+            if "manifest.json" not in entries:
+                raise RecipeError("retained recipe collection metadata changed during removal")
+            manifest = _manifest(_json(_read_regular_at(directory, "manifest.json", MAX_MANIFEST_BYTES)))
+            identity = hashlib.sha256(canonical_bytes([
+                manifest["pack_id"], manifest["pack_version"],
+            ])).hexdigest()
+            if identity != name or manifest["pack_id"] != pack_id:
+                raise RecipeError("retained recipe collection metadata changed during removal")
+            for entry in entries:
+                if entry not in _PACK_METADATA_FILES and not _PACK_METADATA_TEMPORARY.fullmatch(entry):
+                    raise RecipeError("retained recipe collection metadata changed during removal")
+                info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    raise RecipeError("retained recipe collection metadata changed during removal")
+            for entry in sorted(entries, key=lambda value: value == "manifest.json"):
+                info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
+                os.unlink(entry, dir_fd=directory)
+                deleted_bytes += info.st_size
+            os.fsync(directory)
+            descriptors.pop()
+            os.close(directory)
+            os.rmdir(name, dir_fd=metadata)
+            deleted_directories += 1
+        for name in inventory["empty_directories"]:
+            try:
+                os.rmdir(name, dir_fd=metadata)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                if exc.errno != errno.ENOTEMPTY:
+                    raise
+        os.fsync(metadata)
+        return {"deleted_directories": deleted_directories, "deleted_bytes": deleted_bytes}
+    except OSError as exc:
+        raise RecipeError("retained recipe collection metadata removal failed") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 def _report_bytes(directory: int, name: str, value: bytes, *, immutable: bool = False) -> None:
     """Retain exact notices; progress replacement never touches household journals."""
     if immutable:
@@ -946,6 +1129,88 @@ def _report_bytes(directory: int, name: str, value: bytes, *, immutable: bool = 
             os.unlink(temporary, dir_fd=directory)
         except FileNotFoundError:
             pass
+
+
+def remove_collection(state_directory: Path | str, household: str,
+                      expected_descriptor: Mapping) -> dict[str, Any]:
+    """Permanently remove one installer-selected bundled collection offline.
+
+    Database deletion is atomic. File cleanup is deliberately resumable: the
+    retained manifests remain as the authoritative cleanup inventory until all
+    candidate assets and free database pages have been handled.
+    """
+    from recipe_assets import RecipeAssetError, RecipeAssets
+    from recipes import RecipeStore
+
+    if not isinstance(expected_descriptor, Mapping):
+        raise RecipeError("a trusted recipe collection identity is required")
+    pack_id = _text(expected_descriptor.get("pack_id"), "pack_id")
+    if len(pack_id) > 128:
+        raise RecipeError("portable pack_id exceeds the bank metadata limit")
+    display_name = expected_descriptor.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME)
+    _text(display_name, "display_name")
+    state = Path(state_directory)
+    store = RecipeStore(state / "recipes.sqlite3", household)
+    assets = RecipeAssets(state / "recipe-assets")
+
+    inventory = _pack_metadata_inventory(state, pack_id)
+    state_references = _state_asset_references(state)
+    count = store.count_pack_records(pack_id)
+    # Without the retained manifests there is no exact bounded inventory of
+    # historical files shipped by this pack, so do not strand them silently.
+    if count and not inventory["directories"]:
+        raise RecipeError("recipe collection metadata is missing; update/import it before removal")
+    store.referenced_asset_ids()  # Preflight the actual retained database schema.
+    assets.preflight_removal(inventory["assets"])
+
+    deleted = None
+    try:
+        deleted = store.delete_absent_pack_records(pack_id=pack_id, present_recipe_ids=())
+        retained_references = state_references | store.referenced_asset_ids()
+        candidate_assets = inventory["assets"]
+        removable_assets = candidate_assets - retained_references
+        asset_report = assets.remove_many(removable_assets)
+        database_report = store.compact() if deleted or inventory["directories"] else {
+            "before_bytes": store.path.stat().st_size,
+            "after_bytes": store.path.stat().st_size,
+            "reclaimed_bytes": 0,
+            "free_bytes_before": 0,
+            "compacted": False,
+        }
+        metadata_report = (
+            _remove_pack_metadata(state, inventory, pack_id)
+            if inventory["directories"] or inventory["empty_directories"]
+            else {"deleted_directories": 0, "deleted_bytes": 0}
+        )
+    except (OSError, RecipeError, RecipeAssetError) as exc:
+        if deleted is not None:
+            raise RecipeError(
+                "recipe collection entries were removed, but storage cleanup is incomplete; "
+                "rerun remove-recipe-collection"
+            ) from exc
+        raise
+
+    retained_candidates = candidate_assets & retained_references
+    return {
+        "status": "complete",
+        "pack_id": pack_id,
+        "display_name": display_name,
+        "deleted": len(deleted),
+        "deleted_favorites": sum(item["was_favorite"] for item in deleted),
+        "deleted_locally_modified": sum(item["locally_modified"] for item in deleted),
+        "candidate_assets": len(candidate_assets),
+        "deleted_assets": asset_report["deleted"],
+        "missing_assets": asset_report["missing"],
+        "retained_referenced_assets": len(retained_candidates),
+        "deleted_metadata_directories": metadata_report["deleted_directories"],
+        "database": database_report,
+        "reclaimed_bytes": (
+            asset_report["deleted_bytes"]
+            + metadata_report["deleted_bytes"]
+            + database_report["reclaimed_bytes"]
+        ),
+        "household_history_preserved": True,
+    }
 
 
 def apply_archive(path: Path | str, state_directory: Path | str, household: str,

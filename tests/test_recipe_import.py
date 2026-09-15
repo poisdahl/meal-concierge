@@ -692,6 +692,33 @@ class PackInstallationTests(unittest.TestCase):
         write_archive(path, self.manifest, {"records.jsonl": source})
         return path
 
+    def asset_package(self, name, version, records, asset_files):
+        source = self.root / f"{name}.jsonl"
+        source.write_bytes(b"".join(canonical_bytes(item) + b"\n" for item in records))
+        path = self.root / f"{name}.zip"
+        self.manifest.update(
+            pack_version=version,
+            recipe_schema_version=2,
+            records_count=len(records),
+            membership_mode="authoritative",
+        )
+        files = {"records.jsonl": source}
+        for asset_id, data in asset_files.items():
+            asset = self.root / f"{name}-{asset_id[7:]}.jpg"
+            asset.write_bytes(data)
+            files[f"assets/{asset_id[7:]}.jpg"] = asset
+        write_archive(path, self.manifest, files)
+        return path
+
+    def managed_cover(self, color):
+        import io
+        from PIL import Image
+        from recipe_assets import sanitize_image
+        raw = io.BytesIO()
+        Image.new("RGB", (8, 8), color).save(raw, format="PNG")
+        data = sanitize_image(raw.getvalue())
+        return "sha256:" + hashlib.sha256(data).hexdigest(), data
+
     def test_trusted_descriptor_preflight_is_read_only_and_checks_all_fields(self):
         from recipe_portable import preflight_archive
         path = self.package()
@@ -899,6 +926,178 @@ class PackInstallationTests(unittest.TestCase):
                          ("partial", 1, 0))
         for identity in ("absent-one", "absent-two"):
             self.assertEqual(store.get(refs[identity]["recipe_id"])["pack"]["version"], "1")
+
+    def test_explicit_collection_removal_deletes_only_its_entries_and_is_idempotent(self):
+        from recipe_portable import remove_collection
+        from recipes import RecipeStore
+        records = [
+            {**self.record, "recipe_id": identity,
+             "recipe": {**self.recipe, "name": name}}
+            for identity, name in (("plain", "Plain"), ("edited", "Edited"), ("favorite", "Favorite"))
+        ]
+        first = self.apply(self.versioned_package(
+            "remove-v1", records, pack_version="1", membership_mode="authoritative"))
+        refs = {result["recipe_id"]: result["bank_recipe_ref"] for result in first["results"]}
+        state = self.root / "state"
+        store = RecipeStore(state / "recipes.sqlite3", "synthetic-household")
+        plain = store.get(refs["plain"]["recipe_id"])
+        store.archive(
+            plain["id"], plain["revision"], idempotency_key="remove-pack-archive"
+        )
+        edited = store.get(refs["edited"]["recipe_id"])
+        store.update(edited["id"], edited["revision"], {**self.recipe, "name": "My local edit"})
+        store.set_favorite(refs["favorite"], True, idempotency_key="remove-pack-favorite")
+        local = store.save({**self.recipe, "name": "Local user recipe"})
+        store.set_favorite(local["library_recipe_ref"], True, idempotency_key="keep-local-favorite")
+        other = store.import_pack_record(
+            {**self.recipe, "name": "Other bundled recipe"},
+            pack_id="other-pack", recipe_id="other", version="1",
+        )["recipe"]
+        store.set_favorite(other["library_recipe_ref"], True, idempotency_key="keep-other-favorite")
+
+        report = remove_collection(state, "synthetic-household", {
+            "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+        })
+        self.assertEqual((report["status"], report["deleted"], report["deleted_favorites"],
+                          report["deleted_locally_modified"]), ("complete", 3, 1, 1))
+        for reference in refs.values():
+            with self.assertRaisesRegex(RecipeError, "not found"):
+                store.get(reference["recipe_id"])
+        self.assertEqual(store.get(local["id"])["entry_origin"], "user")
+        self.assertEqual(store.get(other["id"])["pack"]["pack_id"], "other-pack")
+        self.assertEqual({row["id"] for row in store.search(
+            limit=50, include_archived=True, favorites_only=True)}, {local["id"], other["id"]})
+        import sqlite3
+        with sqlite3.connect(state / "recipes.sqlite3") as connection:
+            response = connection.execute(
+                "SELECT response_json FROM idempotency WHERE key='remove-pack-archive'"
+            ).fetchone()[0]
+        self.assertEqual(json.loads(response), {"id": plain["id"]})
+        with self.assertRaisesRegex(RecipeError, "permanently deleted"):
+            store.archive(
+                plain["id"], plain["revision"], idempotency_key="remove-pack-archive"
+            )
+        self.assertFalse(any((state / "pack-metadata").iterdir()))
+        self.assertLessEqual(report["database"]["after_bytes"], report["database"]["before_bytes"])
+
+        repeated = remove_collection(state, "synthetic-household", {
+            "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+        })
+        self.assertEqual((repeated["deleted"], repeated["deleted_assets"],
+                          repeated["deleted_metadata_directories"]), (0, 0, 0))
+
+    def test_collection_removal_prunes_only_unreferenced_manifest_assets(self):
+        from recipe_portable import remove_collection
+        from recipes import RecipeStore
+
+        shared, shared_data = self.managed_cover("blue")
+        frozen, frozen_data = self.managed_cover("green")
+        orphan, orphan_data = self.managed_cover("red")
+        base = {**self.recipe, "schema_version": 2}
+        first_records = [
+            {**self.record, "recipe_id": "shared", "recipe": normalize_recipe({
+                **base, "name": "Shared", "image": {"asset_id": shared, "credit": "Synthetic blue"}})},
+            {**self.record, "recipe_id": "orphan", "recipe": normalize_recipe({
+                **base, "name": "Orphan", "image": {"asset_id": orphan, "credit": "Synthetic red"}})},
+        ]
+        first = self.apply(self.asset_package("assets-v1", "1", first_records, {
+            shared: shared_data, orphan: orphan_data,
+        }))
+        state = self.root / "state"
+        store = RecipeStore(state / "recipes.sqlite3", "synthetic-household")
+        orphan_ref = next(
+            result["bank_recipe_ref"] for result in first["results"] if result["recipe_id"] == "orphan"
+        )
+        orphan_recipe = store.get(orphan_ref["recipe_id"])
+        store.archive(
+            orphan_recipe["id"], orphan_recipe["revision"],
+            idempotency_key="removed-covered-pack-archive",
+        )
+        second_records = [{**self.record, "recipe_id": "shared", "recipe": normalize_recipe({
+            **base, "name": "Shared", "image": {"asset_id": frozen, "credit": "Synthetic green"}})}]
+        self.apply(self.asset_package("assets-v2", "2", second_records, {frozen: frozen_data}))
+        store.save(normalize_recipe({
+            **base, "name": "User keeps blue", "image": {"asset_id": shared, "credit": "Synthetic blue"},
+        }))
+        (state / "state-v12.backup.json").write_text(json.dumps({"frozen_cover": frozen}))
+        assets = state / "recipe-assets"
+        unrelated = assets / ("f" * 64 + ".jpg")
+        unrelated.write_bytes(b"not managed by this collection")
+
+        report = remove_collection(state, "synthetic-household", {
+            "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+        })
+        self.assertEqual((report["candidate_assets"], report["deleted_assets"],
+                          report["retained_referenced_assets"]), (3, 1, 2))
+        import sqlite3
+        with sqlite3.connect(state / "recipes.sqlite3") as connection:
+            archived_response = connection.execute(
+                "SELECT response_json FROM idempotency WHERE key='removed-covered-pack-archive'"
+            ).fetchone()[0]
+        self.assertEqual(json.loads(archived_response), {"id": orphan_recipe["id"]})
+        self.assertNotIn(orphan, archived_response)
+        self.assertTrue((assets / (shared[7:] + ".jpg")).is_file())
+        self.assertTrue((assets / (frozen[7:] + ".jpg")).is_file())
+        self.assertFalse((assets / (orphan[7:] + ".jpg")).exists())
+        self.assertEqual(unrelated.read_bytes(), b"not managed by this collection")
+        self.assertFalse(any((state / "pack-metadata").iterdir()))
+
+    def test_collection_removal_rejects_irregular_asset_before_database_delete(self):
+        from recipe_assets import RecipeAssetError
+        from recipe_portable import remove_collection
+        from recipes import RecipeStore
+        asset_id, data = self.managed_cover("purple")
+        self.manifest["recipe_schema_version"] = 2
+        record = {**self.record, "recipe": normalize_recipe({
+            **self.recipe, "schema_version": 2,
+            "image": {"asset_id": asset_id, "credit": "Synthetic purple"},
+        })}
+        imported = self.apply(self.asset_package("irregular", "1", [record], {asset_id: data}))
+        state = self.root / "state"
+        candidate = state / "recipe-assets" / (asset_id[7:] + ".jpg")
+        candidate.unlink()
+        outside = self.root / "outside.jpg"
+        outside.write_bytes(data)
+        candidate.symlink_to(outside)
+        with self.assertRaises(RecipeAssetError):
+            remove_collection(state, "synthetic-household", {
+                "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+            })
+        reference = imported["results"][0]["bank_recipe_ref"]
+        self.assertEqual(RecipeStore(state / "recipes.sqlite3", "synthetic-household").get(
+            reference["recipe_id"])["pack"]["pack_id"], self.manifest["pack_id"])
+        self.assertEqual(outside.read_bytes(), data)
+
+    def test_collection_removal_retry_cleans_empty_metadata_directory(self):
+        from recipe_portable import remove_collection
+        from recipes import RecipeStore
+        imported = self.apply(self.package())
+        state = self.root / "state"
+        store = RecipeStore(state / "recipes.sqlite3", "synthetic-household")
+        store.delete_absent_pack_records(pack_id=self.manifest["pack_id"], present_recipe_ids=())
+        metadata = state / imported["report_directory"]
+        for child in metadata.iterdir():
+            child.unlink()
+        report = remove_collection(state, "synthetic-household", {
+            "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+        })
+        self.assertEqual((report["status"], report["deleted"]), ("complete", 0))
+        self.assertFalse(metadata.exists())
+
+    def test_collection_removal_fails_closed_before_database_delete(self):
+        from recipe_portable import remove_collection
+        from recipes import RecipeStore
+        report = self.apply(self.package())
+        state = self.root / "state"
+        store = RecipeStore(state / "recipes.sqlite3", "synthetic-household")
+        reference = report["results"][0]["bank_recipe_ref"]
+        retained = state / report["report_directory"] / "manifest.json"
+        retained.write_bytes(b"not-json")
+        with self.assertRaises(RecipeError):
+            remove_collection(state, "synthetic-household", {
+                "pack_id": self.manifest["pack_id"], "display_name": "Optional Recipe Collection",
+            })
+        self.assertEqual(store.get(reference["recipe_id"])["pack"]["pack_id"], self.manifest["pack_id"])
 
     def test_existing_user_source_identity_is_never_relabelled_bundled(self):
         from recipes import RecipeStore

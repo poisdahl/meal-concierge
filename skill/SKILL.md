@@ -478,6 +478,17 @@ permanently deletes bundled identities absent from its complete new snapshot,
 including local edits, archive state and the favorite on that exact removed
 entry. It never deletes user recipes, other packs or their favorites.
 
+Removing the entire Optional Recipe Collection is installation maintenance, not
+a recipe MCP action. On an explicit request, update an older runtime first,
+verify that no active work will be interrupted, stop the exact installation,
+run `./install.sh remove-recipe-collection --home ABSOLUTE_DATA_HOME`, and restart
+the same owner. Do not emulate removal by archiving recipes or by importing an
+empty/user-selected pack. The offline command hard-deletes only the reviewed
+built-in collection identity, prunes only its unreferenced manifest assets and
+metadata, compacts the bank, and preserves other recipes, favorites, household
+history and delivery artifacts. If it reports incomplete storage cleanup, rerun
+the same command rather than deleting files manually.
+
 Use `meal_concierge_recipes` for libraries/search/get, and
 `meal_concierge_recipe_discovery` for discover/resolve. Search the target week.
 For browsing many local results, use discover `projection=summary`,

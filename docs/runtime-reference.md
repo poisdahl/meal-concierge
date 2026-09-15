@@ -366,6 +366,34 @@ Already committed record updates remain available; resolve the reported issue
 before retrying `import-recipes`. Source links and separate text/image credits
 remain available in imported records.
 
+To remove the whole **Optional Recipe Collection**, update the runtime first,
+stop the exact installation and run:
+
+```sh
+./install.sh remove-recipe-collection --home /absolute/data-home
+```
+
+Start the same service owner again after the command completes. The command uses
+the installed runtime under the same offline ownership locks as import, but
+performs no GitHub lookup, download or archive selection. Its only collection
+selector is the reviewed built-in `wikibooks-themealdb-en` identity; names or
+arguments cannot widen the deletion. It transactionally deletes every bundled
+entry with that identity, including revisions, archive state, local edits and
+the favorite on each exact entry. User entries, other packs and their favorites
+do not match. Prior idempotency keys remain as compact tombstones that reject
+replay without retaining full removed recipes or their cover references.
+
+Retained manifests for every installed version provide the bounded list of
+collection asset candidates. After the database delete, candidates still
+referenced by another database record, current or migrated household state, or
+a retained recipe-bank migration backup are kept. Unreferenced candidates are
+deleted, then SQLite is vacuumed to return free pages to the filesystem.
+Retained pack reports follow; manifests are removed last, making
+file cleanup resumable and the whole command idempotent. A missing or irregular
+manifest fails before database deletion. If cleanup fails after the transaction,
+rerun the same command; historical menu/delivery state and completed delivery
+artifacts are not deleted.
+
 ## Grok executable-binding fallback
 
 If Shell reports the documented executable-binding error, reconcile partial

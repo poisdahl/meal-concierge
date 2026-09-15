@@ -613,7 +613,7 @@ class InstallerTests(unittest.TestCase):
         from recipes import normalize_recipe
         recipe = normalize_recipe(RECIPE)
         manifest = {'format': FORMAT, 'format_version': 1, 'kind': 'bundled',
-                    'pack_id': 'mc03-test', 'pack_version': '1', 'normalizer_version': 'test1',
+                    'pack_id': install.RECIPE_PACK['pack_id'], 'pack_version': '1', 'normalizer_version': 'test1',
                     'recipe_schema_version': 1, 'records_count': 1}
         records = self.root / 'records.jsonl'
         records.write_bytes(canonical_bytes({'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe}) + b'\n')
@@ -643,6 +643,16 @@ class InstallerTests(unittest.TestCase):
                 resolve.assert_called_once_with()
             self.assertFalse(list(release.glob('recipe-pack-*.zip')))
         self.assertEqual(len(RecipeStore(home / 'state/recipes.sqlite3', CONFIG['household']).search()), 1)
+        remove_argv = ['install.py', 'remove-recipe-collection', '--home', str(home)]
+        for expected_deleted in (1, 0):
+            with patch.object(sys, 'argv', remove_argv), \
+                 patch.object(install, 'latest_recipe_pack', side_effect=AssertionError('unexpected network')) as resolve, \
+                 patch('sys.stdout', new_callable=io.StringIO) as output:
+                install.main()
+                resolve.assert_not_called()
+            report = json.loads(output.getvalue().split(': ', 1)[1])
+            self.assertEqual((report['status'], report['deleted']), ('complete', expected_deleted))
+        self.assertEqual(RecipeStore(home / 'state/recipes.sqlite3', CONFIG['household']).search(), [])
         (home / 'maintenance.json').write_text('{}')
         with patch.object(sys, 'argv', argv), patch.object(install, 'latest_recipe_pack') as resolve:
             with self.assertRaisesRegex(RuntimeError, 'complete the stopped runtime update'):
