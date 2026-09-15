@@ -15,6 +15,7 @@ import re
 import secrets
 from typing import Any, Callable, Iterator, Mapping
 from zoneinfo import ZoneInfo
+from web_recipes import DEFAULT_WEB_SEARCH, validate_web_search
 
 
 class HouseholdError(RuntimeError):
@@ -100,6 +101,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
     "recipes": {
         "repeat_cooldown_weeks": 6,
         "sources": deepcopy(DEFAULT_RECIPE_SOURCES),
+        "web_search": deepcopy(DEFAULT_WEB_SEARCH),
     },
 }
 
@@ -215,6 +217,12 @@ def _merge(target: dict[str, Any], changes: Mapping[str, Any]) -> None:
 def validate_profile(profile: Mapping[str, Any]) -> None:
     """Validate editable household values at the write boundary."""
     def check(value: Any, default: Any, path: str) -> None:
+        if path == "recipes.web_search":
+            try:
+                validate_web_search(value)
+            except ValueError as exc:
+                raise HouseholdError(str(exc)) from exc
+            return
         if isinstance(default, dict):
             if not isinstance(value, Mapping) or set(value) != set(default):
                 raise HouseholdError(f"profile {path} has invalid fields")
@@ -806,6 +814,11 @@ def _migrate_state(
     recipe_profile = profile.get("recipes")
     if not isinstance(recipe_profile, dict):
         raise HouseholdError("household recipe profile is invalid")
+    recipe_profile.setdefault("web_search", deepcopy(DEFAULT_WEB_SEARCH))
+    try:
+        validate_web_search(recipe_profile["web_search"])
+    except ValueError as exc:
+        raise HouseholdError(str(exc)) from exc
     cooldown = recipe_profile.get("repeat_cooldown_weeks")
     if isinstance(cooldown, bool) or not isinstance(cooldown, int) or not 0 <= cooldown <= 260:
         raise HouseholdError("repeat cooldown must be an integer from zero to 260 weeks")

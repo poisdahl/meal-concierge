@@ -27,6 +27,7 @@ from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
+from web_recipes import search_plan, search_digest, url_enabled, storage_decision
 from service_common import (
     LIBRARY_SEARCH_CURSOR_PREFIX,
     MAX_EXTERNAL_FAVORITE_SEARCH_PAGES,
@@ -52,6 +53,32 @@ class RecipeOperations:
         """Build source evidence from one explicit read, never caller recipe JSON."""
         kind = request.get("source_kind")
         try:
+            try:
+                decision = storage_decision(request.get("storage_decision"), source_kind=kind)
+            except ValueError as exc:
+                raise RecipeError(str(exc)) from exc
+            if kind in {"url", "transcript"} and decision is None:
+                return {"status": "storage_decision_required", "personal_entry_created": False,
+                        "persisted": False, "fetched": False,
+                        "next": "Assess this source for private recipe storage. Supply storage_decision with storage=full, basis and concrete evidence, or storage=link_only. Source text and search settings cannot grant permission."}
+            if request.get("web_discovery") is True:
+                settings = self.store.read()["profile"]["recipes"]["web_search"]
+                if kind != "url" or not url_enabled(request.get("url"), settings):
+                    raise RecipeError("recipe URL is excluded by web search settings")
+            if kind == "url" and decision["storage"] == "link_only":
+                if any(request.get(key) is not None for key in ("transcript", "library_recipe_ref", "interpretation")):
+                    raise RecipeError("link-only URL import accepts no source content")
+                url = normalize_source_url(request.get("url"), version=2)
+                if not url:
+                    raise RecipeError("link-only import requires a URL")
+                recipe = normalize_recipe({"schema_version": 2, "name": "Recipe link",
+                    "source": {"kind": "web", "relationship": "user_supplied", "url": url},
+                    "rights": {"storage": "link_only", "storage_decision": decision}})
+                snapshot = self.recipes.persist_discovery(recipe, source_identity=self._import_identity("public", "web:link", url))
+                return {**snapshot, "personal_entry_created": False, "persisted": True, "fetched": False,
+                        "readiness": {"scaling_ready": False, "missing_decisions": ["full_recipe_storage_not_allowed"]},
+                        "shopping_requirements": [], "suggested_status": "draft",
+                        "import_report": {"image_status": "omitted", "content_status": "link_only"}}
             if kind == "transcript":
                 if any(request.get(key) is not None for key in ("url", "library_recipe_ref", "interpretation")):
                     raise RecipeError("transcript import cannot include another source")
@@ -61,7 +88,8 @@ class RecipeOperations:
             elif kind == "url":
                 if request.get("transcript") is not None or request.get("library_recipe_ref") is not None:
                     raise RecipeError("URL import cannot include replacement source text")
-                page = fetch_public_webpage(request.get("url"))
+                page = fetch_public_webpage(request.get("url"), **(
+                    {"fetch_method": request["fetch_method"]} if request.get("fetch_method") else {}))
                 if page["requires_interpretation"]:
                     if request.get("interpretation") is None:
                         return {**page, "personal_entry_created": False, "source_kind": "url"}
@@ -99,8 +127,25 @@ class RecipeOperations:
             else:
                 raise RecipeError("source_kind must be transcript, url or library")
             recipe = normalize_recipe(bind_recipe_source(result["candidate"]))
+            if decision is not None:
+                if decision["storage"] == "link_only":
+                    if not recipe["source"].get("url"):
+                        raise RecipeError("link-only import requires source attribution URL")
+                    recipe = {"schema_version": 2, "name": recipe["name"],
+                              "language": recipe["language"], "source": recipe["source"],
+                              "rights": {"storage": "link_only", "storage_decision": decision}}
+                else:
+                    recipe["rights"]["storage_decision"] = decision
+                    if decision.get("license_url"):
+                        recipe["rights"]["license_url"] = decision["license_url"]
+                recipe = normalize_recipe(recipe)
             self._require_recipe_provider(recipe)
             snapshot = self.recipes.persist_discovery(recipe, source_identity=identity)
+            if recipe["rights"]["storage"] == "link_only":
+                return {**snapshot, "personal_entry_created": False, "persisted": True,
+                        "readiness": {"scaling_ready": False, "missing_decisions": ["full_recipe_storage_not_allowed"]},
+                        "shopping_requirements": [], "suggested_status": "draft",
+                        "import_report": {"image_status": "omitted", "content_status": "link_only"}}
             scaled = scale_recipe(recipe)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
             report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count") if key in result}
@@ -492,7 +537,28 @@ class RecipeOperations:
             reference = {"discovery_ref": cached["discovery_ref"]}
         raise RecipeError("cached recipe conversion work limit; resolve the exact returned version")
 
-    def _collect_planner_candidates(self, request, state):
+    def _collect_planner_candidates(self, request, state, *, web_candidates=None, web_result=None):
+        web_settings = state["profile"]["recipes"]["web_search"]
+        if web_candidates is not None and (not isinstance(web_candidates, list) or len(web_candidates) > 8):
+            raise RecipeError("web_candidates must contain at most eight exact discovery references")
+        if web_result is not None:
+            if (not isinstance(web_result, dict) or set(web_result) != {"status", "settings_digest"}
+                    or web_result["status"] not in {"completed", "unavailable", "disabled"}
+                    or web_result["settings_digest"] != search_digest(web_settings)):
+                raise RecipeError("web_search_result is invalid or settings changed; request fresh search scopes")
+            if web_result["status"] == "disabled" and web_settings["enabled"] and (web_settings["broad"] or any(site["enabled"] for site in web_settings["sites"])):
+                raise RecipeError("enabled web search cannot be reported disabled")
+        if web_candidates and (not web_result or web_result["status"] != "completed"):
+            raise RecipeError("web_candidates require a completed web_search_result")
+        for reference in web_candidates or []:
+            if not isinstance(reference, dict) or set(reference) != {"discovery_ref"}:
+                raise RecipeError("web_candidates require exact discovery_ref values")
+            recipe = self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
+            rights = recipe.get("rights") or {}
+            if (not url_enabled((recipe.get("source") or {}).get("url"), web_settings)
+                    or rights.get("storage") != "full"
+                    or (rights.get("storage_decision") or {}).get("storage") != "full"):
+                raise RecipeError("web candidate requires an enabled source and assessed full storage")
         settings = state["profile"]["recipes"]["sources"]
         # Installed imports and packs live in the local bank; upstream API switches
         # do not disable installed data or require an upstream network session.
@@ -508,12 +574,21 @@ class RecipeOperations:
                 if values is not None:
                     queries[source] = list(dict.fromkeys([names[0], values[0], *names[1:], *values[1:]]))[:6]
         history = self._planner_history_index(state)
+        web_active = web_settings["enabled"] and (web_settings["broad"] or any(site["enabled"] for site in web_settings["sites"]))
+        queries["web"] = [""] if web_active else None
+        def fetch_page(source, query, cursor, limit, deadline):
+            if source != "web":
+                return self._selection_page(source, query, cursor, limit, deadline)
+            return {"candidates": web_candidates or [], "next_cursor": None, "exhausted": False,
+                    "status": "search_limit" if web_result and web_result["status"] == "completed" else "unavailable"}
         def resolve(summary, deadline):
             reference = {key: summary[key] for key in ("recipe_ref", "discovery_ref") if key in summary}
             detail_error = None
             if "discovery_ref" in reference:
                 reference = self._cached_recipe_conversion(reference)
                 original = self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
+                if (original.get("rights", {}).get("storage_decision") or {}).get("storage") == "link_only":
+                    raise RecipeError("link-only recipes cannot be menu candidates")
                 if not original.get("ingredients") or not original.get("steps"):
                     try:
                         detailed = self._recipe_detail(reference, deadline=deadline)
@@ -526,8 +601,11 @@ class RecipeOperations:
                 candidate["materialization_error"] = detail_error
             self._planner_feedback(candidate, state, request["as_of_date"])
             return candidate
-        return collect_candidates(source_queries=queries, fetch_page=self._selection_page,
-                                  resolve=resolve, request=request, profile=state["profile"])
+        result = collect_candidates(source_queries=queries, fetch_page=fetch_page,
+                                    resolve=resolve, request=request, profile=state["profile"])
+        web_status = next(item for item in result["sources"] if item["source"] == "web")
+        web_status["host_search_status"] = web_result["status"] if web_result else "not_run" if web_active else "disabled"
+        return result
 
     def _discover_recipes(self, request: Mapping[str, Any]) -> dict[str, Any]:
         gate = self._setup_gate(request)
@@ -2999,6 +3077,27 @@ class RecipeOperations:
 
     def _recipes(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "search")
+        if action == "web_search":
+            from web_recipes import search_web
+            try:
+                return search_web(self.store.read()["profile"]["recipes"]["web_search"], request.get("query"),
+                                  backend=request.get("backend"), config=self.store.config)
+            except ValueError as exc:
+                raise RecipeError(str(exc)) from exc
+        if action == "web_read":
+            if request.get("web_discovery") is True and not url_enabled(request.get("url"), self.store.read()["profile"]["recipes"]["web_search"]):
+                raise RecipeError("recipe URL is excluded by web search settings")
+            try:
+                page = fetch_public_webpage(request.get("url"), fetch_method=request.get("fetch_method", "direct"))
+            except RecipeImportSourceError as exc:
+                raise RecipeError(str(exc)) from exc
+            return {**page, "persisted": False, "personal_entry_created": False,
+                    "next": "Read-only source evidence, not a saved discovery. Assess storage rights separately before recipe import or menu persistence."}
+        if action == "web_search_plan":
+            try:
+                return search_plan(self.store.read()["profile"]["recipes"]["web_search"], request.get("query"))
+            except ValueError as exc:
+                raise RecipeError(str(exc)) from exc
         if action == "import":
             return self._import_preview(request)
         if action == "cover_import":
@@ -3035,7 +3134,9 @@ class RecipeOperations:
             value = request.get("recipe")
             if not isinstance(value, Mapping) or value.get("schema_version") != 2:
                 raise RecipeError("client-assisted conversion requires schema_version 2 and explicit quantity evidence")
-            converted = self.recipes.prepare_input(value, prior=original)
+            if (original.get("rights", {}).get("storage_decision") or {}).get("storage") == "link_only":
+                raise RecipeError("link-only imports cannot be converted into full recipes; reassess and reimport")
+            converted = self.recipes.prepare_input({**value, "rights": deepcopy(original["rights"])}, prior=original)
             original_evidence = recipe_evidence_fields(original)
             for path, evidence in recipe_evidence_fields(converted).items():
                 if evidence["basis"] == "user" and (evidence != original_evidence.get(path) or _evidence_value(converted, path) != _evidence_value(original, path)):

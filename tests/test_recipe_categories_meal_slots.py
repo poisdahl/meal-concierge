@@ -42,7 +42,8 @@ class CategoryMealTests(unittest.TestCase):
                           "ingredients": [{"page": 1, "quote": f"200 g {ingredient}"}],
                           "steps": [{"page": 1, "quote": "Mix and serve."}]}}
         preview = self.app.handle({"operation": "recipes", "action": "import",
-                                  "source_kind": "transcript", "transcript": transcript})
+                                  "source_kind": "transcript", "transcript": transcript,
+                                  "storage_decision": {"storage": "full", "basis": "own_recipe", "evidence": "Synthetic test recipe authored here."}})
         return self.app.handle({"operation": "recipes", "action": "save",
                                "discovery_ref": preview["discovery_ref"], "idempotency_key": name})["recipe"]
 

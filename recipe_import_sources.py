@@ -91,11 +91,11 @@ def _public_address(address: str) -> bool:
 class _PinnedConnection(http.client.HTTPConnection):
     """One request; socket.connect receives only prevalidated numeric addresses."""
 
-    def __init__(self, host: str, port: int, *, tls: bool, public_only: bool):
-        super().__init__(host, port, timeout=TIMEOUT)
+    def __init__(self, host: str, port: int, *, tls: bool, public_only: bool, timeout: float = TIMEOUT):
+        super().__init__(host, port, timeout=timeout)
         self._tls = tls
         self._public_only = public_only
-        self._deadline = time.monotonic() + TIMEOUT
+        self._deadline = time.monotonic() + timeout
         self._transport: socket.socket | None = None
 
     def abort(self) -> None:
@@ -149,12 +149,28 @@ class _PinnedConnection(http.client.HTTPConnection):
 
 def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
                authorization: str | None = None,
-               accept: str = "application/json, text/html, application/xhtml+xml") -> tuple[bytes, str]:
+               search_api_key: str | None = None,
+               accept: str = "application/json, text/html, application/xhtml+xml",
+               json_body: dict | None = None) -> tuple[bytes, str]:
     """Fixed-origin GET. Only an independently configured origin permits private IPs."""
     checked = _url(url, "source URL")
     if not checked:
         raise RecipeImportSourceError("source URL is required")
     parsed = urlsplit(checked)
+    # Search credentials are separate from authenticated/private recipe origins.
+    # Only these exact public API routes accept them; DNS remains public-only.
+    search_header = None
+    if search_api_key is not None:
+        from recipe_search_setup import validate_api_key
+        validate_api_key(search_api_key)
+        if configured_origin is not None or authorization is not None or parsed.fragment:
+            raise RecipeImportSourceError("invalid search credential destination")
+        if (parsed.scheme, parsed.netloc, parsed.path) == ("https", "api.search.brave.com", "/res/v1/web/search") and json_body is None:
+            search_header = ("X-Subscription-Token", search_api_key)
+        elif checked == "https://api.firecrawl.dev/v2/search" and json_body is not None:
+            search_header = ("Authorization", "Bearer " + search_api_key)
+        else:
+            raise RecipeImportSourceError("invalid search credential destination")
     if configured_origin is None:
         if parsed.scheme != "https" or authorization is not None:
             raise RecipeImportSourceError("public source retrieval requires unauthenticated HTTPS")
@@ -162,24 +178,45 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
         require_authenticated_origin(configured_origin, checked)
     host = parsed.hostname.encode("idna").decode("ascii")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    connection = _PinnedConnection(host, port, tls=parsed.scheme == "https", public_only=configured_origin is None)
+    # POST is reserved for fixed anonymous search/reading endpoints, never a
+    # source-controlled URL, configured account or arbitrary remote action.
+    if json_body is not None and checked not in {"https://api.firecrawl.dev/v2/search", "https://api.firecrawl.dev/v2/scrape", "https://www.godfisk.no/sok/_Search"}:
+        raise RecipeImportSourceError("unsupported public source POST")
+    timeout = 30.0 if json_body is not None else TIMEOUT
+    connection = _PinnedConnection(host, port, tls=parsed.scheme == "https", public_only=configured_origin is None,
+                                   **({"timeout": timeout} if json_body is not None else {}))
     path = quote(parsed.path or "/", safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         path += "?" + quote(parsed.query, safe="=&?/%:@!$'()*+,;~-._")
-    headers = {"Accept": accept, "Accept-Encoding": "identity", "User-Agent": "meal-concierge/source-import-v1"}
+    # HTTPConnection defaults to port 80 even when our pinned socket uses TLS.
+    # Its implicit Host therefore adds :443, which some virtual hosts reject.
+    authority = f"[{host}]" if ":" in host else host
+    if port != (443 if parsed.scheme == "https" else 80):
+        authority += f":{port}"
+    headers = {"Host": authority, "Accept": accept, "Accept-Encoding": "identity", "User-Agent": "meal-concierge/source-import-v1"}
+    if checked.startswith("https://www.matprat.no/api/ContentSearch/Search?"):
+        # The publisher's public search requires its own search-page referrer.
+        headers["Referer"] = "https://www.matprat.no/sok/"
     if authorization is not None:
         headers["Authorization"] = authorization
-    timer = threading.Timer(TIMEOUT, connection.abort)
+    if search_header is not None:
+        headers[search_header[0]] = search_header[1]
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+    timer = threading.Timer(timeout, connection.abort)
     timer.daemon = True
     timer.start()
     response = None
     try:
-        connection.request("GET", path, headers=headers)
+        if json_body is None:
+            connection.request("GET", path, headers=headers)
+        else:
+            connection.request("POST", path, body=_wire_json(json_body), headers=headers)
         response = connection.getresponse()
         if 300 <= response.status < 400:
             raise RecipeImportSourceError("source redirects are forbidden")
         if response.status != 200:
-            raise RecipeImportSourceError(f"source GET failed with HTTP {response.status}")
+            raise RecipeImportSourceError(f"source request failed with HTTP {response.status}")
         if response.headers.get("Content-Encoding", "identity").casefold() != "identity":
             raise RecipeImportSourceError("compressed source responses are unsupported")
         lengths = response.headers.get_all("Content-Length", [])
@@ -216,18 +253,63 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
         connection.close()
 
 
-def fetch_public_webpage(url: str) -> dict[str, Any]:
+def firecrawl_request(endpoint: str, payload: dict, *, api_key: str | None = None) -> dict:
+    """Bounded public API; search alone supports an explicit local credential."""
+    if endpoint not in {"search", "scrape"}:
+        raise RecipeImportSourceError("unsupported Firecrawl operation")
+    raw, content_type = _get_bytes("https://api.firecrawl.dev/v2/" + endpoint,
+        maximum=MAX_WEBPAGE_BYTES * 2, accept="application/json", json_body=payload,
+        **({"search_api_key": api_key} if api_key is not None else {}))
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise RecipeImportSourceError("Firecrawl returned invalid JSON") from exc
+    if content_type != "application/json" or not isinstance(value, dict) or value.get("success") is not True or not isinstance(value.get("data"), dict):
+        raise RecipeImportSourceError("Firecrawl response is unavailable or incompatible")
+    return value["data"]
+
+
+def _firecrawl_page(url: str) -> bytes:
+    checked = _url(url, "source URL")
+    parsed = urlsplit(checked or "")
+    if parsed.scheme != "https" or not parsed.hostname or parsed.port not in {None, 443}:
+        raise RecipeImportSourceError("Firecrawl requires a public HTTPS URL on port 443")
+    try:
+        addresses = socket.getaddrinfo(parsed.hostname, 443, type=socket.SOCK_STREAM)
+        if not addresses or len(addresses) > 32 or any(not _public_address(a[4][0]) for a in addresses):
+            raise RecipeImportSourceError("public recipe URLs cannot resolve to nonpublic addresses")
+    except (OSError, ValueError) as exc:
+        raise RecipeImportSourceError("public recipe URL DNS is unavailable or nonpublic") from exc
+    data = firecrawl_request("scrape", {"url": checked, "formats": ["rawHtml"],
+        "onlyMainContent": False, "storeInCache": False, "maxAge": 0,
+        "skipTlsVerification": False})
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("statusCode") != 200 or metadata.get("url") != checked:
+        raise RecipeImportSourceError("Firecrawl did not verify the exact requested page")
+    html = data.get("rawHtml")
+    if not isinstance(html, str) or not html or len(html.encode("utf-8")) > MAX_WEBPAGE_BYTES:
+        raise RecipeImportSourceError("Firecrawl page is empty or too large")
+    return html.encode("utf-8")
+
+
+def fetch_public_webpage(url: str, *, fetch_method: str = "direct") -> dict[str, Any]:
     """Fetch once: structured recipes or bounded text requiring host interpretation.
 
     Embedded contexts, images and links stay inert. Malformed JSON-LD is an
     explicit failure, not a reason to silently switch extraction methods.
     """
-    raw, content_type = _get_bytes(url, maximum=MAX_WEBPAGE_BYTES)
-    if content_type not in {"text/html", "application/xhtml+xml"}:
-        raise RecipeImportSourceError("public recipe source must return HTML")
+    if fetch_method == "firecrawl":
+        raw = _firecrawl_page(url)
+    elif fetch_method == "direct":
+        raw, content_type = _get_bytes(url, maximum=MAX_WEBPAGE_BYTES, accept="text/html, application/xhtml+xml")
+        if content_type not in {"text/html", "application/xhtml+xml"}:
+            raise RecipeImportSourceError("public recipe source must return HTML")
+    else:
+        raise RecipeImportSourceError("fetch_method must be direct or firecrawl")
     result = read_webpage(raw, source_url=url)
     result["recipes"] = [_source_result(record, {"kind": "web", "url": url})
                          for record in result["recipes"]]
+    result["fetch_method"] = fetch_method
     return result
 
 

@@ -10,8 +10,17 @@ Give the agent a recipe link, paste the text or attach a supported file:
 
 > Read this recipe, show me the ingredients and portions, then save it when I confirm.
 
-Check the preview before saving. Reading a source does not by itself save a
-recipe. Missing amounts, unclear servings and unsupported fields are reported;
+Check the preview before saving. Before importing text or a URL, the agent must
+record a concrete basis for storing the full recipe privately: your own recipe,
+permission, a verified license or an applicable private-use assessment. Public
+access or a source's presence in search settings is not permission. If the
+basis is unresolved, a URL can be saved as a link only, without fetching its
+contents; that bookmark is not a shopping-ready recipe.
+
+A full preview persists a private technical snapshot but does not create a
+personal bank entry. Menus, orders and recipe emails can also retain recipe
+content. This is not a no-storage mode or permission to redistribute recipes.
+Missing amounts, unclear servings and unsupported fields are reported;
 they are not silently invented. You can keep an incomplete recipe as a draft
 and fill in what is missing later.
 
@@ -19,6 +28,20 @@ Recipes saved through Meal Concierge go into its local bank. Source links and
 credits are retained. Changes to an original webpage do not silently replace
 your saved version. Reimporting the same source can produce a conflict for you
 to review instead of overwriting your local edits.
+
+## Web recipes in weekly menus
+
+Automatic recipe discovery defaults to MatPrat, Vegetarentusiast, Frukt.no,
+Godfisk, TINE Kjøkken, Godt and Trines Matblogg. You can disable individual
+domains, replace the list or turn web discovery off. Searching the wider web is
+off by default and can be enabled separately. Disabled domains remain excluded
+even in broad search. These are search preferences, not licensed integrations.
+
+The agent uses its available web-search tool and submits selected, assessed
+recipes to the normal menu planner alongside local and store recipes. Search
+or page failures are reported; they do not disable local/store planning. Exact
+portions and ingredients must come from the recipe, not a search snippet.
+User-supplied recipe links and text still work with automatic web search off.
 
 ## Sources and files
 
