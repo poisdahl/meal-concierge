@@ -22,8 +22,8 @@ For long menus, text or attachments may be split into several parts.
 
 | Agent or destination | Practical limitation |
 |---|---|
-| Codex CLI | Can create local files; the terminal itself does not show a PDF/image preview. |
-| Codex desktop / Claude Desktop Code | Use the client's file viewer for PDF and images; file access and attachment support are required. |
+| Codex or Claude Code in a terminal | Can create local files; the terminal itself does not show a PDF/image preview. |
+| Codex or Claude Code in a desktop app | Use the client's file viewer for PDF and images; file access and attachment support are required. |
 | Grok Bot group rooms | Recipe text is supported; PDF and image attachments are not delivered through that room transport. |
 | Hermes, OpenClaw, NanoClaw and other destinations | File delivery depends on the configured chat/sender. Have the agent check support rather than promise attachments. |
 
