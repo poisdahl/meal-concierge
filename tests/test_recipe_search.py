@@ -45,7 +45,8 @@ class OptionalSearchTests(unittest.TestCase):
         params = parse_qs(urlsplit(url).query)
         self.assertEqual(kwargs["search_api_key"], "synthetic-secret-marker")
         self.assertEqual(params["country"], ["NO"])
-        self.assertEqual(params["search_lang"], ["no"])
+        # Brave accepts the language code "nb"; "no" is rejected with HTTP 422.
+        self.assertEqual(params["search_lang"], ["nb"])
         self.assertEqual(params["safesearch"], ["strict"])
         return json.dumps({"type": "search", "query": {"original": params["q"][0]},
             "web": {"results": [{"title": "Kikertgryte", "url": "https://recipes.example/kikertgryte"}]}}).encode(), "application/json"

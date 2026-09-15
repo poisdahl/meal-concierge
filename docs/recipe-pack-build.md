@@ -77,6 +77,26 @@ and never creates personal acceptance. Only the reviewed release introduces
 publisher estimate markers through the verified bundled-import path. Culinary
 review is required in addition to numeric completeness before publication.
 
+### Optional ordinary Norwegian grocery policy
+
+`--ordinary-grocery-selection` is an explicit publisher build option for making
+a deliberately smaller, source-bound collection. It is not enabled during
+installation or menu generation, and it never filters a user's chosen recipe
+pack at runtime. The option requires the pinned editorial-curation input, binds
+its policy identifier into the build identity, and lists every omitted source
+identity in `coverage.json`.
+
+The policy excludes only recipes whose normalized ingredient names contain a
+bounded, reviewed ingredient phrase; unfamiliar titles are retained. It does
+not infer suitability from a recipe's country, publisher or title, and it does
+not guess required equipment from free-form method text. Two reviewed
+adaptations are bound to the exact source hash in the editorial-curation input.
+They retain original ingredient wording and source attribution while replacing
+the active ingredient, amount and matching method text together. A changed
+source or unexpected amount aborts the build for review. The policy contains no
+retailer integration, live-catalog reference or household state. User-selected
+collection packs, favourites, local edits and menu history are unaffected.
+
 ## Rights, attribution and images
 
 Wikibooks text is distributed under CC BY-SA 4.0 with source, revision,

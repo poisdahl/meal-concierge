@@ -323,8 +323,10 @@ def write_file(root, relative, data):
     return {'path': relative, 'bytes': len(data), 'sha256': digest(data)}
 
 
-def fingerprint():
+def fingerprint(*, ordinary_grocery_selection=False):
     modules = ['recipes', 'recipe_quantities', 'recipe_assets', 'recipe_pack_sources', 'recipe_portable', 'recipe_curation']
+    if ordinary_grocery_selection:
+        modules.append('norwegian_grocery_curation')
     values = {name: digest(Path(importlib.import_module(name).__file__).read_bytes()) for name in modules}
     values['builder'] = digest(Path(__file__).read_bytes())
     for name in ['PIL', 'simplejpeg', 'numpy']:
@@ -457,7 +459,7 @@ class Covers:
         return data
 
 
-def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None):
+def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None, ordinary_grocery_selection=False):
     from recipe_assets import RecipeAssetError
     from recipe_portable import AUTHORITATIVE_MEMBERSHIP, DEFAULT_COLLECTION_DISPLAY_NAME, canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe, categories_from_tags
@@ -473,6 +475,17 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         raise PackBuildError('expected snapshot SHA-256 is required')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', pack_version):
         raise PackBuildError('invalid pack version')
+    if not isinstance(ordinary_grocery_selection, bool):
+        raise PackBuildError('ordinary grocery selection must be true or false')
+    ordinary_apply = None
+    ordinary_adapt = frozenset()
+    ordinary_exclusion_errors = ordinary_policy_errors = ()
+    if ordinary_grocery_selection:
+        from norwegian_grocery_curation import ADAPT, OrdinaryGroceryExcluded, OrdinaryGroceryPolicyError, apply
+        ordinary_apply = apply
+        ordinary_adapt = ADAPT
+        ordinary_exclusion_errors = (OrdinaryGroceryExcluded,)
+        ordinary_policy_errors = (OrdinaryGroceryPolicyError,)
     read_file(snapshot, 'SEALED', 4096)
     source_bytes = read_file(snapshot, 'snapshot.json', MAX_SOURCE_BODY)
     if digest(source_bytes) != snapshot_sha256:
@@ -510,11 +523,16 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             raise PackBuildError('curation contains unknown source identities')
     elif curation_sha256:
         raise PackBuildError('curation checksum requires its file')
-    versions = fingerprint()
+    if ordinary_grocery_selection and amendments is None:
+        raise PackBuildError('ordinary grocery selection requires pinned editorial curation')
+    versions = fingerprint(ordinary_grocery_selection=ordinary_grocery_selection)
     if amendments is not None:
         versions['curation_input_sha256'] = curation_sha256
     if covers:
         versions['covers_manifest_sha256'] = covers.manifest_sha256
+    if ordinary_grocery_selection:
+        from norwegian_grocery_curation import POLICY
+        versions['ordinary_grocery_selection'] = POLICY
     run_key = digest(encoded({'snapshot': snapshot_sha256, 'versions': versions, 'policy': RIGHTS_POLICY, 'pack_version': pack_version}))
     output.mkdir(parents=True, exist_ok=True)
     cache = f'cache/{run_key}'
@@ -551,7 +569,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 if cached_status in {'ready', 'draft'}:
                     if not isinstance(cached.get('recipe'), dict) or not isinstance(cached.get('credit'), dict) or not isinstance(cached.get('reasons'), list) or not isinstance(cached.get('image_status'), str):
                         raise ValueError('incomplete cached recipe')
-                elif cached_status not in {'failed_parse', 'excluded_missing_source_method'}:
+                elif cached_status not in {'failed_parse', 'excluded_missing_source_method',
+                                           'excluded_ordinary_grocery_selection'}:
                     raise ValueError('invalid cached status')
                 if cached.get('image_status') == 'invalid_derivative':
                     cached = None
@@ -563,12 +582,21 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             try:
                 reader = wikibooks_recipe if entry['source'] == 'wikibooks' else mealdb_recipe
                 recipe, credit = reader(entry, payloads.get('rendered', payloads['raw']))
+                reviewed_source_hash = None
+                if ordinary_grocery_selection and identity in ordinary_adapt:
+                    amendment = amendments.get(identity)
+                    if not isinstance(amendment, dict) or not isinstance(amendment.get('source_hash'), str):
+                        raise PackBuildError('ordinary grocery adaptation requires source-bound editorial curation for '+identity)
+                    reviewed_source_hash = amendment['source_hash']
                 if amendments is not None:
                     from recipe_curation import curate
                     try:
                         recipe, credit = curate(recipe, credit, pack_version=pack_version, amendments=amendments)
                     except (RecipeError, KeyError, TypeError, ValueError) as exc:
                         raise PackBuildError('curation failed for '+entry['source']+':'+entry['source_id']+': '+str(exc)) from exc
+                if ordinary_grocery_selection:
+                    recipe, credit, _ = ordinary_apply(recipe, credit, pack_version=pack_version,
+                                                       reviewed_source_hash=reviewed_source_hash)
                 recipe = normalize_recipe({**recipe, "categories": categories_from_tags(recipe.get("tags", []))})
                 status, reasons = readiness(recipe)
                 reasons.extend(credit.get('normalization_issues', []))
@@ -604,6 +632,10 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 cached = {'recipe': recipe, 'status': status, 'reasons': reasons, 'credit': credit, 'image_status': image_status}
             except SourceMethodExcluded as exc:
                 cached = {'status': 'excluded_missing_source_method', 'reason': str(exc)}
+            except ordinary_exclusion_errors as exc:
+                cached = {'status': 'excluded_ordinary_grocery_selection', 'reason': str(exc)}
+            except ordinary_policy_errors as exc:
+                raise PackBuildError('ordinary grocery policy no longer matches '+identity+': '+str(exc)) from exc
             except PackBuildError:
                 raise
             except (SourceParseError, RecipeError, KeyError, TypeError, ValueError) as exc:
@@ -754,10 +786,12 @@ def main():
     parser.add_argument('--covers-manifest-sha256')
     parser.add_argument('--curation', type=Path)
     parser.add_argument('--curation-sha256')
+    parser.add_argument('--ordinary-grocery-selection', action='store_true')
     args = parser.parse_args()
     print(json.dumps(build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
                            covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256,
-                           curation=args.curation, curation_sha256=args.curation_sha256), indent=2))
+                           curation=args.curation, curation_sha256=args.curation_sha256,
+                           ordinary_grocery_selection=args.ordinary_grocery_selection), indent=2))
 
 
 if __name__ == '__main__':

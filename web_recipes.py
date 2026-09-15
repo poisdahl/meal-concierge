@@ -242,7 +242,7 @@ def _brave_search(settings, query, api_key):
     if len(scoped) > 600 or len(scoped.split()) > 75:
         raise RecipeImportSourceError("Brave query/scope is too long; shorten the query or select fewer sites")
     url = "https://api.search.brave.com/res/v1/web/search?" + urlencode({
-        "q": scoped, "count": 8, "country": "NO", "search_lang": "no",
+        "q": scoped, "count": 8, "country": "NO", "search_lang": "nb",
         "safesearch": "strict", "spellcheck": "false", "text_decorations": "false", "result_filter": "web",
     })
     raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, accept="application/json", search_api_key=api_key)
