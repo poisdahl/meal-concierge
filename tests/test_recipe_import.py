@@ -79,6 +79,15 @@ class PortableTests(unittest.TestCase):
             write_archive(second, self.manifest, {"records.jsonl": self.root / "records.jsonl"})
         self.assertEqual(first.read_bytes(), second.read_bytes())
 
+    def test_collection_manifest_metadata_is_validated(self):
+        for field, value in (("display_name", "  "), ("display_name", " Optional Recipe Collection "),
+                             ("membership_mode", "partial"), ("membership_mode", [])):
+            with self.subTest(field=field):
+                self.manifest[field] = value
+                with self.assertRaises(RecipeError):
+                    self.package()
+                self.manifest.pop(field)
+
     def test_changed_digest_and_truncation_rejected(self):
         path = self.package()
         with zipfile.ZipFile(path) as source:
@@ -674,6 +683,15 @@ class PackInstallationTests(unittest.TestCase):
         state.mkdir(exist_ok=True)
         return apply_archive(path, state, "synthetic-household", self.descriptor(path))
 
+    def versioned_package(self, name, records, **manifest):
+        source = self.root / f"{name}.jsonl"
+        source.write_bytes(b"".join(canonical_bytes(item) + b"\n" for item in records))
+        path = self.root / f"{name}.zip"
+        self.manifest.update(manifest)
+        self.manifest["records_count"] = len(records)
+        write_archive(path, self.manifest, {"records.jsonl": source})
+        return path
+
     def test_trusted_descriptor_preflight_is_read_only_and_checks_all_fields(self):
         from recipe_portable import preflight_archive
         path = self.package()
@@ -786,6 +804,101 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual(after["notes"], "New release wording")
         self.assertEqual(normalize_recipe(store.get(before["id"], before["revision"])), normalize_recipe(before))
         self.assertEqual(self.apply(updated)["unchanged"], 1)
+
+    def test_authoritative_update_deletes_only_absent_same_pack_entries_and_their_favorites(self):
+        from recipes import RecipeStore
+        records = [
+            {**self.record, "recipe_id": identity,
+             "recipe": {**self.recipe, "name": name}}
+            for identity, name in (("keep", "Keep"), ("edited", "Edited"), ("favorite", "Favorite"))
+        ]
+        first = self.apply(self.versioned_package(
+            "authoritative-v1", records, pack_version="1",
+            display_name="Optional Recipe Collection", membership_mode="authoritative"))
+        refs = {result["recipe_id"]: result["bank_recipe_ref"] for result in first["results"]}
+        store = RecipeStore(self.root / "state/recipes.sqlite3", "synthetic-household")
+        edited = store.get(refs["edited"]["recipe_id"])
+        store.update(edited["id"], edited["revision"], {**self.recipe, "name": "Local edit"})
+        store.set_favorite(refs["favorite"], True, idempotency_key="removed-favorite")
+
+        local = store.save({**self.recipe, "name": "Local user recipe"})
+        store.set_favorite(local["library_recipe_ref"], True, idempotency_key="local-favorite")
+        other = store.import_pack_record(
+            {**self.recipe, "name": "Other collection recipe"},
+            pack_id="other-pack", recipe_id="other", version="1")["recipe"]
+        store.set_favorite(other["library_recipe_ref"], True, idempotency_key="other-favorite")
+
+        report = self.apply(self.versioned_package(
+            "authoritative-v2", [records[0]], pack_version="2",
+            display_name="Optional Recipe Collection", membership_mode="authoritative"))
+        self.assertEqual((report["deleted"], report["deleted_favorites"],
+                          report["deleted_locally_modified"]), (2, 1, 1))
+        self.assertEqual({row["recipe_id"] for row in report["results"] if row["outcome"] == "deleted"},
+                         {"edited", "favorite"})
+        for identity in ("edited", "favorite"):
+            with self.assertRaisesRegex(RecipeError, "not found"):
+                store.get(refs[identity]["recipe_id"])
+        self.assertEqual(store.get(refs["keep"]["recipe_id"])["pack"]["version"], "2")
+        self.assertEqual(store.get(local["id"])["entry_origin"], "user")
+        self.assertEqual(store.get(other["id"])["pack"]["pack_id"], "other-pack")
+        self.assertEqual({row["id"] for row in store.search(
+            limit=50, include_archived=True, favorites_only=True)}, {local["id"], other["id"]})
+        repeated = self.apply(self.root / "authoritative-v2.zip")
+        self.assertEqual((repeated["deleted"], repeated["unchanged"]), (0, 1))
+
+    def test_merge_pack_omission_and_interrupted_authoritative_update_do_not_delete(self):
+        from recipes import RecipeStore
+        records = [
+            {**self.record, "recipe_id": identity,
+             "recipe": {**self.recipe, "name": name}}
+            for identity, name in (("keep", "Keep"), ("absent", "Absent"))
+        ]
+        first = self.apply(self.versioned_package("merge-v1", records, pack_version="1"))
+        refs = {result["recipe_id"]: result["bank_recipe_ref"] for result in first["results"]}
+        store = RecipeStore(self.root / "state/recipes.sqlite3", "synthetic-household")
+        merge = self.apply(self.versioned_package("merge-v2", [records[0]], pack_version="2"))
+        self.assertEqual(merge["deleted"], 0)
+        self.assertEqual(store.get(refs["absent"]["recipe_id"])["pack"]["version"], "1")
+
+        authoritative = self.versioned_package(
+            "authoritative-v3", [records[0]], pack_version="3",
+            display_name="Optional Recipe Collection", membership_mode="authoritative")
+        with patch.object(RecipeStore, "import_pack_record", side_effect=KeyboardInterrupt()):
+            interrupted = self.apply(authoritative)
+        self.assertEqual((interrupted["status"], interrupted["processed"], interrupted["deleted"]),
+                         ("partial", 0, 0))
+        self.assertEqual(store.get(refs["absent"]["recipe_id"])["pack"]["version"], "1")
+
+    def test_authoritative_delete_phase_is_atomic(self):
+        from recipes import RecipeStore
+        records = [
+            {**self.record, "recipe_id": identity,
+             "recipe": {**self.recipe, "name": name}}
+            for identity, name in (("keep", "Keep"), ("absent-one", "Absent one"),
+                                   ("absent-two", "Absent two"))
+        ]
+        first = self.apply(self.versioned_package(
+            "atomic-v1", records, pack_version="1", membership_mode="authoritative"))
+        refs = {result["recipe_id"]: result["bank_recipe_ref"] for result in first["results"]}
+        store = RecipeStore(self.root / "state/recipes.sqlite3", "synthetic-household")
+        updated = self.versioned_package(
+            "atomic-v2", [records[0]], pack_version="2", membership_mode="authoritative")
+        actual = RecipeStore._delete_recipe_rows
+        calls = 0
+
+        def fail_after_first(connection, recipe_id):
+            nonlocal calls
+            actual(connection, recipe_id)
+            calls += 1
+            if calls == 1:
+                raise RecipeError("synthetic reconciliation failure")
+
+        with patch.object(RecipeStore, "_delete_recipe_rows", side_effect=fail_after_first):
+            report = self.apply(updated)
+        self.assertEqual((report["status"], report["failed"], report["deleted"]),
+                         ("partial", 1, 0))
+        for identity in ("absent-one", "absent-two"):
+            self.assertEqual(store.get(refs[identity]["recipe_id"])["pack"]["version"], "1")
 
     def test_existing_user_source_identity_is_never_relabelled_bundled(self):
         from recipes import RecipeStore

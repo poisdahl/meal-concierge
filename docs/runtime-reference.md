@@ -302,9 +302,9 @@ Installation and code updates do not download or import a recipe collection.
 A fresh local bank can be empty; recipes from the selected, connected store
 remain available without the collection. Existing recipes are kept.
 
-To add or refresh the optional collection, use current repository code and update
-an older runtime first. Stop the existing service through its current owner, then
-run this command with the installation's actual home:
+To add or refresh the **Optional Recipe Collection**, use current repository code
+and update an older runtime first. Stop the existing service through its current
+owner, then run this command with the installation's actual home:
 
 ```sh
 ./install.sh import-recipes --home /absolute/data-home
@@ -329,11 +329,15 @@ offline mode or a way to select an older version. Archive data does not pass
 through RPC. Import requires the existing service to be stopped and retains the
 normal exclusive ownership locks.
 
-Repeated imports are idempotent. An unchanged bundled recipe advances to the new
-publisher version with a new history revision. Local content edits produce a
-conflict; favorites, explicit local status and archived entries are preserved.
-Conflicts are reported for explicit resolution. A failed import preserves the
-core installation and any already committed recipes; resolve the reported issue
+Repeated imports are idempotent. A bundled recipe that remains can advance to the
+new publisher version with a new history revision. Local content edits produce a
+conflict; favorites, explicit local status and archived entries are preserved for
+records that remain. After every record in an authoritative snapshot has been
+read, the importer permanently deletes same-pack entries absent from the new
+release, including their local revisions, archived state and exact favorite.
+Other local recipes, collections and favorites are never selected by this
+cleanup. A failed or interrupted record pass does not run absent-entry deletion.
+Already committed record updates remain available; resolve the reported issue
 before retrying `import-recipes`. Source links and separate text/image credits
 remain available in imported records.
 

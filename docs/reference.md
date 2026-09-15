@@ -830,8 +830,12 @@ SQLite schema 6 adds `entry_origin=user|bundled|unknown` and optional
 historical culinary documents. Ordinary explicit saves/imports are user entries;
 legacy entries are unknown. Only the verified local pack consumer creates
 bundled entries. `locally_modified` compares current content to the initial pack
-baseline. Stable pack IDs make repeats safe; incoming changes or local edits
-report conflicts while preserving identity, history, favorites and archive state.
+baseline. Stable pack IDs make repeats safe; incoming changes or local edits on
+records that remain report conflicts while preserving identity, history,
+favorites and archive state. A completely read pack with authoritative membership
+permanently deletes bundled entries of that exact pack ID when their pack recipe
+IDs are absent, including their revisions and exact favorites. It cannot select
+user entries, other packs or unrelated favorites.
 Builtin-only `entry_origin` search filtering applies before limits and combines
 independently with favorites/archive filters. Caller-supplied origin metadata
 never grants a different origin or redistribution rights.

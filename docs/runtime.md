@@ -159,9 +159,10 @@ reconcile the original operation first.
 
 ### Add or update the recipe collection
 
-> Import the latest optional recipe collection into my existing Meal Concierge
-> installation. Preserve my own recipes, favorites and local edits. Tell me
-> which version was imported and whether any conflicts need my attention.
+> Synchronize the latest Optional Recipe Collection into my existing Meal
+> Concierge installation. Permanently remove collection recipes that are no
+> longer included. Preserve every other local recipe and favorite. Tell me which
+> version was imported and whether any conflicts need my attention.
 
 The same request **adds the collection for the first time or updates it later**.
 If you have an older program version, update the program first. This also applies
@@ -180,9 +181,14 @@ current source, and start it again:
 `import-recipes` selects the newest published stable recipe release and verifies
 its checksum, size and format. You do not need to find a version number or edit
 a configuration file. It reports the import result; review any conflicts before
-retrying an incomplete import. Existing local edits, favorites and archived
-entries are preserved. Unmodified collection recipes can advance to the new
-publisher version. Recipes absent from a newer pack are not automatically deleted.
+retrying an incomplete import. Existing collection recipes can advance to the
+new publisher version while preserving local edits, favorites and archive state
+for records that remain in the collection. Once every incoming record has been
+read, an authoritative update permanently deletes same-pack entries absent from
+the new release. That deletion includes any local revisions, archive state and
+favorite belonging to the removed entry. Other local recipes, collections and
+favorites are outside the cleanup. An invalid pack or an interruption before the
+complete record pass does not perform absent-entry deletion.
 
 A local `--recipe-pack /absolute/pack.zip` must match that latest release and
 still requires internet access for verification. It is not an offline import

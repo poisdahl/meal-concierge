@@ -24,6 +24,7 @@ from runtime_ownership import file_lock, ownership, listener_ownership
 
 SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
+RECIPE_COLLECTION_NAME = 'Optional Recipe Collection'
 # Compatibility fields supported by this runtime; artifact identity is resolved
 # from the publisher's GitHub releases only when the user requests an import.
 RECIPE_PACK = {
@@ -69,7 +70,8 @@ def latest_recipe_pack():
             or type(asset.get('size')) is not int or not 0 < asset['size'] <= MAX_PACK_BYTES
             or asset.get('browser_download_url') != url):
         raise RuntimeError('latest recipe release has an invalid digest, size or URL')
-    return {**RECIPE_PACK, 'pack_version': version, 'bytes': asset['size'],
+    return {**RECIPE_PACK, 'display_name': RECIPE_COLLECTION_NAME,
+            'pack_version': version, 'bytes': asset['size'],
             'sha256': digest.removeprefix('sha256:'), 'url': url}
 
 
@@ -466,9 +468,9 @@ def main():
                 try:
                     recipe_pack_command(release, 'preflight', archive, expected=expected)
                     report = recipe_pack_command(release, 'apply', archive, meta, expected)
-                    print('Recipe pack:', json.dumps({key: value for key, value in report.items() if key != 'results'}))
+                    print(RECIPE_COLLECTION_NAME + ':', json.dumps({key: value for key, value in report.items() if key != 'results'}))
                     if report['status'] != 'complete':
-                        raise RuntimeError('recipe import incomplete; committed recipes and conflicts preserved; resolve before retrying import-recipes')
+                        raise RuntimeError('recipe import incomplete; committed recipe changes and conflicts preserved; resolve before retrying import-recipes')
                 finally:
                     archive.unlink(missing_ok=True)
                 return
