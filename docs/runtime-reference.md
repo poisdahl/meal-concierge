@@ -354,6 +354,91 @@ offline mode or a way to select an older version. Archive data does not pass
 through RPC. Import requires the existing service to be stopped and retains the
 normal exclusive ownership locks.
 
+### User-selected collection packs
+
+A separate local path imports a private or otherwise user-selected collection;
+it never treats that ZIP as the official publisher bundle. First inspect the
+exact file with the installed runtime:
+
+```sh
+./install.sh inspect-recipe-pack --home /absolute/data-home \
+  --recipe-pack /absolute/family-recipes.zip
+```
+
+Inspection is read-only with respect to the installation and may run while the
+service is active. It rejects links and special files, verifies the complete
+bounded archive, and prints its SHA-256, byte size, pack identity/revision,
+membership mode and record count. Recipe prose and metadata remain untrusted
+data. A local collection cannot carry store binding, local estimate acceptance,
+or Meal Concierge project-review authority. The official
+`wikibooks-themealdb-en` pack identity is reserved.
+
+After reviewing the output, stop the exact service owner and import the same
+bytes. Pinning the digest from inspection is recommended when another person or
+agent supplied the ZIP:
+
+```sh
+./install.sh import-recipe-pack --home /absolute/data-home \
+  --recipe-pack /absolute/family-recipes.zip \
+  --expected-sha256 SHA256_FROM_INSPECTION
+```
+
+The importer derives a descriptor from the selected file, verifies an optional
+digest pin, then copies it into a private immutable staging file while checking
+the same digest and size. Preflight and application reopen only that staged
+copy. Multiple collections coexist by stable `pack_id`; records within one pack
+update by stable `recipe_id`. Existing local edits conflict rather than being
+overwritten. `pack_revision` is a positive monotonic integer: rollback and reuse
+of one revision for different content fail closed. `pack_version` is the
+human-facing version label and need not be orderable, but each changed revision
+must use a new label because retained metadata is keyed by pack ID and version.
+
+Local collection manifests use `kind: collection`. Use
+`membership_mode: merge` unless the file is intentionally a complete snapshot;
+merge omission never deletes an installed recipe. An authoritative local pack
+is rejected unless the operator also supplies both `--allow-recipe-removals`
+and `--expected-sha256` on that exact import. Once authorized and fully read,
+it permanently deletes absent
+recipes belonging to the same `pack_id`, including their local edits, archive
+state and favorites. The flag never widens deletion to another pack or a user
+recipe. There is intentionally no local-pack remove-by-name shortcut; create a
+new authoritative revision only when permanent reconciliation is intended.
+
+The minimum collection manifest fields are:
+
+```json
+{
+  "format": "meal-concierge-recipes",
+  "format_version": 1,
+  "kind": "collection",
+  "pack_id": "family-recipes",
+  "pack_version": "2026.1",
+  "pack_revision": 1,
+  "normalizer_version": "2",
+  "recipe_schema_version": 2,
+  "records_count": 1,
+  "display_name": "Family recipes",
+  "membership_mode": "merge"
+}
+```
+
+The shared archive writer adds the exact `files` inventory. `records.jsonl`
+contains canonical rows with `recipe_id`, `status` (`ready` or `draft`) and a
+normalized recipe matching `recipe_schema_version`. Pack and recipe identities
+must remain stable across revisions. A private recipe-history export with
+`kind: private` is a different backup/restore format and cannot be imported as a
+shareable collection.
+
+`pack_id` is the collection namespace selected by the operator; there is no
+publisher signature for a private pack. Choose a globally unique, stable ID and
+inspect it before import. Importing a higher revision under an existing ID is an
+explicit authorization to update that namespace. Collection entries are stored
+as `entry_origin=collection`, distinct from the official `bundled` collection.
+Recipe-only private export/restore preserves the entry origin and record-level
+pack identity but intentionally excludes retained installer manifests. Use a
+complete installation backup when future monotonic pack updates must remain
+immediately available after restore.
+
 Repeated imports are idempotent. A bundled recipe that remains can advance to the
 new publisher version with a new history revision. Local content edits produce a
 conflict; favorites, explicit local status and archived entries are preserved for

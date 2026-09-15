@@ -673,7 +673,7 @@ class PackInstallationTests(unittest.TestCase):
 
     def descriptor(self, path):
         return {key: self.manifest[key] for key in (
-            "format", "format_version", "pack_id", "pack_version",
+            "format", "format_version", "kind", "pack_id", "pack_version",
             "recipe_schema_version", "normalizer_version")} | {
                 "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
@@ -737,6 +737,137 @@ class PackInstallationTests(unittest.TestCase):
                 with self.assertRaises(RecipeError):
                     preflight_archive(path, descriptor | {key: changed})
         self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_local_collection_inspection_binds_digest_and_rejects_reserved_identity(self):
+        from recipe_portable import inspect_local_archive, preflight_archive
+        self.manifest.update(
+            kind="collection", pack_id="family-recipes", pack_revision=1,
+            display_name="Family recipes",
+        )
+        path = self.package()
+        descriptor = inspect_local_archive(path, reserved_pack_ids=("official-pack",))
+        self.assertEqual(
+            (descriptor["kind"], descriptor["pack_id"], descriptor["pack_revision"],
+             descriptor["records_count"]),
+            ("collection", "family-recipes", 1, 1),
+        )
+        self.assertEqual(descriptor["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(preflight_archive(path, descriptor)["kind"], "collection")
+        changed = self.root / "changed.zip"
+        changed.write_bytes(path.read_bytes() + b"x")
+        with self.assertRaisesRegex(RecipeError, "selected recipe pack"):
+            preflight_archive(changed, descriptor)
+
+        path.unlink()
+        self.manifest["pack_id"] = "official-pack"
+        reserved = self.package()
+        with self.assertRaisesRegex(RecipeError, "reserved"):
+            inspect_local_archive(reserved, reserved_pack_ids=("official-pack",))
+
+    def test_local_collection_cannot_claim_project_review(self):
+        from recipe_portable import inspect_local_archive
+        self.manifest.update(
+            kind="collection", pack_id="family-recipes", pack_revision=1,
+            recipe_schema_version=2,
+        )
+        self.record["recipe"] = normalize_recipe({
+            "schema_version": 2,
+            "name": "Estimated lentils",
+            "portions": 2,
+            "portions_evidence": {
+                "basis": "estimate",
+                "assumptions": "Two servings inferred from the page.",
+                "project_review": {
+                    "publisher": "Meal Concierge",
+                    "pack_id": "family-recipes",
+                    "pack_version": "1",
+                },
+            },
+            "ingredients": ["200 g lentils"],
+            "steps": ["Simmer."],
+            "source": {"kind": "generated", "relationship": "generated"},
+            "rights": {"storage": "full"},
+        })
+        with self.assertRaisesRegex(RecipeError, "cannot supply project review"):
+            inspect_local_archive(self.package())
+
+    def test_local_collection_revision_prevents_rollback_and_reuse(self):
+        from recipe_portable import apply_archive, inspect_local_archive
+        from recipes import RecipeStore
+        self.manifest.update(
+            kind="collection", pack_id="family-recipes", pack_revision=1,
+            display_name="Family recipes",
+        )
+        first_path = self.versioned_package("local-v1", [self.record], pack_version="1")
+        first = inspect_local_archive(first_path)
+        state = self.root / "local-state"
+        state.mkdir()
+        self.assertEqual(
+            apply_archive(first_path, state, "synthetic-household", first)["created"], 1
+        )
+        saved = RecipeStore(state / "recipes.sqlite3", "synthetic-household").search()
+        self.assertEqual((saved[0]["entry_origin"], saved[0]["pack"]["pack_id"]),
+                         ("collection", "family-recipes"))
+
+        updated_record = {
+            **self.record, "recipe": {**self.recipe, "notes": "Second edition"},
+        }
+        second_path = self.versioned_package(
+            "local-v2", [updated_record], pack_version="2", pack_revision=2,
+        )
+        second = inspect_local_archive(second_path)
+        self.assertEqual(
+            apply_archive(second_path, state, "synthetic-household", second)["updated"], 1
+        )
+        with self.assertRaisesRegex(RecipeError, "downgrade"):
+            apply_archive(first_path, state, "synthetic-household", first)
+
+        reused_path = self.versioned_package(
+            "local-reused", [{**updated_record, "recipe_id": "different"}],
+            pack_version="different", pack_revision=2,
+        )
+        reused = inspect_local_archive(reused_path)
+        with self.assertRaisesRegex(RecipeError, "already identifies different content"):
+            apply_archive(reused_path, state, "synthetic-household", reused)
+
+    def test_authoritative_local_collection_needs_explicit_removal_authorization(self):
+        from recipe_portable import apply_archive, inspect_local_archive
+        from recipes import RecipeStore
+        records = [
+            {**self.record, "recipe_id": identity,
+             "recipe": {**self.recipe, "name": name}}
+            for identity, name in (("keep", "Keep"), ("remove", "Remove"))
+        ]
+        self.manifest.update(
+            kind="collection", pack_id="family-recipes", pack_revision=1,
+            membership_mode="authoritative",
+        )
+        first_path = self.versioned_package("local-authoritative-v1", records)
+        first = inspect_local_archive(first_path)
+        state = self.root / "authoritative-local-state"
+        state.mkdir()
+        with self.assertRaisesRegex(RecipeError, "explicit removal authorization"):
+            apply_archive(first_path, state, "synthetic-household", first)
+        self.assertEqual(
+            RecipeStore(state / "recipes.sqlite3", "synthetic-household").search(), []
+        )
+        apply_archive(
+            first_path, state, "synthetic-household", first, allow_removals=True,
+        )
+
+        second_path = self.versioned_package(
+            "local-authoritative-v2", [records[0]], pack_version="2", pack_revision=2,
+        )
+        second = inspect_local_archive(second_path)
+        with self.assertRaisesRegex(RecipeError, "explicit removal authorization"):
+            apply_archive(second_path, state, "synthetic-household", second)
+        self.assertEqual(len(RecipeStore(
+            state / "recipes.sqlite3", "synthetic-household"
+        ).search(limit=50)), 2)
+        report = apply_archive(
+            second_path, state, "synthetic-household", second, allow_removals=True,
+        )
+        self.assertEqual(report["deleted"], 1)
 
     def test_bad_recipe_is_rejected_before_any_state_mutation(self):
         from recipe_portable import apply_archive
@@ -1777,6 +1908,28 @@ class PrivatePortableTests(unittest.TestCase):
         original=self.output.read_bytes()
         with self.assertRaises(FileExistsError): self.export()
         self.assertEqual(self.output.read_bytes(),original)
+
+    def test_collection_origin_uses_private_schema_two_and_restores(self):
+        with self.store._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE recipe_entry_metadata SET entry_origin='collection' WHERE recipe_id=?",
+                (self.identity,),
+            )
+        manifest = self.export()
+        self.assertEqual(manifest["private_schema_version"], 2)
+        with open_private_archive(self.output) as archive:
+            archive.verify()
+            entries = {group["entry"]["id"]: group for group in archive.recipe_entries()}
+        self.assertEqual(entries[self.identity]["entry"]["entry_origin"], "collection")
+
+        target = RecipeStore(self.root / "target/recipes.sqlite3", self.store.household)
+        target.search()
+        report = portable.restore_private_archive(self.output, target)
+        self.assertEqual(report["status"], "complete")
+        restored = target.get(self.identity)
+        self.assertEqual((restored["entry_origin"], restored["pack"]["pack_id"]),
+                         ("collection", "synthetic-pack"))
 
     def test_public_private_gates(self):
         manifest, rows, assets = self.archive_rows()

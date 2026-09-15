@@ -103,12 +103,12 @@ origin. Discovery snapshots are not personal-bank entries.
 
 Only the internal verified-pack consumer calls
 `RecipeStore.import_pack_record(recipe, pack_id=..., recipe_id=..., version=...,
-status="ready")`. It must verify archive provenance and install exact managed
+status="ready", entry_origin="bundled"|"collection")`. It must verify archive provenance and install exact managed
 assets first. The API accepts `ready` (active) or `draft` and commits one record
 at a time. Its result has `outcome: created|unchanged|conflict`, the bank `recipe`,
 and a conflict `reason` when applicable. This is not a normal RPC import mode.
 
-Bundled entries expose `pack: {pack_id, recipe_id, version, baseline_hash}`.
+Managed pack entries expose `pack: {pack_id, recipe_id, version, baseline_hash}`.
 The initial normalized document establishes the immutable baseline. Reimport
 looks up the stable pack/recipe pair before mutable source metadata. Unchanged
 content preserves the original ID, version, history, favorite and archive state.
@@ -118,7 +118,7 @@ An interrupted import resumes by repeating the same per-record calls.
 
 `locally_modified` compares the current document with that baseline, including
 when reading a historical revision; archiving or favoriting is not a content
-edit. Built-in search can filter `entry_origin=user|bundled|unknown` before its
+edit. Built-in search can filter `entry_origin=user|bundled|collection|unknown` before its
 limit and independently combine `favorites_only` or `include_archived`.
 Pack origin does not authorize redistribution or override provider eligibility.
 

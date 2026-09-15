@@ -31,6 +31,7 @@ RECIPE_COLLECTION_NAME = 'Optional Recipe Collection'
 RECIPE_PACK = {
     'format': 'meal-concierge-recipes',
     'format_version': 1,
+    'kind': 'bundled',
     'recipe_schema_version': 2,
     'normalizer_version': '2',
     'pack_id': 'wikibooks-themealdb-en',
@@ -109,15 +110,29 @@ def stage_recipe_pack(release, source=None, expected=None):
         raise
 
 
-def recipe_pack_command(release, action, archive, meta=None, expected=None):
+def recipe_pack_command(
+    release, action, archive, meta=None, expected=None, *, allow_removals=False,
+):
+    if action == 'inspect-local':
+        code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import inspect_local_archive; print(json.dumps(inspect_local_archive(sys.argv[2],reserved_pack_ids=tuple(json.loads(sys.argv[3])))))"
+        args = [
+            release / 'venv/bin/python', '-I', '-c', code, release, archive,
+            json.dumps([RECIPE_PACK['pack_id']]),
+        ]
+        result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (result.stdout or result.stderr).strip()[:2000]
+            raise RuntimeError(f'recipe pack inspection failed ({result.returncode}): {detail}')
+        return json.loads(result.stdout)
     expected = latest_recipe_pack() if expected is None else expected
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import preflight_archive; print(json.dumps(preflight_archive(sys.argv[2],json.loads(sys.argv[3]))))"
     args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected)]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
-        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),json.loads(sys.argv[4]))"
-        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(meta), json.dumps(expected)]
+        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),json.loads(sys.argv[4]),allow_removals=json.loads(sys.argv[5]))"
+        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive,
+                json.dumps(meta), json.dumps(expected), json.dumps(allow_removals)]
     result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
     if result.returncode not in ({0, 2} if action == 'apply' else {0}):
         detail = (result.stdout or result.stderr).strip()[:2000]
@@ -141,12 +156,15 @@ def recipe_collection_remove_command(release, meta):
     return json.loads(result.stdout)
 
 
-def apply_recipe_pack(archive, meta, expected):
+def apply_recipe_pack(archive, meta, expected, *, allow_removals=False):
     """Installed-runtime child entry point; no parent-owned lifetime locks."""
     from recipe_portable import apply_archive
     with offline(meta):
         settings = json.loads(Path(meta['paths']['config']).read_text())
-        report = apply_archive(archive, Path(meta['paths']['state']), settings['household'], expected)
+        report = apply_archive(
+            archive, Path(meta['paths']['state']), settings['household'], expected,
+            allow_removals=allow_removals,
+        )
         print(json.dumps(report))
     if report['status'] != 'complete':
         raise SystemExit(2)
@@ -438,7 +456,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['import-recipes', 'remove-recipe-collection', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -450,13 +468,27 @@ def main():
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
     for field in ['config', 'state', 'socket', 'tokens', 'browser-profile', 'browser-home', 'browser-socket-directory', 'agent-browser', 'browser-executable']:
         parser.add_argument('--' + field)
-    parser.add_argument('--recipe-pack', type=Path, help='local copy of the latest published pack, for import-recipes only')
+    parser.add_argument('--recipe-pack', type=Path, help='recipe-pack ZIP selected for an inspect/import action')
+    parser.add_argument('--expected-sha256', help='optional exact digest pin for import-recipe-pack')
+    parser.add_argument('--allow-recipe-removals', action='store_true', help='allow an authoritative local pack to remove absent recipes from its own pack_id')
     parser.add_argument('--backup', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
-    if args.recipe_pack is not None and args.action != 'import-recipes':
-        raise RuntimeError('--recipe-pack applies only to import-recipes')
+    pack_actions = {'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack'}
+    if args.recipe_pack is not None and args.action not in pack_actions:
+        raise RuntimeError('--recipe-pack applies only to recipe-pack inspect/import actions')
+    if args.action in {'inspect-recipe-pack', 'import-recipe-pack'} and args.recipe_pack is None:
+        raise RuntimeError('--recipe-pack is required for local collection inspection/import')
+    if args.expected_sha256 is not None and (
+        args.action != 'import-recipe-pack'
+        or re.fullmatch(r'[0-9a-f]{64}', args.expected_sha256) is None
+    ):
+        raise RuntimeError('--expected-sha256 must be a lowercase SHA-256 for import-recipe-pack')
+    if args.allow_recipe_removals and args.action != 'import-recipe-pack':
+        raise RuntimeError('--allow-recipe-removals applies only to import-recipe-pack')
+    if args.allow_recipe_removals and args.expected_sha256 is None:
+        raise RuntimeError('--allow-recipe-removals requires --expected-sha256 for the exact pack')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
     if args.action == 'check-browser':
@@ -478,6 +510,20 @@ def main():
         checked = browser_paths(args, provider, meta['paths'], runtime_path=runtime_path)
         print(json.dumps({'provider': provider, **checked}, indent=2))
         print('Browser prerequisites ready; no store login was performed.')
+        return
+    if args.action == 'inspect-recipe-pack':
+        manifest = home / 'runtime.json'
+        if (
+            not manifest.exists()
+            or (home / 'pending-install.json').exists()
+            or (home / 'maintenance.json').exists()
+        ):
+            raise RuntimeError('complete the runtime update before inspecting a local recipe pack')
+        meta = json.loads(manifest.read_text())
+        report = recipe_pack_command(
+            Path(meta['release']), 'inspect-local', args.recipe_pack,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return
     if args.action == 'restore':
         if not args.backup:
@@ -523,7 +569,7 @@ def main():
                 with offline(meta):
                     print(backup(meta, args.backup))
                 return
-            if args.action in {'import-recipes', 'remove-recipe-collection'}:
+            if args.action in {'import-recipes', 'import-recipe-pack', 'remove-recipe-collection'}:
                 assert_stopped(meta)
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
                     raise RuntimeError('complete the stopped runtime update before changing the recipe collection')
@@ -532,14 +578,27 @@ def main():
                     report = recipe_collection_remove_command(release, meta)
                     print(RECIPE_COLLECTION_NAME + ':', json.dumps(report))
                     return
-                expected = latest_recipe_pack()
+                local_collection = args.action == 'import-recipe-pack'
+                expected = (
+                    recipe_pack_command(release, 'inspect-local', args.recipe_pack)
+                    if local_collection else latest_recipe_pack()
+                )
+                if (
+                    args.expected_sha256 is not None
+                    and expected['sha256'] != args.expected_sha256
+                ):
+                    raise RuntimeError('local recipe pack differs from --expected-sha256')
                 archive = stage_recipe_pack(release, args.recipe_pack, expected)
                 try:
                     recipe_pack_command(release, 'preflight', archive, expected=expected)
-                    report = recipe_pack_command(release, 'apply', archive, meta, expected)
-                    print(RECIPE_COLLECTION_NAME + ':', json.dumps({key: value for key, value in report.items() if key != 'results'}))
+                    report = recipe_pack_command(
+                        release, 'apply', archive, meta, expected,
+                        allow_removals=args.allow_recipe_removals,
+                    )
+                    label = expected.get('display_name', RECIPE_COLLECTION_NAME)
+                    print(label + ':', json.dumps({key: value for key, value in report.items() if key != 'results'}))
                     if report['status'] != 'complete':
-                        raise RuntimeError('recipe import incomplete; committed recipe changes and conflicts preserved; resolve before retrying import-recipes')
+                        raise RuntimeError('recipe import incomplete; committed recipe changes and conflicts preserved; resolve before retrying the same import')
                 finally:
                     archive.unlink(missing_ok=True)
                 return

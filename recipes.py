@@ -1728,7 +1728,7 @@ class RecipeStore:
         if row is None:
             return {"entry_origin": "unknown", "pack": None, "locally_modified": False}
         pack = None
-        if row["entry_origin"] == "bundled":
+        if row["entry_origin"] in {"bundled", "collection"}:
             pack = {"pack_id": row["pack_id"], "recipe_id": row["pack_recipe_id"],
                     "version": row["pack_version"], "baseline_hash": row["baseline_hash"]}
         return {"entry_origin": row["entry_origin"], "pack": pack,
@@ -4346,7 +4346,10 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def import_pack_record(self, recipe: Any, *, pack_id: str, recipe_id: str, version: str, status: str = "ready") -> dict[str, Any]:
+    def import_pack_record(
+        self, recipe: Any, *, pack_id: str, recipe_id: str, version: str,
+        status: str = "ready", entry_origin: str = "bundled",
+    ) -> dict[str, Any]:
         """Import one record from a caller-verified pack, never from ordinary RPC.
 
         The caller establishes archive provenance and installs exact managed
@@ -4356,6 +4359,8 @@ class RecipeStore:
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
         pack_recipe_id = _bounded_text(recipe_id, "pack recipe_id", required=True, maximum=256)
         version = _bounded_text(version, "pack version", required=True, maximum=128)
+        if entry_origin not in {"bundled", "collection"}:
+            raise RecipeError("pack entry_origin must be bundled or collection")
         if status not in ("ready", "draft"):
             raise RecipeError("pack record status must be ready or draft")
         recipe = normalize_recipe(recipe)
@@ -4366,10 +4371,14 @@ class RecipeStore:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 existing = connection.execute(
-                    "SELECT r.*, m.baseline_hash FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id WHERE m.pack_id=? AND m.pack_recipe_id=?",
+                    "SELECT r.*, m.baseline_hash, m.entry_origin AS pack_entry_origin "
+                    "FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id "
+                    "WHERE m.pack_id=? AND m.pack_recipe_id=?",
                     (pack_id, pack_recipe_id),
                 ).fetchone()
                 if existing is not None:
+                    if existing["pack_entry_origin"] != entry_origin:
+                        raise RecipeError("pack identity belongs to a different origin")
                     result = self._record(connection, existing, created=False)
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
@@ -4403,8 +4412,8 @@ class RecipeStore:
                     return {"outcome": "conflict", "reason": "source_identity_exists", "recipe": self._record(connection, duplicate, created=False)}
                 result = self._save(connection, recipe, "active" if status == "ready" else "draft", None, "pack")
                 connection.execute(
-                    "UPDATE recipe_entry_metadata SET entry_origin='bundled', pack_id=?, pack_recipe_id=?, pack_version=?, baseline_hash=? WHERE recipe_id=?",
-                    (pack_id, pack_recipe_id, version, content_hash, result["id"]),
+                    "UPDATE recipe_entry_metadata SET entry_origin=?, pack_id=?, pack_recipe_id=?, pack_version=?, baseline_hash=? WHERE recipe_id=?",
+                    (entry_origin, pack_id, pack_recipe_id, version, content_hash, result["id"]),
                 )
                 result.update(self._entry_metadata(connection, result["id"]))
                 return {"outcome": "created", "recipe": result}
@@ -4459,8 +4468,8 @@ class RecipeStore:
             raise RecipeError("recipe search filters must be true or false")
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise RecipeError("search offset must be a non-negative integer")
-        if entry_origin is not None and entry_origin not in ("user", "bundled", "unknown"):
-            raise RecipeError("entry_origin must be user, bundled or unknown")
+        if entry_origin is not None and entry_origin not in ("user", "bundled", "collection", "unknown"):
+            raise RecipeError("entry_origin must be user, bundled, collection or unknown")
         if status_filter not in {None, "active", "draft", "archived"}:
             raise RecipeError("invalid recipe status filter")
         if category is not None:
@@ -4655,9 +4664,14 @@ class RecipeStore:
             "UPDATE idempotency SET response_json=? WHERE key=?", replacements
         )
 
-    def delete_absent_pack_records(self, *, pack_id: Any, present_recipe_ids: Iterable[Any]) -> list[dict[str, Any]]:
-        """Delete bundled identities absent from a verified authoritative pack snapshot."""
+    def delete_absent_pack_records(
+        self, *, pack_id: Any, present_recipe_ids: Iterable[Any],
+        entry_origin: str = "bundled",
+    ) -> list[dict[str, Any]]:
+        """Delete same-origin identities absent from an authoritative pack snapshot."""
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
+        if entry_origin not in {"bundled", "collection"}:
+            raise RecipeError("pack entry_origin must be bundled or collection")
         if isinstance(present_recipe_ids, (str, bytes, Mapping)):
             raise RecipeError("present pack recipe ids must be an iterable of identities")
         present = set()
@@ -4679,9 +4693,9 @@ class RecipeStore:
                     JOIN recipes r ON r.id=m.recipe_id
                     LEFT JOIN recipe_favorites f
                       ON f.library_id='builtin' AND f.recipe_id=r.id
-                    WHERE m.entry_origin='bundled' AND m.pack_id=?
+                    WHERE m.entry_origin=? AND m.pack_id=?
                     ORDER BY m.pack_recipe_id
-                """, (pack_id,)).fetchall()
+                """, (entry_origin, pack_id)).fetchall()
                 deleted = []
                 removed_rows = [row for row in rows if row["pack_recipe_id"] not in present]
                 self._tombstone_recipe_idempotency(
@@ -4701,15 +4715,17 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def count_pack_records(self, pack_id: Any) -> int:
-        """Count only entries carrying the internal bundled identity for one pack."""
+    def count_pack_records(self, pack_id: Any, *, entry_origin: str = "bundled") -> int:
+        """Count entries carrying one exact managed origin and pack identity."""
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
+        if entry_origin not in {"bundled", "collection"}:
+            raise RecipeError("pack entry_origin must be bundled or collection")
         try:
             with self._connection() as connection:
                 return connection.execute(
                     "SELECT count(*) FROM recipe_entry_metadata "
-                    "WHERE entry_origin='bundled' AND pack_id=?",
-                    (pack_id,),
+                    "WHERE entry_origin=? AND pack_id=?",
+                    (entry_origin, pack_id),
                 ).fetchone()[0]
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
