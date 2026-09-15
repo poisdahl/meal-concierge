@@ -27,6 +27,7 @@ from unittest.mock import patch
 CORE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(CORE))
 import install
+import browser_prerequisites
 from runtime_ownership import ownership, listener_ownership, assert_no_legacy_service, file_lock
 from core import StateStore
 from recipes import RecipeStore
@@ -49,12 +50,27 @@ def installer(*args, success=True, cwd=None, env=None):
     return command(sys.executable, CORE / 'install.py', *args, success=success, cwd=cwd, env=env)
 
 
+def browser_dependencies(root, *, adapter_version='0.33.1', chrome_version='Chromium 140.0', snap=False):
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    adapter = root / 'agent-browser'
+    adapter.write_text(f'#!/bin/sh\nprintf "agent-browser {adapter_version}\\n"\n')
+    adapter.chmod(0o700)
+    chrome = root / 'chromium'
+    marker = '# snap run chromium\n' if snap else ''
+    chrome.write_text(f'#!/bin/sh\n{marker}printf "{chrome_version}\\n"\n')
+    chrome.chmod(0o700)
+    return adapter, chrome
+
+
 @contextmanager
-def service(root, *, state=None, profile=None, sock=None):
+def service(root, *, state=None, profile=None, sock=None, adapter=None, chrome=None):
     config = root / 'config.json'
     if not config.exists():
         config.write_text(json.dumps(CONFIG))
-    args = [sys.executable, str(CORE / 'service.py'), '--config', str(config), '--state', str(state or root / 'state'), '--socket', str(sock or root / 'run/service.sock'), '--browser-profile', str(profile or root / 'browser/profile'), '--browser-home', str(root / 'browser'), '--browser-socket-directory', str(root / 'browser/run')]
+    args = [sys.executable, str(CORE / 'service.py'), '--config', str(config), '--state', str(state or root / 'state'), '--tokens', str(root / 'tokens'), '--socket', str(sock or root / 'run/service.sock'), '--browser-profile', str(profile or root / 'browser/profile'), '--browser-home', str(root / 'browser'), '--browser-socket-directory', str(root / 'browser/run')]
+    if adapter is not None and chrome is not None:
+        args += ['--browser-binary', str(adapter), '--browser-executable', str(chrome)]
     with (root / 'service.log').open('w') as log:
         process = subprocess.Popen(args, stdout=log, stderr=log)
         try:
@@ -167,6 +183,31 @@ class InstallerTests(unittest.TestCase):
                 pass
         self.assertEqual(sock.read_text(), 'preserve non-socket')
 
+    def test_external_mathem_update_preflight_never_interrupts_running_owner(self):
+        config = self.root / 'config.json'
+        config.write_text(json.dumps({**CONFIG, 'provider': 'mathem'}))
+        adapter, chrome = browser_dependencies(self.root / 'dependencies')
+        with service(self.root, adapter=adapter, chrome=chrome) as (process, args):
+            paths = dict(zip([value[2:].replace('-', '_') for value in args[2::2]], args[3::2]))
+            meta = {'format': 1, 'home': str(self.root), 'code_root': str(self.root / 'code'),
+                    'name': 'grok-external', 'manager': 'external', 'unit': None,
+                    'paths': paths, 'runtime_path': os.defpath}
+            manifest = self.root / 'runtime.json'; manifest.write_text(json.dumps(meta))
+            state = Path(paths['state']) / 'state.json'
+            before = {manifest: manifest.read_bytes(), state: state.read_bytes()}
+            socket_path = Path(paths['socket']); inode = socket_path.stat().st_ino
+            argv = ['install.py', 'update', '--home', str(self.root),
+                    '--agent-browser', str(adapter), '--browser-executable', str(chrome)]
+            with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
+                with self.assertRaisesRegex(RuntimeError, 'owned'):
+                    install.main()
+            publish.assert_not_called()
+            self.assertIsNone(process.poll())
+            self.assertEqual(socket_path.stat().st_ino, inode)
+            self.assertTrue(raw_rpc(socket_path, {'operation': 'health'})['ok'])
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
+
     def test_restart_waits_for_retiring_supervisor_and_owner(self):
         with tempfile.TemporaryDirectory() as directory:
             meta = {'manager': 'launchd', 'name': 'mc03-test', 'home': directory,
@@ -228,8 +269,57 @@ class InstallerTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_mathem_stopped_update_adds_browser_without_retargeting_private_data(self):
-        home = self.root / 'home'; home.mkdir()
+    def test_new_oda_and_mathem_installs_share_browser_validation(self):
+        adapter, chrome = browser_dependencies(self.root)
+        for provider in ('oda', 'mathem'):
+            with self.subTest(provider=provider):
+                home = self.root / (provider + '-home')
+                code = self.root / (provider + '-code')
+                sockets = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='mc-browser-', dir='/tmp')))
+                argv = ['install.py', 'install', '--manager', 'external', '--home', str(home),
+                        '--code-root', str(code), '--provider', provider,
+                        '--household', provider + ' synthetic', '--agent-browser', str(adapter),
+                        '--browser-executable', str(chrome), '--socket', str(sockets / 'service.sock'),
+                        '--browser-socket-directory', str(sockets / 'browser')]
+                with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
+                    install.main()
+                meta = publish.call_args.args[0]
+                self.assertEqual(meta['paths']['browser_binary'], str(adapter))
+                self.assertEqual(meta['paths']['browser_executable'], str(chrome))
+                self.assertEqual(meta['manager'], 'external')
+                self.assertFalse((home / 'config.json').exists())
+                self.assertFalse((home / 'state').exists())
+
+        for provider in ('oda', 'mathem'):
+            with self.subTest(provider=provider, failure='missing adapter'):
+                home = self.root / (provider + '-missing-home')
+                code = self.root / (provider + '-missing-code')
+                argv = ['install.py', 'install', '--manager', 'external', '--home', str(home),
+                        '--code-root', str(code), '--provider', provider,
+                        '--household', provider + ' synthetic', '--agent-browser', str(self.root / 'missing'),
+                        '--browser-executable', str(chrome)]
+                with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
+                    with self.assertRaisesRegex(RuntimeError, 'browser prerequisites.*agent-browser is missing'):
+                        install.main()
+                publish.assert_not_called()
+                self.assertFalse(code.exists())
+                self.assertFalse((home / 'config.json').exists())
+                self.assertFalse((home / 'state').exists())
+
+        home = self.root / 'mathem-missing-chrome-home'
+        code = self.root / 'mathem-missing-chrome-code'
+        argv = ['install.py', 'install', '--manager', 'external', '--home', str(home),
+                '--code-root', str(code), '--provider', 'mathem', '--household', 'synthetic',
+                '--agent-browser', str(adapter),
+                '--browser-executable', str(self.root / 'missing-chromium')]
+        with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
+            with self.assertRaisesRegex(RuntimeError, 'non-snap Chrome/Chromium is missing'):
+                install.main()
+        publish.assert_not_called()
+        self.assertFalse(code.exists())
+
+    def test_mathem_update_preflights_browser_and_preserves_private_data_on_failure(self):
+        home = (self.root / 'home').resolve(); home.mkdir()
         config = home / 'config.json'
         config.write_text(json.dumps({**CONFIG, 'provider': 'mathem'}))
         paths = {key: str(home / value) for key, value in {
@@ -244,29 +334,183 @@ class InstallerTests(unittest.TestCase):
                 'name': 'mc50-test', 'manager': 'external', 'unit': None, 'paths': paths}
         manifest = home / 'runtime.json'
         manifest.write_text(json.dumps(meta))
-        adapter = self.root / 'agent-browser'
-        adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1\\n"\n')
-        adapter.chmod(0o700)
-        chrome = self.root / 'chromium'
-        chrome.write_text('#!/bin/sh\nexit 0\n'); chrome.chmod(0o700)
-        before = manifest.read_bytes()
+        state = Path(paths['state']); state.mkdir()
+        pending = {'status': 'uncertain', 'idempotency_key': 'original-operation'}
+        unresolved = {field: {**pending, 'idempotency_key': field + '-original'} for field in (
+            'pending_checkout', 'pending_cancellation', 'pending_cart_change', 'order_change',
+        )}
+        unresolved['email_jobs'] = {'original': {'status': 'sending', 'claim': 'original-email-claim'}}
+        (state / 'state.json').write_text(json.dumps(unresolved))
+        tokens = Path(paths['tokens']); tokens.mkdir(); (tokens / 'mathem-weekly.tokens.json').write_text('oauth sentinel')
+        profile = Path(paths['browser_profile']); profile.mkdir(parents=True); (profile / 'Cookies').write_text('browser sentinel')
+        code = Path(meta['code_root']); code.mkdir(); (code / 'owner.json').write_text(json.dumps({'home': str(home)}))
+        (code / 'release-old').mkdir(); (code / 'current').symlink_to('release-old')
+        before = {path: path.read_bytes() for path in (
+            manifest, config, state / 'state.json', tokens / 'mathem-weekly.tokens.json',
+            profile / 'Cookies', code / 'owner.json',
+        )}
+        def assert_preserved():
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(os.readlink(code / 'current'), 'release-old')
+            self.assertFalse((home / 'pending-install.json').exists())
+            self.assertFalse((home / 'maintenance.json').exists())
+            self.assertFalse((home / 'backups').exists())
         argv = ['install.py', 'update', '--home', str(home)]
-        with patch.object(sys, 'argv', argv), patch.object(install, 'publish') as publish:
-            install.main()
-        self.assertEqual(publish.call_args.args[0]['paths'], paths)
+        with patch.object(sys, 'argv', argv), patch.object(browser_prerequisites.shutil, 'which', return_value=None), \
+             patch.object(install, 'assert_stopped', side_effect=AssertionError('must preflight first')), \
+             patch.object(install, 'publish') as publish:
+            with self.assertRaisesRegex(RuntimeError, 'Mathem browser prerequisites.*does not require store login'):
+                install.main()
+        publish.assert_not_called()
+        assert_preserved()
+
+        adapter, chrome = browser_dependencies(self.root)
+        check = ['install.py', 'check-browser', '--home', str(home),
+                 '--agent-browser', str(adapter), '--browser-executable', str(chrome)]
+        with patch.object(sys, 'argv', check), patch.object(install, 'data_ownership', side_effect=AssertionError('read-only check')):
+            output = io.StringIO()
+            with patch('sys.stdout', output):
+                install.main()
+        self.assertIn('Browser prerequisites ready; no store login was performed.', output.getvalue())
+        assert_preserved()
+
+        stopped_meta = []
         with patch.object(sys, 'argv', argv + ['--agent-browser', str(adapter), '--browser-executable', str(chrome)]), \
+             patch.object(install, 'assert_stopped', side_effect=lambda value: stopped_meta.append(json.loads(json.dumps(value)))), \
              patch.object(install, 'publish') as publish:
             install.main()
+        self.assertEqual(stopped_meta, [meta])
         updated = publish.call_args.args[0]['paths']
         self.assertEqual(updated, {**paths, 'browser_binary': str(adapter), 'browser_executable': str(chrome)})
-        self.assertEqual(manifest.read_bytes(), before)  # Publication owns the actual metadata replacement.
-        adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.1.0\\n"\n')
+        assert_preserved()  # Publication owns actual replacement.
+
+        adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1-beta\\n"\n')
         with patch.object(sys, 'argv', argv + ['--agent-browser', str(adapter), '--browser-executable', str(chrome)]), \
+             patch.object(install, 'assert_stopped', side_effect=AssertionError('must preflight first')), \
              patch.object(install, 'publish') as publish:
             with self.assertRaisesRegex(RuntimeError, 'tested agent-browser'):
                 install.main()
         publish.assert_not_called()
-        self.assertEqual(manifest.read_bytes(), before)
+        assert_preserved()
+
+        adapter, snap = browser_dependencies(self.root, snap=True)
+        with patch.object(sys, 'argv', argv + ['--agent-browser', str(adapter), '--browser-executable', str(snap)]), \
+             patch.object(install, 'assert_stopped', side_effect=AssertionError('must preflight first')), \
+             patch.object(install, 'publish') as publish:
+            with self.assertRaisesRegex(RuntimeError, 'Snap Chromium'):
+                install.main()
+        publish.assert_not_called()
+        assert_preserved()
+
+    def test_update_keeps_recorded_browser_counterpart_for_partial_override(self):
+        home = (self.root / 'partial-home').resolve(); home.mkdir()
+        config = home / 'config.json'; config.write_text(json.dumps({**CONFIG, 'provider': 'mathem'}))
+        legacy_helpers = self.root / 'legacy-helpers'; legacy_helpers.mkdir()
+        original_adapter, original_chrome = browser_dependencies(self.root / 'original')
+        replacement_adapter, _ = browser_dependencies(self.root / 'replacement')
+        sockets = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='mc-partial-', dir='/tmp')))
+        paths = {
+            'config': str(config), 'state': str(home / 'state'), 'socket': str(sockets / 'service.sock'),
+            'tokens': str(home / 'tokens'), 'browser_home': str(home / 'browser'),
+            'browser_profile': str(home / 'browser/profile'), 'browser_socket_directory': str(sockets / 'browser'),
+            'browser_binary': str(original_adapter), 'browser_executable': str(original_chrome),
+        }
+        meta = {'format': 1, 'home': str(home), 'code_root': str(self.root / 'partial-code'),
+                'name': 'partial', 'manager': 'external', 'unit': None, 'paths': paths,
+                'runtime_path': str(legacy_helpers) + os.pathsep + os.defpath}
+        (home / 'runtime.json').write_text(json.dumps(meta))
+        argv = ['install.py', 'update', '--home', str(home), '--agent-browser', str(replacement_adapter)]
+        with patch.object(sys, 'argv', argv), patch.object(install, 'assert_stopped'), \
+             patch.object(install, 'publish') as publish:
+            install.main()
+        published = publish.call_args.args[0]
+        updated = published['paths']
+        self.assertEqual(updated['browser_binary'], str(replacement_adapter))
+        self.assertEqual(updated['browser_executable'], str(original_chrome))
+        published_path = published['runtime_path'].split(os.pathsep)
+        current_path = os.environ.get('PATH', os.defpath).split(os.pathsep)
+        self.assertEqual(published_path[:len(current_path)], current_path)
+        self.assertIn(str(legacy_helpers), published_path)
+
+    def test_browserless_mathem_upgrade_records_the_validated_service_path(self):
+        home = (self.root / 'path-home').resolve(); home.mkdir()
+        config = home / 'config.json'; config.write_text(json.dumps({**CONFIG, 'provider': 'mathem'}))
+        helpers = self.root / 'path-helpers'; helpers.mkdir()
+        runtime = helpers / 'browser-runtime'
+        runtime.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1\\n"\n'); runtime.chmod(0o700)
+        adapter = self.root / 'env-agent-browser'
+        adapter.write_text('#!/usr/bin/env browser-runtime\nexit 99\n'); adapter.chmod(0o700)
+        _, chrome = browser_dependencies(self.root / 'path-browser')
+        sockets = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='mc-path-', dir='/tmp')))
+        paths = {
+            'config': str(config), 'state': str(home / 'state'), 'socket': str(sockets / 'service.sock'),
+            'tokens': str(home / 'tokens'), 'browser_home': str(home / 'browser'),
+            'browser_profile': str(home / 'browser/profile'), 'browser_socket_directory': str(sockets / 'browser'),
+        }
+        code = self.root / 'path-code'; code.mkdir()
+        (code / 'owner.json').write_text(json.dumps({'home': str(home)}))
+        legacy_helpers = self.root / 'legacy-path'; legacy_helpers.mkdir()
+        stale_runtime = legacy_helpers / 'browser-runtime'
+        stale_runtime.write_text('#!/bin/sh\nprintf "agent-browser 0.1.0\\n"\n'); stale_runtime.chmod(0o700)
+        legacy_path = str(legacy_helpers) + os.pathsep + os.defpath
+        meta = {'format': 1, 'home': str(home), 'code_root': str(code), 'name': 'path-test',
+                'manager': 'external', 'unit': None, 'paths': paths, 'runtime_path': legacy_path}
+        manifest = home / 'runtime.json'; manifest.write_text(json.dumps(meta))
+        candidate_path = str(helpers) + os.pathsep + os.defpath
+        argv = ['install.py', 'update', '--home', str(home), '--agent-browser', str(adapter),
+                '--browser-executable', str(chrome)]
+        with patch.dict(os.environ, {'PATH': candidate_path}), patch.object(sys, 'argv', argv), \
+             patch.object(install, 'assert_stopped'), patch.object(install, 'publish') as publish:
+            install.main()
+        updated = publish.call_args.args[0]
+        updated_path = updated['runtime_path'].split(os.pathsep)
+        self.assertEqual(updated_path[:len(candidate_path.split(os.pathsep))], candidate_path.split(os.pathsep))
+        self.assertGreater(updated_path.index(str(legacy_helpers)), updated_path.index(str(helpers)))
+        self.assertIn(str(helpers), updated_path)
+        self.assertEqual(updated['paths']['browser_binary'], str(adapter))
+        probe = subprocess.run([str(adapter), '--version'], env={**os.environ, 'PATH': updated['runtime_path']},
+                               capture_output=True, text=True, check=True)
+        self.assertEqual(probe.stdout.strip(), 'agent-browser 0.33.1')
+        self.assertEqual(manifest.read_text(), json.dumps(meta))
+
+    def test_legacy_provider_is_normalized_for_browser_check_and_update(self):
+        adapter, chrome = browser_dependencies(self.root / 'legacy-provider-browser')
+        for raw_provider, expected in ((None, 'oda'), ('MaThEm', 'mathem')):
+            with self.subTest(provider=raw_provider):
+                home = (self.root / f'legacy-{expected}').resolve(); home.mkdir()
+                settings = {**CONFIG}
+                if raw_provider is None:
+                    settings.pop('provider', None)
+                else:
+                    settings['provider'] = raw_provider
+                config = home / 'config.json'; config.write_text(json.dumps(settings))
+                sockets = Path(self.enterContext(tempfile.TemporaryDirectory(prefix='mc-legacy-', dir='/tmp')))
+                paths = {
+                    'config': str(config), 'state': str(home / 'state'),
+                    'socket': str(sockets / 'service.sock'), 'tokens': str(home / 'tokens'),
+                    'browser_home': str(home / 'browser'),
+                    'browser_profile': str(home / 'browser/profile'),
+                    'browser_socket_directory': str(sockets / 'browser'),
+                    'browser_binary': str(adapter), 'browser_executable': str(chrome),
+                }
+                meta = {'format': 1, 'home': str(home), 'code_root': str(self.root / f'legacy-{expected}-code'),
+                        'name': f'legacy-{expected}', 'manager': 'external', 'unit': None,
+                        'paths': paths, 'runtime_path': os.defpath}
+                (home / 'runtime.json').write_text(json.dumps(meta))
+
+                check = ['install.py', 'check-browser', '--home', str(home)]
+                with patch.object(sys, 'argv', check), patch('sys.stdout', new_callable=io.StringIO) as output:
+                    install.main()
+                self.assertEqual(json.loads(output.getvalue().split('\nBrowser')[0])['provider'], expected)
+
+                update = ['install.py', 'update', '--home', str(home)]
+                with patch.object(sys, 'argv', update), patch.object(install, 'assert_stopped'), \
+                     patch.object(install, 'browser_paths', wraps=install.browser_paths) as browser_paths, \
+                     patch.object(install, 'publish') as publish:
+                    install.main()
+                self.assertEqual(browser_paths.call_args.args[1], expected)
+                publish.assert_called_once()
 
     def test_recipe_artifact_requires_release_digest_and_exact_bounded_size(self):
         source = self.root / 'offline.zip'
@@ -734,7 +978,7 @@ def native(root, name, adapter, chrome):
             assert not install.active(meta)
 
 
-def external(root):
+def external(root, adapter, chrome):
     """Fresh real dependencies/service/MCP without native manager or store auth."""
     root = Path(root).resolve()
     home, code = root / 'home', root / 'code'
@@ -746,7 +990,8 @@ def external(root):
     env = {**os.environ, 'PATH': os.defpath}
     print(installer('install', '--manager', 'external', '--uv', uv,
                     '--home', home, '--code-root', code, '--name', 'mc09-external',
-                    '--provider', 'mathem', '--household', 'MC09 installation fixture', env=env).stdout)
+                    '--provider', 'mathem', '--household', 'MC09 installation fixture',
+                    '--agent-browser', adapter, '--browser-executable', chrome, env=env).stdout)
     meta = json.loads((home / 'runtime.json').read_text())
     assert meta['manager'] == 'external' and meta['unit'] is None
     assert not (home / 'service.unit').exists() and not (home / 'service.plist').exists()
@@ -827,7 +1072,7 @@ def external(root):
             stop_group()
 
 
-def native_mathem(root, name):
+def native_mathem(root, name, adapter, chrome):
     home = Path(root) / 'mathem-home'
     foreign = Path(root) / 'foreign-project'
     foreign.mkdir(parents=True, exist_ok=True)
@@ -835,10 +1080,12 @@ def native_mathem(root, name):
     inherited = command('uv', 'venv', '--python', install.PYTHON, foreign / 'unwanted-venv', cwd=foreign, success=False)
     assert inherited.returncode and 'required' in inherited.stderr.lower(), inherited.stderr
     installer('install', '--home', home, '--code-root', Path(root) / 'mathem-code', '--name', name,
-              '--provider', 'mathem', '--household', 'MC03 Mathem synthetic', cwd=foreign)
+              '--provider', 'mathem', '--household', 'MC03 Mathem synthetic',
+              '--agent-browser', adapter, '--browser-executable', chrome, cwd=foreign)
     meta = json.loads((home / 'runtime.json').read_text())
     try:
-        assert 'browser_binary' not in meta['paths']
+        assert meta['paths']['browser_binary'] == str(Path(adapter).absolute())
+        assert meta['paths']['browser_executable'] == str(Path(chrome).absolute())
         installer('start', '--home', home)
         attachment = json.loads(installer('attach', '--home', home).stdout)
         print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
@@ -861,7 +1108,7 @@ def native_mathem(root, name):
         meta = updated
         installer('start', '--home', home)
         print(command(attachment['command'], '-I', __file__, '--bridge', home).stdout.strip())
-        print('PASS native Mathem core and own bank without browser or Hermes; provider authentication not configured in this isolated test')
+        print('PASS native Mathem core and own bank with validated browser prerequisites and no Hermes; provider authentication not configured in this isolated test')
         print('PASS standalone runtime ignores an incompatible invoking-project uv configuration')
         print('PASS restart/reconnect and offline upgrade preserve the exact saved recipe and uncertain operation')
     finally:

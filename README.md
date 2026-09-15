@@ -75,8 +75,10 @@ installation (or to Grok for its cloud installation):
 > Update my existing Meal Concierge installation from
 > https://github.com/poisdahl/meal-concierge to the latest version on main.
 > Follow docs/runtime.md and my agent's installation guide. Preserve my recipes,
-> settings, login and saved data. Refresh the connected agent's tools and skill
-> as needed, verify that everything works, and report the installed version.
+> settings, login, browser profile and saved data. Check the new version's
+> prerequisites before stopping the working service. Refresh the connected
+> agent's tools and skill as needed, verify that everything works, and report
+> the installed version.
 
 A program update keeps your existing recipe collection. To refresh the
 collection too, request [the latest recipe collection](#add-or-update-the-recipe-collection)
@@ -88,9 +90,13 @@ Choose **one store per installation**. Several agents can share the same
 household installation. Shopping requires your own store account, complete
 contact details and an address in its delivery area.
 
-**Oda and Mathem follow the same setup:** authorize the store connection, then
-log into the same account in the dedicated browser to enable checkout. Add a
-usable payment card on the store's website if you want saved-card payment.
+**Oda and Mathem follow the same setup and browser requirements:** installation
+requires agent-browser 0.33.1 and Chrome or non-snap Chromium. The installer
+discovers or accepts explicit executable paths and validates them without opening
+the browser or requiring store login. After installation, authorize the store
+connection, then log into the same account in the dedicated browser to enable
+checkout. Add a usable payment card on the store's website if you want saved-card
+payment.
 
 | Store | Country / currency | Payment through Meal Concierge |
 |---|---|---|
@@ -98,10 +104,11 @@ usable payment card on the store's website if you want saved-card payment.
 | Mathem | Sweden / SEK | Saved card; complete any required approval yourself. |
 | MENY | Norway / NOK | Vipps; configure home delivery and your Vipps phone number, then approve on your phone. |
 
-MENY uses its dedicated browser for the store connection as well as checkout.
-Mathem can also run without a checkout browser and hand you over to its website
-to finish the order. The current Oda installer requires the browser dependencies;
-see [installation requirements](docs/runtime.md#install-and-attach).
+MENY uses the same browser dependencies and its dedicated browser for the store
+connection as well as checkout. Older Mathem installations without recorded
+browser executables must follow the non-destructive
+[browser upgrade check](docs/runtime.md#update-the-program) before their next
+program update.
 
 Installation does not create store accounts or add payment cards. Enter
 passwords, payment details and approvals in the trusted store or payment

@@ -20,7 +20,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import sys
 import socket
 import struct
@@ -33,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from oda_browser import MathemBrowser, OdaBrowser, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature
+from browser_prerequisites import validate_browser_paths
 from core import (
     CancellationPreconditionError,
     CheckoutPreconditionError,
@@ -913,12 +913,30 @@ def main() -> None:
     args = parser().parse_args()
     if args.maintenance and args.maintenance.exists():
         raise SystemExit("offline update is incomplete; repair it before starting the service")
-    with ownership(args.state, args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid):
-        run(args)
-
-
-def run(args) -> None:
     settings = config(args.config)
+    validate_browser_prerequisites(args, settings)
+    with ownership(args.state, args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid):
+        run(args, settings)
+
+
+def validate_browser_prerequisites(args, settings) -> None:
+    if settings["provider"] not in {"oda", "mathem"}:
+        return
+    try:
+        paths = validate_browser_paths(args.browser_binary, args.browser_executable)
+    except RuntimeError as exc:
+        raise SystemExit(
+            f"{settings['provider'].upper()} browser prerequisites are not ready: {exc}. "
+            "Run install.py check-browser, then update the existing installation. Store login is separate."
+        ) from exc
+    args.browser_binary = Path(paths["browser_binary"])
+    args.browser_executable = Path(paths["browser_executable"])
+
+
+def run(args, settings=None) -> None:
+    if settings is None:
+        settings = config(args.config)
+        validate_browser_prerequisites(args, settings)
     browser_arguments = {
         "instance": str(settings.get("instance") or "household"),
         "binary": args.browser_binary,
@@ -959,8 +977,7 @@ def run(args) -> None:
             # it must not block the built-in bank or grocery/order paths.
             continue
     if settings["provider"] == "mathem":
-        available = shutil.which(str(args.browser_binary)) and shutil.which(str(args.browser_executable))
-        checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments) if available else None
+        checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments)
     else:
         checkout_browser = OdaBrowser(
             provider_client=provider_client,

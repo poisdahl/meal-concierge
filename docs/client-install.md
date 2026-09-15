@@ -44,6 +44,8 @@ and [Claude Code shared configuration](https://code.claude.com/docs/en/desktop#s
   with a logged-in desktop user. Other host combinations need separate verification.
 - Python 3.10+, `uv`, and the selected store's
   [runtime prerequisites](runtime.md#install-and-attach).
+- Oda and Mathem use the same required, locally validated browser executables;
+  their store authorization and browser login happen only after installation.
 - Permission to register a local plugin and run its tools. The client connection
   must run as the household service owner on the same computer.
 
@@ -156,7 +158,8 @@ orders, outgoing messages or schedules.
 
 Ask your agent to update the **existing** installation using the
 [runtime update procedure](runtime.md#updates-failures-and-recovery). Code
-updates preserve recipes, including collections imported by older versions. To refresh that
+prerequisites are checked before the working service is stopped. Program updates
+preserve recipes, including collections imported by older versions. To refresh that
 collection, update the code first, then separately ask to
 [import the latest collection](runtime.md#versioned-recipe-package-integration).
 

@@ -3,7 +3,6 @@ set -Eeuo pipefail
 
 source_root="$(cd -- "$(dirname -- "$0")" && pwd)"
 cd "$source_root"
-hermes_home="${HERMES_HOME:-$HOME/.hermes}"
 private_root="${MEAL_CONCIERGE_HOME:-${HERMES_HOME:+$HERMES_HOME/meal-concierge}}"
 private_root="${private_root:-$HOME/.local/share/meal-concierge}"
 config_path="${MEAL_CONCIERGE_CONFIG:-$private_root/config.json}"
@@ -30,70 +29,15 @@ find_runtime_python() {
   return 1
 }
 
-find_agent_browser() {
-  local candidate
-  if [[ -n "${MEAL_CONCIERGE_AGENT_BROWSER:-}" && -x "$MEAL_CONCIERGE_AGENT_BROWSER" ]]; then
-    printf '%s\n' "$MEAL_CONCIERGE_AGENT_BROWSER"
-    return 0
-  fi
-  if command -v agent-browser >/dev/null 2>&1; then
-    command -v agent-browser
-    return 0
-  fi
-  candidate="$HOME/.local/lib/meal-concierge/node_modules/.bin/agent-browser"
-  if [[ -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  candidate="$hermes_home/node/bin/agent-browser"
-  if [[ -x "$candidate" ]]; then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  echo "agent-browser was not found; install it before starting the meal concierge" >&2
-  return 1
-}
-
-find_chromium() {
-  local candidate
-  if [[ -n "${MEAL_CONCIERGE_BROWSER_EXECUTABLE:-}" && -x "$MEAL_CONCIERGE_BROWSER_EXECUTABLE" ]]; then
-    printf '%s\n' "$MEAL_CONCIERGE_BROWSER_EXECUTABLE"
-    return 0
-  fi
-  for candidate in chromium chromium-browser google-chrome-stable google-chrome; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      command -v "$candidate"
-      return 0
-    fi
-  done
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    for candidate in \
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-      "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-      "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-      "$HOME/Applications/Chromium.app/Contents/MacOS/Chromium"; do
-      if [[ -x "$candidate" ]]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-    done
-  fi
-  echo "Chromium or Google Chrome was not found; set MEAL_CONCIERGE_BROWSER_EXECUTABLE" >&2
-  return 1
-}
-
 python="$(find_runtime_python)"
-provider="$("$python" -c 'from pathlib import Path; from service import config; import sys; print(config(Path(sys.argv[1]))["provider"])' "$config_path")"
-
-if [[ "$provider" != "mathem" ]]; then
-  agent_browser="$(find_agent_browser)"
-  chromium="$(find_chromium)"
-elif agent_browser="$(find_agent_browser 2>/dev/null)" && chromium="$(find_chromium 2>/dev/null)"; then
-  : # Mathem shopping remains available when optional checkout tools are absent.
-else
-  agent_browser=""
-  chromium=""
+"$python" -c 'from pathlib import Path; from service import config; import sys; config(Path(sys.argv[1]))' "$config_path"
+browser_paths="$("$python" -I "$source_root/browser_prerequisites.py")"
+if [[ "$browser_paths" != *$'\n'* ]]; then
+  echo "Browser prerequisite resolver returned an invalid result" >&2
+  exit 1
 fi
+agent_browser="${browser_paths%%$'\n'*}"
+chromium="${browser_paths#*$'\n'}"
 
 umask 077
 mkdir -p "$private_root" "$state_path" "$browser_home" "$browser_profile" "$browser_socket_directory" "$(dirname -- "$socket_path")"
@@ -114,8 +58,6 @@ service_args=(
   --browser-gid "$(id -g)"
 )
 
-if [[ -n "$agent_browser" && -n "$chromium" ]]; then
-  service_args+=(--browser-binary "$agent_browser" --browser-executable "$chromium")
-fi
+service_args+=(--browser-binary "$agent_browser" --browser-executable "$chromium")
 
 exec "${service_args[@]}"

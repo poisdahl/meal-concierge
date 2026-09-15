@@ -59,12 +59,20 @@ class ProviderRoutingTests(unittest.TestCase):
                 settings = {"provider": selected, "household": "Synthetic startup"}
                 config_path = root / "config.json"
                 config_path.write_text(json.dumps(settings))
+                adapter = root / "agent-browser"
+                adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1\\n"\n')
+                adapter.chmod(0o700)
+                chrome = root / "chromium"
+                chrome.write_text('#!/bin/sh\nprintf "Chromium 140.0\\n"\n')
+                chrome.chmod(0o700)
                 args = service.parser().parse_args([
                     "--config", str(config_path), "--state", str(root / "state"),
                     "--tokens", str(tokens), "--socket", str(root / "service.sock"),
                     "--browser-home", str(root / "browser"),
                     "--browser-profile", str(root / "browser/profile"),
                     "--browser-socket-directory", str(root / "browser/run"),
+                    "--browser-binary", str(adapter),
+                    "--browser-executable", str(chrome),
                 ])
                 store = StateStore(args.state, settings)
                 with store.locked() as state:
