@@ -17,28 +17,29 @@ from order_reductions import _intent, _ui_script
 from test_meal_concierge import FakeOda, FakeBrowser, CONFIG
 
 
-def source():
+def source(provider='oda'):
+    currency = 'NOK' if provider == 'oda' else 'SEK'
     return {
         'ok': True,
-        'eligibility': {'order_number': 'test123', 'currency': 'NOK', 'total_uncredited_quantity': 4,
+        'eligibility': {'order_number': 'test123', 'currency': currency, 'total_uncredited_quantity': 4,
             'cutoff_text': 'Before cutoff', 'bonus_info': {'threshold_reached': False},
             'items_groups': [{'name': 'Groceries', 'items': [
                 {'product_id': 27667, 'description': 'Nektariner Spania/ Italia, 1 kg', 'quantity': 2,
-                 'uncredited_quantity': 2, 'gross_amount': 89.6, 'currency': 'NOK',
+                 'uncredited_quantity': 2, 'gross_amount': 89.6, 'currency': currency,
                  'eligible_for_removal': True, 'entire_quantity_removal_only': False},
                 {'product_id': 99, 'description': 'Pærer', 'quantity': 2, 'uncredited_quantity': 2,
-                 'gross_amount': 60, 'currency': 'NOK', 'eligible_for_removal': True,
+                 'gross_amount': 60, 'currency': currency, 'eligible_for_removal': True,
                  'entire_quantity_removal_only': False}]}]},
-        'details': {'summary': {'order_number': 'test123', 'currency': 'NOK', 'gross_amount': 198.6,
+        'details': {'summary': {'order_number': 'test123', 'currency': currency, 'gross_amount': 198.6,
                     'status': {'can_remove_from_order': True, 'payment_status_state': 'payment_authorized'},
                     'delivery': {'delivery_address': 'Synthetic only', 'delivery_time': 'Friday'}},
                     'options': {'can_remove_from_order': True}, 'items': {'product_count': 4}}}
 
 
 class Browser(FakeBrowser):
-    def __init__(self):
+    def __init__(self, provider='oda'):
         super().__init__()
-        self.source = source()
+        self.source = source(provider)
         self.final_clicks = 0
         self.stage = None
         self.fail_after_click = False
@@ -89,13 +90,16 @@ class Browser(FakeBrowser):
 
 
 class OrderRemovalTests(unittest.TestCase):
+    provider_name = 'oda'
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='meal-removal-')
         self.addCleanup(temp.cleanup)
-        self.store = StateStore(Path(temp.name), CONFIG)
+        self.store = StateStore(Path(temp.name), {**CONFIG, 'provider': self.provider_name})
         self.provider = FakeOda()
-        self.provider.orders = [{'orderNumber': 'test123', 'currency': 'NOK'}]
-        self.browser = Browser()
+        currency = 'NOK' if self.provider_name == 'oda' else 'SEK'
+        self.provider.orders = [{'orderNumber': 'test123', 'currency': currency}]
+        self.browser = Browser(self.provider_name)
         self.app = Application(self.store, self.provider, self.browser)
         self.cart_before = deepcopy(self.provider.cart)
         with self.store.locked() as state:
@@ -111,6 +115,10 @@ class OrderRemovalTests(unittest.TestCase):
 
     def test_prepare_confirm_replay_preserves_cart_and_recipe_snapshot(self):
         prepared = self.prepare(1)
+        self.assertEqual(prepared['provider'], self.provider_name)
+        self.assertEqual(prepared['currency'], 'NOK' if self.provider_name == 'oda' else 'SEK')
+        expected_prefix = 'https://oda.com/no/' if self.provider_name == 'oda' else 'https://www.mathem.se/se/'
+        self.assertTrue(self.browser.url.startswith(expected_prefix))
         self.assertEqual(prepared['expected_credit_ore'], 4480)
         self.assertEqual(self.browser.final_clicks, 0)
         self.assertEqual(self.prepare(1), prepared)
@@ -197,15 +205,15 @@ class OrderRemovalTests(unittest.TestCase):
                 self.assertEqual(self.browser.final_clicks, 0)
 
     def test_foreign_order_duplicate_increase_and_remove_all_rejected(self):
-        eligibility = source()['eligibility']
+        eligibility = source(self.provider_name)['eligibility']
         for items in ([{'product_id': '27667', 'quantity': q}] for q in (-1, 3, True)):
             with self.assertRaises(HouseholdError):
-                _intent(items, eligibility)
+                _intent(items, eligibility, self.provider_name)
         for items in ([{'product_id': 'unknown', 'quantity': 0}],
                       [{'product_id': '27667', 'quantity': 0}]*2,
                       [{'product_id': '27667', 'quantity': 0}, {'product_id': '99', 'quantity': 0}]):
             with self.assertRaises(HouseholdError):
-                _intent(items, eligibility)
+                _intent(items, eligibility, self.provider_name)
         self.browser.source['eligibility']['order_number'] = 'other'
         with self.assertRaisesRegex(HouseholdError, 'identity'):
             self.prepare()
@@ -258,27 +266,49 @@ class OrderRemovalTests(unittest.TestCase):
         self.assertTrue(result['reconciliation_required'])
         self.assertFalse(result['removed'])
 
+    def test_provider_currency_is_bound_before_review(self):
+        wrong = 'SEK' if self.provider_name == 'oda' else 'NOK'
+        self.browser.source['eligibility']['currency'] = wrong
+        self.browser.source['eligibility']['items_groups'][0]['items'][0]['currency'] = wrong
+        with self.assertRaisesRegex(HouseholdError, 'identity'):
+            self.prepare(1)
+        self.assertEqual(self.browser.final_clicks, 0)
+        self.assertIsNone(self.store.read()['order_change'])
+
     @unittest.skipUnless(shutil.which('node'), 'Node is required for native DOM control regression')
     def test_dom_final_requires_visible_exact_dialog_and_selected_quantity(self):
-        items = _intent([{'product_id': '27667', 'quantity': 1}], source()['eligibility'])
-        script = _ui_script('test123', items, 'confirm')
+        items = _intent([{'product_id': '27667', 'quantity': 1}], source(self.provider_name)['eligibility'], self.provider_name)
+        script = _ui_script('test123', items, 'confirm', provider=self.provider_name)
+        mathem = self.provider_name == 'mathem'
+        button_text = 'Ta bort varor' if mathem else 'Fjern varer'
+        dialog_text = ('Är du säker på att du vill ta bort varor från din beställning? Ta bort varor' if mathem else
+                       'Er du sikker på at du vil fjerne disse varene fra bestillingen din? Prisen på de fjernede varene blir trukket fra totalen nederst på bestillingen.')
+        total_text = 'Totalt borttaget, inkl. moms' if mathem else 'Totalt fjernet, inkl. MVA'
+        origin = 'https://www.mathem.se' if mathem else 'https://oda.com'
+        path = '/se/account/orders/remove-items/test123/' if mathem else '/no/account/orders/remove-items/test123/'
         harness = r'''
 const vm=require('vm');
 function run({visibleDialog=true,quantity='1',wrongText=false,duplicate=false,wrongUrl=false,disabled=false,extra=false,wrongTotal=false,wrongPrice=false}={}) {
- const button={textContent:'Fjern varer',disabled,getClientRects:()=>[{}],getAttribute:()=>null,setAttribute(){this.tagged=true},removeAttribute(){}};
+ const button={textContent:BUTTON_TEXT,disabled,getClientRects:()=>[{}],getAttribute:()=>null,setAttribute(){this.tagged=true},removeAttribute(){}};
  const box={...button,textContent:quantity};
  const heading={...button,textContent:'Nektariner Spania/ Italia, 1 kg'};
  const article={...button,innerText:'Nektariner Spania/ Italia, 1 kg '+(wrongPrice?'43,80':'44,80')+' kr',querySelectorAll:s=>s==='h1'?[heading]:[box]};
- const dialog={...button,innerText:wrongText?'Cancel order': 'Er du sikker på at du vil fjerne disse varene fra bestillingen din? Prisen på de fjernede varene blir trukket fra totalen nederst på bestillingen.',getClientRects:()=>visibleDialog?[{}]:[],querySelectorAll:()=>[button]};
- const main={...button,innerText:'Totalt fjernet, inkl. MVA -'+(wrongTotal?'43,80':'44,80')+' kr'};
+ const dialog={...button,innerText:wrongText?'Cancel order':DIALOG_TEXT,getClientRects:()=>visibleDialog?[{}]:[],querySelectorAll:()=>[button]};
+ const main={...button,innerText:TOTAL_TEXT+' -'+(wrongTotal?'43,80':'44,80')+' kr'};
  const document={querySelectorAll:s=>s==='article'?[article]:s==='main'?[main]:s==='[role="combobox"][id="quantity-to-credit"]'?(extra?[box,box]:[box]):s==='[role="dialog"]'?(duplicate?[dialog,dialog]:[dialog]):[]};
- const location={origin:'https://oda.com',pathname:wrongUrl?'/wrong/':'/no/account/orders/remove-items/test123/'};
+ const location={origin:ORIGIN,pathname:wrongUrl?'/wrong/':PATH};
  return JSON.parse(vm.runInNewContext(SCRIPT,{document,location,getComputedStyle:()=>({visibility:'visible'})})).ok;
 }
 process.stdout.write(JSON.stringify([run(),run({visibleDialog:false}),run({quantity:'2'}),run({wrongText:true}),run({duplicate:true}),run({wrongUrl:true}),run({disabled:true}),run({extra:true}),run({wrongTotal:true}),run({wrongPrice:true})]));
-'''.replace('SCRIPT', json.dumps(script))
+'''.replace('BUTTON_TEXT', json.dumps(button_text)).replace('DIALOG_TEXT', json.dumps(dialog_text)).replace(
+            'TOTAL_TEXT', json.dumps(total_text)).replace('ORIGIN', json.dumps(origin)).replace(
+            'PATH', json.dumps(path)).replace('SCRIPT', json.dumps(script))
         result = subprocess.run(['node', '-e', harness], capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(result.stdout), [True, False, False, False, False, False, False, False, False, False])
+
+
+class MathemOrderRemovalTests(OrderRemovalTests):
+    provider_name = 'mathem'
 
 
 if __name__ == '__main__':

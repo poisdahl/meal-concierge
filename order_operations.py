@@ -1000,7 +1000,7 @@ class OrderOperations:
                     if change:
                         cart = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                         if cart["items"]:
-                            raise HouseholdError("an Oda delivery-window change must be prepared without staged item additions")
+                            raise HouseholdError(f"a {self.provider.title()} delivery-window change must be prepared without staged item additions")
                     requested_dates = None
                     if isinstance(slot_ref, str) and slot_ref.startswith(f"{self.provider}:"):
                         requested_dates = [retail_delivery_slot_date(slot_ref, provider=self.provider)]
@@ -1211,7 +1211,7 @@ class OrderOperations:
                     current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
                     status = str((current.get("tracking") or {}).get("status") or "").casefold()
                     if status != "paid_and_modifiable":
-                        raise HouseholdError("Oda order is not currently modifiable")
+                        raise HouseholdError(f"{self.provider.title()} order is not currently modifiable")
                     cart = cart_summary(self.provider_client.call("get_cart", {}, deadline=deadline))
                     quantities, _names = self._cart_lines(cart)
                     digest = self._cart_digest(quantities)
@@ -1678,7 +1678,7 @@ class OrderOperations:
             message = f"Order {payload['order_id']} accepted at {self.provider.upper()} (provider status: {payload.get('tracking_status') or 'confirmed'}).\n" + '\n'.join(lines)
             payment = payload['payment']
             message += f"\nBank payment authorization: {payment['authorization']}; charge: {payment['charge']}."
-            availability = {'additions_only': 'additions currently supported', 'unavailable': 'currently unavailable',
+            availability = {'additions_and_reductions': 'additions and reductions currently supported', 'unavailable': 'currently unavailable',
                             'unknown': 'unknown', 'requires_current_provider_review': 'requires current provider review',
                             'manual_provider_review': 'manual provider review only'}
             message += '\nCurrent editing: ' + availability[options['edit_availability']] + '. ' + options['message']
@@ -1780,14 +1780,14 @@ class OrderOperations:
                     options.update(deadline=parsed_deadline.isoformat(), deadline_status='provider_reported', deadline_source=source_name + '.modificationDeadline')
                     break
             if self.provider == 'oda':
-                options.update(edit_availability='additions_only' if status == 'paid_and_modifiable' else 'unavailable' if status in {'paid_and_not_modifiable', 'picking', 'shipped', 'delivered', 'cancelled', 'canceled'} else 'unknown',
-                               message='User-directed additions are supported only while this order remains modifiable. Removal/replacement/refund is not promised.')
+                options.update(edit_availability='additions_and_reductions' if status == 'paid_and_modifiable' else 'unavailable' if status in {'paid_and_not_modifiable', 'picking', 'shipped', 'delivered', 'cancelled', 'canceled'} else 'unknown',
+                               message='User-directed additions and guarded reductions are supported while this order remains modifiable. Cancellation and delivery changes use their separate protected reviews. Replacement and bank-refund settlement are not promised.')
             elif self.provider == 'meny':
                 options.update(edit_availability='requires_current_provider_review', message='MENY full-order editing requires a current editable order, another checkout and Vipps approval; no removal/refund guarantee.')
             else:
                 if status == 'paid_and_modifiable' and self.browser is not None:
-                    options.update(edit_availability='additions_only',
-                        message='User-directed additions use the original order and another protected checkout. Cancellation requires a fresh available cancellation review. Moving delivery preserves goods and requires a fresh original/new full-total review; a higher total requires approval unless covered by the authorized price limit. Removal, replacement, refund and payment release are not promised.')
+                    options.update(edit_availability='additions_and_reductions',
+                        message='User-directed additions use the original order and another protected checkout. Guarded reductions use Mathem\'s native removal page. Cancellation requires a fresh available cancellation review. Moving delivery preserves goods and requires a fresh original/new full-total review; a higher total requires approval unless covered by the authorized price limit. Replacement, bank-refund settlement and payment release are not promised.')
                     followup_deadline = time.monotonic() + 90
                     with self._browser_operation(followup_deadline):
                         # A terminal-result replay may run while a newer
@@ -2318,7 +2318,7 @@ class OrderOperations:
         cart = self.provider_client.call("get_cart", {}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_cart", {}, deadline=deadline)
         summary = cart_summary(cart)
         if order_change and self.provider in {"oda", "mathem"} and self._cart_lines(summary)[0] != order_change.get("expected_cart_quantities", {}):
-            raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
+            raise HouseholdError(f"{self.provider.title()} addition cart changed outside this edit; abort with retain_cart=true and review the goods before checkout")
         cart_plan_baseline = independent_cart_plan if independent_cart else None
         if not order_change and isinstance(menu_baseline, Mapping) and not independent_cart:
             cart_gate = self._cart_checkout_gate(summary, menu_baseline)
@@ -2347,7 +2347,8 @@ class OrderOperations:
             summary["delivery"]["address"] = unicodedata.normalize("NFC", " ".join(address.split()))
         before = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline, allow_recovery=allow_recovery) if self.provider == "meny" else self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
         if self.browser is None:
-            raise HouseholdError("Oda checkout browser is not configured; configure the dedicated browser and sign into the same intended Oda account as OAuth before requesting checkout again")
+            provider_label = self.provider.title()
+            raise HouseholdError(f"{provider_label} checkout browser is not configured; configure the dedicated browser and sign into the same intended {provider_label} account as OAuth before requesting checkout again")
         with self._browser_operation(deadline):
             state = self.store.read()
             if (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
@@ -2362,7 +2363,7 @@ class OrderOperations:
                 )
                 reviewed_summary = review.get("summary")
                 if not isinstance(reviewed_summary, Mapping):
-                    raise HouseholdError("Oda delivery change returned no verified summary")
+                    raise HouseholdError(f"{self.provider.title()} delivery change returned no verified summary")
                 summary = deepcopy(dict(reviewed_summary))
             elif order_change and self.provider in {"oda", "mathem"}:
                 review = self.browser.review_order_change(
@@ -2393,7 +2394,7 @@ class OrderOperations:
                             cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                             if cart_gate is not None:
                                 return cart_gate
-                        raise HouseholdError("Oda cart or delivery changed while preparing checkout; prepare a new summary")
+                        raise HouseholdError(f"{self.provider.title()} cart or delivery changed while preparing checkout; prepare a new summary")
             if self.provider == "meny":
                 reviewed_summary = review.get("summary")
                 if not isinstance(reviewed_summary, Mapping):
@@ -2484,7 +2485,7 @@ class OrderOperations:
                         cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
                         if cart_gate is not None:
                             return cart_gate
-                    raise HouseholdError("Oda cart or delivery changed while preparing checkout; prepare a new summary")
+                    raise HouseholdError(f"{self.provider.title()} cart or delivery changed while preparing checkout; prepare a new summary")
                 cart = refreshed_cart
                 summary = refreshed_summary
             if self.provider in {"oda", "mathem"} and isinstance(review.get("amounts"), Mapping):
@@ -2495,7 +2496,7 @@ class OrderOperations:
                     amount_cart["amounts"] = deepcopy(dict(review["amounts"]))
                     reviewed_amounts = cart_summary(amount_cart).get("amounts")
                     if not isinstance(reviewed_amounts, Mapping):
-                        raise HouseholdError("Oda checkout returned no verified amounts")
+                        raise HouseholdError(f"{self.provider.title()} checkout returned no verified amounts")
                     summary["amounts"] = deepcopy(dict(reviewed_amounts))
             payment_display = None
             if self.provider in {"oda", "mathem"}:

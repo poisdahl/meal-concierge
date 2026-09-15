@@ -2769,7 +2769,7 @@ class MathemBrowser(OdaBrowser):
 
     Uses the same native browser transport and deadline as Oda. Account identity
     is bound to the selected MCP address reference before each fresh review.
-    Existing-order additions and cancellation bind the original receipt account.
+    Existing-order additions, reductions and cancellation bind the original receipt account.
     """
     checkout_provider = "mathem"
     checkout_url = "https://www.mathem.se/se/checkout/confirm/"
@@ -2781,7 +2781,7 @@ class MathemBrowser(OdaBrowser):
 
     def _review_checkout(self, cart, *, order_id=None, delivery_text=None):
         if order_id is not None or delivery_text is not None:
-            raise HouseholdError("Mathem existing-order changes require the store website")
+            raise HouseholdError("Mathem existing-order changes require their dedicated protected workflow")
         expected = self._cart_expectation(cart)
         if delivery_signature(expected["delivery_text"], provider="mathem") is None:
             raise HouseholdError("Select a Mathem delivery window before checkout")

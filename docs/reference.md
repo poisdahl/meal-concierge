@@ -67,7 +67,7 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 | Read, change and active-menu sync cart | MCP | MCP | Logged-in browser |
 | Product favorites, recurring items and menus | Local | Local | Local |
 | Delivery selection / read and track orders | Yes | MCP | Yes |
-| Add goods / move or cancel an existing order | Yes | Guarded additions/cancellation and available free-window changes; paid/refund-bearing changes remain manual | Yes |
+| Add, reduce or cancel goods / move an existing order | Yes | Yes, when Mathem exposes the corresponding control for the current order | Yes |
 | Protected checkout | Fresh or standing authorization, reconcile | Guarded saved card with dedicated browser; otherwise manual | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
 
 Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
@@ -112,11 +112,18 @@ bound receipt account/address. The staged cart inherits that order's delivery;
 it must not create a new delivery reservation or fall back to a new order.
 The review binds original/added/combined quantities and SEK amounts. It reports
 unavailable fee components as unknown instead of using new-order fee rules.
-Cancellation separately verifies the same order, receipt, current modifiability
-and Swedish confirmation dialog. Delivery changes use the bound original-order
-checkout and the shared full-total authorization rule below. The selected slot
-price alone never establishes the final order price or payment due. Missing
-original/final totals or unavailable dates stop the change.
+Reductions use Mathem's separate removal page and the same protected
+`remove_prepare` / `remove_confirm` / `remove_reconcile` lifecycle as Oda. The
+review binds exact remaining quantities, product prices and expected credit;
+reconciliation verifies the resulting quantities, merchant total, delivery and
+account without claiming that a bank refund has settled. Cancellation separately
+verifies the same order, receipt, current modifiability and Swedish confirmation
+dialog. Delivery changes use the bound original-order checkout and the shared
+full-total authorization rule below. The selected slot price alone never
+establishes the final order price or payment due. Missing original/final totals
+or unavailable dates stop the change. The Mathem reduction path is covered by
+synthetic lifecycle and native-DOM tests; a live reduction still requires an
+active order for which Mathem currently exposes removal.
 Native outcomes and remaining gates are recorded in [acceptance](acceptance.md).
 
 Mathem MCP receipts omit the address. Reconciliation therefore reads the exact
@@ -2009,6 +2016,7 @@ Actual provider permission is checked during editing and checkout
 rather than inferred from time.
 
 Provider explanations: [Oda additions](https://hjelp.oda.com/no/article/100639),
+[Mathem order changes](https://support.mathem.se/sv/article/b656be),
 [MENY order changes](https://meny.no/faq/bestilling-i-nettbutikken).
 
 Each supplemental cart write is journalled before dispatch; MENY uses bounded

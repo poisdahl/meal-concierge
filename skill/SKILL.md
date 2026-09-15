@@ -648,13 +648,13 @@ purchase or alter the menu merely because something ran out.
 
 Read current orders when delivery may already be booked. For one unambiguous
 intended upcoming order, use orders change_begin with its exact returned ID;
-clarify if more than one order fits. Oda checks current paid_and_modifiable status;
+clarify if more than one order fits. Oda and Mathem check current paid_and_modifiable status;
 MENY checks the real enabled change controls. Never assume a fixed 20:00 or
 midnight cutoff. An unavailable order read is not proof there is no order.
 If changes are closed, report that the goods cannot join that delivery and
 clarify the next delivery when necessary; never cancel/reorder to get around it.
 
-For removal or reduction of goods already on an Oda order, use `orders
+For removal or reduction of goods already on an Oda or Mathem order, use `orders
 remove_prepare` with its exact `order_id` and `items=[{product_id,quantity}]`.
 Use one stable `idempotency_key` for this removal intent. Here quantity is the desired remaining number of packages: zero removes the
 product. Do not send this to cart change: the addition cart is separate from
@@ -668,7 +668,7 @@ the additions against the updated order. These are separate merchant changes.
 
 Use cart ensure with exact requirements=[{product_id,product_name,quantity}].
 Quantity is the desired minimum, not an increment. Existing cart quantities
-count; in an Oda order edit, already ordered quantities also count. Repeating
+count; in an Oda or Mathem order edit, already ordered quantities also count. Repeating
 ensure rereads stock in the cart/order and adds only the deficit. An explicit
 “one more” instead uses cart change with a positive quantity delta; never repeat
 an uncertain delta. An interrupted cart write survives restart: use cart
@@ -677,18 +677,18 @@ If still uncertain, retain the attempt and report that outcome; never retry it.
 Active weekly menus allow these household extras and retain
 them separately from menu ingredients. Only report success after verified reads.
 
-A nonempty Oda cart is preserved. change_begin returns cart_confirmation_required
+A nonempty Oda or Mathem cart is preserved. change_begin returns cart_confirmation_required
 with its exact contents and cart_digest. Pass that digest only if the current
 request already authorizes all those goods for that exact order; otherwise ask
-one destination question. Never empty or silently move unrelated goods. To end an Oda edit while keeping
+one destination question. Never empty or silently move unrelated goods. To end an Oda or Mathem edit while keeping
 staged goods, use change_abort with retain_cart=true. Outside changes to an
-Oda addition cart require this retained-cart review before rebinding its destination.
+Oda or Mathem addition cart require this retained-cart review before rebinding its destination.
 
 For an existing order, additions are not delivered until checkout confirms the
 change. A clear request to add goods to that order authorizes completing that
 addition under standing policy; fresh policy still needs its one confirmation.
 Reuse the checkout idempotency key for the same intent. If ensure finds everything
-already ordered and the Oda addition cart is empty, change_abort and report that
+already ordered and the Oda or Mathem addition cart is empty, change_abort and report that
 it is already included. MENY edits reopen the whole order, may update all prices,
 and require finishing checkout and user payment approval through Vipps, the
 mobile payment service used by the MENY integration. Resolve a
@@ -699,7 +699,7 @@ session, desktop browser or general browser tool is not that session. Do not
 diagnose the Meal Concierge login from another browser's logged-out page or ask
 the user to log in there. Use the adapter's actual result, distinguish a missing
 feature or checkout mismatch from an authentication failure, and explain the
-concrete blocker without presenting integration restrictions as Oda policy.
+concrete blocker without presenting integration restrictions as store policy.
 
 For a weekly shop, retain the user's full request across follow-up messages:
 adding sprouts or requesting a PDF does not cancel already requested staples.
