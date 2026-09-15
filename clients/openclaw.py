@@ -17,10 +17,11 @@ def configuration(attachment: dict) -> dict:
         raise ValueError("attachment.command must be an absolute executable path")
     if not isinstance(args, list) or not args or not all(isinstance(a, str) for a in args):
         raise ValueError("attachment.args must be a nonempty string array")
-    if not isinstance(env, dict) or set(env) != {"MEAL_CONCIERGE_SOCKET"}:
-        raise ValueError("attachment.env must contain only MEAL_CONCIERGE_SOCKET")
-    if not isinstance(env["MEAL_CONCIERGE_SOCKET"], str) or not Path(env["MEAL_CONCIERGE_SOCKET"]).is_absolute():
-        raise ValueError("attachment socket must be an absolute path")
+    if (not isinstance(env, dict) or "MEAL_CONCIERGE_SOCKET" not in env
+            or not set(env).issubset({"MEAL_CONCIERGE_SOCKET", "MEAL_CONCIERGE_EMAIL_CONFIG"})):
+        raise ValueError("attachment.env requires MEAL_CONCIERGE_SOCKET and permits only optional MEAL_CONCIERGE_EMAIL_CONFIG")
+    if any(not isinstance(value, str) or not Path(value).is_absolute() for value in env.values()):
+        raise ValueError("attachment environment values must be absolute paths")
     if not isinstance(skill, str) or not Path(skill).is_absolute() or Path(skill).name != "SKILL.md":
         raise ValueError("attachment.skill must be an absolute SKILL.md path")
     return {

@@ -1,382 +1,218 @@
-# Standalone runtime and safe updates
+# Install, update and maintain Meal Concierge
 
-The runtime runs independently of agent conversations on Linux/user-systemd,
-Apple Silicon macOS/launchd, or an explicit external process owner.
-Installation, service lifecycle and agent attachment
-are separate commands. The installer never registers an agent, logs in, transfers
-schedulers, sends messages or performs grocery actions.
+The easiest setup is to use the [installation prompt](../README.md#installation)
+and the guide for your already installed agent. This page gives the shared
+manual steps and the information an installing agent needs.
+
+Meal Concierge runs as a separate service. Your agent connects to it; recipes,
+settings and store login belong to the service installation.
 
 ## Install and attach
 
-Use Python 3.10+ for the installer and install `uv` on PATH, or pass its verified
-executable path with `--uv`. The installed runtime
-uses Python 3.12.12 and all versions in `runtime-requirements.txt`, including
-`mcp==2.1.1` and `mcp-types==2.1.1`. Installation verifies both SDK versions and
-loaded module paths inside its own virtual environment. Hermes is not required.
-For Oda/MENY, install `agent-browser@0.33.1` and a non-snap Chromium/Chrome.
-The adapter may need Node.js 24+ on the PATH used to install the service.
-Apple Silicon app discovery includes `/Applications/Google Chrome.app` and
-`~/Applications/Google Chrome.app`. Linux ARM64 needs a distribution Chromium;
-the adapter's Chrome for Testing download does not provide Linux ARM64 builds.
+### What you need
 
-From a product checkout **outside the data directory**:
+- **Linux** with a working user systemd service manager, or **Apple Silicon
+  macOS** with a logged-in user's launchd session. Grok uses its
+  [cloud setup](grok.md). Windows, Intel macOS and WSL are not covered here.
+- **Python 3.10+** and **uv** for installation. The installer downloads its own
+  Python 3.12.12 and dependencies; you do not manage that environment yourself.
+- For browser use: **agent-browser 0.33.1** and **Chrome or non-snap Chromium**.
+  The npm adapter may need Node.js 24+. Linux ARM64 needs a distribution Chromium.
+  The [Grok guide](grok.md#browser-and-login) covers its native browser option.
+- A separate data directory for each household/store. Additional trusted agents
+  should connect to the same installation instead of making copies.
+
+Oda and MENY currently require browser dependencies during installation.
+Mathem permits installation without them for recipes, cart work and manual
+website checkout. To enable saved-card checkout, give Oda and Mathem the same
+browser setup and log into the selected store.
+
+### 1. Find or create the installation
+
+Before creating anything, inspect known services and household data locations.
+From an existing source checkout, you can also check conventional locations:
 
 ```sh
-./install.sh install --provider meny --household "My household" \
-  --agent-browser "$HOME/.local/lib/meal-concierge/node_modules/.bin/agent-browser"
+./install.sh discover
+```
+
+This checks selected and conventional locations only. For an existing healthy
+household, retain its version and use `attach`; a repeated setup request is not
+an update request. Do not replace another household or an existing service.
+
+For a **new** installation, obtain the latest `main` from the
+[official repository](https://github.com/poisdahl/meal-concierge) and retain a
+checkout at its exact commit. Keep source outside the data directory. Run from
+that checkout, replacing the example household and provider (`oda`, `mathem`
+or `meny`):
+
+```sh
+./install.sh install --provider oda --household "My household" \
+  --agent-browser /absolute/path/to/agent-browser \
+  --browser-executable /absolute/path/to/chrome
 ./install.sh start
 ./install.sh attach
 ```
 
-`--browser-executable /absolute/path/to/chromium` overrides browser discovery.
-Installation leaves the service stopped. `attach` checks the running service and
-prints its stdio MCP command/args/env and skill path; register those with each
-trusted owner's agent. It changes neither client configuration nor service
-lifecycle. Platform-specific packages and complete real-client workflows remain
-separate integration work. Additional clients share the same service.
+`install` creates the service but leaves it stopped. `start` runs it; `attach`
+returns the connection details and skill path. Add these using your
+[agent's guide](../README.md#agent-support), then verify the tools from a new
+conversation. A successful installation does not log into the store.
 
-New data defaults to `~/.local/share/meal-concierge`; set `--home` (or
-`MEAL_CONCIERGE_HOME`) for another installation. Code defaults to
-`~/.local/lib/meal-concierge/<service-name>`. `--code-root` must be disjoint from
-data and belongs to one installation. Each release has its own venv; `current`
-selects code. New installations use a short browser instance name; socket paths
-are checked against the native Unix limit before staging. Use shorter explicit
-`--socket`/`--browser-socket-directory` paths when adopting a long legacy layout. Old releases are retained. `--name` selects the native service name
-(default `meal-concierge` on Linux, `com.meal-concierge` on macOS).
+Data defaults to `~/.local/share/meal-concierge`. For another home, pass
+`--home /absolute/data-home` to **every** command. Distinct installations also
+need distinct `--name` and `--code-root` values. Keep program and data paths
+separate. If a socket path is too long, choose short durable paths with
+`--socket` and `--browser-socket-directory` before installing.
 
-| Private path | Contents |
-|---|---|
-| `config.json` | Household/provider configuration; preserved during updates |
-| `state/state.json` | Household state and protected outcome/email journals |
-| `state/recipes.sqlite3` | Own bank, revisions, snapshots and library-operation journals |
-| `state/recipe-assets/` | Managed recipe images; copied with the entire state tree |
-| `browser/` | Dedicated browser home/profile and daemon socket directory |
-| `tokens/` | Private provider OAuth state; populated only by explicit login |
-| `run/` | Socket-only directory for agent connection; no household data |
-| `backups/` | Private, complete offline state/config copies made before migration |
-| `runtime.json` | Exact installation paths, owner and selected/previous code release |
+`--uv /absolute/path/to/uv` overrides uv discovery. The installer checks the
+browser paths and version. Use the existing installation's paths when updating;
+never create a second service to repair the first. See
+[existing installation adoption](runtime-reference.md#existing-installations)
+for a deliberate move from a legacy supervisor or Compose layout.
 
-Oda/Mathem OAuth uses the installed MCP SDK without Hermes. Provider readiness
-is separate from service health. Existing Compose and explicit legacy runner
-paths remain supported by `service.py`; native adoption does not convert Compose
-or claim live parity. MENY login and the private `vipps_phone_number` used by
-Oda or MENY require the authorized provider setup.
+### 2. Connect the store
 
-## Externally managed hosts
+Follow [store login](#provider-oauth) below. Online recipes from your selected,
+connected store are available without importing a local collection. A new local
+recipe bank can be empty; this does not mean the installation failed.
 
-Use `--manager external` for a host such as the Grok cloud computer that can
-keep a foreground command running as a native background execution but has no
-user systemd/launchd manager. This uses the same release staging, pinned Python
-and dependencies, configuration, migration and ownership
-locks as native installations. It writes no systemd unit or launchd plist and
-does not install another supervisor. A normal installation without this option
-retains the native manager behavior.
+### 3. Check the result
 
-From the reviewed source directory, for example:
-
-```sh
-python3 install.py install --manager external --uv /usr/local/bin/uv \
-  --home /workspace/meal-concierge/home --code-root /tmp/meal-concierge/program \
-  --socket /tmp/meal-concierge/service.sock \
-  --browser-socket-directory /tmp/meal-concierge/browser \
-  --provider mathem --household "My household"
-python3 install.py run --home /workspace/meal-concierge/home
-```
-
-These are example paths and provider choices; inspect the actual host and use
-the user's intended store. Oda/MENY still require their browser dependencies.
-The first command performs the declared `uv` staging, verification and migration
-subprocesses; it does not start the service or authenticate a store. Do not treat
-this entry point as a bypass for platform review of its underlying operations.
-Grok-specific command review and acceptance limits are in the [Grok guide](grok.md).
-
-Run the second command through the platform's normal background-execution
-facility and retain its exact execution ID and service PID/start identity.
-`run` waits for the selected release's foreground service and holds the installer
-lock until that child exits. The service independently holds its data/listener
-locks. `attach` remains available while it runs:
-
-```sh
-python3 install.py attach --home /workspace/meal-concierge/home
-```
-
-`start`, `stop` and `restart` deliberately refuse this mode: the external owner
-must control its exact execution. Terminating the launcher alone may leave the
-service child alive. Reconcile both the native execution and actual service
-identity before stopping a surviving task-owned process or starting another.
-A timeout, missing output or vanished parent is not proof that the service
-stopped. Never kill by a broad command/name match.
-
-Repeated setup should discover the matching installation, inspect its identity
-and attach to its healthy service. `install` refuses an existing installation;
-it does not mean update. Before an explicit `update` or backup, the owner must
-stop that execution and establish that no service survives. External offline
-checks use the existing ownership locks; acquiring those checks can create lock
-files and remove a proven-stale socket, so they are not read-only inventory.
-Busy, invalid or uncertain targets fail without permission to take them over.
-Manager choice remains in `runtime.json`; install/update and lifecycle commands
-reject a conflicting `--manager` rather than changing ownership.
-
-`run` refuses pending installation or maintenance state. Resume an interrupted
-publication through the existing stopped `update` path, using its original home
-and paths. Retained recipes/assets and outcome journals must not be replaced.
-After cloud runtime loss, rebuild the missing replaceable runtime from the
-matching reviewed source; do not restore older household data. Changing from a
-previous supervisor is a separate explicit ownership transfer, not a side effect
-of selecting external mode.
-
-The focused native-style local test is
-`python tests/test_installer.py --external /explicit/new/scratch-root` with the
-pinned test dependencies. It creates a new unauthenticated Mathem fixture,
-downloads the real runtime and recipe pack, exercises MCP and interrupted-owner
-recovery, then stops its own service. It makes no store or account calls.
-This test does not establish Grok's Shell approval or background-cancellation
-behavior; those require native verification.
+In the actual agent conversation, ask to show Meal Concierge setup, the selected
+household and store, and available recipes. Confirm the skill and tools load.
+After login, check a recipe/product search and cart read. Report core setup,
+store connection and checkout readiness separately. These checks do not place
+an order or send email.
 
 ## Provider OAuth
 
-Run the helper with the installation's `current/venv/bin/python` and
-`current/provider_oauth.py`. Use the exact token path from `runtime.json`; the
-following example uses explicit installation paths:
+Oda and Mathem use the same connection procedure with separate store accounts.
+First authorize the connection using the installed helper. Substitute the
+program and token paths recorded in the installation's `runtime.json`:
 
 ```sh
-/private/program/current/venv/bin/python -I /private/program/current/provider_oauth.py \
-  --provider oda --tokens /private/household/tokens --status
-/private/program/current/venv/bin/python -I /private/program/current/provider_oauth.py \
-  --provider oda --tokens /private/household/tokens
+/absolute/program/current/venv/bin/python -I /absolute/program/current/provider_oauth.py \
+  --provider oda --tokens /absolute/data-home/tokens
 ```
 
-Use `--provider mathem` for the separate Mathem login. `--status` reads only
-presence, remaining expiry and pending-exchange status; it does not create files,
-normalize a registration, refresh tokens, contact the provider or certify a
-working connection. The login command opens the system browser and waits up to
-300 seconds (`--timeout` accepts 1–600). It performs OAuth and MCP discovery,
-without cart/order actions. A saved login may still report connection
-`unavailable` when the provider's MCP endpoint fails. Run normal service status
-for a fresh provider connection check.
+For Mathem, use `--provider mathem`. Complete the authorization in the browser.
+Adding `--status` inspects saved authorization only; ask the service to check
+that it can actually reach the store after login.
 
-For a headless host, add `--no-browser`. The helper writes an authorization URL
-to a private `*.authorize.json` file and prints only its path and callback port.
-Privately open that URL in your browser; do not paste the file or callback URL
-into chat or logs. Forward the printed port from your local loopback to that
-host's loopback with `ssh -L PORT:127.0.0.1:PORT HOST` before authorizing. Keep the
-login helper and forward running until the callback completes. The callback
-listener binds only `127.0.0.1`; it verifies the exact path/state, and the SDK
-verifies PKCE and any authorization-response issuer. The temporary URL file and
-listener are removed when the command exits. Existing registrations reuse their
-exact supported `http://localhost:PORT/...` or `http://127.0.0.1:PORT/...` redirect;
-a busy port fails instead of changing that registration.
+For checkout, also log into the **same account** in the installation's dedicated
+browser and check its delivery address and saved payment method. Authorization
+of the connection does not log in that browser. MENY uses the dedicated browser
+for its whole store connection and requires home delivery and Vipps setup.
 
-Ordinary service calls never open an authorization browser or register a new
-client. They refresh an expired token under the same provider lock used by the
-login helper and then dispatch each MCP request once. A competing operation
-returns busy. Authorization rejection requires explicit login and does not
-silently replay the provider request. Missing or invalid optional provider auth
-does not stop the core own-bank path.
+On a remote host, have the installing agent provide a private browser/login
+handoff. The [headless login instructions](runtime-reference.md#provider-oauth)
+explain `--no-browser` and forwarding the local callback port. Do not put
+passwords, tokens or callback URLs in chat, or copy cookies from another browser.
+Close the visible login browser before the supervised browser reuses its profile.
 
-The existing `oda-weekly` and `mathem-weekly` token, `.client.json`, `.meta.json`
-and per-provider lock names remain unchanged. Legacy `expires_at` is honored;
-older records use original file modification time plus `expires_in`. Keep the
-original token directory in place when adopting an installation. Failed or
-cancelled login leaves the previous token/registration intact until a complete
-new grant is available. A private `.pending.json` records token-exchange
-uncertainty or a complete replacement awaiting local publication. Ready
-publication resumes under the lock after restart. An uncertain exchange blocks
-another refresh and requires explicit login. Preserve this file with the other
-auth files; do not delete it or restore old refresh tokens after a possible
-rotation. The helper never restores household/order/email journals.
-
-Before an authorized cutover, inspect active services/jobs and identify every
-process that can use the same provider credentials. Stop/retire the old direct
-OAuth owner and its automatic restart path before the standalone service takes
-over. Hermes must connect through Meal Concierge; a separate direct provider
-registration must not keep refreshing the same token files. The file lock cannot
-coordinate an older client that ignores it. Keep each provider's token directory
-available to its original-provider follow-ups when changing the active store.
-Rollback preserves the newest auth transaction and outcome journals: complete a
-ready publication with this runtime before any older code reads the legacy files;
-resolve an uncertain exchange by explicit login rather than replaying a refresh.
-Do not clone refresh credentials across installations.
-
-Oda additionally needs the dedicated browser profile logged into the same
-account, with the intended delivery address and payment method. MCP OAuth does
-not authenticate that browser or prove account binding. Existing protected-order
-browser review remains the account/address check. Mathem also uses a dedicated
-browser for guarded saved-card checkout; its selected MCP address reference
-must match that browser account. MENY retains its dedicated browser login.
-
-Mathem core installation keeps browser prerequisites optional. To enable its
-checkout browser, pass the tested `--agent-browser` and `--browser-executable`
-paths to install, or to an explicit stopped-service update of the same home.
-The installer validates the native adapter version and retains the installation's
-existing private browser profile/home/socket ownership. Log that profile into
-Mathem normally; never copy another browser's cookies or refresh tokens. The
-`run-service.sh` launcher also discovers available browser executables; absent
-prerequisites leave Mathem core operations and the manual checkout handoff usable.
-A configured browser is not evidence of login, account matching or card readiness.
-
-The provider auth tests use actual MCP/mcp-types 2.1.1 with test-only OAuth/MCP
-responses against the [MCP authorization contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
-Their acceptance is
-**synthetically verified; live not verified**. No production synthetic fallback,
-live credential move or live provider certification is implied.
-
-## Existing installations
-
-`./install.sh discover` reports the selected home and conventional Hermes home.
-It does not scan arbitrary disks or live Compose services. A detected config or
-state prevents silent replacement. Inspect the old unit/container command and
-preserve **all** effective paths, including tokens and browser socket directory.
-Stop and disable the old supervisor under its owner's authorization first. An
-old launchd plist must be retired from LaunchAgents; systemd must report disabled,
-masked or not found. The installer will not stop or disable an old owner for you.
-
-Then adopt the same data/config with a distinct new native service name:
-
-```sh
-./install.sh install --adopt --legacy-unit OLD_STOPPED_UNIT \
-  --home /private/runtime-metadata --code-root /private/program \
-  --name meal-concierge-replacement \
-  --config /existing/config.json --state /existing/state \
-  --tokens /existing/mcp-tokens --socket /existing/run/service.sock \
-  --browser-home /existing/browser --browser-profile /existing/browser/profile \
-  --browser-socket-directory /existing/browser/run \
-  --agent-browser /absolute/path/to/agent-browser \
-  --browser-executable /absolute/path/to/chromium
-```
-
-Use `--legacy-unit none` only for restored/offline data with no old supervisor.
-No source config, provider, primary recipe library or credentials are rewritten.
-Explicit `HERMES_HOME` in the legacy shell runner retains its token/data fallback;
-new native services pass exact paths and do not use that fallback.
-
-Lifetime locks cover resolved state/JSON/SQLite, browser home/profile/daemon and
-listener paths before initialization. The service also inspects old service
-process arguments before takeover. Ambiguous implicit legacy browser profiles
-require stopping that process. A live listener or non-socket path is never
-unlinked by a competing launcher. Locks are not proof that a pre-lock supervisor
-cannot later restart: disabling/retiring that old owner remains mandatory.
+To add Mathem's optional browser later, use an explicit stopped-service update
+with `--agent-browser` and `--browser-executable`, then log in. Preserve the
+existing home and profile. See [browser setup details](runtime-reference.md#provider-oauth).
 
 ## Updates, failures and recovery
 
-When an Oda or Mathem MCP or website change is found, check the corresponding
-interface at both providers and consider a shared fix first. Record each
-provider's dated source/observation and result, including unchanged or unavailable.
-Keep separate identities and provider-specific behavior where evidence requires
-it; do not infer matching behavior from shared schemas or automatically deploy
-the other provider. See the [current parity evidence](oda-mathem-parity.md).
+### Update the program
+
+> Update my existing Meal Concierge installation to the latest main, pinned to
+> a specific commit. Preserve my data, login and recipes. Follow docs/runtime.md
+> and my agent's guide, refresh the agent connection if needed, and verify it.
+> Do not import a recipe collection.
+
+First check for active shopping, payment and delivery work. Wait for it to finish;
+resolve uncertain results before maintenance. For a native installation, retain
+the existing home and run:
 
 ```sh
-./install.sh stop --home /private/household
-./install.sh backup --home /private/household --backup /private/backups/manual-copy
-# Update the product checkout, then:
-./install.sh update --home /private/household
-./install.sh start --home /private/household
-./install.sh attach --home /private/household
+./install.sh stop --home /absolute/data-home
+# Obtain the chosen new source commit, then run from that checkout:
+./install.sh update --home /absolute/data-home
+./install.sh start --home /absolute/data-home
+./install.sh attach --home /absolute/data-home
 ```
 
-The installer refuses updates/backups while the owner is active. It builds and
-checks the candidate venv before migration; under offline lifetime locks it copies
-the full state tree/config, opens and migrates both JSON and SQLite, publishes
-its own native definition and switches code. Updates preserve exact recipe refs,
-local edits, histories and outstanding operations. They do not rerun the selective
-`migrate.py` importer, change primary libraries or reconcile provider effects.
+The update makes an offline backup of state and configuration before migration.
+It preserves recipes, local edits, favorites, saved menus, settings and existing
+login paths. It does not import or refresh the optional collection. Refresh the
+client package or skill using your agent's guide and start a new conversation.
+Verify the same household and saved data.
 
-`maintenance.json` blocks service start after a migration/publication failure.
-`pending-install.json` preserves exact paths if first installation is interrupted.
-Retry `update --home ...` to finish from the current data. Native registration is
-an exclusive link to that home's durable definition: retry cannot overwrite a
-foreign service unit. Partial build directories and backups are retained for
-inspection, not automatically pruned. A failed migration can have upgraded one
-store before the other fails; do not manually remove the maintenance marker and
-start old code. Repair the cause and retry, or inspect a private offline restore.
+### Recover an interrupted attempt
 
-Code rollback is separate from data recovery. Never replace current journals with
-a pre-order/pre-send backup after possible external effects. This installer does
-not offer an automatic data rollback or downgrade. Preserve latest outcomes and
-reconcile their original identities before any recovery decision.
+A timeout does not prove the installer or service stopped. Have the installing
+agent inspect the original process and installation before retrying. Keep all
+data and login files; do not reinstall, reset the host or delete locks/maintenance
+markers to force progress.
 
-## Complete private data backup and relocated restore
-
-```sh
-./install.sh restore --backup /private/backups/manual-copy \
-  --home /private/new-empty-home
-```
-
-Restore accepts a complete installer backup into a **new** home only; it never
-starts a service or overwrites an existing home. It copies SQLite including its
-sidecars, JSON, all state snapshots/assets and config together. Symbolic links
-and special files in the state tree are rejected: linked files must be deliberately
-relocated before backup, never silently followed or omitted. The completion
-marker is written last; a failed backup cannot be restored as complete.
-
-Browser profiles, OAuth tokens and external recipe-library credentials outside
-the state tree are not included. Preserve their existing paths during adoption;
-re-establish or separately manage credentials under the correct provider owner
-when restoring to another host. Complete relocated database-plus-assets restoration has been exercised with
-managed images, historical recipe references and frozen menus on both native
-platforms. This does not restore credentials omitted from the backup.
+An interrupted install/update may need the stopped `update` recovery using the
+same source and paths. An interrupted recipe import instead needs inspection of
+its report and, once resolved, `import-recipes`. See
+[detailed recovery](runtime-reference.md#updates-failures-and-recovery).
+Never restore an old backup over a possibly completed order, payment or email;
+reconcile the original operation first.
 
 ## Versioned recipe package integration
 
-Installation and code updates do not download or import a recipe collection.
-An empty recipe bank is a valid fresh installation; existing recipes are kept.
+### Add or update the recipe collection
 
-To add or refresh the optional collection, use current repository code and update
-an older runtime first. Stop the existing service through its current owner, then
-run this command with the installation's actual home:
+> Import the latest optional recipe collection into my existing Meal Concierge
+> installation. Preserve my own recipes, favorites and local edits. Tell me
+> which version was imported and whether any conflicts need my attention.
+
+The same request **adds the collection for the first time or updates it later**.
+If you have an older program version, update the program first. This also applies
+to installations that received the old `2026-09-06.5` collection automatically:
+a code update leaves that collection unchanged until you request an import.
+
+When no active work will be interrupted, stop the existing service, run from
+current source, and start it again:
 
 ```sh
+./install.sh stop --home /absolute/data-home
 ./install.sh import-recipes --home /absolute/data-home
+./install.sh start --home /absolute/data-home
 ```
 
-Start the service again through the same owner after import. For Grok/external
-installations use the established host executor; native installations use
-`./install.sh stop --home /absolute/data-home` and `start` respectively.
-Never interrupt an active shopping, payment or delivery job to import recipes.
+`import-recipes` selects the newest published stable recipe release and verifies
+its checksum, size and format. You do not need to find a version number or edit
+a configuration file. It reports the import result; review any conflicts before
+retrying an incomplete import. Existing local edits, favorites and archived
+entries are preserved. Unmodified collection recipes can advance to the new
+publisher version. Recipes absent from a newer pack are not automatically deleted.
 
-`import-recipes` selects the most recently published stable `recipes-` release
-from the official GitHub repository, independently of the runtime code version.
-Drafts, prereleases and code releases are excluded. It verifies the archive
-against GitHub's SHA-256 and byte size, then checks the supported format before
-writing. A missing/invalid latest artifact or unsupported format is reported;
-there is no silent fallback to an older pack. No release lookup occurs during
-ordinary installation or update.
+A local `--recipe-pack /absolute/pack.zip` must match that latest release and
+still requires internet access for verification. It is not an offline import
+mode or a selector for older packs. If the latest release is invalid or
+incompatible, the command reports the error instead of choosing an older one.
 
-`import-recipes --recipe-pack /absolute/pack.zip` uses a local copy but still
-looks up the latest release and verifies the same digest and size. It is not an
-offline mode or a way to select an older version. Archive data does not pass
-through RPC. Import requires the existing service to be stopped and retains the
-normal exclusive ownership locks.
+## Externally managed hosts
 
-Repeated imports are idempotent. An unchanged bundled recipe advances to the new
-publisher version with a new history revision. Local content edits produce a
-conflict; favorites, explicit local status and archived entries are preserved.
-Conflicts are reported for explicit resolution. A failed import preserves the
-core installation and any already committed recipes; resolve the reported issue
-before retrying `import-recipes`. Source links and separate text/image credits
-remain available in imported records.
+Grok's cloud service uses `--manager external` and its native background
+executor; it does not use `start`/`stop`. Follow the [Grok guide](grok.md) for
+stopping and starting its exact execution around updates or recipe imports.
+Data must remain in persistent storage. For another explicitly managed host,
+see [external ownership](runtime-reference.md#externally-managed-hosts).
 
-## Verification boundary
+## Complete private data backup and relocated restore
 
-The native fixture in `tests/test_installer.py --native ROOT NAME ADAPTER CHROME`
-requires fresh scratch paths and a unique native unit name. It exercises install,
-interrupted publication/retry, one service owner, actual SDK discovery/setup,
-same-client reconnect across restart, full offline update/restore and adoption of
-existing configured paths. `--mathem ROOT NAME` checks the core without browser
-or Hermes and reports provider login as unavailable. These are isolated tests,
-not permission to run against a household installation.
+Ask the installing agent to back up or move the installation. For a manual
+backup, stop the service and choose a new private destination:
 
-The Linux ARM64 browser proof used extracted Chromium 152 with a task-only
-`--no-sandbox` wrapper because the host restricts unprivileged namespaces. It
-opened only a synthetic blank page; this does not certify that host's production
-browser sandbox or any provider login. Install a supported sandboxed browser for
-normal use. Apple Silicon used installed Chrome 152 with its normal sandbox.
-The actual MENY browser wrapper and persisted instance/profile paths were tested.
+```sh
+./install.sh backup --home /absolute/data-home --backup /absolute/new-backup
+```
 
-The separate `--compose-split` fixture passed with a UID-0 service limited to
-SETUID/SETGID and browser-owned mode-0700 directories; locks are opened under the
-configured browser identity before threads start, then the core identity is
-restored. `--socket-container` verified that the same owner-UID container reconnects
-after host service restart with only the socket directory exposed. Neither test
-changes or certifies an existing live Compose installation.
+Restart the service afterward. The backup includes state, recipes, images and
+configuration. It does **not** include browser profiles, OAuth tokens or external
+credentials outside the state tree; preserve those separately in private storage.
+
+Restore only to a new empty home. Use the
+[restore and adoption instructions](runtime-reference.md#complete-private-data-backup-and-relocated-restore)
+to reconnect the service without overwriting newer data or reviving old payments.
+For removal, stop the exact service and remove its agent/native registration;
+keep the data unless you explicitly want it deleted.
