@@ -89,11 +89,6 @@ everyday use. Maintainer and advanced integration details live separately:
 - [Recipe import formats and extraction](docs/recipe-import-reference.md)
 - [Delivery and sender integration](docs/recipe-delivery-reference.md)
 - [Service and workflow contracts](docs/reference.md)
-- [Installation test history](docs/installation-evidence.md)
-- [Provider acceptance](docs/acceptance.md), [Oda/Mathem evidence](docs/oda-mathem-parity.md)
-  and [platform acceptance](docs/platform-acceptance.md)
 
-Dated acceptance records describe the versions and scenarios actually tested.
-They are not installation instructions or a claim that every current client
-has passed every workflow. In particular, older installations automatically
-imported a recipe pack; current installation and code updates do not.
+For repeatable checks, use [Local checks](#local-checks). Keep current usage and
+integration requirements in the docs; record individual test runs in the PR and CI.

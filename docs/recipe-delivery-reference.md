@@ -1,8 +1,6 @@
 # Finalized recipe delivery — technical reference
 
 For installation agents and maintainers. Start with the [user guide](recipe-delivery.md).
-Dated test results describe the release tested, not a fresh installation today.
-Installation and code updates do not import the optional recipe collection.
 
 An explicit request to receive a saved menu uses `meal_concierge_recipe_delivery`.
 It does not require a grocery purchase. Reads, saves, edits and state migration
@@ -46,7 +44,7 @@ It neither copies nor writes the credential file; access-token refresh stays in
 memory. Login and revoked-grant repair belong to the existing integration.
 **If that integration has its own write policy, use its guarded JSON command
 instead** (`--command /absolute/helper ...`); the standalone example is not a
-way to bypass policy. Bob uses his guarded Workspace helper this way.
+way to bypass policy.
 
 SMTP example, using a password already supplied by the host's secret environment:
 
@@ -98,11 +96,6 @@ The private receipt directory contains original message bytes and evidence.
 Preserve it across upgrades and include it in the host's private backup policy.
 Do not delete it to fix an uncertain send. The service's existing outcome journal
 remains authoritative; local receipts bridge the network-send/ack crash window.
-
-Synthetic acceptance exercises setup/restart, PDF/MIME, duplicate calls, account
-changes, unknown/accepted reconciliation, concurrent executors, explicit retry,
-order-day scheduler gates and a real loopback SMTP sink. This is not evidence of
-a live Gmail recipient accepting email; that requires a separately authorized send.
 
 ## Normal native host path
 
@@ -198,91 +191,6 @@ unavailable without separately verified native timer/destination acceptance;
 an automatic delivery request with no enabled channel is explicitly rejected.
 Existing configured order-day email remains supported.
 
-## Transport acceptance
-
-The following labels concern this new finalized-menu delivery path. Previous
-import/image, scheduler or checkout acceptance does not establish it. See the
-[existing client acceptance](../clients/README.md),
-[email scheduler contract](email-scheduler.md), and
-[managed asset contract](recipe-assets.md) for those separate results.
-
-| Host/path | Text | PDF/image outbound | Email | Scheduled chat |
-| --- | --- | --- | --- | --- |
-| Shared Application + actual MCP 2.1.1 + Unix RPC/CLI | Verified local synthetic transfer | Verified exact PDF/image byte transfer; native recipient not implied | Verified single MIME send to loopback-only SMTP sink | Unavailable in this implementation |
-| Hermes native host | Read-only current Bob client/MCP status verified; no delivery occurrence | Unverified | Sender inventory unavailable; no probe send | Unavailable here |
-| OpenClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
-| Codex desktop | Verified emitted synthetic seven-day recipe text in the bound task | Verified for the original synthetic occurrence: recipient confirmed readable PDF and native image preview; historical transport acknowledgements remain unknown | Unverified | Unavailable here |
-| Codex CLI | Unverified native reply for this occurrence | Local file transfer verified; visual preview unavailable in CLI itself | Unverified | Unavailable here |
-| Claude Desktop 1.46388.4 / embedded Code 2.1.260 | Verified 19,172-byte complete frozen saved-week text in the bound native conversation | Verified 276,833-byte readable ten-page PDF and two exact managed-image native previews; all four parts accepted | Unverified; email absent from the occurrence | Unavailable here |
-| Grok Bot 0.44.0 | Verified once for current-source bank-only saved week: 15,719-byte structured text accepted by `SendToUser`; exact final bubble styling/read status unobserved | Definitively `not_sent` for the 585,065-byte PDF and three managed images because Bot group rooms drop attachments | Unverified | Unavailable here |
-| NanoClaw native host | Unverified for this new occurrence | Unverified | Unverified | Unavailable here |
-
-Codex desktop documents a PDF preview panel in its
-[official app changelog](https://learn.chatgpt.com/docs/changelog#codex-2026-02-05-app).
-That documented feature is not by itself acceptance of this delivery path.
-
-On 2026-09-07 the original Codex desktop probe froze seven dated synthetic
-recipe snapshots (recipe revision 1), scaled from two to six portions, with
-600 g carrots and 3 l water per recipe and distinct recipe/image credits.
-The actual RPC/CLI exported a 67,971-byte PDF and a 15,175-byte managed synthetic
-JPEG; the exact 4,010-byte recipe text was emitted once in the bound task.
-The PDF SHA-256 is
-`67892fb792b39cebd8254c8612ada3be0eb65636cb408165212a19c7c26556a8`;
-the image SHA-256 is
-`01359d0f5a975cbbfe00ce0c7fb862b38584b6aaed012130e1f3a749eff1ea18`.
-
-The file panel initially returned `queued` and automated Codex UI inspection
-was denied. During subsequent reconciliation, the recipient explicitly answered
-“ja og ja” when asked whether the PDF in the original task could be opened and
-read and whether the image actually appeared as a preview. This affirmative
-recipient observation satisfies the remaining native presentation gate for that
-original occurrence; it is not a new send or an automated transport receipt.
-The immutable original journal still records text `accepted`, PDF/image
-`unknown`, with the original attempt tokens and destination. It was not edited,
-reseeded, retargeted or resent, and the refused inspection route was not retried.
-
-These observed payload sizes establish one successful native presentation,
-not a measured maximum Codex message/attachment limit. The probe used conservative
-operational bounds of 16,000 text bytes and 1,000,000 attachment bytes. Shared
-integration tests separately exercise bounded splitting, oversized attachments,
-missing/disabled assets, text fallback and partial/unknown outcome recovery.
-Existing six-page native and thirteen-page long-fixture visual reviews apply to
-unchanged PDF bytes; no renderer or layout changed. Grok's earlier introspected
-`SendToUser` schema was not a performed transfer; the current result below is
-separate. Other host qualifications remain as listed above. See [issue 53](https://github.com/poisdahl/meal-concierge/issues/53)
-for the acceptance result reusable by issue 52.
-
-On 13 September, Grok Bot 0.44.0 exercised this delivery path from a current
-public-source retained installation. Request
-`issue52-grok-final-20260913-a` froze bank-only menu
-`menu_0162193d6ce0eb841f317d45` revision 1, digest
-`5657fde91b2d4a108fae3ddcef9ddd3f9370eae01c2c541aabc5e75260836f87`.
-The complete 15,719-byte text part was accepted once. The maintained plain-text
-renderer separates section titles with line breaks, prefixes list rows with
-bullets and preserves source URLs in parentheses. The final delivered
-group-room bubble was not exposed in the available Bot transcripts, so exact
-visual styling and recipient-read status are not claimed. Its 585,065-byte PDF
-and three managed images were positively `not_sent`, rather than unknown,
-because the selected Bot group-room transport drops attachments. The sender did
-not retry them. This is accepted evidence for the structured current-client
-text payload and attachment limit, not a successful Grok PDF/image presentation.
-
-The same date's owner-confirmed Claude Desktop Code occurrence used retained
-menu `menu_dfc3b9a6641e31009991a612` revision 1, digest
-`82dea9d29f815f13c4877e90c298798f3a234d5d271163469ccaceefaaf3741a`.
-Request `issue52-claude-final-20260913-a` presented the complete 19,172-byte
-text, a 276,833-byte ten-page PDF and two managed JPEG previews of 32,546 and
-140,434 bytes in the same native conversation. The operator opened the PDF in
-Claude's built-in viewer, observed readable pages 1 and 10 and the full 1–10
-page structure; both image previews were visible. Exported hashes matched the
-frozen metadata. Each part was begun, presented and acknowledged once with its
-original token and actual native file/message receipt. Final `get` reports all
-four parts `accepted` and `all_accepted=true`; `recipient_read` remains unknown
-because the API does not record the separate operator observation. A first
-read-only binary export used the absent default Linux socket, returned zero
-bytes and `dispatched:false`, then succeeded against the actual Desktop socket
-before any `begin`; no send was replayed.
-
 ## Validation
 
 Run `python -m unittest discover -s tests -p test_recipe_delivery.py -q` in the
@@ -293,13 +201,3 @@ partial/unknown outcomes, explicit holds, legacy send fencing and migration.
 Its SMTP test never forwards externally and uses `.test` recipients. Inspect
 rendered PDF pages as well as text extraction; automated tests cannot establish
 native attachment presentation or visual layout on every client.
-
-The twelve focused tests passed with the pinned dependencies and Python
-3.12.12. The private repository's required `fleet` validation passed. All 322
-existing-plus-new product tests were exercised: 319 passed under Python 3.12.13;
-the three Grok runtime tests rejected that interpreter because their fixture
-requires 3.12.12, then all three passed under 3.12.12. The two subsequent
-attachment-limit/section-splitting regressions are included in the twelve-test
-focused run. PDF visual review covered all 13 pages of a long Norwegian fixture
-and all six pages of the frozen seven-day native candidate, with readable
-quantities, page breaks and distinct credits.

@@ -5,9 +5,6 @@ A native scheduler owns its timer and invokes the existing service; it does
 not start another household daemon. Every email remains bound to its original
 provider, order, recipient and menu snapshot after a provider or menu change.
 
-See the [native acceptance matrix](scheduler-acceptance.md) for exact tested
-client versions, persistence/pause/timing evidence and sender limits.
-
 This is the Application, JSON CLI and native MCP contract. Native platform
 persistence, actual timer invocation and sender availability must be verified
 on the selected platform separately. Existing jobs without managed ownership
@@ -180,7 +177,7 @@ scope cannot establish removal. This receipt accounts for the
 terminal legacy row during first global adoption. None of these operations
 cancels or changes the provider order.
 
-## Frozen payload and test boundary
+## Frozen payload
 
 The menu and recipient are captured when the email is scheduled. Subsequent
 menu/profile changes cannot replace that content. `test` and `begin_send` accept
@@ -196,16 +193,9 @@ uses its original menu snapshot to render both alternatives consistently.
 Optional image descriptors, duplicate fallback HTML and warnings are dropped
 as needed before either preparation result exceeds the existing RPC limit;
 required text that still cannot fit fails before dispatch. `test` never consumes
-the scheduled job. The focused tests exercise actual Application/snapshot and
-socket preparation, MIME construction and a loopback SMTP receiver, including
-exact CID bytes and both credits. They also reopen the journal after a lost
-send acknowledgment and reconcile the one accepted message. Synthetic provider
-reads and loopback SMTP are not proof of real delivery or native scheduler
-persistence. A sender on another host/container needs supported narrow asset
+the scheduled job. A sender on another host/container needs supported narrow asset
 transfer before it can claim inline-image support; client-local paths alone do
 not provide that access.
 
-Run the focused contract tests with
-`python integrations/meal-concierge/tests/test_email_scheduler.py` in the
-private repository, or `python tests/test_email_scheduler.py` in the exported
-product. The shared-code validation profile is `scripts/validate.py fleet`.
+For adapter changes, run `python tests/test_email_scheduler.py` from the product
+checkout using the pinned runtime dependencies.

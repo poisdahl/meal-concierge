@@ -1,7 +1,6 @@
 # Standalone runtime and safe updates — technical reference
 
 For installation agents and maintainers. Start with the [user guide](runtime.md).
-Dated test results describe the release tested, not a fresh installation today.
 Installation and code updates do not import the optional recipe collection.
 
 The runtime runs independently of agent conversations on Linux/user-systemd,
@@ -91,7 +90,7 @@ the user's intended store. Oda/MENY still require their browser dependencies.
 The first command performs the declared `uv` staging, verification and migration
 subprocesses; it does not start the service or authenticate a store. Do not treat
 this entry point as a bypass for platform review of its underlying operations.
-Grok-specific command review and acceptance limits are in the [Grok guide](grok.md).
+Grok-specific setup and limitations are in the [Grok guide](grok.md).
 
 Run the second command through the platform's normal background-execution
 facility and retain its exact execution ID and service PID/start identity.
@@ -127,14 +126,6 @@ After cloud runtime loss, rebuild the missing replaceable runtime from the
 matching reviewed source; do not restore older household data. Changing from a
 previous supervisor is a separate explicit ownership transfer, not a side effect
 of selecting external mode.
-
-The focused native-style local test is
-`python tests/test_installer.py --external /explicit/new/scratch-root` with the
-pinned test dependencies. It creates a new unauthenticated Mathem fixture,
-downloads the real runtime, exercises MCP and interrupted-owner
-recovery, then stops its own service. It makes no store or account calls.
-This test does not establish Grok's Shell approval or background-cancellation
-behavior; those require native verification.
 
 ## Provider OAuth
 
@@ -209,7 +200,7 @@ browser for guarded saved-card checkout; its selected MCP address reference
 must match that browser account. MENY retains its dedicated browser login.
 
 Mathem core installation keeps browser prerequisites optional. To enable its
-checkout browser, pass the tested `--agent-browser` and `--browser-executable`
+checkout browser, pass the verified `--agent-browser` and `--browser-executable`
 paths to install, or to an explicit stopped-service update of the same home.
 The installer validates the native adapter version and retains the installation's
 existing private browser profile/home/socket ownership. Log that profile into
@@ -217,12 +208,6 @@ Mathem normally; never copy another browser's cookies or refresh tokens. The
 `run-service.sh` launcher also discovers available browser executables; absent
 prerequisites leave Mathem core operations and the manual checkout handoff usable.
 A configured browser is not evidence of login, account matching or card readiness.
-
-The provider auth tests use actual MCP/mcp-types 2.1.1 with test-only OAuth/MCP
-responses against the [MCP authorization contract](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
-Their acceptance is
-**synthetically verified; live not verified**. No production synthetic fallback,
-live credential move or live provider certification is implied.
 
 ## Existing installations
 
@@ -261,13 +246,6 @@ unlinked by a competing launcher. Locks are not proof that a pre-lock supervisor
 cannot later restart: disabling/retiring that old owner remains mandatory.
 
 ## Updates, failures and recovery
-
-When an Oda or Mathem MCP or website change is found, check the corresponding
-interface at both providers and consider a shared fix first. Record each
-provider's dated source/observation and result, including unchanged or unavailable.
-Keep separate identities and provider-specific behavior where evidence requires
-it; do not infer matching behavior from shared schemas or automatically deploy
-the other provider. See the [current parity evidence](oda-mathem-parity.md).
 
 ```sh
 ./install.sh stop --home /private/household
@@ -316,14 +294,13 @@ marker is written last; a failed backup cannot be restored as complete.
 Browser profiles, OAuth tokens and external recipe-library credentials outside
 the state tree are not included. Preserve their existing paths during adoption;
 re-establish or separately manage credentials under the correct provider owner
-when restoring to another host. Complete relocated database-plus-assets restoration has been exercised with
-managed images, historical recipe references and frozen menus on both native
-platforms. This does not restore credentials omitted from the backup.
+when restoring to another host.
 
 ## Versioned recipe package integration
 
 Installation and code updates do not download or import a recipe collection.
-An empty recipe bank is a valid fresh installation; existing recipes are kept.
+A fresh local bank can be empty; recipes from the selected, connected store
+remain available without the collection. Existing recipes are kept.
 
 To add or refresh the optional collection, use current repository code and update
 an older runtime first. Stop the existing service through its current owner, then
@@ -359,30 +336,6 @@ Conflicts are reported for explicit resolution. A failed import preserves the
 core installation and any already committed recipes; resolve the reported issue
 before retrying `import-recipes`. Source links and separate text/image credits
 remain available in imported records.
-
-## Verification boundary
-
-The native fixture in `tests/test_installer.py --native ROOT NAME ADAPTER CHROME`
-requires fresh scratch paths and a unique native unit name. It exercises install,
-interrupted publication/retry, one service owner, actual SDK discovery/setup,
-same-client reconnect across restart, full offline update/restore and adoption of
-existing configured paths. `--mathem ROOT NAME` checks the core without browser
-or Hermes and reports provider login as unavailable. These are isolated tests,
-not permission to run against a household installation.
-
-The Linux ARM64 browser proof used extracted Chromium 152 with a task-only
-`--no-sandbox` wrapper because the host restricts unprivileged namespaces. It
-opened only a synthetic blank page; this does not certify that host's production
-browser sandbox or any provider login. Install a supported sandboxed browser for
-normal use. Apple Silicon used installed Chrome 152 with its normal sandbox.
-The actual MENY browser wrapper and persisted instance/profile paths were tested.
-
-The separate `--compose-split` fixture passed with a UID-0 service limited to
-SETUID/SETGID and browser-owned mode-0700 directories; locks are opened under the
-configured browser identity before threads start, then the core identity is
-restored. `--socket-container` verified that the same owner-UID container reconnects
-after host service restart with only the socket directory exposed. Neither test
-changes or certifies an existing live Compose installation.
 
 ## Grok executable-binding fallback
 

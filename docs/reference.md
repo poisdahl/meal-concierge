@@ -36,7 +36,7 @@ per-household formatting setting or duplicated agent instruction file.
 
 The profiles cover simple text, formatted chat and larger-screen interfaces,
 with terminal defaults and channel-specific differences. Grok Bot uses simple
-text pending verification of its future integration. These instructions do not
+text where required by its delivery surface. These instructions do not
 change the [available agent integrations](../README.md#agent-support): preparing
 a profile for Codex, Claude Code or Grok does not install its connector.
 
@@ -126,15 +126,13 @@ verifies the same order, receipt, current modifiability and Swedish confirmation
 dialog. Delivery changes use the bound original-order checkout and the shared
 full-total authorization rule below. The selected slot price alone never
 establishes the final order price or payment due. Missing original/final totals
-or unavailable dates stop the change. The Mathem reduction path is covered by
-synthetic lifecycle and native-DOM tests; a live reduction still requires an
-active order for which Mathem currently exposes removal.
-Native outcomes and remaining gates are recorded in [acceptance](acceptance.md).
+or unavailable dates stop the change. A reduction requires an active order for
+which the store currently exposes removal.
 
-Mathem MCP receipts omit the address. Reconciliation therefore reads the exact
-order URL only after a potentially accepted result, verifies its visible order
-reference and receipt address, and matches MCP
-currency, products, total, delivery window and fulfillable tracking state. A
+Oda and Mathem MCP receipts omit the address. Their shared browser receipt
+checks read the exact order page after a potentially accepted result and verify
+its visible order reference and receipt address. Reconciliation also matches
+MCP currency, products, total, delivery window and fulfillable tracking state. A
 missing or unreadable receipt keeps the attempt uncertain and never authorizes
 another payment. While unpaid, reconciliation leaves the payment/challenge
 page in place. Repeated confirmation/reconciliation uses the original journal.
@@ -243,10 +241,7 @@ target. After dispatch, use `action="reconcile"` on this retained attempt,
 including after a lost response or restart; the prior failure never authorizes
 another payment. Original and recovery IDs resolve to the same confirmed result.
 Store/device approvals remain external and must not be inferred from an
-unconfirmed response. Ordinary live recovery is demonstrated for an Oda new
-order using its existing saved card after a hosted Vipps timeout; the shared
-Mathem new-order route is implemented but not demonstrated live; the shared
-recovery logic has isolated coverage.
+unconfirmed response.
 
 Oda's hosted payment redirect uses the remaining bounded checkout operation
 time while reserving enough time to verify and submit the hosted phone form.
@@ -288,23 +283,7 @@ payable. Mathem's overview total is a separate field; when it differs,
 amounts and all displayed fee rows are frozen and rechecked before payment.
 No rounding tolerance or inferred fee replaces the actual payment-button amount.
 If the owner has already completed the payment, ordinary reconciliation records
-that result and clears the original attempt; it does not submit again. The
-[recovery evidence](oda-mathem-parity.md#ordinary-mathem-failed-addition-recovery--2026-09-10)
-records successful ordinary installed Hermes/MCP recovery of a positively failed
-Mathem addition: fresh bound review and required notice, one payment and one
-bank-app method selection, owner bank approval, then merchant-confirmed
-reconciliation. Earlier helper-assisted results and isolated failure/restart
-tests remain separately identified.
-
-Authenticated MCP cart/delivery reads and bounded add/remove probes, checkout
-amount/account/card helper reads and read-only receipt address verification have
-been exercised. Local tests cover guarded Application preparation, final DOM
-drift and lost-response reconciliation. Native Mathem ordering, a recovery-assisted
-addition, free delivery confirmation after scoped UI preparation and cancellation
-are recorded in [acceptance](acceptance.md), separately from those local tests.
-Bank authorization, charge, refund and release remain unknown. Published-source
-installation, preserved data and final native reconnect are verified in that
-acceptance record.
+that result and clears the original attempt; it does not submit again.
 
 MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths
@@ -381,21 +360,19 @@ unit price is therefore not necessarily an exact payable total: missing pant,
 variable weight, unknown member eligibility and unsupported offer syntax all
 stay unresolved. Comparable merchandise unit prices use exact fractions within
 mass, volume or count; the display value is rounded to two decimal øre per
-canonical unit using round-half-even. The current Oda `product_search` fixture
-exposes exact merchandise price and availability but no product-level deposit
-or offer-term field, so its `total_payable_ore` and automatic offer use remain
-unavailable. MENY search cards likewise do not prove an exact pant amount or
+canonical unit using round-half-even. Oda `product_search` supplies merchandise
+price and availability without product-level deposit or offer-term fields;
+missing fields leave `total_payable_ore` and automatic offer use unavailable. MENY search cards likewise do not prove an exact pant amount or
 that pant is absent. For each bounded, available exact-price result the MENY
 adapter therefore verifies the same current price against the linked product's
 single primary price block. Exactly no pant marker establishes zero product
 pant; a `+ pant` marker without its amount remains unknown. This lets ordinary
 no-pant products expose an exact payable total without treating card absence as
-evidence. The captured public `Tilbud` current/original-price pair and strict
-`N for M` tag establish the only automatic MENY discount forms. `Fra N,NN kr`
-is always a lower bound (including `fra 0`), never payable; no such product card
-was present in the bounded verification capture. Other lower-bound, promotional
-and package grammars remain display-only. Because the captured campaigns do not
-state repetition limits, one discounted unit or one exact multi-buy threshold is
+evidence. The `Tilbud` current/original-price pair and strict `N for M` tag are the
+supported automatic MENY discount forms. `Fra N,NN kr`
+is always a lower bound (including `fra 0`), never payable. Other lower-bound,
+promotional and package grammars remain display-only. Without explicit campaign
+repetition limits, one discounted unit or one exact multi-buy threshold is
 the largest decision-bearing quantity; larger quantities stay unresolved. No
 observation is stored as durable price truth.
 
@@ -452,13 +429,12 @@ Delivery list returns the same seven-field slot object for each provider:
 timestamps, integer `price_ore` or `null`, `price_kind` (`exact`, `from` or
 `unavailable`) and the provider-selected flag. Price presentation is derived
 only from that state as `49 kr`, `fra 49 kr` or `pris ikke tilgjengelig`.
-`fra 0` is never reported as free. A parser is enabled only for sanitized
-provider-fixture shapes; unknown shapes stop instead of guessing price or units.
-The current Oda fixture establishes integer IDs, RFC 3339 `openDatetime` /
-`closeDatetime`, and exact `kr` + NBSP + integer-kroner prices, including
-confirmed `kr 0`; other Oda price syntax remains unavailable. Full or
-provider-unavailable Oda rows are not offered as candidates. The current MENY
-fixture establishes only its duplicated `fra N kr fra N kroner` label form.
+`fra 0` is never reported as free. Parsers accept only their supported response
+shapes; unknown shapes stop instead of guessing price or units. Oda delivery
+parsing requires integer IDs, RFC 3339 `openDatetime` / `closeDatetime`, and exact
+`kr` + NBSP + integer-kroner prices, including `kr 0`. Other Oda price syntax
+remains unavailable. Full or provider-unavailable Oda rows are not candidates.
+MENY price parsing supports its duplicated `fra N kr fra N kroner` label form.
 MENY list results retain that bounded original ARIA label in the outer
 `display[slot_ref]` metadata map while excluding it from the seven-field slot
 identity, so price wording can change without changing `slot_ref`.
@@ -493,9 +469,7 @@ summary independently supplies its aggregate item-count/product-total,
 discount, discounted `Delsum`, delivery, delivery-packaging, named other-fee
 and total rows, while the selected-slot price is also verified against the
 fresh slot listing. The aggregate label is bound to the exact cart or order
-product count. The sanitized fixture retains the exact observed labels and
-formatted amount strings used by that parser.
-MENY's cart and checkout
+product count. MENY's cart and checkout
 surfaces establish their own totals. Neither provider reconstructs a missing
 subtotal, delivery, discount, deposit, bag or other fee by subtraction.
 
@@ -703,13 +677,6 @@ redirected to `builtin`, and can become confirmed only when a unique marker
 search, origin record, snapshot digest, source identity and normalized content
 all agree. A copied marker or partial stub is not enough.
 
-The sanitized fixture in `tests/fixtures/mealie/v3.24.0.json` records the
-stable v3.24.0 shapes checked against the official current Mealie OpenAPI
-surface without retaining a token, user/household identity, private recipe or
-internal hostname. Optional live coverage runs only when an operator explicitly
-supplies a test connection; it creates one uniquely marked recipe and removes
-only the exact confirmed or reconciled provider UUID.
-
 Mealie search and get include the authenticated account's current native
 `is_favorite`; `favorites_only=true` is accepted because the connection reports
 `favorite_read`. Meal Concierge serializes its own desired-state writes for a
@@ -833,15 +800,6 @@ group/household scope cannot inherit or reconcile the old operation. Missing
 recipes are not recreated, retargeted or copied into the
 built-in bank. A later provider recipe with the same title or source URL but a
 new ID is a distinct identity and inherits no mapping, usage or favorite state.
-
-The sanitized fixture in `tests/fixtures/recipesage/v4.0.6.json` records exact
-selected request/response schemas captured from the hosted OpenAPI and the
-official self-host release provenance, with synthetic response values only. It
-contains no session, real email/account ID, private recipe or internal hostname.
-Optional live coverage runs only when an operator explicitly
-supplies a test connection; it creates one uniquely marked temporary recipe and
-removes only the exact confirmed or reconciled UUID. An uncertain cleanup is
-reconciled and never repeated blindly.
 
 The hidden prompt reads credential JSON. Add/update probes authentication and
 semantic read capabilities before saving connection configuration; credential
@@ -1445,20 +1403,6 @@ Delivery, cart-level bags and fees are excluded. The later provider-authoritativ
 checkout summary remains the final price authority. Comparison performs only
 bounded product observations; it never authorizes cart, order or payment changes.
 
-The finite bounds were exercised with a synthetic seven-dinner Application
-fixture: 52 source rows produced 37 resolved shopping needs and three pantry/
-optional questions. Explicit decisions yielded a complete 37-need plan and one
-cart mutation, with independent package arithmetic and exact fractional pantry
-subtraction. Three full-week alternatives reused 37 compatible searches; a
-separate boundary fixture exercised three disjoint 64-need alternatives with
-192 approvals and searches. A 65-need menu failed before dispatch. The measured 37-need preparation made 37 synthetic searches and returned 50
-packages costing 5,000 øre in 0.15 seconds. A stress fixture of 64 needs with five
-candidates and an analytic bound of 7,776 combinations per need took 9.17 seconds;
-a fixture exceeding the unchanged 10,000-combination limit returned all 64 needs
-unresolved in 11.28 seconds. These are synthetic local measurements under
-concurrent validation load, not live-store speed estimates.
-
-
 ## Exact meal slots and remaining-week replanning
 
 Planner saves create opaque stable `slot_id` values with exact date, dinner type,
@@ -1493,8 +1437,7 @@ non-scalable and incompatible rows explicitly unresolved; it is never a provider
 product/cart quantity delta. Cart sync or order changes require their separate
 explicit reconciliation path. These actions call no provider.
 
-State v8 was already used by the project rename in PR #26. The permanent v7→v8
-migration is retained; slot metadata is therefore the additive v8→v9 step, with
+Slot metadata uses the additive v8→v9 migration, with
 one private atomic `state-v8.backup.json` before upgrading an existing v8 file.
 Direct v7 upgrades retain their own `state-v7.backup.json`. Backups are 0600,
 never overwritten; migration is atomic/idempotent and newer versions fail closed.
@@ -1605,8 +1548,7 @@ dependencies. Retried retained keys are idempotent; their expiry follows their
 whole component. Expired corrections never leave dangling references or
 resurrect retained events.
 
-Because PR #26 already used state v8 and slot planning uses v9, feedback is the
-additive v9→v10 migration. Existing v9 state receives one atomic private 0600
+Feedback uses the additive v9→v10 migration. Existing v9 state receives one atomic private 0600
 `state-v9.backup.json`, never overwritten. Failed migration leaves its source
 usable and unknown newer versions fail closed.
 
@@ -1802,7 +1744,7 @@ only when reconciliation and in-progress stages are unpinned. Confirmed ID
 mappings remain bounded durable metadata. Public results contain bounded
 names, refs and digests, never full frozen recipe text or provider error bodies.
 
-### External cancellation and live-test cleanup
+### External cancellation and follow-up cleanup
 
 If an order was cancelled outside Meal Concierge, use `email reconcile` with
 its exact provider/order ID. It checks provider status without cancelling an
@@ -1828,21 +1770,6 @@ absence and acknowledge exact cleanup before releasing the binding; preserve unr
 follow-up cleanup are distinct operations; never re-cancel an already cancelled
 order. When an ordinary order cancellation succeeds, reconcile its email
 follow-up and apply any returned cron removal before reporting completion.
-
-Ordinary tests use synthetic providers and temporary local state, with no real
-checkout, payment, email or cron creation. A live test that creates an actual
-order needs explicit authorization naming the allowed order/amount/scope and
-whether that exact order is to be kept or cancelled. Include its cron/email
-cleanup in that authorization up front. Separate local state or browser
-profiles do not isolate the real provider account or cart. Preserve unrelated
-cart lines and orders. Record exact created IDs privately, reconcile uncertain
-writes before any retry, verify authorized cancellation at the provider, then
-remove the exact cron and pending local follow-up. Never claim the live test
-finished while required cleanup is incomplete: report the remaining exact
-artifact and blocking condition. Do not infer test ownership or cancel orders
-by name, date or similarity. No automatic real-order creation/cancellation is
-part of the ordinary validation suite.
-
 
 ## Complete household workflow
 
@@ -1929,14 +1856,6 @@ ensures a minimum package count without duplicate additions on repeated calls.
 Use `change` for explicit additional quantity deltas. Both actions accept an
 active menu; verified household extras are tracked as supplemental quantities
 and remain separate when menu requirements change. They do not rewrite recipes.
-
-The [provider evidence matrix](oda-mathem-parity.md) distinguishes earlier
-assisted results from ordinary installed Hermes flows and independent merchant
-evidence. Oda and MENY demonstrate same/lower/higher full totals; Mathem
-demonstrates unchanged totals, with no distinct priced alternative returned in
-the bounded trial. This does not establish global price unavailability. Do not
-retry a failed or uncertain addition payment through a separate helper and
-describe that as product recovery.
 
 ### Delivery-only changes and price authority
 

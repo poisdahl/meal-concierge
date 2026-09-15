@@ -17,7 +17,7 @@ python build_recipe_pack.py \
   --snapshot /absolute/path/to/sealed-source-snapshot \
   --snapshot-sha256 EXPECTED_SNAPSHOT_JSON_SHA256 \
   --output /absolute/path/to/separate-build-directory \
-  --pack-version 2026-09-06.4 \
+  --pack-version UNIQUE_VERSION \
   --covers-root /absolute/path/to/reviewed-cover-derivatives \
   --covers-manifest-sha256 EXPECTED_COVERS_MANIFEST_JSON_SHA256
 ```
@@ -72,35 +72,6 @@ and never creates personal acceptance. Only the reviewed release introduces
 publisher estimate markers through the verified bundled-import path. Culinary
 review is required in addition to numeric completeness before publication.
 
-### Reviewed dinner mappings
-
-Five narrow mappings bind source page, revision and rendered SHA-256 after
-whole-procedure review. They recover explicit mango, duck breast, star anise,
-onion, sausage and tomato counts. The lamb dish selects the source's twelve
-small potatoes, retaining the alternative ten medium potatoes and approximate
-weight in original evidence. Acorn salmon selects the complete oven method
-using the source's non-stick sheet alternative. Its oil-dependent stovetop
-method remains in full attribution. These choices are recorded as adaptations;
-no estimate receives user acceptance and no approximate weight becomes exact.
-
-The following source recipes have complete quantified ingredient lists and
-explicit person servings, and can be scaled without accepted estimates:
-
-| Recipe | Wikibooks page / revision | Source servings |
-| --- | --- | --- |
-| Frito Pie (Baked) | 59633 / 4518551 | 4 |
-| Salmon with Rice and Sauce | 413652 / 4494430 | 3 |
-| Jamaican Chicken Fingers with Honey-Mustard Sauce | 102173 / 4509779 | 4 |
-| Asian Grilled Duck Breasts | 203935 / 4509725 | 4 |
-| Langar Dal | 479669 / 4597437 | 4 |
-| Acorn Crusted Salmon (Oven Method) | 266778 / 4512396 | 2 |
-| Lamb Sausages and Grilled Potatoes | 414427 / 4524828 | 6 |
-
-These are seven main-dish candidates, not a nutritional assessment or proof of
-retailer matching. Langar dal is a legume main component; suggested side dishes
-remain suggestions until separately quantified. Offline menu selection and
-product matching must exercise the installed artifact through the runtime.
-
 ## Rights, attribution and images
 
 Wikibooks text is distributed under CC BY-SA 4.0 with source, revision,
@@ -126,13 +97,9 @@ SHA-256 and exact description URL and retain a revision permalink. They distingu
 photographers, copyright holders, uploaders and later editors; unknown creators
 remain unknown. Complete notices survive in `attribution.json` even when their
 combined display credit exceeds the recipe field limit.
-The supplements were reviewed on 6 September 2026. A Commons revision permalink
-pins the description; editor notes can come from the separately displayed file
+A Commons revision permalink pins the description; editor notes can come from
+the separately displayed file
 history, which MediaWiki does not freeze with the description revision.
-
-The optional `SN1.JPG` cover is not selected for this collection. Its recipe,
-supplied Serendipity1987 attribution, declared licenses and original source
-notices are retained in `attribution.json`.
 
 A separate source compression job owns canonical managed renditions. The builder
 checks the reviewed derivative manifest digest, complete recipe associations,
@@ -142,7 +109,7 @@ EXIF orientation and embedded ICC-to-sRGB conversion, resizes without upscaling
 to at most 960 pixels and makes one JPEG quality-85 encoding. Separate ordinary
 image notices survive in the artifact. No second lossy conversion occurs.
 Omitting both cover arguments creates a text-only probe with visible pending
-cover counts; it does not establish image acceptance.
+cover counts; it includes no managed images.
 
 ## Artifact and acceptance boundaries
 
@@ -162,94 +129,9 @@ limits are unchanged.
 `build-report.json` records actual build time and compressed/expanded sizes.
 Installer discovery, trusted bundled origin, database updates, conflict handling,
 offline menu behavior, backup and relocated restore are separate integration
-paths. A passing builder test or a text-only archive does not certify them.
+paths.
 
 Recipes without an actionable source method are excluded by a source-hash-bound
 curation decision, including previously completed placeholders. Short but real
 preparation methods remain eligible. Changed recipe yields retain their original
 value in attribution; covers that no longer represent an adaptation are omitted.
-
-## Released .5 coverage and offline acceptance
-
-The immutable `2026-09-06.5` archive contains 4,599 ready recipes (3,807
-Wikibooks and 792 TheMealDB), with 1,570 managed JPEG assets referenced by
-1,580 recipes. The remaining 3,019 recipes have a text-only presentation.
-The coverage inventory accounts for 8,642 entries: 2,671 Wikibooks redirects,
-1,351 non-recipe pages, 20 parse failures, the included recipes, and one
-TheMealDB exclusion without a real source method. This accounts for the
-captured scope; it does not assert successful parsing of every recipe or an
-atomic, authoritative export of either upstream catalog.
-
-The 20 retained Wikibooks failures are explicitly outside this release's
-supported conversion shapes. They remain `failed_parse` in its immutable
-coverage report, not invented recipes or silently reclassified non-recipes:
-
-| Unsupported source shape | Count | Wikibooks page IDs |
-| --- | ---: | --- |
-| Nested ingredient lists needing grouping or an alternative choice | 11 | 14077, 25802, 30765, 33222, 34046, 108198, 119511, 180949, 462326, 464709, 465816 |
-| Missing/multiple ingredient sections needing recipe splitting | 4 | 16997, 40635, 159967, 446276 |
-| Incomplete ingredient or procedure section | 2 | 56657, 482477 |
-| Notes exceed the supported field size | 1 | 83557 |
-| Yield unit exceeds the supported field size | 1 | 470790 |
-| Unsupported ingredient table | 1 | 471224 |
-
-These classifications preserve the actual parser outcomes. Resolving a page
-requires a separately reviewed source mapping or editorial choice; the release
-does not guess missing instructions, flatten ambiguous alternatives or enlarge
-runtime fields to conceal the failures. The source-hash-bound TheMealDB
-missing-method exclusion remains unchanged.
-
-A fresh isolated Linux ARM64 bank was exercised on 7 September 2026 using
-Python 3.12.12 and the pinned runtime dependencies from public `fa63031`.
-The production staging helper acquired and verified the exact public archive;
-the production archive importer ran under its ordinary offline ownership lock.
-All 4,599 records were created without failures or conflicts in 135.633 seconds
-(excluding the 8.570-second download). Earlier accepted interrupted/resumed,
-repeat-import, upgrade/conflict, frozen-history and relocated-restore checks
-remain applicable to this unchanged archive.
-
-| Measured artifact/storage | Bytes |
-| --- | ---: |
-| Downloaded ZIP | 186,678,225 |
-| Expanded members | 234,658,369 |
-| Recipe JSONL | 42,821,263 |
-| Managed JPEGs | 179,997,024 |
-| Attribution | 9,826,643 |
-| Coverage | 1,731,767 |
-| Installed bank, assets and metadata after menu acceptance | 289,328,114 |
-
-Installation needs room for both the staged archive and installed bank, plus
-runtime dependencies, temporary files and any retained backup. These are
-measurements of this release, not constant storage guarantees.
-
-With network connections disabled in the acceptance process, first/repeated
-20-result Application summary reads took 0.122/0.116 seconds. The summary
-response was 15,717 bytes; fetching the corresponding 20 exact full documents
-returned 285,497 bytes in 0.330 seconds. “First” means a new Application process,
-not a flushed operating-system disk cache. Full detail retained ingredients,
-steps, source identity and exact versions. No source API or LLM conversion ran.
-
-A plain seven-day request with no personal recipes selected seven local dishes
-in 44.635 seconds: one local search page, 20 detail reads, 17 suitable candidates,
-eight shortlisted candidates and 40,320 planner assignments. AI fallback stayed
-disabled. The resulting 81 ingredient occurrences needed nine explicit optional
-ingredient decisions before product preparation. Omitting those optional items
-left 58 exact requirements and 57 distinct queries, producing a prepared plan
-with controlled Oda product responses and exact candidate choices. No automatic
-ownership, optional-ingredient choice or purchase was inferred.
-
-Separately, the seven source-quantified dinner mappings listed above passed the
-actual installed-bank -> dated menu -> product-preparation path for Oda, Mathem
-and MENY. Each had 46 requirements, 46 searches per preparation and a prepared
-58-package result with synthetic, explicitly approved offers. Both preparations
-(before and after candidate approval) made 92 searches together. Socket access
-was disabled; no provider API, cart or checkout ran. All 4,599 pack records are
-provider-neutral. These tests establish shared runtime compatibility and offline
-source independence; they do not establish live product availability or prices.
-
-All included JPEGs passed the strict decoder during installation. Four sampled
-renditions were also visually inspected at their distributed size: food edges,
-garnish, bread texture and crumb detail remained legible without visible severe
-compression artifacts. This is representative visual inspection, not manual
-inspection of all 1,570 files. No new image rendition or recipe release was
-needed for this acceptance.

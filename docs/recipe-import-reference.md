@@ -1,7 +1,6 @@
 # Recipe import boundaries — technical reference
 
 For installation agents and maintainers. Start with the [user guide](recipe-import.md).
-Dated test results describe the release tested, not a fresh installation today.
 Installation and code updates do not import the optional recipe collection.
 
 This is the shared reader and portable-file contract. The verified collection
@@ -92,9 +91,7 @@ are not carried into the culinary candidate. Unsupported fields are reported.
 
 Mealie cover bytes are read only by the dedicated `read_cover` method and still
 require `RecipeAssets` decoding. Other attachments within a known recipe
-directory are counted as unsupported and are not extracted or opened. These
-reader tests prove the declared source shapes and shared normalization, not
-authenticated API access or full bank migration.
+directory are counted as unsupported and are not extracted or opened.
 
 ## Network source readers
 
@@ -195,8 +192,9 @@ Native label names come from native recipe relations. A favorite is returned
 only when the existing adapter actually observed a boolean favorite. Otherwise
 favorite_status is unavailable. No tag/rating is treated as favorite state.
 
-Native calls have the existing adapter's timeouts; aggregate import bounds are
-checked between those calls. Both native wire decoders reject duplicate JSON
+Mealie pagination uses the request parameter `perPage` and response fields
+`per_page` and `total_pages`. Native calls have the existing adapter's timeouts;
+aggregate import bounds are checked between those calls. Both native wire decoders reject duplicate JSON
 keys, nonfinite numbers and numeric overflow before interpreting the response.
 The extraction boundary separately validates retained field names and wording.
 
@@ -250,27 +248,7 @@ the service can attach a managed asset. This helper's exact source URL can be
 retained in private source context; managed image metadata must separately obey
 the canonical image URL/attribution contract.
 
-### Tested boundaries
-
-`tests/test_recipe_import.py` uses the existing sanitized Mealie v3.24.0 and
-RecipeSage v4.0.6 API fixtures with real adapters against ephemeral loopback HTTP
-servers. It covers mapped pagination and authentication, redirect refusal,
-response limits, native quantities and sidecar removal, favorite observations,
-and Mealie cover retrieval followed by actual managed-image sanitization.
-Public DNS/socket/TLS failure cases use synthetic boundaries.
-
-Authenticated self-hosted import was also exercised on 2026-09-07 against the
-official Mealie v3.24.0 container, with a newly isolated source account and two
-invented recipes. Native login, capability discovery and one-item pagination
-fed the real Application import/save/get path. Quantities, four-person servings,
-ordered steps, source links, notes and tags survived reopening the bank and
-repeating the original save intents; exactly two built-in entries remained.
-All 23 source calls during import were GETs and the native records were unchanged.
-Mealie's response fields are `per_page` and `total_pages`; its request parameter
-remains `perPage`. This acceptance uses a real authenticated service with test
-data, not an existing household account or public TLS endpoint. Native image
-and RecipeSage source-account acceptance remain distinct from the fixture checks
-above; this test does not certify those unexercised account paths.
+### HTML fallback
 
 The plain HTML fallback preserves paragraph/list/table-cell separation and
 contiguous inline text. It ignores script/style/template and explicitly hidden
@@ -280,11 +258,6 @@ JSON-LD instead of silently falling back. It is a text extractor, not a browser
 renderer: CSS layout, external resources and scripts are not interpreted.
 The host agent must still identify the recipe and report ambiguity or missing
 fields before the shared import/save workflow.
-
-The service import/image path, controlled write retirement and private restore
-are described here and in the reference. Actual model-driven attachment
-acceptance remains specific to each client; parser or protocol tests alone do
-not establish that a client read the original attachment.
 
 ## Supplied text and host transcriptions
 
@@ -304,7 +277,9 @@ reading is unavailable or incomplete (including missing `pdftoppm` in Claude
 Code), the shared skill runs its bundled `scripts/read_pdf.py` helper and reads
 the resulting PNGs with the client's native image tool. Both generated local
 client packages bind that helper to the same installed Python as their MCP
-bridge. The host must support command execution and image reading; a remote
+bridge. NanoClaw's template does not include this helper; its container needs
+a working native PDF reader or source pages provided as images. The host must
+support command execution and image reading; a remote
 service cannot open an attachment that exists only on the client host.
 
 The helper takes the original PDF and a new `--output` directory. It renders
@@ -364,8 +339,7 @@ qualified identity, show readiness, and process the requested save.
 For photo/PDF imports, source evidence means explicit wording in the supplied
 transcription. The service has not verified that wording against original pixels
 or PDF bytes. Missing attribution remains unknown; it is never reported as a
-verified absence of store binding. Actual client attachment and service-save
-acceptance remain separate from these extraction tests.
+verified absence of store binding.
 
 ## Offline collection file, version 1
 
@@ -393,7 +367,7 @@ The manifest fields are:
   "format_version": 1,
   "kind": "bundled",
   "pack_id": "wikibooks-themealdb-en",
-  "pack_version": "2026-09-06.1",
+  "pack_version": "example-version",
   "recipe_schema_version": 2,
   "normalizer_version": "declared-by-builder",
   "records_count": 1,

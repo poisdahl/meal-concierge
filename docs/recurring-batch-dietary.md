@@ -54,19 +54,16 @@ Required goods are never silently omitted.
 
 Oda's and Mathem's exact numeric product routes resolve only to the same product's canonical
 public URL. The anonymous reader retains the visible ingredient/allergen rows,
-source URL and missing-information limits. This path was checked against the
-public [Oda product detail](https://oda.com/no/products/40887-r-gulrotsuppe/)
-and [Mathem product detail](https://www.mathem.se/se/products/4694-barilla-pasta-fusilli/).
+source URL and missing-information limits.
 No account, cart or payment effect is involved. Search-provided literal fields
 are retained too. Missing/unavailable detail is unknown; a product name or an
 absent term is not proof of allergen absence. Negated/ambiguous statements do
 not become positive conflicts. Explicit retailer free-from labels are reported
 as compatible labels, not universal safety certification.
 
-MENY detail collection beyond its current search fields remains unverified and
-therefore unknown. Mathem uses the same final-product assessment and exact
-substitution permission rules. Its native protected checkout and dietary
-acceptance remain [issue #50](https://github.com/poisdahl/meal-concierge/issues/50).
+MENY product detail beyond its supported search fields remains unknown. Oda
+and Mathem use the same final-product assessment and exact substitution
+permission rules.
 
 ## The existing final confirmation
 
@@ -135,19 +132,6 @@ window, unchanged goods/order total and zero additional payment. A provider
 timestamp. Mathem's observed textual deadline is reported separately without
 inventing a year or ISO timestamp; absent evidence remains unknown.
 No message promises universal removal, replacement or refund.
-
-## Validation scope
-
-`test_meal_concierge_recurring_dietary.py` exercises ordinary Application tool
-requests with synthetic retailer/cart/order state and a task-local sender inbox:
-recurring discovery/save, balanced shopping, subsequent-week reuse, shortfalls,
-mixed meals, real-format detail parsing, typed/ambiguous findings, manual product
-changes, legacy pending summaries, scheduled and direct standing checkout,
-failed/uncertain notices, result recovery and exactly one payment dispatch.
-Existing batch/replan, product, scheduler, payment uncertainty and provider tests
-remain part of the fleet profile. These tests and the anonymous Oda detail read
-do not claim authenticated dietary checkout, live purchases or native external
-recipient acceptance. Those require separate authorization.
 
 ## Weekly shop continuity
 

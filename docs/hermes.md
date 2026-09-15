@@ -7,18 +7,15 @@ The household service runs independently of Hermes conversations.
 
 Send this to Codex, Claude Code or another agent with access to your Hermes host:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge for my
-> existing Hermes installation. Follow `docs/hermes.md`. Inspect the actual host
-> and existing installations first. Reuse my existing household and installed
-> version if present; preserve its data, settings and connections. For a new
-> installation, use the latest `main`, resolve it to a full commit SHA and install
-> from that checkout. Ask for my store and household if needed. Set up the
-> persistent service, Hermes MCP connection and shared skill in the intended
-> Hermes profile. Do not import the optional local recipe collection unless I
-> request it separately. Verify the connection, household, loaded skill and
-> available recipe sources. A new local bank may be empty; online recipes do not
-> require the optional collection. Keep normal platform approvals and tell me
-> which login or activation steps I must complete.
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
+> for my existing Hermes installation. Follow docs/hermes.md.
+> Connect to my existing household if present; otherwise install the latest
+> version. Ask which host, store and household to use as needed.
+> Preserve my data and settings. Verify the service, tools, skill and store
+> connection, and help me complete login and activation.
+
+This connects to the existing household when one is already installed.
+For a program update, use the [update prompt](../README.md#update-meal-concierge).
 
 ## Requirements
 
@@ -104,7 +101,7 @@ uses the host owner's authority, not separate identities for each chat member.
 
 ## Updates and help
 
-Update the existing service through the [runtime procedure](runtime.md#updates-failures-and-recovery),
+Use the [update prompt](../README.md#update-meal-concierge) or update the existing service through the [runtime procedure](runtime.md#updates-failures-and-recovery),
 then reload Hermes to pick up the linked installed skill.
 Check the MCP connection and skill again. Code updates keep existing recipes,
 including collections imported by older
@@ -113,6 +110,4 @@ versions; update the code before separately requesting
 
 After an uncertain cart change, checkout or send, check the original operation
 before retrying. For attachment errors, compare the active profile, returned
-paths, owner and service status. The [platform matrix](platform-acceptance.md)
-records tested scope; this guide does not imply a fresh native Hermes lifecycle
-test was performed for every version.
+paths, owner and service status.

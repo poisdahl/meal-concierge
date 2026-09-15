@@ -8,23 +8,21 @@ files, MCP registrations and skills; use only trusted same-owner Bots.
 
 Paste this into the Grok Bot that will use Meal Concierge:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge on this
-> Grok cloud computer. Follow `docs/grok.md`. Inspect the actual host and existing
-> installations first. Reuse my existing household and installed version if
-> present; preserve its data, settings and connections. For a new installation,
-> use the latest `main`, resolve it to a full commit SHA and install from that
-> checkout. Ask for my store and household if needed. Set up the external service,
-> native MCP connection and shared skill. Do not import the optional local recipe
-> collection unless I request it separately. Verify the connection, household,
-> loaded skill and available recipe sources. A new local bank may be empty; online
-> recipes do not require the optional collection. Keep normal platform approvals
-> and tell me which login or activation steps I must complete.
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
+> on this Grok cloud computer. Follow docs/grok.md.
+> Connect to my existing household if present; otherwise install the latest
+> version. Ask which store and household to use as needed.
+> Preserve my data and settings. Verify the service, tools, skill and store
+> connection, and help me complete login and activation.
+
+This connects to the existing household when one is already installed.
+For a program update, use the [update prompt](../README.md#update-meal-concierge).
 
 ## Requirements
 
 - An existing Grok Bot with cloud Shell access, native background execution, MCP
-  registration and skills. Guided setup has been exercised; unattended setup is
-  not established.
+  registration and skills. Complete setup interactively so you can handle login
+  and platform approvals.
 - Python 3.10+, `uv`, and the selected store's
   [runtime prerequisites](runtime.md#install-and-attach).
 - A visible dedicated cloud browser for the user to complete store login. Login
@@ -134,27 +132,11 @@ the shared skill for input and [recipe delivery](recipe-delivery.md) for output.
 Verify the actual file arrived in the intended conversation. Sending a path as
 text is not attachment delivery.
 
-**Grok Bot group rooms were observed to drop PDF and image attachments.** Use
+**Grok Bot group rooms do not deliver PDF and image attachments through this integration.** Use
 complete text with dates, dishes, portions, source links and credits, or another
 verified destination. Report this limitation before promising PDF/image delivery.
-A successful standalone PDF fixture does not establish group-room support.
 
-For routines, verify a result in the intended conversation; `Succeeded` alone
-does not establish delivery. Support has documented
-[queue issues](https://forum.cursor.com/t/grok-bot-routines-dont-auto-run-on-schedule/170358/5)
-and [held reports that can surface after a chat message](https://forum.cursor.com/t/grok-bot-routine-marks-succeeded-but-never-posts-a-chat-bubble/169841/6).
-Check the existing result before rerunning work. Scheduling reliability and VM
-sleep/wake recovery remain unverified.
-
-## Recovery and attachments
-
-See [updates and help](#updates-and-help) and
-[attachments and scheduled delivery](#attachments-and-scheduled-delivery).
-
-<a id="current-target-retained-installation-result--13-september-2026"></a>
-
-## Verification boundary
-
-The [historical Grok record](installation-evidence.md#grok-retained-installation--13-september-2026)
-and [platform matrix](platform-acceptance.md) preserve the tested versions,
-operator assistance, transport results and remaining limits.
+For routines, check the result in the intended conversation; `Succeeded` alone
+does not establish delivery. Inspect any existing result before rerunning work.
+Keep the cloud host available and check scheduled outcomes; do not assume that
+sleeping or restarting it will preserve on-time delivery.

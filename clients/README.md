@@ -24,9 +24,3 @@ renderer; image reading and permission to run it are still required. NanoClaw
 currently needs its container's native PDF reader. See
 [PDF input](../docs/recipe-import.md#pdf-attachments-without-system-packages).
 Cloud and group-chat attachment support varies by client; consult its guide.
-
-## Client contract and checks
-
-For adapter development, see [historical component tests](../docs/installation-evidence.md#codex-and-claude-component-and-attachment-checks)
-and the [platform matrix](../docs/platform-acceptance.md). These records separate
-native-client results from synthetic service checks and live store support.
