@@ -274,30 +274,30 @@ class InstallerTests(unittest.TestCase):
         source.write_bytes(payload)
         release = self.root / 'release'; release.mkdir()
         expected = {'bytes': len(payload), 'sha256': hashlib.sha256(payload).hexdigest()}
-        with patch.object(install, 'RECIPE_PACK', expected):
+        with patch.object(install, 'latest_recipe_pack', return_value=expected):
             staged = install.stage_recipe_pack(release, source)
             self.assertEqual(staged.read_bytes(), payload)
             source.write_bytes(b'changed after staging')
             self.assertEqual(staged.read_bytes(), payload)
             for invalid in (payload[:-1], payload + b'x', b'x' + payload[1:]):
                 source.write_bytes(invalid)
-                with self.assertRaisesRegex(RuntimeError, 'release descriptor|pinned'):
+                with self.assertRaisesRegex(RuntimeError, 'release descriptor|published artifact'):
                     install.stage_recipe_pack(release, source)
                 self.assertEqual(list(release.iterdir()), [staged])
 
     def test_default_recipe_download_verifies_content_and_removes_failed_stage(self):
         payload = b'synthetic published artifact'
-        expected = {**install.RECIPE_PACK, 'bytes': len(payload),
+        expected = {**install.RECIPE_PACK, 'url': 'https://example.invalid/pack.zip', 'bytes': len(payload),
                     'sha256': hashlib.sha256(payload).hexdigest()}
         release = self.root / 'release'; release.mkdir()
-        with patch.object(install, 'RECIPE_PACK', expected):
+        with patch.object(install, 'latest_recipe_pack', return_value=expected):
             with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(payload)) as fetch:
                 staged = install.stage_recipe_pack(release)
             fetch.assert_called_once_with(expected['url'], timeout=60)
             self.assertEqual(staged.read_bytes(), payload)
             for invalid in (payload[:-1], payload + b'x', b'x' + payload[1:]):
                 with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(invalid)):
-                    with self.assertRaisesRegex(RuntimeError, 'release descriptor|pinned'):
+                    with self.assertRaisesRegex(RuntimeError, 'release descriptor|published artifact'):
                         install.stage_recipe_pack(release)
                 self.assertEqual(list(release.iterdir()), [staged])
 
@@ -307,16 +307,50 @@ class InstallerTests(unittest.TestCase):
         fifo = self.root / 'fifo'; os.mkfifo(fifo)
         release = self.root / 'release'; release.mkdir()
         expected = {'bytes': 4, 'sha256': hashlib.sha256(b'keep').hexdigest()}
-        with patch.object(install, 'RECIPE_PACK', expected):
+        with patch.object(install, 'latest_recipe_pack', return_value=expected):
             for invalid in (link, fifo):
                 with self.assertRaises((OSError, RuntimeError)):
                     install.stage_recipe_pack(release, invalid)
             self.assertEqual(list(release.iterdir()), [])
-        with patch.object(install, 'RECIPE_PACK', None):
-            self.assertIsNone(install.stage_recipe_pack(release))
-            with self.assertRaisesRegex(RuntimeError, 'no released recipe pack'):
-                install.stage_recipe_pack(release, source)
         self.assertEqual(source.read_bytes(), b'keep')
+
+    def test_latest_recipe_release_ignores_code_drafts_and_prereleases(self):
+        def release(version, date, **extra):
+            tag = 'recipes-' + version
+            name = f'meal-concierge-recipes-{version}.zip'
+            return {'tag_name': tag, 'published_at': date, 'assets': [{
+                'name': name, 'size': 12, 'digest': 'sha256:' + 'a' * 64,
+                'browser_download_url': f'https://github.com/poisdahl/meal-concierge/releases/download/{tag}/{name}'}], **extra}
+        newest = release('2026-09-14-grocery-review-v3', '2026-09-14')
+        listing = [release('old', '2026-09-06'), newest,
+                   release('preview', '2026-09-15', prerelease=True),
+                   release('draft', '2026-09-16', draft=True),
+                   {'tag_name': 'v99', 'published_at': '2026-09-17'}]
+        with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(listing).encode())):
+            self.assertEqual(install.latest_recipe_pack()['pack_version'], '2026-09-14-grocery-review-v3')
+        for field, value in [('digest', None), ('size', 0), ('browser_download_url', 'https://example.com/pack.zip')]:
+            invalid = json.loads(json.dumps(newest))
+            invalid['assets'][0][field] = value
+            with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps([listing[0], invalid]).encode())):
+                with self.assertRaises(RuntimeError):
+                    install.latest_recipe_pack()
+
+    def test_install_and_update_publish_without_recipe_network_or_import(self):
+        from contextlib import nullcontext
+        home = self.root / 'home'; home.mkdir()
+        code = self.root / 'code'; code.mkdir()
+        release = code / 'r1'; release.mkdir()
+        config = home / 'config.json'
+        meta = {'code_root': str(code), 'paths': {'config': str(config), 'state': str(home / 'state')}}
+        with patch.object(install, 'stage_release', return_value=release), \
+             patch.object(install, 'offline', side_effect=lambda _: nullcontext()), \
+             patch.object(install, 'migrate'), patch.object(install, 'write_unit'), \
+             patch.object(install.urllib.request, 'urlopen', side_effect=AssertionError('unexpected recipe network')), \
+             patch.object(install, 'recipe_pack_command', side_effect=AssertionError('unexpected import')):
+            for _ in range(2):
+                install.publish(meta, home / 'runtime.json', home, CONFIG)
+                self.assertTrue((home / 'runtime.json').exists())
+                self.assertEqual(list(release.iterdir()), [])
 
     def test_backup_refuses_replaceable_code_and_symlink_aliases(self):
         code = self.root / 'code'; code.mkdir()
@@ -345,10 +379,29 @@ class InstallerTests(unittest.TestCase):
         (release / 'venv/bin/python').symlink_to(sys.executable)
         for path in CORE.glob('*.py'):
             (release / path.name).symlink_to(path)
-        with patch.object(install, 'RECIPE_PACK', expected):
+        with patch.object(install, 'latest_recipe_pack', return_value=expected):
             report = install.recipe_pack_command(release, 'preflight', archive)
         self.assertEqual(report['records_count'], 1)
         self.assertEqual(report['archive_sha256'], expected['sha256'])
+        home = self.root / 'home'; home.mkdir()
+        config = home / 'config.json'; config.write_text(json.dumps(CONFIG))
+        meta = {'manager': 'external', 'release': str(release), 'paths': {
+            'config': str(config), 'state': str(home / 'state'),
+            'socket': str(home / 'run/service.sock'), 'browser_profile': str(home / 'browser/profile'),
+            'browser_home': str(home / 'browser'), 'browser_socket_directory': str(home / 'browser/run')}}
+        install.write_json(home / 'runtime.json', meta)
+        argv = ['install.py', 'import-recipes', '--home', str(home), '--recipe-pack', str(archive)]
+        for _ in range(2):
+            with patch.object(sys, 'argv', argv), patch.object(install, 'latest_recipe_pack', return_value=expected) as resolve:
+                install.main()
+                resolve.assert_called_once_with()
+            self.assertFalse(list(release.glob('recipe-pack-*.zip')))
+        self.assertEqual(len(RecipeStore(home / 'state/recipes.sqlite3', CONFIG['household']).search()), 1)
+        (home / 'maintenance.json').write_text('{}')
+        with patch.object(sys, 'argv', argv), patch.object(install, 'latest_recipe_pack') as resolve:
+            with self.assertRaisesRegex(RuntimeError, 'complete the stopped runtime update'):
+                install.main()
+            resolve.assert_not_called()
 
     def test_migration_child_keeps_ownership_after_installer_parent_is_killed(self):
         state = self.root / 'state'
@@ -754,11 +807,11 @@ def external(root):
             assert (home / 'runtime.json').read_bytes() == snapshot
             stop_group()
             # Reconcile an interrupted publication through the existing resume path.
-            archive = next(Path(meta['release']).glob('recipe-pack-*.zip'))
+            assert not list(Path(meta['release']).glob('recipe-pack-*.zip'))
             (home / 'runtime.json').rename(home / 'pending-install.json')
             install.write_json(home / 'maintenance.json', {'reason': 'isolated interrupted publication'})
             assert installer('run', '--home', home, success=False).returncode
-            print(installer('update', '--home', home, '--uv', uv, '--recipe-pack', archive, env=env).stdout)
+            print(installer('update', '--home', home, '--uv', uv, env=env).stdout)
             meta = json.loads((home / 'runtime.json').read_text())
             assert meta['manager'] == 'external' and meta['unit'] is None
             assert Path(meta['paths']['state'], 'state.json').read_bytes() == before

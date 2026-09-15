@@ -67,7 +67,7 @@ Oda or MENY require the authorized provider setup.
 Use `--manager external` for a host such as the Grok cloud computer that can
 keep a foreground command running as a native background execution but has no
 user systemd/launchd manager. This uses the same release staging, pinned Python
-and dependencies, configuration, recipe-pack import, migration and ownership
+and dependencies, configuration, migration and ownership
 locks as native installations. It writes no systemd unit or launchd plist and
 does not install another supervisor. A normal installation without this option
 retains the native manager behavior.
@@ -319,33 +319,43 @@ platforms. This does not restore credentials omitted from the backup.
 
 ## Versioned recipe package integration
 
-The installer stages and verifies a release-pinned archive before taking the
-offline installation locks, then imports it into the built-in recipe bank using
-the shared bounded archive codec. It verifies the descriptor's hash, size and
-format; `--recipe-pack PATH` accepts only a local artifact matching that descriptor
-and only during `install` or `update`. Archive data does not pass through RPC.
+Installation and code updates do not download or import a recipe collection.
+An empty recipe bank is a valid fresh installation; existing recipes are kept.
 
-This runtime pins [recipe pack 2026-09-06.5](https://github.com/poisdahl/meal-concierge/releases/tag/recipes-2026-09-06.5).
-It contains 4,599 English recipes: 3,807 from Wikibooks and 792 from TheMealDB,
-with 1,570 compressed JPEGs used by 1,580 recipes. Twenty additional Wikibooks
-pages could not be parsed and are excluded. One TheMealDB placeholder without an
-actionable source method is also excluded. Existing saved copies are preserved.
+To add or refresh the optional collection, use current repository code and update
+an older runtime first. Stop the existing service through its current owner, then
+run this command with the installation's actual home:
 
-All included recipes have quantified ingredients and person-serving values.
-Publisher estimates remain labelled as estimates, with assumptions available;
-they do not represent personal user acceptance or nutritional validation.
-Recipes with source omissions include explicit editorial adaptations.
-Source links, revision information where available, and separate
-text and image credits are included. TheMealDB content uses attribution-based
-redistribution; its supplied upstream recipe links are retained.
+```sh
+./install.sh import-recipes --home /absolute/data-home
+```
 
-Use the latest repository code when installing or updating. The installer
-verifies the published digest and format for both the default HTTPS download
-and a local `--recipe-pack` file. Repeated imports are idempotent. An unchanged bundled recipe advances to the new
+Start the service again through the same owner after import. For Grok/external
+installations use the established host executor; native installations use
+`./install.sh stop --home /absolute/data-home` and `start` respectively.
+Never interrupt an active shopping, payment or delivery job to import recipes.
+
+`import-recipes` selects the most recently published stable `recipes-` release
+from the official GitHub repository, independently of the runtime code version.
+Drafts, prereleases and code releases are excluded. It verifies the archive
+against GitHub's SHA-256 and byte size, then checks the supported format before
+writing. A missing/invalid latest artifact or unsupported format is reported;
+there is no silent fallback to an older pack. No release lookup occurs during
+ordinary installation or update.
+
+`import-recipes --recipe-pack /absolute/pack.zip` uses a local copy but still
+looks up the latest release and verifies the same digest and size. It is not an
+offline mode or a way to select an older version. Archive data does not pass
+through RPC. Import requires the existing service to be stopped and retains the
+normal exclusive ownership locks.
+
+Repeated imports are idempotent. An unchanged bundled recipe advances to the new
 publisher version with a new history revision. Local content edits produce a
-conflict; favorites, explicit local status and archived entries are preserved. Conflicts are
-reported for explicit resolution. A pack download failure leaves the core
-runtime usable and reports that the recipe collection needs attention.
+conflict; favorites, explicit local status and archived entries are preserved.
+Conflicts are reported for explicit resolution. A failed import preserves the
+core installation and any already committed recipes; resolve the reported issue
+before retrying `import-recipes`. Source links and separate text/image credits
+remain available in imported records.
 
 ## Verification boundary
 

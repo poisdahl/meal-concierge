@@ -24,29 +24,58 @@ from runtime_ownership import file_lock, ownership, listener_ownership
 
 SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
-# Published with the matching runtime after the public artifact is verified.
-# The archive itself, command-line input and household config cannot supply trust.
+# Compatibility fields supported by this runtime; artifact identity is resolved
+# from the publisher's GitHub releases only when the user requests an import.
 RECIPE_PACK = {
     'format': 'meal-concierge-recipes',
     'format_version': 1,
     'recipe_schema_version': 2,
     'normalizer_version': '2',
     'pack_id': 'wikibooks-themealdb-en',
-    'pack_version': '2026-09-06.5',
-    'bytes': 186678225,
-    'sha256': '03454e61818d3c7de4c42abc56cbbfc2341da374c1fc911ac630e93b197e74a3',
-    'url': 'https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-06.5/meal-concierge-recipes-2026-09-06.5.zip',
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
 
 
-def stage_recipe_pack(release, source=None):
-    """Copy a release-pinned artifact; offline input has the same trust boundary."""
-    expected = RECIPE_PACK
-    if expected is None:
-        if source is not None:
-            raise RuntimeError('no released recipe pack is pinned by this runtime')
-        return None
+def latest_recipe_pack():
+    """Resolve the newest stable recipe release, excluding ordinary code releases."""
+    releases = []
+    page = 1
+    while True:
+        request = urllib.request.Request(
+            f'https://api.github.com/repos/poisdahl/meal-concierge/releases?per_page=100&page={page}',
+            headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'meal-concierge'})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            batch = json.load(response)
+        if not isinstance(batch, list):
+            raise RuntimeError('invalid GitHub release listing')
+        releases.extend(item for item in batch if not item.get('draft') and not item.get('prerelease')
+                        and str(item.get('tag_name', '')).startswith('recipes-'))
+        if len(batch) < 100:
+            break
+        page += 1
+    if not releases:
+        raise RuntimeError('no published recipe pack found')
+    release = max(releases, key=lambda item: item['published_at'])
+    tag = release['tag_name']
+    version = tag.removeprefix('recipes-')
+    name = f'meal-concierge-recipes-{version}.zip'
+    assets = [asset for asset in release.get('assets', []) if asset.get('name') == name]
+    if len(assets) != 1:
+        raise RuntimeError('latest recipe release is missing its archive')
+    asset = assets[0]
+    digest = asset.get('digest', '')
+    url = f'https://github.com/poisdahl/meal-concierge/releases/download/{tag}/{name}'
+    if (not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+            or type(asset.get('size')) is not int or not 0 < asset['size'] <= MAX_PACK_BYTES
+            or asset.get('browser_download_url') != url):
+        raise RuntimeError('latest recipe release has an invalid digest, size or URL')
+    return {**RECIPE_PACK, 'pack_version': version, 'bytes': asset['size'],
+            'sha256': digest.removeprefix('sha256:'), 'url': url}
+
+
+def stage_recipe_pack(release, source=None, expected=None):
+    """Verify both downloads and local copies against publisher release metadata."""
+    expected = latest_recipe_pack() if expected is None else expected
     if not 0 < expected['bytes'] <= MAX_PACK_BYTES:
         raise RuntimeError('release recipe pack exceeds the supported archive size')
     destination = Path(release) / ('recipe-pack-' + uuid.uuid4().hex + '.zip')
@@ -69,7 +98,7 @@ def stage_recipe_pack(release, source=None):
                     digest.update(chunk)
                     output.write(chunk)
         if size != expected['bytes'] or digest.hexdigest() != expected['sha256']:
-            raise RuntimeError('recipe pack differs from the artifact pinned by this runtime')
+            raise RuntimeError('recipe pack differs from the selected published artifact')
         destination.chmod(0o400)
         return destination
     except BaseException:
@@ -77,14 +106,15 @@ def stage_recipe_pack(release, source=None):
         raise
 
 
-def recipe_pack_command(release, action, archive, meta=None):
+def recipe_pack_command(release, action, archive, meta=None, expected=None):
+    expected = latest_recipe_pack() if expected is None else expected
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import preflight_archive; print(json.dumps(preflight_archive(sys.argv[2],json.loads(sys.argv[3]))))"
-    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(RECIPE_PACK)]
+    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected)]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
-        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]))"
-        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(meta)]
+        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),json.loads(sys.argv[4]))"
+        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(meta), json.dumps(expected)]
     result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
     if result.returncode not in ({0, 2} if action == 'apply' else {0}):
         detail = (result.stdout or result.stderr).strip()[:2000]
@@ -92,12 +122,12 @@ def recipe_pack_command(release, action, archive, meta=None):
     return json.loads(result.stdout)
 
 
-def apply_recipe_pack(archive, meta):
+def apply_recipe_pack(archive, meta, expected):
     """Installed-runtime child entry point; no parent-owned lifetime locks."""
     from recipe_portable import apply_archive
     with offline(meta):
         settings = json.loads(Path(meta['paths']['config']).read_text())
-        report = apply_archive(archive, Path(meta['paths']['state']), settings['household'], RECIPE_PACK)
+        report = apply_archive(archive, Path(meta['paths']['state']), settings['household'], expected)
         print(json.dumps(report))
     if report['status'] != 'complete':
         raise SystemExit(2)
@@ -361,7 +391,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['install', 'update', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['import-recipes', 'install', 'update', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -373,16 +403,13 @@ def main():
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
     for field in ['config', 'state', 'socket', 'tokens', 'browser-profile', 'browser-home', 'browser-socket-directory', 'agent-browser', 'browser-executable']:
         parser.add_argument('--' + field)
-    parser.add_argument('--recipe-pack', type=Path, help='downloaded artifact matching the recipe pack pinned by this runtime')
+    parser.add_argument('--recipe-pack', type=Path, help='local copy of the latest published pack, for import-recipes only')
     parser.add_argument('--backup', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
-    if args.recipe_pack is not None:
-        if args.action not in {'install', 'update'}:
-            raise RuntimeError('--recipe-pack applies only to install/update')
-        if RECIPE_PACK is None:
-            raise RuntimeError('no released recipe pack is pinned by this runtime')
+    if args.recipe_pack is not None and args.action != 'import-recipes':
+        raise RuntimeError('--recipe-pack applies only to import-recipes')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
     if args.action == 'restore':
@@ -430,6 +457,21 @@ def main():
                     print(backup(meta, args.backup))
                 return
             assert_stopped(meta)
+            if args.action == 'import-recipes':
+                if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
+                    raise RuntimeError('complete the stopped runtime update before importing recipes')
+                expected = latest_recipe_pack()
+                release = Path(meta['release'])
+                archive = stage_recipe_pack(release, args.recipe_pack, expected)
+                try:
+                    recipe_pack_command(release, 'preflight', archive, expected=expected)
+                    report = recipe_pack_command(release, 'apply', archive, meta, expected)
+                    print('Recipe pack:', json.dumps({key: value for key, value in report.items() if key != 'results'}))
+                    if report['status'] != 'complete':
+                        raise RuntimeError('recipe import incomplete; committed recipes and conflicts preserved; resolve before retrying import-recipes')
+                finally:
+                    archive.unlink(missing_ok=True)
+                return
         else:
             if args.action != 'install':
                 raise RuntimeError('no standalone runtime manifest; discover and explicitly adopt existing paths first')
@@ -498,22 +540,11 @@ def main():
                 if (code_root / 'current').exists():
                     raise RuntimeError('unowned existing code root; use an empty code directory')
                 write_json(owner, {'home': str(home)})
-            publish(meta, path, home, settings, args.recipe_pack, args.uv)
+            publish(meta, path, home, settings, uv_binary=args.uv)
 
 
-def publish(meta, path, home, settings, recipe_pack=None, uv_binary=None):
+def publish(meta, path, home, settings, uv_binary=None):
     release = stage_release(Path(meta['code_root']), uv_binary)
-    archive = None
-    pack_error = None
-    try:
-        archive = stage_recipe_pack(release, recipe_pack)
-        if archive is not None:
-            recipe_pack_command(release, 'preflight', archive)
-    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-        if recipe_pack is not None:
-            raise  # Explicit invalid input never reaches database migration.
-        archive = None
-        pack_error = str(exc)
     with offline(meta):
         meta['paths']['maintenance'] = str(home / 'maintenance.json')
         # Persist the exact owner before any unit publication or data migration.
@@ -540,22 +571,8 @@ def publish(meta, path, home, settings, recipe_pack=None, uv_binary=None):
         write_json(path, meta)
         (home / 'maintenance.json').unlink()
         (home / 'pending-install.json').unlink()
-    # The complete core is usable if pack application cannot acquire ownership.
-    # The child reacquires lifetime ownership before it writes; a competing core
-    # startup makes application fail safely rather than sharing mutable state.
-    if archive is not None:
-        try:
-            report = recipe_pack_command(release, 'apply', archive, meta)
-            print('Recipe pack:', json.dumps({key: value for key, value in report.items() if key != 'results'}))
-            if report['status'] != 'complete':
-                pack_error = 'recipe pack import is incomplete; committed recipes remain available and reported conflicts were preserved'
-        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
-            pack_error = str(exc)
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
-    if pack_error:
-        raise RuntimeError('Runtime is usable; recipe pack needs attention: ' + pack_error + '. Retry update after addressing the reported problem.')
-    if RECIPE_PACK is None:
-        print('No recipe pack is pinned in this source build.')
+    print('Recipe collection is optional. Import later with import-recipes while the service is stopped.')
 
 
 if __name__ == '__main__':

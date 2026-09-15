@@ -149,7 +149,10 @@ In the actual native conversation, load the packaged Meal Concierge skill and
 use its discovered MCP tools to show status/setup, verify the selected household
 and provider, and read stored recipes. In Claude Code, including Desktop Code,
 invoke the registered skill; a matching skill file/hash alone is not native skill
-invocation. Check the installed pack’s reported count,
+invocation. An empty recipe bank is valid: installation and updates do not import
+the optional collection. Only on a separate user request, follow
+[manual recipe import](runtime.md#versioned-recipe-package-integration).
+For an existing imported pack, check its reported count,
 version and managed assets; distinguish a metadata reference from a readable
 image. Keep existing household settings unless the user chooses a change.
 
@@ -180,10 +183,10 @@ If the same source’s initial publication was interrupted and left
 explicit recovery of that attempt, not permission to fetch newer code. If only
 staging/owner files exist, inspect that original attempt before choosing a retry.
 
-A recipe-pack error may occur **after** the core was published successfully.
+A separately requested recipe import can fail while the core remains usable.
 Inspect the markers and core before classifying installation as failed. Preserve
 committed recipes/conflicts and report the pack’s partial result; a later repair
-uses the controlled stopped update path. Do not blindly reinstall or reset data.
+uses the stopped `import-recipes` path. Do not blindly reinstall or reset data.
 Native refusal remains a refusal, distinct from a missing dependency or crashed
 process. Resume only after the underlying cause or native approval is resolved.
 
