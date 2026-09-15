@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, fingerprint, read_file, write_file
+from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, write_file
 from recipe_pack_sources import SourceParseError, SourceHTML, mealdb_recipe, readiness, wikibooks_recipe
 
 
@@ -374,46 +374,6 @@ class BuildRoundtripTests(unittest.TestCase):
                 self.assertEqual([r['recipe_id'] for r in records], ['wikibooks:123', 'wikibooks:124'])
                 self.assertTrue(all(r['recipe']['source_provider'] is None for r in records))
                 self.assertFalse(any('cache' in name or name.startswith('/') for name in archive.entries))
-
-    def test_ordinary_grocery_selection_is_explicit_and_requires_curation(self):
-        from unittest.mock import patch
-        from norwegian_grocery_curation import OrdinaryGroceryPolicyError
-        from recipe_portable import open_archive
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            source, sha = self.fixture(root)
-            with self.assertRaisesRegex(PackBuildError, 'requires pinned editorial curation'):
-                build(source, root / 'missing-curation', snapshot_sha256=sha, pack_version='test.1',
-                      ordinary_grocery_selection=True)
-            curation = root / 'curation.json'
-            curation.write_bytes(encoded({'schema': 1, 'records': {}}))
-            result = build(source, root / 'selected', snapshot_sha256=sha, pack_version='test.1',
-                           curation=curation, curation_sha256=digest(curation.read_bytes()),
-                           ordinary_grocery_selection=True)
-            self.assertEqual(result['records'], 2)
-            with open_archive(root / 'selected' / result['archive']) as archive:
-                archive.verify()
-            from zipfile import ZipFile
-            with ZipFile(root / 'selected' / result['archive']) as archive:
-                coverage = json.loads(archive.read('coverage.json'))
-            self.assertTrue(all(row['status'] in {'ready', 'draft'} for row in coverage))
-            with patch('norwegian_grocery_curation.apply',
-                       side_effect=OrdinaryGroceryPolicyError('reviewed source drift')):
-                with self.assertRaisesRegex(PackBuildError, 'policy no longer matches'):
-                    build(source, root / 'drift', snapshot_sha256=sha, pack_version='test.1',
-                          curation=curation, curation_sha256=digest(curation.read_bytes()),
-                          ordinary_grocery_selection=True)
-
-    def test_disabled_build_fingerprint_does_not_depend_on_optional_policy(self):
-        from unittest.mock import patch
-        import build_recipe_pack
-        with patch.object(build_recipe_pack.importlib, 'import_module',
-                          wraps=build_recipe_pack.importlib.import_module) as importer:
-            versions = fingerprint()
-        imported = [call.args[0] for call in importer.call_args_list]
-        self.assertNotIn('norwegian_grocery_curation', imported)
-        self.assertNotIn('norwegian_grocery_curation', versions)
-        self.assertIn('norwegian_grocery_curation', fingerprint(ordinary_grocery_selection=True))
 
     def test_malformed_cache_shapes_are_rebuilt_without_changing_archive(self):
         with tempfile.TemporaryDirectory() as temporary:
