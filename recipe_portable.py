@@ -1,7 +1,8 @@
 """Versioned, bounded recipe-pack framing shared by the builder and importer.
 
-The codec grants no source trust. The installer selects a trusted release
-descriptor and holds offline ownership before calling the bank application API.
+The codec grants no source trust. The installer either selects a trusted
+publisher release descriptor or derives a digest-bound descriptor from an
+explicitly selected local collection before calling the bank application API.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ FORMAT = "meal-concierge-recipes"
 FORMAT_VERSION = 1
 DEFAULT_COLLECTION_DISPLAY_NAME = "Optional Recipe Collection"
 AUTHORITATIVE_MEMBERSHIP = "authoritative"
+OFFICIAL_PACK_KIND = "bundled"
+LOCAL_PACK_KIND = "collection"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * MAX_ARCHIVE_BYTES
 MAX_RECORDS_BYTES = 512 * 1024 * 1024
@@ -102,8 +105,15 @@ def _text(value: Any, field: str) -> str:
 def _manifest(value: Any) -> dict:
     if not isinstance(value, dict) or value.get("format") != FORMAT or type(value.get("format_version")) is not int or value["format_version"] != FORMAT_VERSION:
         raise RecipeError("unsupported portable recipe format")
-    if value.get("kind") != "bundled":
+    if value.get("kind") not in {OFFICIAL_PACK_KIND, LOCAL_PACK_KIND}:
         raise RecipeError("private recipes require the explicit private archive API")
+    if value["kind"] == LOCAL_PACK_KIND and (
+        type(value.get("pack_revision")) is not int
+        or not 1 <= value["pack_revision"] <= 2**63 - 1
+    ):
+        raise RecipeError("portable collection pack_revision must be a positive integer")
+    if value["kind"] == OFFICIAL_PACK_KIND and "pack_revision" in value:
+        raise RecipeError("bundled packs cannot declare a collection pack_revision")
     for field in ("pack_id", "pack_version", "normalizer_version"):
         _text(value.get(field), field)
         if field != "normalizer_version" and len(value[field]) > 128:
@@ -416,7 +426,7 @@ def _private_manifest(value: Any) -> dict:
     if (not isinstance(value, dict) or set(value) != fields or value["format"] != FORMAT
             or type(value["format_version"]) is not int or value["format_version"] != FORMAT_VERSION
             or value["kind"] != "private" or type(value["private_schema_version"]) is not int
-            or value["private_schema_version"] != 1):
+            or value["private_schema_version"] not in {1, 2}):
         raise RecipeError("unsupported private recipe format")
     for field, maximum in (("recipes_count", MAX_IMPORT_RECORDS), ("records_count", MAX_PRIVATE_RECORDS)):
         if type(value[field]) is not int or not 0 <= value[field] <= maximum:
@@ -458,12 +468,12 @@ def _private_entry(value: Any) -> dict:
         _private_text(value[field], field)
     if type(value["revision"]) is not int or not 1 <= value["revision"] <= 2**63 - 1:
         raise RecipeError("private recipe revision is invalid")
-    if value["status"] not in ("active", "draft", "archived") or value["entry_origin"] not in ("user", "bundled", "unknown"):
+    if value["status"] not in ("active", "draft", "archived") or value["entry_origin"] not in ("user", "bundled", "collection", "unknown"):
         raise RecipeError("private recipe status/origin is invalid")
     if value["source_key"] is not None:
         _private_text(value["source_key"], "source_key", 4096)
     pack = value["pack"]
-    if value["entry_origin"] == "bundled":
+    if value["entry_origin"] in {"bundled", "collection"}:
         if not isinstance(pack, dict) or set(pack) != {"pack_id", "recipe_id", "version", "baseline_hash"}:
             raise RecipeError("private bundled origin is incomplete")
         for field in ("pack_id", "recipe_id", "version"):
@@ -471,7 +481,7 @@ def _private_entry(value: Any) -> dict:
         if not isinstance(pack["baseline_hash"], str) or not _DIGEST.fullmatch(pack["baseline_hash"]):
             raise RecipeError("private pack baseline is invalid")
     elif pack is not None:
-        raise RecipeError("private non-bundled recipe cannot have pack metadata")
+        raise RecipeError("private non-pack recipe cannot have pack metadata")
     favorite = value["favorite"]
     if favorite is not None:
         if (not isinstance(favorite, dict) or set(favorite) != {"is_favorite", "favorite_revision", "created_at", "updated_at"}
@@ -563,6 +573,11 @@ class PrivatePortableArchive(PortableArchive):
                 if entry is not None:
                     yield complete()
                 entry = _private_entry(row)
+                if (
+                    self.manifest["private_schema_version"] == 1
+                    and entry["entry_origin"] == "collection"
+                ):
+                    raise RecipeError("private schema 1 cannot contain collection origin")
                 if entry["id"] in identities:
                     raise RecipeError("private recipe identity is duplicated")
                 identities.add(entry["id"])
@@ -740,6 +755,7 @@ def export_private_archive(destination: Path | str, store) -> dict:
             staging = Path(temporary)
             files = {"records.jsonl": staging / "records.jsonl"}
             counts = {"recipes_count": 0, "records_count": 0}
+            private_schema_version = 1
             total_bytes = 0
             asset_bytes = 0
             connection = sqlite3.connect(store.path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
@@ -765,6 +781,8 @@ def export_private_archive(destination: Path | str, store) -> dict:
                         origin = connection.execute("SELECT entry_origin,pack_id,pack_recipe_id,pack_version,baseline_hash FROM recipe_entry_metadata WHERE recipe_id=?", (identity,)).fetchone()
                         if origin is None:
                             raise RecipeError("private recipe origin metadata is missing")
+                        if origin["entry_origin"] == "collection":
+                            private_schema_version = 2
                         pack = None
                         if any(origin[key] is not None for key in ("pack_id", "pack_recipe_id", "pack_version", "baseline_hash")):
                             pack = {"pack_id": origin["pack_id"], "recipe_id": origin["pack_recipe_id"], "version": origin["pack_version"], "baseline_hash": origin["baseline_hash"]}
@@ -819,21 +837,33 @@ def export_private_archive(destination: Path | str, store) -> dict:
             finally:
                 connection.close()
             return write_private_archive(output, {"format": FORMAT, "format_version": FORMAT_VERSION,
-                "kind": "private", "private_schema_version": 1, **counts}, files)
+                "kind": "private", "private_schema_version": private_schema_version, **counts}, files)
     except sqlite3.Error as exc:
         raise RecipeError("private recipe snapshot is unavailable") from exc
 
 
 @contextmanager
 def _verified_archive(path: Path | str, expected: Mapping):
-    """Bind one opened file to the installer's code-selected release descriptor."""
-    fields = ("format", "format_version", "recipe_schema_version", "pack_id", "pack_version", "normalizer_version")
+    """Bind one opened file to a previously selected exact descriptor."""
+    fields = (
+        "format", "format_version", "kind", "recipe_schema_version",
+        "pack_id", "pack_version", "normalizer_version",
+    )
     if not isinstance(expected, Mapping) or not all(field in expected for field in (*fields, "bytes", "sha256")):
-        raise RecipeError("a complete trusted release descriptor is required")
+        raise RecipeError("a complete recipe pack descriptor is required")
+    if expected["kind"] not in {OFFICIAL_PACK_KIND, LOCAL_PACK_KIND}:
+        raise RecipeError("recipe pack descriptor kind is invalid")
+    if expected["kind"] == LOCAL_PACK_KIND:
+        fields += ("pack_revision",)
+        if (
+            type(expected.get("pack_revision")) is not int
+            or not 1 <= expected["pack_revision"] <= 2**63 - 1
+        ):
+            raise RecipeError("collection pack descriptor revision is invalid")
     if type(expected["bytes"]) is not int or not 0 < expected["bytes"] <= MAX_ARCHIVE_BYTES or not isinstance(expected["sha256"], str) or not _DIGEST.fullmatch(expected["sha256"]):
-        raise RecipeError("trusted release size/digest is invalid")
+        raise RecipeError("recipe pack descriptor size/digest is invalid")
     if type(expected["format_version"]) is not int or type(expected["recipe_schema_version"]) is not int:
-        raise RecipeError("trusted release versions are invalid")
+        raise RecipeError("recipe pack descriptor versions are invalid")
     for field in ("pack_id", "pack_version", "normalizer_version"):
         _text(expected[field], field)
     try:
@@ -843,18 +873,70 @@ def _verified_archive(path: Path | str, expected: Mapping):
             while chunk := handle.read(CHUNK_BYTES):
                 actual_size += len(chunk)
                 if actual_size > expected["bytes"]:
-                    raise RecipeError("archive differs from trusted release size")
+                    raise RecipeError("archive differs from selected recipe pack size")
                 digest.update(chunk)
             if actual_size != expected["bytes"] or digest.hexdigest() != expected["sha256"]:
-                raise RecipeError("archive differs from trusted release digest/size")
+                raise RecipeError("archive differs from selected recipe pack digest/size")
             _directory_bound(handle)
             with zipfile.ZipFile(handle) as zipped:
                 archive = PortableArchive(zipped)
                 if any(archive.manifest[field] != expected[field] for field in fields):
-                    raise RecipeError("archive manifest differs from trusted release descriptor")
+                    raise RecipeError("archive manifest differs from selected recipe pack descriptor")
                 yield archive
     except (zipfile.BadZipFile, EOFError, UnicodeError, struct.error, NotImplementedError) as exc:
-        raise RecipeError("trusted recipe archive is invalid") from exc
+        raise RecipeError("selected recipe archive is invalid") from exc
+
+
+def inspect_local_archive(
+    path: Path | str, *, reserved_pack_ids: tuple[str, ...] = (),
+) -> dict:
+    """Read and validate one user-selected collection without granting trust.
+
+    The returned descriptor binds subsequent staging, preflight and application
+    to the exact bytes inspected here. Collection content remains untrusted and
+    cannot carry service-owned review or acceptance decisions.
+    """
+    try:
+        with _regular_file(Path(path)) as source, tempfile.TemporaryFile() as handle:
+            size = 0
+            digest = hashlib.sha256()
+            while chunk := source.read(CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_ARCHIVE_BYTES:
+                    raise RecipeError("portable archive is too large")
+                digest.update(chunk)
+                handle.write(chunk)
+            if size == 0:
+                raise RecipeError("portable archive is empty")
+            handle.flush()
+            _directory_bound(handle)
+            with zipfile.ZipFile(handle) as zipped:
+                archive = PortableArchive(zipped)
+                if archive.manifest["kind"] != LOCAL_PACK_KIND:
+                    raise RecipeError("local import requires a collection recipe pack")
+                if archive.manifest["pack_id"] in reserved_pack_ids:
+                    raise RecipeError("collection pack_id is reserved for a publisher bundle")
+                checked = _preflight(archive, trust="local")
+                return {
+                    **{
+                        field: archive.manifest[field]
+                        for field in (
+                            "format", "format_version", "kind", "recipe_schema_version",
+                            "pack_id", "pack_version", "pack_revision", "normalizer_version",
+                        )
+                    },
+                    "bytes": size,
+                    "sha256": digest.hexdigest(),
+                    "display_name": archive.manifest.get(
+                        "display_name", DEFAULT_COLLECTION_DISPLAY_NAME
+                    ),
+                    "membership_mode": archive.manifest.get("membership_mode", "merge"),
+                    "records_count": checked["records_count"],
+                    "files_count": checked["files_count"],
+                    "expanded_bytes": checked["expanded_bytes"],
+                }
+    except (zipfile.BadZipFile, EOFError, UnicodeError, struct.error, NotImplementedError) as exc:
+        raise RecipeError("local recipe archive is invalid") from exc
 
 
 def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
@@ -864,14 +946,18 @@ def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
     acquiring the archive. This function is not an ordinary recipe-upload tool.
     """
     with _verified_archive(path, expected_descriptor) as archive:
-        return {**_preflight(archive), "archive_sha256": expected_descriptor["sha256"],
+        trust = "official" if archive.manifest["kind"] == OFFICIAL_PACK_KIND else "local"
+        return {**_preflight(archive, trust=trust), "archive_sha256": expected_descriptor["sha256"],
                 "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                **({"pack_revision": archive.manifest["pack_revision"]}
+                   if archive.manifest["kind"] == LOCAL_PACK_KIND else {}),
+                "kind": archive.manifest["kind"],
                 "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
                 "membership_mode": archive.manifest.get("membership_mode", "merge"),
                 "recipe_schema_version": archive.manifest["recipe_schema_version"]}
 
 
-def _preflight(archive: PortableArchive) -> dict:
+def _preflight(archive: PortableArchive, *, trust: str) -> dict:
     from recipe_assets import validate_managed
     from recipes import evidence_inputs, normalize_recipe, recipe_evidence_fields, recipe_source_provider, scale_recipe
     result = archive.verify()
@@ -889,13 +975,18 @@ def _preflight(archive: PortableArchive) -> dict:
         if canonical_bytes(recipe) != canonical_bytes(record["recipe"]):
             raise RecipeError("pack recipe differs from its declared normalized schema")
         if recipe_source_provider(recipe) is not None:
-            raise RecipeError("a bundled pack cannot contain store-bound recipes")
+            raise RecipeError("a recipe pack cannot contain store-bound recipes")
         if any(item.get("acceptance") for value in recipe_evidence_fields(recipe).values() for item in evidence_inputs(value)):
-            raise RecipeError("a bundled pack cannot supply local estimate acceptance")
+            raise RecipeError("a recipe pack cannot supply local estimate acceptance")
         for evidence in recipe_evidence_fields(recipe).values():
             for item in evidence_inputs(evidence):
-                if item.get("project_review") is not None and item["project_review"] != {
-                    "publisher": "Meal Concierge", "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"]}:
+                review = item.get("project_review")
+                if review is not None and trust == "local":
+                    raise RecipeError("a local collection cannot supply project review")
+                if review is not None and review != {
+                    "publisher": "Meal Concierge", "pack_id": archive.manifest["pack_id"],
+                    "pack_version": archive.manifest["pack_version"],
+                }:
                     raise RecipeError("project review does not match the verified release")
         if record["status"] == "ready":
             scaled = scale_recipe(recipe)
@@ -995,6 +1086,30 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _validate_local_collection_update(
+    state: Path, manifest: Mapping, *, existing_records: int,
+) -> None:
+    """Reject identity collisions, missing history and revision rollback."""
+    inventory = _pack_metadata_inventory(state, manifest["pack_id"])
+    if existing_records and not inventory["directories"]:
+        raise RecipeError(
+            "collection metadata is missing; restore it before updating this pack_id"
+        )
+    incoming_revision = manifest["pack_revision"]
+    for item in inventory["directories"]:
+        retained = item["manifest"]
+        if retained["kind"] != LOCAL_PACK_KIND:
+            raise RecipeError("collection pack_id collides with a publisher bundle")
+        retained_revision = retained["pack_revision"]
+        if retained_revision > incoming_revision:
+            raise RecipeError("collection pack_revision would downgrade installed content")
+        if (
+            retained_revision == incoming_revision
+            and canonical_bytes(retained) != canonical_bytes(manifest)
+        ):
+            raise RecipeError("collection pack_revision already identifies different content")
 
 
 def _state_asset_references(state: Path) -> set[str]:
@@ -1213,9 +1328,15 @@ def remove_collection(state_directory: Path | str, household: str,
     }
 
 
-def apply_archive(path: Path | str, state_directory: Path | str, household: str,
-                  expected_descriptor: Mapping) -> dict:
-    """Apply a verified release under the caller's *in-process* offline ownership.
+def apply_archive(
+    path: Path | str,
+    state_directory: Path | str,
+    household: str,
+    expected_descriptor: Mapping,
+    *,
+    allow_removals: bool = False,
+) -> dict:
+    """Apply a verified pack under the caller's *in-process* offline ownership.
 
     The installer owns the service/state lifetime locks throughout this call.
     This internal API is not an ordinary upload tool. It never restores state
@@ -1229,15 +1350,36 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
     state = Path(state_directory)
     # The caller has initialized this exact installation while holding ownership.
     with _verified_archive(path, expected_descriptor) as archive:
-        checked = _preflight(archive)
+        local_collection = archive.manifest["kind"] == LOCAL_PACK_KIND
+        checked = _preflight(archive, trust="local" if local_collection else "official")
+        if (
+            local_collection
+            and archive.manifest.get("membership_mode", "merge") == AUTHORITATIVE_MEMBERSHIP
+            and not allow_removals
+        ):
+            raise RecipeError(
+                "authoritative local collection import requires explicit removal authorization"
+            )
+        store = RecipeStore(state / "recipes.sqlite3", household)
+        entry_origin = "collection" if local_collection else "bundled"
+        if local_collection:
+            _validate_local_collection_update(
+                state,
+                archive.manifest,
+                existing_records=store.count_pack_records(
+                    archive.manifest["pack_id"], entry_origin=entry_origin,
+                ),
+            )
         with _pack_directory(state, archive.manifest) as (directory, relative):
             for name in ("manifest.json", "attribution.json", "coverage.json"):
                 if name in archive.entries:
                     _report_bytes(directory, name, archive._read(name), immutable=True)
-            store = RecipeStore(state / "recipes.sqlite3", household)
             assets = RecipeAssets(state / "recipe-assets")
             report = {"status": "in_progress", "archive_sha256": expected_descriptor["sha256"],
                       "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                      **({"pack_revision": archive.manifest["pack_revision"]}
+                         if local_collection else {}),
+                      "kind": archive.manifest["kind"],
                       "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
                       "membership_mode": archive.manifest.get("membership_mode", "merge"),
                       "total": checked["records_count"], "processed": 0, "created": 0,
@@ -1257,7 +1399,8 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
                     if image:
                         assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
                     outcome = store.import_pack_record(record["recipe"], pack_id=archive.manifest["pack_id"],
-                        recipe_id=current, version=archive.manifest["pack_version"], status=record["status"])
+                        recipe_id=current, version=archive.manifest["pack_version"],
+                        status=record["status"], entry_origin=entry_origin)
                     category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
                     report[category] += 1
                     report["processed"] += 1
@@ -1272,6 +1415,7 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
                     deleted = store.delete_absent_pack_records(
                         pack_id=archive.manifest["pack_id"],
                         present_recipe_ids=present_recipe_ids,
+                        entry_origin=entry_origin,
                     )
                     report["deleted"] = len(deleted)
                     report["deleted_favorites"] = sum(item["was_favorite"] for item in deleted)

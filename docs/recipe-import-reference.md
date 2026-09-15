@@ -465,9 +465,12 @@ pending installation manifest. An optional `--state-directory` must match the
 manifest. Normal JSON/image imports still require `--state-directory`.
 
 The private manifest has exactly `format: meal-concierge-recipes`,
-`format_version: 1`, `kind: private`, `private_schema_version: 1`, `recipes_count`,
-`records_count` and `files`. Each canonical revision retains its own schema 1 or
-2, so there is no single recipe schema version in the manifest. Members are
+`format_version: 1`, `kind: private`, `private_schema_version`, `recipes_count`,
+`records_count` and `files`. Private schema 1 remains readable for archives with
+the original user/bundled/unknown origins. The writer emits private schema 2
+when any entry has collection origin; older runtimes must be updated before
+restoring that archive. Each canonical revision retains its own recipe schema 1
+or 2, so there is no single recipe schema version in the manifest. Members are
 `records.jsonl` and managed `assets/<sha256>.jpg` only; shared ZIP framing,
 inventory and path checks still apply.
 
@@ -478,8 +481,8 @@ Each recipe occupies one contiguous group in the JSONL stream:
 - All retained revision rows, in increasing revision order, with `type: revision`,
   `recipe_id`, `revision`, `status`, `document` and `created_at`.
 
-`pack` is null or `{pack_id, recipe_id, version, baseline_hash}` for bundled
-entries. `favorite` is null if there was never a favorite row; otherwise it holds
+`pack` is null or `{pack_id, recipe_id, version, baseline_hash}` for bundled or
+collection entries. `favorite` is null if there was never a favorite row; otherwise it holds
 `is_favorite`, `favorite_revision`, `created_at` and `updated_at`. An explicit
 false favorite retains its revision. The exact stored source key survives,
 including migration identities. The final revision must match the entry's head,
@@ -523,12 +526,16 @@ This is a recipe archive restore, not a whole-household backup or ordinary RPC.
 
 ## Trust and integration boundaries
 
-`kind: bundled` is an untrusted manifest assertion. Only the dedicated verified
-pack installation context may assign bundled entry origin. Ordinary imports
-remain user-origin and preserve known store binding; null binding does not grant
-public redistribution. A source instruction cannot change provider, favorite,
-cart or save authorization. The framing codec neither changes origin nor writes
-the bank; only the dedicated application API below does so.
+`kind: bundled` and `kind: collection` are untrusted manifest assertions. Only
+the dedicated digest-bound pack installation context may assign managed entry
+origin. `entry_origin=bundled` is reserved for the independently selected
+official release; `entry_origin=collection` marks a user-selected pack.
+`kind: collection` is the potentially private sharing format and must include a
+positive signed-64-bit `pack_revision`. Ordinary imports remain user-origin
+and preserve known store binding; null binding does not grant public
+redistribution. A source instruction cannot change provider, favorite, cart or
+save authorization. The framing codec neither changes origin nor writes the
+bank; only the dedicated application API below does so.
 
 `preflight_archive(path, expected_descriptor)` checks the entire archive against
 an independently selected release descriptor: exact compressed bytes and SHA256,
@@ -541,9 +548,20 @@ The shared provider resolver includes known-store source and upstream attributio
 even when an explicit binding is null. This exclusion does not establish public
 rights; the release builder must independently qualify source and image rights.
 
+`inspect_local_archive(path, reserved_pack_ids=...)` is the separate local trust
+entry point. It accepts only `kind: collection`, computes the descriptor from the
+opened regular file, verifies every member/record, rejects reserved publisher
+identities and rejects all `project_review` claims. The installer can then stage
+and reopen only bytes matching that descriptor. Import rejects a lower
+`pack_revision` and rejects different content reusing an installed revision.
+Local authoritative membership requires a separate exact-command
+`allow_removals` authorization plus an expected archive SHA-256; merge is
+non-destructive on omission.
+
 The installer calls `apply_archive(path, state_directory, household,
-expected_descriptor)` in process while holding the installation's actual offline
-ownership locks. It supplies a private, closed staging copy of the selected
+expected_descriptor, allow_removals=False)` in process while holding the
+installation's actual offline ownership locks. It supplies a private, closed
+staging copy of the selected
 archive; hashing an opened descriptor alone cannot prevent another writer from
 changing that same inode. Ordinary uploaded files must not invoke this trusted
 API or choose their own trusted descriptor. There is no standalone apply CLI.
@@ -555,9 +573,10 @@ local edits and source identities remain intact for records present in the new
 collection; differing records produce explicit conflicts. Assets are installed
 before their referencing record. After the complete record stream of a manifest
 with `membership_mode: authoritative` has been read, one bank transaction deletes
-all bundled entries with that exact `pack_id` whose pack recipe identity is
-absent. Their revisions, bindings, metadata and exact favorite are removed;
-entries and favorites belonging to users or other packs cannot match the delete.
+all managed entries with that exact `pack_id` and the importing pack's origin
+whose pack recipe identity is absent. Their revisions, bindings, metadata and
+exact favorite are removed; entries and favorites belonging to users, another
+origin or other packs cannot match the delete.
 Idempotency keys for those entries remain as compact identifier-only tombstones
 so a retry is still rejected as permanently deleted, while stale full-recipe
 responses and cover references do not retain the removed collection.

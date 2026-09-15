@@ -141,7 +141,7 @@ class PublisherUpgradeTests(unittest.TestCase):
             'normalizer_version': '2', 'recipe_schema_version': 2, 'records_count': 1}
         path = self.root/('pack-'+version+'.zip')
         write_archive(path, manifest, {'records.jsonl': records})
-        descriptor = {key: manifest[key] for key in ('format','format_version','pack_id','pack_version','normalizer_version','recipe_schema_version')}
+        descriptor = {key: manifest[key] for key in ('format','format_version','kind','pack_id','pack_version','normalizer_version','recipe_schema_version')}
         descriptor.update(bytes=path.stat().st_size, sha256=hashlib.sha256(path.read_bytes()).hexdigest())
         return path, descriptor
 

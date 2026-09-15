@@ -619,7 +619,7 @@ class InstallerTests(unittest.TestCase):
         records.write_bytes(canonical_bytes({'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe}) + b'\n')
         archive = self.root / 'pack.zip'
         write_archive(archive, manifest, {'records.jsonl': records})
-        expected = {key: value for key, value in manifest.items() if key not in {'kind', 'records_count'}}
+        expected = {key: value for key, value in manifest.items() if key != 'records_count'}
         expected.update(url=archive.as_uri(), bytes=archive.stat().st_size, sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
         release = self.root / 'release'; (release / 'venv/bin').mkdir(parents=True)
         (release / 'venv/bin/python').symlink_to(sys.executable)
@@ -658,6 +658,93 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'complete the stopped runtime update'):
                 install.main()
             resolve.assert_not_called()
+
+    def test_local_collection_inspect_and_digest_pinned_import(self):
+        from recipe_portable import FORMAT, canonical_bytes, write_archive
+        from recipes import normalize_recipe
+        recipe = normalize_recipe(RECIPE)
+        manifest = {
+            'format': FORMAT, 'format_version': 1, 'kind': 'collection',
+            'pack_id': 'family-recipes', 'pack_version': '2026.1',
+            'pack_revision': 1, 'normalizer_version': 'test1',
+            'recipe_schema_version': 1, 'records_count': 1,
+            'display_name': 'Family recipes', 'membership_mode': 'merge',
+        }
+        records = self.root / 'family-records.jsonl'
+        records.write_bytes(canonical_bytes({
+            'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe,
+        }) + b'\n')
+        archive = self.root / 'family-pack.zip'
+        write_archive(archive, manifest, {'records.jsonl': records})
+
+        release = self.root / 'local-release'
+        (release / 'venv/bin').mkdir(parents=True)
+        (release / 'venv/bin/python').symlink_to(sys.executable)
+        for path in CORE.glob('*.py'):
+            (release / path.name).symlink_to(path)
+        home = self.root / 'local-home'
+        home.mkdir()
+        config = home / 'config.json'
+        config.write_text(json.dumps(CONFIG))
+        meta = {'manager': 'external', 'release': str(release), 'paths': {
+            'config': str(config), 'state': str(home / 'state'),
+            'socket': str(home / 'run/service.sock'),
+            'browser_profile': str(home / 'browser/profile'),
+            'browser_home': str(home / 'browser'),
+            'browser_socket_directory': str(home / 'browser/run'),
+        }}
+        install.write_json(home / 'runtime.json', meta)
+
+        inspect_argv = [
+            'install.py', 'inspect-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive),
+        ]
+        with patch.object(sys, 'argv', inspect_argv), \
+             patch('sys.stdout', new_callable=io.StringIO) as output:
+            install.main()
+        descriptor = json.loads(output.getvalue())
+        self.assertEqual(
+            (descriptor['pack_id'], descriptor['pack_revision'], descriptor['kind']),
+            ('family-recipes', 1, 'collection'),
+        )
+
+        wrong_argv = [
+            'install.py', 'import-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive), '--expected-sha256', '0' * 64,
+        ]
+        unpinned_removal_argv = [
+            'install.py', 'import-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive), '--allow-recipe-removals',
+        ]
+        with patch.object(sys, 'argv', unpinned_removal_argv):
+            with self.assertRaisesRegex(RuntimeError, 'requires --expected-sha256'):
+                install.main()
+        self.assertFalse((home / 'state/recipes.sqlite3').exists())
+        with patch.object(sys, 'argv', wrong_argv):
+            with self.assertRaisesRegex(RuntimeError, 'expected-sha256'):
+                install.main()
+        self.assertFalse((home / 'state/recipes.sqlite3').exists())
+
+        import_argv = [
+            'install.py', 'import-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive), '--expected-sha256', descriptor['sha256'],
+        ]
+        with patch.object(sys, 'argv', import_argv), \
+             patch('sys.stdout', new_callable=io.StringIO) as output:
+            install.main()
+        report = json.loads(output.getvalue().split(': ', 1)[1])
+        self.assertEqual(
+            (report['status'], report['created'], report['kind'], report['pack_revision']),
+            ('complete', 1, 'collection', 1),
+        )
+        saved = RecipeStore(
+            home / 'state/recipes.sqlite3', CONFIG['household']
+        ).search()
+        self.assertEqual(
+            (len(saved), saved[0]['entry_origin'], saved[0]['pack']['pack_id']),
+            (1, 'collection', 'family-recipes'),
+        )
+        self.assertFalse(list(release.glob('recipe-pack-*.zip')))
 
     def test_migration_child_keeps_ownership_after_installer_parent_is_killed(self):
         state = self.root / 'state'

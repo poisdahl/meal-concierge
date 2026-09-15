@@ -6,7 +6,7 @@ Application owns source reads, trusted normalization, immutable references and
 provider eligibility. Menu `plan` accepts `planner_input={week, dates?, portions?}`
 without candidate references. Application collects the enabled local bank and
 selected retailer, loads full details, shortlists and runs the planner. Installed
-user/imported/bundled entries participate through `internal`, independently of
+user/imported/bundled/collection entries participate through `internal`, independently of
 upstream pack API switches. Existing explicit candidate requests remain valid.
 
 Summaries contain exact references, source/version identity, title, known

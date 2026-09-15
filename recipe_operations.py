@@ -3197,8 +3197,10 @@ class RecipeOperations:
                 raise RecipeLibraryError("favorites_only must be true or false")
             entry_origin = request.get("entry_origin")
             if entry_origin is not None:
-                if entry_origin not in ("user", "bundled", "unknown"):
-                    raise RecipeLibraryError("entry_origin must be user, bundled or unknown")
+                if entry_origin not in ("user", "bundled", "collection", "unknown"):
+                    raise RecipeLibraryError(
+                        "entry_origin must be user, bundled, collection or unknown"
+                    )
                 if library_ids != ["builtin"]:
                     raise RecipeLibraryError("entry_origin filtering requires the builtin recipe library")
             if requested_ids is None and library_ids == ["builtin"] and request.get("cursor") is not None:
