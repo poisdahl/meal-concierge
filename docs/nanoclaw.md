@@ -8,18 +8,15 @@ agent containers. NanoClaw receives a connection and the shared skill.
 
 Send this to Codex, Claude Code or another agent with access to your NanoClaw host:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge for my
-> existing NanoClaw installation. Follow `docs/nanoclaw.md`. Inspect the actual
-> host and existing installations first. Reuse my existing household and installed
-> version if present; preserve its data, settings and connections. For a new
-> installation, use the latest `main`, resolve it to a full commit SHA and install
-> from that checkout. Ask for my store, household and trusted NanoClaw group if
-> needed. Set up the persistent host service, native template, required read-only
-> mounts and shared skill. Do not import the optional local recipe collection
-> unless I request it separately. Verify the connection, household, loaded skill
-> and available recipe sources. A new local bank may be empty; online recipes do
-> not require the optional collection. Keep normal platform approvals and tell
-> me which login or activation steps I must complete.
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
+> for my existing NanoClaw installation. Follow docs/nanoclaw.md.
+> Connect to my existing household if present; otherwise install the latest
+> version. Ask which host, store and household to use as needed. Use my intended trusted NanoClaw group.
+> Preserve my data and settings. Verify the service, tools, skill and store
+> connection, and help me complete login and activation.
+
+This connects to the existing household when one is already installed.
+For a program update, use the [update prompt](../README.md#update-meal-concierge).
 
 ## Requirements
 
@@ -128,14 +125,3 @@ After an uncertain cart change, checkout or send, check the original operation
 before retrying. Scheduled retries must keep the same occurrence identity.
 Configure model authentication through NanoClaw's established provider setup;
 Meal Concierge's template does not install or maintain model credentials.
-
-<a id="isolated-integration-test"></a>
-<a id="native-model-acceptance"></a>
-
-## Verification boundary
-
-Developer instructions and results are in
-[installation evidence](installation-evidence.md#nanoclaw-integration-and-native-model-checks)
-and the [platform matrix](platform-acceptance.md). They record the tested
-container, chat adapter and delivery limits, without establishing live retailer
-or production email behavior.

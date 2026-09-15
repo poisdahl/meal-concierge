@@ -25,22 +25,25 @@ your selected, connected store: Oda, Mathem or MENY.
 You can also save your own recipes and add an optional offline collection.
 No recipe pack is needed to get started.
 
+[Install](#installation) · [Update Meal Concierge](#update-meal-concierge) ·
+[Add or update recipes](#add-or-update-the-recipe-collection) · [User guide](docs/usage.md)
+
 ## Installation
 
 Your agent platform should already be installed. Send this to **Codex,
-Claude Code or another installation-capable AI agent** with access to the
-computer running your chosen agent. For **Grok Bot**, send it to Grok itself.
-Replace the bracketed agent name:
+Claude Code or another installation-capable AI agent** with access to its host.
+For **Grok Bot**, send it to Grok itself. Replace the bracketed agent name:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
 > for my existing [Hermes / OpenClaw / NanoClaw / Codex / Claude Code / Grok Bot].
-> Follow the matching installation guide linked from README.
-> For a new installation, use the latest main and pin it to a specific commit.
-> Reuse any matching existing installation without resetting data or upgrading it.
-> Ask which host, store and household to use. Let me complete login and required
-> approvals. Do not import the optional recipe collection unless I request it
-> separately. Verify the service, this agent's tools and skill, and recipe access;
-> an empty local bank is normal. Tell me what is ready and what remains.
+> Follow the matching installation guide. Connect to my existing household if
+> present; otherwise install the latest version. Ask which host, store and
+> household to use as needed. Preserve my data and settings. Verify the service,
+> tools, skill and store connection, and help me complete login and activation.
+
+If Meal Concierge is already installed, the agent connects to the same recipes,
+settings and store connection. To update the program itself, use [Update Meal Concierge](#update-meal-concierge)
+below. Connecting another agent does not require reinstalling the service.
 
 Meal Concierge runs on Linux, Apple Silicon macOS, or Grok's cloud computer.
 It runs separately from the conversation, so closing a chat does not remove
@@ -60,6 +63,21 @@ saved recipes or settings. The guides below cover the required host setup.
 Use the guide for your actual client: support for one client does not establish
 support for every desktop, IDE or chat mode. For manual service installation,
 see [shared setup](docs/runtime.md).
+
+## Update Meal Concierge
+
+Send this to an installation-capable agent with access to your existing
+installation (or to Grok for its cloud installation):
+
+> Update my existing Meal Concierge installation from
+> https://github.com/poisdahl/meal-concierge to the latest version on main.
+> Follow docs/runtime.md and my agent's installation guide. Preserve my recipes,
+> settings, login and saved data. Refresh the connected agent's tools and skill
+> as needed, verify that everything works, and report the installed version.
+
+A program update keeps your existing recipe collection. To refresh the
+collection too, request [the latest recipe collection](#add-or-update-the-recipe-collection)
+separately after updating the program. You keep the same household and saved data.
 
 ## Requirements
 
@@ -125,18 +143,7 @@ recipe pack and verifies its checksum and size. It briefly stops the service
 when no active work will be interrupted, then starts it again.
 See [recipe import](docs/recipe-import.md) for this and other ways to add recipes.
 
-## Updates and help
-
-> Update my existing Meal Concierge installation to the latest main, pinned to
-> a specific commit. Follow docs/runtime.md and my agent's installation guide.
-> Preserve my data, login and recipes, update the agent connection if needed,
-> and verify that it works. Do not import a recipe pack.
-
-**Code updates leave the recipe collection unchanged**, including collections
-imported by older versions. Update the code first, then request the latest collection
-separately if you want it. A collection import preserves your local edits and
-reports conflicts for review. Reinstalling or resetting the computer is not
-an update procedure.
+## Help and privacy
 
 For missing tools, login problems or interrupted setup, ask the agent to follow
 [updates and recovery](docs/runtime.md#updates-failures-and-recovery).

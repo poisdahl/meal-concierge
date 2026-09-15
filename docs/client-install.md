@@ -8,18 +8,15 @@ integration. The household service keeps running when you close a conversation.
 
 Paste this into your agent:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge for this
-> Codex or Claude Code installation. Follow `docs/client-install.md`. Inspect the
-> actual host and existing installations first. Reuse my existing household and
-> installed version if present; preserve its data, settings and connections. For
-> a new installation, use the latest `main`, resolve it to a full commit SHA and
-> install from that checkout. Ask for my store and household if needed. Set up
-> the persistent service, native client connection and shared skill. Do not import
-> the optional local recipe collection unless I request it separately. Verify
-> the connection, household, loaded skill and available recipe sources. A new
-> local bank may be empty; online recipes do not require the optional collection.
-> Keep normal platform approvals and tell me which login or activation steps I
-> must complete.
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
+> for my existing Codex or Claude Code installation. Follow docs/client-install.md.
+> Connect to my existing household if present; otherwise install the latest
+> version. Ask which host, store and household to use as needed.
+> Preserve my data and settings. Verify the service, tools, skill and store
+> connection, and help me complete login and activation.
+
+This connects to the existing household when one is already installed.
+For a program update, use the [update prompt](../README.md#update-meal-concierge).
 
 ## Requirements
 
@@ -151,9 +148,3 @@ the original operation before retrying. Reinstalling or restoring old data can
 lose the information needed to establish what happened. Report the source
 commit, client version, last confirmed step and exact error without sharing
 credentials.
-
-## Verified installation lifecycle
-
-Historical results and their limits are in
-[installation evidence](installation-evidence.md#codex-and-claude-installation-lifecycle)
-and the [platform matrix](platform-acceptance.md).

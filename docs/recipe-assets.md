@@ -148,10 +148,6 @@ when the same assets are restored beside the bank. A remote client cannot
 resolve service-host assets merely by receiving these references; its sender
 needs a supported host-local resolver or must use text-only presentation.
 
-The helper's local MIME tests establish byte/CID resolution and readable
-fallback. Actual Application preparation, send-protocol recovery and the
-local sender integration are separate tests; no real delivery is implied.
-
 ## Backup and restore
 
 SQLite-only backups exclude image files. A consistent private installation

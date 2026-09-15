@@ -122,7 +122,6 @@ existing home and profile. See [browser setup details](runtime-reference.md#prov
 > Update my existing Meal Concierge installation to the latest main, pinned to
 > a specific commit. Preserve my data, login and recipes. Follow docs/runtime.md
 > and my agent's guide, refresh the agent connection if needed, and verify it.
-> Do not import a recipe collection.
 
 First check for active shopping, payment and delivery work. Wait for it to finish;
 resolve uncertain results before maintenance. For a native installation, retain

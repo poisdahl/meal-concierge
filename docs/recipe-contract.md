@@ -223,9 +223,3 @@ external dispatch rather than discarding fields. Existing supported schema-1
 text-only write/reconciliation paths remain. Ordinary native JSON imports reject
 privileged evidence/acceptance or unavailable new image references before committing any rows;
 dedicated trusted source import/private restore handles those separately.
-
-The focused behavioral contract is exercised by
-[the recipe contract tests](../tests/test_meal_concierge_recipe_contract.py).
-The suite uses synthetic/local data and actual Application/menu/product code;
-it does not certify live provider availability or public-pack
-redistribution.

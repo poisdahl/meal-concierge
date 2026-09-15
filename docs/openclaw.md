@@ -7,22 +7,19 @@ The household service runs independently of OpenClaw conversations.
 
 Send this to Codex, Claude Code or another agent with access to your OpenClaw host:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge for my
-> existing OpenClaw installation. Follow `docs/openclaw.md`. Inspect the actual
-> host and existing installations first. Reuse my existing household and installed
-> version if present; preserve its data, settings and connections. For a new
-> installation, use the latest `main`, resolve it to a full commit SHA and install
-> from that checkout. Ask for my store and household if needed. Set up the
-> persistent service, OpenClaw MCP connection and shared skill. Do not import the
-> optional local recipe collection unless I request it separately. Verify the
-> connection, household, loaded skill and available recipe sources. A new local
-> bank may be empty; online recipes do not require the optional collection. Keep
-> normal platform approvals and tell me which login or activation steps I must
-> complete.
+> Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
+> for my existing OpenClaw installation. Follow docs/openclaw.md.
+> Connect to my existing household if present; otherwise install the latest
+> version. Ask which host, store and household to use as needed.
+> Preserve my data and settings. Verify the service, tools, skill and store
+> connection, and help me complete login and activation.
+
+This connects to the existing household when one is already installed.
+For a program update, use the [update prompt](../README.md#update-meal-concierge).
 
 ## Requirements
 
-- A working OpenClaw installation. The adapter was tested with **2026.9.2**'s
+- A working OpenClaw installation. The adapter targets **2026.9.2**'s
   embedded runtime and native `mcp.servers` registry; check compatibility with
   your installed version.
 - A supported [runtime host and prerequisites](runtime.md#install-and-attach).
@@ -80,7 +77,7 @@ An empty new local bank is normal. Recipes from your selected, connected store
 are available without the optional collection. See
 [first use](usage.md) and [adding recipes](recipe-import.md).
 
-Keep OpenClaw's normal tool permissions. In the tested version, `coding` and
+Keep OpenClaw's normal tool permissions. In that version, `coding` and
 `messaging` profiles expose configured MCP tools; `minimal` or
 `tools.deny: ["bundle-mcp"]` hide them. Per-server tool filters can also limit
 access. Tool visibility does not authorize orders, outgoing email or schedules.
@@ -93,7 +90,7 @@ use the shared skill's attachment workflow.
 
 ## Updates and help
 
-Update the existing service through the [runtime procedure](runtime.md#updates-failures-and-recovery).
+Use the [update prompt](../README.md#update-meal-concierge) or update the existing service through the [runtime procedure](runtime.md#updates-failures-and-recovery).
 Regenerate the connection fragment from the matching checkout when attachment
 settings change, reload OpenClaw and verify its tools and shared skill. The MCP
 registration must launch only the bridge, not a second household service.
@@ -106,8 +103,3 @@ code before separately asking to
 A timeout or closed conversation does not prove an operation stopped. Reconnect
 to the same service and check the original cart change, checkout or send before
 retrying. Client cleanup should leave the independent household service running.
-
-## Verification boundary
-
-See [historical OpenClaw evidence](installation-evidence.md#openclaw) and the
-[platform matrix](platform-acceptance.md) for tested versions and limits.
