@@ -59,9 +59,11 @@ new attempt. Mathem supports guarded saved-card checkout when the installation
 has a configured dedicated browser logged into the same account. Without an
 available checkout browser, it returns a manual website handoff. Failed login,
 account/address or saved-card checks stop checkout and require attention before
-a fresh review. Mathem also supports guarded additions and cancellation, and bound free-window
-delivery changes. Other payment methods and paid/refund-bearing changes remain
-manual. The [native Mathem result](../docs/acceptance.md) records the completed
+a fresh review. Mathem also supports guarded additions, reductions and
+cancellation, plus bound delivery changes under the shared full-total rule.
+Other payment methods remain manual. A reduction verifies the changed merchant
+total but never claims that a bank refund has settled. The
+[native Mathem result](../docs/acceptance.md) records the completed
 #50 scope, including recovery assistance and unknown bank settlement/refunds.
 
 The attachment uses the installation's stable `current` paths. Rebuild packages

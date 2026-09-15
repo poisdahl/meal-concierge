@@ -3032,7 +3032,7 @@ class PlanningOperations:
             if change and change.get("status") != "editing":
                 raise HouseholdError("the order change is still starting")
             if self.provider in {"oda", "mathem"} and change and change.get("requested_delivery"):
-                raise HouseholdError("finish or abort the staged Oda delivery change before adding items")
+                raise HouseholdError(f"finish or abort the staged {self.provider.title()} delivery change before adding items")
             if self.provider == "meny":
                 self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
             desired = self._cart_requirements(request.get("requirements"))[0] if action == "ensure" else None
@@ -3040,17 +3040,17 @@ class PlanningOperations:
             if change and self.provider in {"oda", "mathem"}:
                 current = self._orders({"action": "get", "order_id": change["order_id"], "_deadline": deadline})
                 if current["tracking"].get("status") != "paid_and_modifiable":
-                    raise HouseholdError("Oda no longer allows additions to this order; retain the staged goods for review")
+                    raise HouseholdError(f"{self.provider.title()} no longer allows additions to this order; retain the staged goods for review")
                 if canonical(current) != canonical(change["before"]):
-                    raise HouseholdError("the target Oda order changed; read it again before continuing")
+                    raise HouseholdError(f"the target {self.provider.title()} order changed; read it again before continuing")
                 if desired is not None:
                     ordered = oda_order_quantities(current["order"])
                     if ordered is None:
-                        raise HouseholdError("Oda ordered quantities cannot be verified")
+                        raise HouseholdError(f"{self.provider.title()} ordered quantities cannot be verified")
             cart = self.provider_client.call("get_cart", {}, deadline=deadline)
             before, _names = self._cart_lines(cart_summary(cart))
             if change and self.provider in {"oda", "mathem"} and before != change.get("expected_cart_quantities", {}):
-                raise HouseholdError("Oda addition cart changed outside this edit; abort with retain_cart=true, then review its destination again")
+                raise HouseholdError(f"{self.provider.title()} addition cart changed outside this edit; abort with retain_cart=true, then review its destination again")
             if desired is not None:
                 operations = [{"productId": key, "quantity": quantity - before.get(key, 0) - ordered.get(key, 0)}
                               for key, quantity in desired.items() if quantity > before.get(key, 0) + ordered.get(key, 0)]

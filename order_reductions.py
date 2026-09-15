@@ -1,4 +1,4 @@
-"""Oda's native, order-scoped item removal. Quantities mean units remaining.
+"""Native Oda/Mathem order-scoped item removal. Quantities mean units remaining.
 
 Reads use the storefront's same-origin API; the sole merchant write is the
 visible confirmation button. An uncertain click is reconciled, never repeated.
@@ -15,21 +15,57 @@ from core import HouseholdError, cart_summary
 from service_common import canonical, money_cents, require_provider_identity, safe_order_id
 
 
+_PROVIDERS = {
+    "oda": {
+        "label": "Oda",
+        "origin": "https://oda.com",
+        "locale": "no",
+        "currency": "NOK",
+        "total_pattern": r"Totalt fjernet,? inkl\. MVA\s*[-−]\s*([\d\s]+[,.]\d{2})\s*kr",
+        "button": "Fjern varer",
+        "dialog_fragments": [
+            "Er du sikker på at du vil fjerne disse varene fra bestillingen din?",
+            "Prisen på de fjernede varene blir trukket fra totalen nederst på bestillingen.",
+        ],
+    },
+    "mathem": {
+        "label": "Mathem",
+        "origin": "https://www.mathem.se",
+        "locale": "se",
+        "currency": "SEK",
+        "total_pattern": r"Totalt borttaget,? inkl\. moms\s*[-−]\s*([\d\s]+[,.]\d{2})\s*kr",
+        "button": "Ta bort varor",
+        # Mathem and Oda share the removal component. These two distinct
+        # Swedish phrases bind the final control to its removal dialog without
+        # accepting a generic delete or cancellation dialog.
+        "dialog_fragments": ["Är du säker", "Ta bort varor", "beställning"],
+    },
+}
+
+
+def _spec(provider):
+    try:
+        return _PROVIDERS[provider]
+    except KeyError:
+        raise HouseholdError("Ordered-item removal is unavailable for this provider") from None
+
+
 def _digest(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
-def _items(eligibility):
+def _items(eligibility, provider="oda"):
+    spec = _spec(provider)
     rows = {}
     groups = eligibility.get("items_groups")
     if not isinstance(groups, list):
-        raise HouseholdError("Oda removable items are unavailable")
+        raise HouseholdError(f"{spec['label']} removable items are unavailable")
     for group in groups:
         if not isinstance(group, dict) or not isinstance(group.get("items"), list):
-            raise HouseholdError("Oda removable item group is invalid")
+            raise HouseholdError(f"{spec['label']} removable item group is invalid")
         for row in group["items"]:
             if not isinstance(row, dict):
-                raise HouseholdError("Oda removable item is invalid")
+                raise HouseholdError(f"{spec['label']} removable item is invalid")
             if row.get("product_id") is None:
                 continue
             pid = str(row["product_id"])
@@ -37,19 +73,20 @@ def _items(eligibility):
             if (not re.fullmatch(r"[1-9][0-9]*", pid) or pid in rows
                     or type(qty) is not int or qty < 0
                     or type(row.get("quantity")) is not int or row["quantity"] < qty
-                    or row["quantity"] < 1 or row.get("currency") != "NOK"
+                    or row["quantity"] < 1 or row.get("currency") != spec["currency"]
                     or not isinstance(row.get("description"), str) or not row["description"].strip()
                     or money_cents(row.get("gross_amount")) is None):
-                raise HouseholdError("Oda removable item identity or quantity is ambiguous")
+                raise HouseholdError(f"{spec['label']} removable item identity or quantity is ambiguous")
             rows[pid] = row
     if (type(eligibility.get("total_uncredited_quantity")) is not int
             or eligibility["total_uncredited_quantity"] != sum(r["uncredited_quantity"] for r in rows.values())):
-        raise HouseholdError("Oda remaining order quantity cannot be verified")
+        raise HouseholdError(f"{spec['label']} remaining order quantity cannot be verified")
     return rows
 
 
-def _intent(items, eligibility):
-    rows = _items(eligibility)
+def _intent(items, eligibility, provider="oda"):
+    spec = _spec(provider)
+    rows = _items(eligibility, provider)
     if not isinstance(items, list) or not items or len(items) > 200:
         raise HouseholdError("items must contain desired remaining quantities")
     result, seen = [], set()
@@ -67,9 +104,9 @@ def _intent(items, eligibility):
         if remaining == previous:
             continue
         if row.get("eligible_for_removal") is not True:
-            raise HouseholdError("Oda no longer permits removing this product")
+            raise HouseholdError(f"{spec['label']} no longer permits removing this product")
         if row.get("entire_quantity_removal_only") is True and remaining != 0:
-            raise HouseholdError("Oda only permits removing the entire quantity of this product")
+            raise HouseholdError(f"{spec['label']} only permits removing the entire quantity of this product")
         credit = int((Decimal(str(row["gross_amount"])) / row["quantity"] * (previous - remaining) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
         result.append({"product_id": pid, "name": row["description"], "quantity": remaining,
                        "previous_quantity": previous, "removed_quantity": previous - remaining,
@@ -80,10 +117,11 @@ def _intent(items, eligibility):
     return sorted(result, key=lambda r: r["product_id"])
 
 
-def _source_script(order_id):
+def _source_script(order_id, provider="oda"):
+    spec = _spec(provider)
     return """(async () => {
       // order-removal-source: read-only storefront routes
-      if (location.origin !== 'https://oda.com') return JSON.stringify({ok:false});
+      if (location.origin !== %s) return JSON.stringify({ok:false});
       const id = %s;
       const paths = ['/api/v1/orders/'+id+'/items_eligible_for_removal/', '/api/v1/orders/'+id+'/'];
       const values = [];
@@ -93,20 +131,21 @@ def _source_script(order_id):
         values.push(await r.json());
       }
       return JSON.stringify({ok:true, eligibility:values[0], details:values[1]});
-    })()""" % json.dumps(order_id)
+    })()""" % (json.dumps(spec["origin"]), json.dumps(order_id))
 
 
-def _ui_script(order_id, items, stage, product_id=None):
+def _ui_script(order_id, items, stage, product_id=None, provider="oda"):
     """Tag exactly one observed native control; never dispatch merchant actions in JS."""
+    spec = _spec(provider)
     return r"""(() => {
       // order-removal-ui
-      const orderId = ORDER_ID, items = ITEMS, stage = STAGE, productId = PRODUCT_ID;
+      const orderId = ORDER_ID, items = ITEMS, stage = STAGE, productId = PRODUCT_ID, spec = SPEC;
       const norm = x => String(x || '').replace(/\s+/g,' ').trim();
       const visible = e => !!e && !!e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
       const enabled = e => !e.disabled && e.getAttribute('aria-disabled') !== 'true';
       const all = (s, root=document) => [...root.querySelectorAll(s)].filter(visible);
       const answer = (ok, extra={}) => JSON.stringify({ok,...extra});
-      if (location.origin !== 'https://oda.com' || location.pathname !== '/no/account/orders/remove-items/'+orderId+'/') return answer(false);
+      if (location.origin !== spec.origin || location.pathname !== '/'+spec.locale+'/account/orders/remove-items/'+orderId+'/') return answer(false);
       document.querySelectorAll('[data-meal-remove-control]').forEach(e=>e.removeAttribute('data-meal-remove-control'));
       const tag = candidates => {
         if (candidates.length !== 1 || !enabled(candidates[0])) return answer(false);
@@ -134,40 +173,42 @@ def _ui_script(order_id, items, stage, product_id=None):
       if (stage === 'open' || stage === 'confirm') {
         const main = all('main'); if (main.length !== 1) return answer(false);
         const text = norm(main[0].innerText);
-        const totals = [...text.matchAll(/Totalt fjernet,? inkl\. MVA\s*[-−]\s*([\d\s]+[,.]\d{2})\s*kr/g)];
+        const totals = [...text.matchAll(new RegExp(spec.total_pattern, 'g'))];
         const credit = items.reduce((s,i)=>s+i.credit_ore,0);
         if (totals.length!==1 || Math.round(Number(totals[0][1].replace(/\s/g,'').replace(',','.'))*100)!==credit) return answer(false);
-        if (stage === 'open') return tag(all('button',main[0]).filter(e=>norm(e.textContent)==='Fjern varer' && !e.closest('[role="dialog"]')));
+        if (stage === 'open') return tag(all('button',main[0]).filter(e=>norm(e.textContent)===spec.button && !e.closest('[role="dialog"]')));
       }
       if (stage === 'confirm') {
-        const dialogs = all('[role="dialog"]').filter(d => norm(d.innerText).includes('Er du sikker på at du vil fjerne disse varene fra bestillingen din?')
-          && norm(d.innerText).includes('Prisen på de fjernede varene blir trukket fra totalen nederst på bestillingen.'));
+        const dialogs = all('[role="dialog"]').filter(d => spec.dialog_fragments.every(fragment=>norm(d.innerText).includes(fragment)));
         if (dialogs.length !== 1) return answer(false);
-        return tag(all('button',dialogs[0]).filter(e=>norm(e.textContent)==='Fjern varer'));
+        return tag(all('button',dialogs[0]).filter(e=>norm(e.textContent)===spec.button));
       }
       return answer(false);
-    })()""".replace("ORDER_ID", json.dumps(order_id)).replace("ITEMS", json.dumps(items)).replace("STAGE", json.dumps(stage)).replace("PRODUCT_ID", json.dumps(product_id))
+    })()""".replace("ORDER_ID", json.dumps(order_id)).replace("ITEMS", json.dumps(items)).replace("STAGE", json.dumps(stage)).replace("PRODUCT_ID", json.dumps(product_id)).replace("SPEC", json.dumps(spec, ensure_ascii=False))
 
 
 def _control(browser, pending, stage, product_id=None, *, click=True):
+    provider = pending["provider"]
+    spec = _spec(provider)
     requested = {r["product_id"]: r for r in pending["items"]}
     items = [{"product_id": pid, "name": row["description"], "quantity": row["uncredited_quantity"],
               "previous_quantity": row["uncredited_quantity"], "credit_ore": 0, "requested": False,
-              **requested.get(pid, {})} for pid, row in _items(pending["before"]["eligibility"]).items()]
+              **requested.get(pid, {})} for pid, row in _items(pending["before"]["eligibility"], provider).items()]
     for item in items:
         item["requested"] = item["product_id"] in requested
-    script = _ui_script(pending["order_id"], items, stage, product_id)
+    script = _ui_script(pending["order_id"], items, stage, product_id, provider)
     for _ in range(12):
         if browser._eval(script).get("ok") is True:
             if click:
                 browser._invoke("click", '[data-meal-remove-control="true"]')
             return
         browser._settle(.25)
-    raise HouseholdError("Oda removal controls do not match the reviewed items or total")
+    raise HouseholdError(f"{spec['label']} removal controls do not match the reviewed items or total")
 
 
 def _form(browser, pending):
-    browser._open("https://oda.com/no/account/orders/remove-items/" + pending["order_id"] + "/")
+    spec = _spec(pending["provider"])
+    browser._open(f"{spec['origin']}/{spec['locale']}/account/orders/remove-items/{pending['order_id']}/")
     for item in pending["items"]:
         _control(browser, pending, "select", item["product_id"])
         _control(browser, pending, "option", item["product_id"])
@@ -176,24 +217,25 @@ def _form(browser, pending):
 
 
 def _read(app, order_id, deadline, binding=None):
+    spec = _spec(app.provider)
     order = app.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
     require_provider_identity(order, order_id)
     current_binding = app.browser.read_order_binding(order_id, order, deadline=deadline, expected_binding=binding)
     if binding is not None and current_binding != binding:
-        raise HouseholdError("Oda removal account binding changed")
-    source = app.browser._eval(_source_script(order_id))
+        raise HouseholdError(f"{spec['label']} removal account binding changed")
+    source = app.browser._eval(_source_script(order_id, app.provider))
     if source.get("ok") is not True:
-        raise HouseholdError("Oda removal source is unavailable")
+        raise HouseholdError(f"{spec['label']} removal source is unavailable")
     eligibility, details = source.get("eligibility"), source.get("details")
     if not isinstance(eligibility, dict) or not isinstance(details, dict):
-        raise HouseholdError("Oda removal source is invalid")
+        raise HouseholdError(f"{spec['label']} removal source is invalid")
     summary = details.get("summary")
     if (not isinstance(summary, dict) or eligibility.get("order_number") != order_id
-            or summary.get("order_number") != order_id or eligibility.get("currency") != "NOK"
-            or summary.get("currency") != "NOK" or money_cents(summary.get("gross_amount")) is None
+            or summary.get("order_number") != order_id or eligibility.get("currency") != spec["currency"]
+            or summary.get("currency") != spec["currency"] or money_cents(summary.get("gross_amount")) is None
             or not summary.get("delivery")):
-        raise HouseholdError("Oda removal order identity, delivery or total is unavailable")
-    _items(eligibility)
+        raise HouseholdError(f"{spec['label']} removal order identity, delivery or total is unavailable")
+    _items(eligibility, app.provider)
     cart = cart_summary(app.provider_client.call("get_cart", {}, deadline=deadline))
     return {"eligibility": eligibility, "details": details, "cart": cart, "binding": current_binding}
 
@@ -206,31 +248,33 @@ def _guard(state, pending=None):
 
 
 def _view(pending):
-    return {"provider": "oda", "order_id": pending["order_id"], "confirmation_id": pending["confirmation_id"],
-            "status": pending["status"], "items": deepcopy(pending["items"]), "currency": "NOK",
+    spec = _spec(pending["provider"])
+    return {"provider": pending["provider"], "order_id": pending["order_id"], "confirmation_id": pending["confirmation_id"],
+            "status": pending["status"], "items": deepcopy(pending["items"]), "currency": spec["currency"],
             "expected_credit_ore": pending["credit_ore"], "original_total_ore": pending["total_ore"],
             "confirmation_required": pending["status"] == "prepared"}
 
 
-def _delivery(source):
+def _delivery(source, provider="oda"):
+    spec = _spec(provider)
     delivery = source["details"]["summary"]["delivery"]
     if not isinstance(delivery, dict) or not delivery.get("delivery_address") or not delivery.get("delivery_time"):
-        raise HouseholdError("Oda removal delivery address and time are unavailable")
+        raise HouseholdError(f"{spec['label']} removal delivery address and time are unavailable")
     return {key: delivery[key] for key in ("delivery_address", "delivery_time")}
 
 
 def _reconcile(app, pending, deadline):
     current = _read(app, pending["order_id"], deadline, pending["before"]["binding"])
     before = pending["before"]
-    expected = {pid: r["uncredited_quantity"] for pid, r in _items(before["eligibility"]).items()}
+    expected = {pid: r["uncredited_quantity"] for pid, r in _items(before["eligibility"], app.provider).items()}
     for item in pending["items"]:
         expected[item["product_id"]] = item["quantity"]
-    observed = {pid: r["uncredited_quantity"] for pid, r in _items(current["eligibility"]).items()}
+    observed = {pid: r["uncredited_quantity"] for pid, r in _items(current["eligibility"], app.provider).items()}
     quantities_match = {k:v for k,v in expected.items() if v} == {k:v for k,v in observed.items() if v}
     summary = current["details"]["summary"]
     total = money_cents(summary["gross_amount"])
     matched = (quantities_match and total == pending["total_ore"] - pending["credit_ore"]
-               and _delivery(current) == _delivery(before))
+               and _delivery(current, app.provider) == _delivery(before, app.provider))
     with app.store.locked() as state:
         if canonical(state.get("order_change")) != canonical(pending):
             raise HouseholdError("The pending removal changed during reconciliation")
@@ -250,8 +294,9 @@ def _reconcile(app, pending, deadline):
 
 def orders_remove(app, request):
     """Called by OrderOperations._orders for the three remove_* actions."""
-    if app.provider != "oda" or app.browser is None:
-        raise HouseholdError("Ordered-item removal requires the logged-in Oda browser")
+    if app.provider not in {"oda", "mathem"} or app.browser is None:
+        raise HouseholdError("Ordered-item removal requires a logged-in Oda or Mathem browser")
+    spec = _spec(app.provider)
     action = request.get("action")
     deadline = min(time.monotonic() + 105, request.get("_deadline") or float("inf"))
     # Check protected state before any browser navigation or session closure;
@@ -275,18 +320,18 @@ def orders_remove(app, request):
                         return _view(pending)
                 _guard(state)
                 token = secrets.token_urlsafe(24)
-                reservation = {"kind": "reduction", "provider": "oda", "order_id": order_id,
+                reservation = {"kind": "reduction", "provider": app.provider, "order_id": order_id,
                                "confirmation_id": token, "status": "preparing", "started_at": app._now().isoformat()}
                 state["order_change"] = reservation
             try:
                 before = _read(app, order_id, deadline)
-                _delivery(before)
+                _delivery(before, app.provider)
                 options, status = before["details"].get("options"), before["details"]["summary"].get("status")
                 if (not isinstance(options, dict) or not isinstance(status, dict)
                         or options.get("can_remove_from_order") is not True
                         or status.get("can_remove_from_order") is not True):
-                    raise HouseholdError("Oda no longer permits removing items from this order")
-                items = _intent(request.get("items"), before["eligibility"])
+                    raise HouseholdError(f"{spec['label']} no longer permits removing items from this order")
+                items = _intent(request.get("items"), before["eligibility"], app.provider)
                 pending = {**reservation, "status": "prepared", "before": before, "items": items,
                            "requested_items": deepcopy(request["items"]), "credit_ore": sum(r["credit_ore"] for r in items),
                            "total_ore": money_cents(before["details"]["summary"]["gross_amount"])}
@@ -338,9 +383,9 @@ def orders_remove(app, request):
         _form(app.browser, pending)
         # Recheck merchant facts after local form preparation and immediately
         # before journaling the one permitted native submission.
-        source = app.browser._eval(_source_script(pending["order_id"]))
+        source = app.browser._eval(_source_script(pending["order_id"], app.provider))
         if source != {"ok": True, "eligibility": current["eligibility"], "details": current["details"]}:
-            raise HouseholdError("Oda order changed while preparing the removal confirmation")
+            raise HouseholdError(f"{spec['label']} order changed while preparing the removal confirmation")
         fresh_cart = cart_summary(app.provider_client.call("get_cart", {}, deadline=deadline))
         if fresh_cart != current["cart"]:
             raise HouseholdError("Cart changed while preparing the removal confirmation")
@@ -357,4 +402,4 @@ def orders_remove(app, request):
             with app.store.locked() as state:
                 if state.get("order_change") == pending:
                     state["order_change"]["status"] = "uncertain"
-            raise HouseholdError("Oda removal result is uncertain; use remove_reconcile without another click") from None
+            raise HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click") from None

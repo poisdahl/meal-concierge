@@ -2320,12 +2320,13 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         after = result['notice']
         self.assertEqual(after['phase'], 'after_reconciliation')
         options = after['payload']['correction_options']
-        self.assertEqual(options['edit_availability'], 'additions_only')
+        self.assertEqual(options['edit_availability'], 'additions_and_reductions')
+        self.assertIn('Guarded reductions', options['message'])
         self.assertIsNone(options['deadline'])
         self.assertEqual(options['deadline_status'], 'provider_reported_text')
         self.assertIn('12. september', options['deadline_text'])
         self.assertIn(options['deadline_text'], after['payload']['message'])
-        self.assertIn('removal, replacement, refund and payment release are not promised', options['message'].casefold())
+        self.assertIn('replacement, bank-refund settlement and payment release are not promised', options['message'].casefold())
         self.assertIn('a higher total requires approval unless covered by the authorized price limit', options['message'])
         self.browser.order_followup.assert_called_once()
         self.app.handle({'operation': 'checkout', 'action': 'notice_result', 'notice_token': after['notice_token'],

@@ -63,12 +63,12 @@ Installation does not create an account or add a payment card.
 | Store | What you must set up |
 |---|---|
 | Oda (Norway) | Authorize the connection and log into the same account in the dedicated browser. Saved-card checkout needs a usable card in Oda. |
-| Mathem (Sweden, SEK) | Authorize the connection. Saved-card checkout also needs the same account logged into the dedicated browser; otherwise use the website checkout link. Change or cancel existing orders on Mathem's website. |
+| Mathem (Sweden, SEK) | Authorize the connection and log into the same account in the dedicated browser. Saved-card checkout needs a usable card in Mathem. |
 | MENY (Norway) | Log into the dedicated browser, set up home delivery and your Vipps phone number, and approve payments on your phone. |
 
 Enter passwords, cards and approvals only in the store's trusted interface,
 never in chat. A connected store does not by itself confirm that checkout is
-ready. Complete end-to-end payment testing is still pending for Mathem.
+ready.
 
 ## First use
 
