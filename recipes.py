@@ -44,6 +44,7 @@ MAX_LIBRARY_OPERATIONS = 10_000
 MAX_LIBRARY_MAPPINGS = 10_000
 FAILED_LIBRARY_OPERATION_TTL_DAYS = 90
 LIBRARY_LIFECYCLE_CONFIRMATION_TTL = timedelta(minutes=10)
+MANAGED_ASSET_REFERENCE = re.compile(r"sha256:[0-9a-f]{64}(?![0-9a-f])")
 ACTIVE_DISCOVERY_BINDING_STATUSES = {"pending", "uncertain"}
 LIBRARY_RECIPE_MUTATION_KINDS = {
     "conditional_update", "archive", "delete", "favorite", "label",
@@ -4618,6 +4619,31 @@ class RecipeStore:
         # recipe_favorites and recipe_entry_metadata cascade only for this exact id.
         connection.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
 
+    @staticmethod
+    def _tombstone_recipe_idempotency(
+        connection: sqlite3.Connection, recipe_ids: set[str]
+    ) -> None:
+        """Keep replay fencing while removing stale full-recipe responses."""
+        if not recipe_ids:
+            return
+        replacements = []
+        for row in connection.execute("SELECT key,response_json FROM idempotency"):
+            try:
+                response = json.loads(row["response_json"])
+            except (json.JSONDecodeError, TypeError, RecursionError) as exc:
+                raise RecipeError("recipe bank is unavailable") from exc
+            if not isinstance(response, Mapping):
+                raise RecipeError("recipe bank is unavailable")
+            response_recipe_id = response.get("id")
+            reference = response.get("library_recipe_ref")
+            if isinstance(reference, Mapping) and reference.get("library_id") == "builtin":
+                response_recipe_id = reference.get("recipe_id")
+            if isinstance(response_recipe_id, str) and response_recipe_id in recipe_ids:
+                replacements.append((_canonical({"id": response_recipe_id}), row["key"]))
+        connection.executemany(
+            "UPDATE idempotency SET response_json=? WHERE key=?", replacements
+        )
+
     def delete_absent_pack_records(self, *, pack_id: Any, present_recipe_ids: Iterable[Any]) -> list[dict[str, Any]]:
         """Delete bundled identities absent from a verified authoritative pack snapshot."""
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
@@ -4646,9 +4672,11 @@ class RecipeStore:
                     ORDER BY m.pack_recipe_id
                 """, (pack_id,)).fetchall()
                 deleted = []
-                for row in rows:
-                    if row["pack_recipe_id"] in present:
-                        continue
+                removed_rows = [row for row in rows if row["pack_recipe_id"] not in present]
+                self._tombstone_recipe_idempotency(
+                    connection, {row["id"] for row in removed_rows}
+                )
+                for row in removed_rows:
                     deleted.append({
                         "recipe_id": row["pack_recipe_id"],
                         "bank_recipe_id": row["id"],
@@ -4661,6 +4689,80 @@ class RecipeStore:
                 return deleted
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
+
+    def count_pack_records(self, pack_id: Any) -> int:
+        """Count only entries carrying the internal bundled identity for one pack."""
+        pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
+        try:
+            with self._connection() as connection:
+                return connection.execute(
+                    "SELECT count(*) FROM recipe_entry_metadata "
+                    "WHERE entry_origin='bundled' AND pack_id=?",
+                    (pack_id,),
+                ).fetchone()[0]
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank is unavailable") from exc
+
+    def referenced_asset_ids(self) -> set[str]:
+        """Conservatively find managed asset references in all retained bank text.
+
+        This scans the actual schema rather than a hand-maintained list of JSON
+        columns. False positives only retain an extra file; they can never make
+        collection removal delete an asset referenced by durable bank state.
+        """
+        def quoted(identifier: str) -> str:
+            return '"' + identifier.replace('"', '""') + '"'
+
+        references: set[str] = set()
+        try:
+            with self._connection() as connection:
+                tables = [row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_schema "
+                    "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )]
+                for table in tables:
+                    columns = [
+                        row[1]
+                        for row in connection.execute(f"PRAGMA table_info({quoted(table)})")
+                        if "TEXT" in str(row[2]).upper()
+                    ]
+                    if not columns:
+                        continue
+                    selected = ",".join(quoted(column) for column in columns)
+                    for row in connection.execute(f"SELECT {selected} FROM {quoted(table)}"):
+                        for value in row:
+                            if isinstance(value, str):
+                                references.update(MANAGED_ASSET_REFERENCE.findall(value))
+            return references
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank asset references are unavailable") from exc
+
+    def compact(self) -> dict[str, Any]:
+        """Reclaim free SQLite pages while the installation is owned offline."""
+        try:
+            with self._connection() as connection:
+                checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checkpoint is not None and checkpoint[0] != 0:
+                    raise RecipeError("recipe bank WAL could not be checkpointed")
+                page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+                free_pages = connection.execute("PRAGMA freelist_count").fetchone()[0]
+                before = self.path.stat().st_size
+                if free_pages:
+                    connection.execute("VACUUM")
+                    checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if checkpoint is not None and checkpoint[0] != 0:
+                        raise RecipeError("compacted recipe bank WAL could not be checkpointed")
+                os.chmod(self.path, 0o600)
+                after = self.path.stat().st_size
+                return {
+                    "before_bytes": before,
+                    "after_bytes": after,
+                    "reclaimed_bytes": max(0, before - after),
+                    "free_bytes_before": free_pages * page_size,
+                    "compacted": bool(free_pages),
+                }
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank compaction failed") from exc
 
     def delete(self, recipe_id: Any, expected_revision: Any) -> dict[str, Any]:
         """Permanently remove one exact built-in recipe and its local identity metadata."""
@@ -4677,6 +4779,7 @@ class RecipeStore:
                     raise RecipeError("recipe was not found")
                 if current["revision"] != expected_revision:
                     raise RecipeError(f"recipe revision conflict; current revision is {current['revision']}")
+                self._tombstone_recipe_idempotency(connection, {recipe_id})
                 self._delete_recipe_rows(connection, recipe_id)
                 return {"library_id": "builtin", "recipe_id": recipe_id, "deleted": True}
         except sqlite3.Error as exc:

@@ -122,6 +122,11 @@ Code updates preserve recipes, including collections imported by older
 versions. Update the
 code before separately requesting
 [the latest optional collection](runtime.md#versioned-recipe-package-integration).
+An explicit request to remove the entire collection requires a current runtime:
+stop the exact cloud execution when idle, run
+`./install.sh remove-recipe-collection --home ABSOLUTE_DATA_HOME` through the
+established host executor, then restore that same execution. This is an offline
+installation operation; do not substitute per-recipe archive calls.
 After cloud runtime loss, rebuild missing replaceable code while preserving
 durable data, credentials and operation records.
 

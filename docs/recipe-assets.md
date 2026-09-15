@@ -154,7 +154,11 @@ SQLite-only backups exclude image files. A consistent private installation
 backup must copy household state, the SQLite bank and the entire
 `recipe-assets` directory while its writers are stopped through the existing
 maintenance procedure. Retaining all managed files also retains historical
-menu/order/email covers; this feature performs no garbage collection.
+menu/order/email covers; ordinary recipe and backup operations perform no
+general garbage collection. The explicit offline `remove-recipe-collection`
+maintenance command is narrower: it considers only files listed by retained
+manifests for that collection, and removes a candidate only after subtracting
+references in the remaining recipe bank, household state and migration backups.
 
 Restore the latest consistent state and assets together into a new empty
 installation, preserving relative placement. Verify both current and frozen

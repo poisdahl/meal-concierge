@@ -268,3 +268,71 @@ class RecipeAssets:
             return data
         except OSError as exc:
             raise RecipeAssetError("managed recipe cover is missing or unavailable") from exc
+
+    def preflight_removal(self, asset_ids) -> None:
+        """Fail before logical deletion if an existing candidate is irregular."""
+        if isinstance(asset_ids, (str, bytes)):
+            raise RecipeAssetError("managed recipe asset removal requires exact identifiers")
+        try:
+            filenames = sorted({asset_filename(asset_id) for asset_id in asset_ids})
+        except TypeError as exc:
+            raise RecipeAssetError("managed recipe asset removal requires exact identifiers") from exc
+        if not filenames:
+            return
+        try:
+            with _directory(self.root) as directory:
+                for filename in filenames:
+                    try:
+                        info = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        raise RecipeAssetError("managed recipe asset removal found an irregular file")
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RecipeAssetError("managed recipe asset removal preflight failed") from exc
+
+    def remove_many(self, asset_ids) -> dict[str, int]:
+        """Remove exact caller-selected managed files without following links.
+
+        The caller owns the installation offline and has already subtracted all
+        durable references. Missing files make retries idempotent. Any irregular
+        existing candidate aborts before this method removes a file.
+        """
+        if isinstance(asset_ids, (str, bytes)):
+            raise RecipeAssetError("managed recipe asset removal requires exact identifiers")
+        try:
+            candidates = {asset_filename(asset_id): asset_id for asset_id in asset_ids}
+        except TypeError as exc:
+            raise RecipeAssetError("managed recipe asset removal requires exact identifiers") from exc
+        if not candidates:
+            return {"deleted": 0, "deleted_bytes": 0, "missing": 0}
+        try:
+            with _directory(self.root) as directory:
+                existing = {}
+                missing = 0
+                for filename in sorted(candidates):
+                    try:
+                        info = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        missing += 1
+                        continue
+                    if not stat.S_ISREG(info.st_mode):
+                        raise RecipeAssetError("managed recipe asset removal found an irregular file")
+                    existing[filename] = info.st_size
+                deleted = deleted_bytes = 0
+                for filename, size in existing.items():
+                    try:
+                        os.unlink(filename, dir_fd=directory)
+                    except FileNotFoundError:
+                        missing += 1
+                    else:
+                        deleted += 1
+                        deleted_bytes += size
+                os.fsync(directory)
+                return {"deleted": deleted, "deleted_bytes": deleted_bytes, "missing": missing}
+        except FileNotFoundError:
+            return {"deleted": 0, "deleted_bytes": 0, "missing": len(candidates)}
+        except OSError as exc:
+            raise RecipeAssetError("managed recipe asset removal failed") from exc

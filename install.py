@@ -125,6 +125,22 @@ def recipe_pack_command(release, action, archive, meta=None, expected=None):
     return json.loads(result.stdout)
 
 
+def recipe_collection_remove_command(release, meta):
+    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import remove_recipe_collection; remove_recipe_collection(json.loads(sys.argv[2]))"
+    result = subprocess.run(
+        [str(release / 'venv/bin/python'), '-I', '-c', code, str(release), json.dumps(meta)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stdout or result.stderr).strip()[:2000]
+        raise RuntimeError(
+            f'recipe collection removal failed ({result.returncode}): {detail}. '
+            'Update Meal Concierge, then rerun remove-recipe-collection.'
+        )
+    return json.loads(result.stdout)
+
+
 def apply_recipe_pack(archive, meta, expected):
     """Installed-runtime child entry point; no parent-owned lifetime locks."""
     from recipe_portable import apply_archive
@@ -134,6 +150,19 @@ def apply_recipe_pack(archive, meta, expected):
         print(json.dumps(report))
     if report['status'] != 'complete':
         raise SystemExit(2)
+
+
+def remove_recipe_collection(meta):
+    """Installed-runtime child entry point; no release lookup or download."""
+    from recipe_portable import remove_collection
+    with offline(meta):
+        settings = json.loads(Path(meta['paths']['config']).read_text())
+        report = remove_collection(
+            Path(meta['paths']['state']),
+            settings['household'],
+            {**RECIPE_PACK, 'display_name': RECIPE_COLLECTION_NAME},
+        )
+        print(json.dumps(report))
 
 
 def run(*args, **kwargs):
@@ -409,7 +438,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['import-recipes', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['import-recipes', 'remove-recipe-collection', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -494,12 +523,16 @@ def main():
                 with offline(meta):
                     print(backup(meta, args.backup))
                 return
-            if args.action == 'import-recipes':
+            if args.action in {'import-recipes', 'remove-recipe-collection'}:
                 assert_stopped(meta)
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
-                    raise RuntimeError('complete the stopped runtime update before importing recipes')
-                expected = latest_recipe_pack()
+                    raise RuntimeError('complete the stopped runtime update before changing the recipe collection')
                 release = Path(meta['release'])
+                if args.action == 'remove-recipe-collection':
+                    report = recipe_collection_remove_command(release, meta)
+                    print(RECIPE_COLLECTION_NAME + ':', json.dumps(report))
+                    return
+                expected = latest_recipe_pack()
                 archive = stage_recipe_pack(release, args.recipe_pack, expected)
                 try:
                     recipe_pack_command(release, 'preflight', archive, expected=expected)
