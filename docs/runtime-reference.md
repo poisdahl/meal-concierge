@@ -453,4 +453,3 @@ On timeout or an uncertain result, check the original helper and stored-grant
 status before starting another login. Follow the shared
 [session and payment guidance](../skill/SKILL.md#store-setup-and-payment-readiness)
 and [confirmation policy](../skill/SKILL.md#delivery-checkout-and-email).
-
