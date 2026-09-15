@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from norwegian_grocery_curation import OrdinaryGroceryExcluded, OrdinaryGroceryPolicyError, apply
 from recipe_curation import batch_mass, curate, recovered, serving_estimate
 from recipe_portable import FORMAT, apply_archive, canonical_bytes, preflight_archive, write_archive
 from recipe_quantities import read_quantity
@@ -23,6 +24,71 @@ def source_recipe():
 
 
 class CurationTests(unittest.TestCase):
+    def test_ordinary_grocery_adaptations_keep_source_wording_and_coherent_method(self):
+        fish = source_recipe()
+        fish['source'] = {**fish['source'], 'kind': 'themealdb', 'external_id': '52802'}
+        fish['ingredients'] = [
+            source_ingredient('200g Jerusalem Artichokes', item='Jerusalem Artichokes', measure='200g'),
+            source_ingredient('25g grated Gruyère', item='Gruyère', measure='25g'),
+        ]
+        fish['steps'] = ['Grate the artichokes.', 'Sprinkle over the cheese.']
+        recipe, _, classification = apply(fish, {}, pack_version='test.1', reviewed_source_hash='a' * 64)
+        self.assertEqual(classification, 'adapt')
+        self.assertEqual(recipe['ingredients'][0]['item'], 'Celeriac')
+        self.assertEqual(recipe['ingredients'][0]['original_text'], '200g Jerusalem Artichokes')
+        self.assertEqual(recipe['ingredients'][1]['item'], 'Jarlsberg')
+        self.assertEqual(recipe['steps'], ['Grate the celeriac.', 'Sprinkle over the Jarlsberg.'])
+
+        pot = source_recipe()
+        pot['source'] = {**pot['source'], 'kind': 'themealdb', 'external_id': '53161'}
+        pot['ingredients'] = [
+            source_ingredient('150ml White Wine', item='White Wine', measure='150ml'),
+            source_ingredient('800ml Chicken Stock', item='Chicken Stock', measure='800ml'),
+        ]
+        pot['steps'] = ['Cook with white wine and stock.']
+        recipe, _, classification = apply(pot, {}, pack_version='test.1', reviewed_source_hash='a' * 64)
+        self.assertEqual(classification, 'adapt')
+        self.assertEqual(recipe['ingredients'][0]['item'], 'Cider vinegar')
+        self.assertEqual(read_quantity(recipe['ingredients'][0]['quantity']), 10)
+        self.assertEqual(read_quantity(recipe['ingredients'][1]['quantity']), 940)
+        self.assertEqual(recipe['ingredients'][0]['original_text'], '150ml White Wine')
+        self.assertEqual(recipe['steps'], ['Cook with stock and cider vinegar.'])
+        _, _, classification = apply(source_recipe(), {}, pack_version='test.1')
+        self.assertEqual(classification, 'keep')
+
+        blocked = source_recipe()
+        blocked['ingredients'] = [source_ingredient('2 tbsp ground crayfish', item='ground crayfish')]
+        with self.assertRaisesRegex(OrdinaryGroceryExcluded, 'ground crayfish'):
+            apply(blocked, {}, pack_version='test.1')
+
+        for item in ('conchiglie pasta', 'striped bass', 'spirulina powder'):
+            with self.subTest(item=item):
+                retained = source_recipe()
+                retained['ingredients'] = [source_ingredient('100 g '+item, item=item)]
+                self.assertEqual(apply(retained, {}, pack_version='test.1')[2], 'keep')
+        retained = source_recipe()
+        retained['ingredients'] = [source_ingredient('red palm', item='red palm'),
+                                   source_ingredient('oil', item='oil')]
+        self.assertEqual(apply(retained, {}, pack_version='test.1')[2], 'keep')
+        for item in ('yams', 'plantains', 'snails'):
+            with self.subTest(blocked_plural=item):
+                blocked = source_recipe()
+                blocked['ingredients'] = [source_ingredient('2 '+item, item=item)]
+                with self.assertRaisesRegex(OrdinaryGroceryExcluded, item):
+                    apply(blocked, {}, pack_version='test.1')
+        retained = source_recipe()
+        retained['steps'] = ['No pressure cooker is needed.',
+                             'Use a slow cooker if desired, or simmer in a pan.']
+        self.assertEqual(apply(retained, {}, pack_version='test.1')[2], 'keep')
+
+        with self.assertRaisesRegex(OrdinaryGroceryPolicyError, 'reviewed source hash'):
+            apply(fish, {}, pack_version='test.1')
+        drifted = deepcopy(fish)
+        drifted['ingredients'][0] = source_ingredient(
+            '300g Jerusalem Artichokes', item='Jerusalem Artichokes', measure='300g')
+        with self.assertRaisesRegex(OrdinaryGroceryPolicyError, 'quantity no longer matches'):
+            apply(drifted, {}, pack_version='test.1', reviewed_source_hash='a' * 64)
+
     def test_estimates_are_explicit_and_source_values_remain_exact(self):
         before = source_recipe()
         result, credit = curate(before, {}, pack_version='1')

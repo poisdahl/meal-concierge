@@ -74,11 +74,11 @@ protections against deleting or rewriting `main` still apply. The exception is
 not the normal path for accepting external contributions. Fork workflow runs
 require maintainer approval before execution.
 
-Maintainers also synchronize a reviewed internal source mirror. Accepted public
-contributions must be brought back into that mirror before the next publication.
-Publish from current public `main`, retain contributor attribution and history,
-and apply only intended changes. Preserve public-only files and contribution
-guidance; never replace the public tree with an older snapshot.
+This repository is the authoritative product source. Private operations
+repositories may pin an exact reviewed commit as a Git submodule, but must not
+maintain a second product-source mirror. Product changes are made here through a
+pull request, then consumed by updating that exact pin. Never replace this tree
+from an older private checkout.
 
 ## Technical documentation
 
