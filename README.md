@@ -21,8 +21,9 @@
 
 Ask for a weekly menu, adjust portions and preferences, and turn ingredients
 into a shopping cart. Your recipes and menus are saved in your installation.
-The included offline collection contains 4,599 recipes; Mealie and RecipeSage
-are optional.
+The offline recipe collection is optional and is not downloaded or imported
+during installation or updates. You can add it later; Mealie and RecipeSage
+are also optional.
 
 ## Installation
 
@@ -30,18 +31,28 @@ For **Codex, Claude Code CLI or Claude Desktop’s Code section**, send:
 
 > Install Meal Concierge from https://github.com/poisdahl/meal-concierge.
 > Follow docs/client-install.md. Preserve existing installations and data.
+> Do not import the optional recipe collection unless I request it separately.
 > Ask which host, store and household to use; let me complete native approvals.
 > Verify the service, recipes and this client’s tools/skill, and report what remains.
 
 For **Grok Bot**, send this prompt:
 
 > Install Meal Concierge from https://github.com/poisdahl/meal-concierge.
+> Do not import the optional recipe collection unless I request it separately.
 > Follow docs/grok.md on your cloud computer. Preserve any existing installation
 > and data. Ask which store and household to use, and let me complete login and
 > required approvals. Verify the tools and tell me what remains incomplete.
 
 For other agents, use the guide below. The service runs on Linux or Apple Silicon
 macOS, or a supported cloud computer; a desktop chat alone does not host it.
+
+### Add the recipe collection later
+
+Ask your agent: “Import the latest optional recipe collection into my existing
+Meal Concierge installation.” The manual `import-recipes` command selects the
+newest published stable recipe release and verifies its SHA-256 and size.
+See [manual recipe import](docs/runtime.md#versioned-recipe-package-integration)
+for the stopped-service command. Existing recipes remain saved during updates.
 
 ## Agent support
 

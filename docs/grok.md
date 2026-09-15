@@ -41,7 +41,9 @@ browser handoff, service lifecycle and native delivery surfaces.
    the shared [store setup guidance](../skill/SKILL.md#store-setup-and-payment-readiness).
    Installation checks do not authorize cart writes, checkout or sending messages.
 
-`install.sh` performs the normal dependency installation and recipe-pack import;
+`install.sh install` installs the dependencies and core without a recipe collection.
+An empty recipe bank is expected. Import the optional collection only on a separate
+user request, following [manual recipe import](runtime.md#versioned-recipe-package-integration);
 all subprocesses remain subject to platform review. If Shell rejects a command,
 report the exact failure and reconcile any partial effects before recovery.
 Do not cycle through wrappers or approval-request retries.
