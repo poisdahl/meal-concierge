@@ -236,6 +236,9 @@ def _brave_search(settings, query, api_key):
     scoped = query
     if not settings["broad"]:
         scoped += " (" + " OR ".join("site:" + s["domain"] for s in settings["sites"] if s["enabled"]) + ")"
+    for site in settings["sites"]:
+        if not site["enabled"]:
+            scoped += " -site:" + site["domain"]
     if len(scoped) > 600 or len(scoped.split()) > 75:
         raise RecipeImportSourceError("Brave query/scope is too long; shorten the query or select fewer sites")
     url = "https://api.search.brave.com/res/v1/web/search?" + urlencode({

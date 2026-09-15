@@ -118,6 +118,20 @@ class OptionalSearchTests(unittest.TestCase):
         self.assertEqual(len(result["results"]), 8)
         self.assertTrue(all(r["url"].startswith("https://recipes.example/soup") for r in result["results"]))
 
+    def test_brave_forwards_exclusions_and_refuses_oversized_scope_without_network(self):
+        self.configure()
+        self.settings["sites"][0]["enabled"] = False
+        with patch("recipe_import_sources._get_bytes", side_effect=self.brave_response) as fetch:
+            search_web(self.settings, "kikertgryte", config=self.config)
+        query = parse_qs(urlsplit(fetch.call_args.args[0]).query)["q"][0]
+        self.assertIn("-site:matprat.no", query)
+        self.settings.update(broad=False, sites=[{"name": "Site", "domain": f"{'x' * 40}{i}.example", "enabled": True} for i in range(32)])
+        with patch("recipe_import_sources._get_bytes") as fetch:
+            result = search_web(self.settings, "soup", config=self.config)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("too long", result["reason"])
+        fetch.assert_not_called()
+
     def test_malformed_api_hits_differ_from_real_zero_results(self):
         self.configure()
         for hits in ([{}], [{"url": 17}], [{"url": "https://recipes.example/soup", "title": []}], {}, None, []):
