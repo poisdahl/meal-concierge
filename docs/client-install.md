@@ -1,15 +1,17 @@
 # Codex and Claude Code
 
-Use Codex CLI, Claude Code CLI, or **Claude Desktop → Code → Local** on the
-computer that will run Meal Concierge. Claude Desktop Chat is a different
-integration. The household service keeps running when you close a conversation.
+Use the same setup in a desktop app or terminal. Install Meal Concierge once
+on the computer running your agent, then connect the clients you want to use.
+They share the same recipes, settings and store connection. The household
+service keeps running when you close a conversation.
 
 ## Install with an AI agent
 
 Paste this into your agent:
 
 > Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
-> for my existing Codex or Claude Code installation. Follow docs/client-install.md.
+> for my existing [Codex / ChatGPT Work Local / Claude Code] environment.
+> Follow docs/client-install.md.
 > Connect to my existing household if present; otherwise install the latest
 > version. Ask which host, store and household to use as needed.
 > Preserve my data and settings. Verify the service, tools, skill and store
@@ -17,6 +19,24 @@ Paste this into your agent:
 
 This connects to the existing household when one is already installed.
 For a program update, use the [update prompt](../README.md#update-meal-concierge).
+
+## Choose your client
+
+- **Codex:** use a local Codex session in the ChatGPT desktop app, or Codex CLI.
+  Both use the `codex` package below.
+- **Claude Code:** use **Code → Local** in Claude Desktop, or Claude Code CLI.
+  Both use the `claude-code` package below.
+- **ChatGPT Work Local:** use the same `codex` package and installation steps.
+  Before relying on it, complete [Check and first use](#check-and-first-use) in
+  the Work conversation; its local tools, skill and file access must be available.
+
+The package connects to a service on the same computer and under the same user.
+Regular ChatGPT Chat, Work Cloud and Claude Desktop Chat are not covered by
+this plugin setup. They need their own connection and skill setup; installing
+this local plugin does not provide those automatically.
+
+See the platform guides for [ChatGPT local plugins](https://developers.openai.com/plugins/build/plugins#build-your-own-curated-plugin-list)
+and [Claude Code shared configuration](https://code.claude.com/docs/en/desktop#shared-configuration).
 
 ## Requirements
 
@@ -72,34 +92,39 @@ and are not portable downloads.
 
 ### 3. Register and load the plugin
 
-Check your client's `plugin --help` and existing registrations first. Preserve
-unrelated plugins and reuse an enabled Meal Concierge registration for the same
-household.
+Register the generated marketplace and enable `meal-concierge` in your chosen
+client. Reuse an existing registration for the same household and preserve
+unrelated plugins. Use either desktop controls or the corresponding CLI:
 
-**Codex CLI:**
+| Client family | Add the marketplace | Install the plugin |
+|---|---|---|
+| Codex | `codex plugin marketplace add /absolute/codex-package` | `codex plugin add meal-concierge@meal-concierge` |
+| Claude Code | `claude plugin marketplace add /absolute/claude-package` | `claude plugin install meal-concierge@meal-concierge` |
 
-```sh
-codex plugin marketplace add /absolute/codex-package
-codex plugin add meal-concierge@meal-concierge
-```
+These commands can be run by your installation agent. Check `plugin --help`
+for the installed client version. You do not need to install a separate CLI
+just to use a desktop app:
 
-**Claude Code CLI:**
+- **ChatGPT desktop:** open the generated Codex marketplace directory as a local
+  project and restart the app. In **Plugins**, choose the Meal Concierge
+  marketplace and install its plugin. For access from other projects, your
+  installation agent can register the same source using the CLI above or a
+  [personal marketplace](https://developers.openai.com/plugins/build/plugins#install-a-local-plugin-manually).
+- **Claude Desktop:** in **Code → Local**, use **+ → Plugins → Add plugin** to install from
+  the configured marketplace. Your installation agent can register the source
+  using the CLI above or the client's
+  [marketplace configuration](https://code.claude.com/docs/en/plugin-marketplaces).
 
-```sh
-claude plugin marketplace add /absolute/claude-package
-claude plugin install meal-concierge@meal-concierge
-```
+Follow the client's reload instructions and start a new conversation in the
+mode you intend to use. Verify both tools and skill with the steps below.
+Switching between desktop and terminal does not require another service or
+another package for the same client family and household.
 
-For a single Claude Code session, you can instead use:
+For a single Claude Code terminal session, an alternative is:
 
 ```sh
 claude --plugin-dir /absolute/claude-package/plugins/meal-concierge
 ```
-
-**Claude Desktop → Code → Local:** open a local folder on the service host and
-use that Code environment's plugin controls to add the generated marketplace and
-activate `meal-concierge`. A separate terminal installation does not establish
-that Desktop loaded the plugin. Follow its reload or new-session instructions.
 
 ## Check and first use
 
@@ -136,8 +161,10 @@ collection, update the code first, then separately ask to
 [import the latest collection](runtime.md#versioned-recipe-package-integration).
 
 After a runtime update, rebuild the plugin from the matching checkout into a new
-output directory. For a requested plugin update, verify the existing marketplace
-belongs to this household, remove that marketplace with
+output directory. Update the registered marketplace source to that new directory
+in the same client environment, then reload the plugin. Desktop users can follow
+the same registration steps as during installation. For CLI registration, verify
+the existing marketplace belongs to this household, remove that marketplace with
 `codex plugin marketplace remove meal-concierge` or
 `claude plugin marketplace remove meal-concierge`, then repeat the relevant
 registration commands with the new output path. For `--plugin-dir`, use the new

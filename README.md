@@ -35,7 +35,7 @@ Claude Code or another installation-capable AI agent** with access to its host.
 For **Grok Bot**, send it to Grok itself. Replace the bracketed agent name:
 
 > Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
-> for my existing [Hermes / OpenClaw / NanoClaw / Codex / Claude Code / Grok Bot].
+> for my existing [Hermes / OpenClaw / NanoClaw / Codex / ChatGPT Work Local / Claude Code / Grok Bot].
 > Follow the matching installation guide. Connect to my existing household if
 > present; otherwise install the latest version. Ask which host, store and
 > household to use as needed. Preserve my data and settings. Verify the service,
@@ -56,13 +56,16 @@ saved recipes or settings. The guides below cover the required host setup.
 | Hermes Agent | [Hermes](docs/hermes.md) | Runs alongside your Hermes installation. |
 | OpenClaw | [OpenClaw](docs/openclaw.md) | Connects to a service on the same host. |
 | NanoClaw | [NanoClaw](docs/nanoclaw.md) | The service runs on the host; trusted agent groups connect from containers. |
-| Codex CLI | [Codex and Claude](docs/client-install.md) | Uses a local plugin connected to the service. |
-| Claude Code CLI / Claude Desktop Code | [Codex and Claude](docs/client-install.md) | Desktop setup uses **Code → Local**. |
+| Codex — ChatGPT desktop app or CLI | [Codex and Claude](docs/client-install.md) | Use a local session on the service host. |
+| Claude Code — desktop app or CLI | [Codex and Claude](docs/client-install.md) | Use a local session on the service host. |
 | Grok Bot | [Grok](docs/grok.md) | Uses Grok's cloud computer; group-room recipe delivery supports text only. |
 
-Use the guide for your actual client: support for one client does not establish
-support for every desktop, IDE or chat mode. For manual service installation,
-see [shared setup](docs/runtime.md).
+Desktop and terminal clients use the same installation and household. In
+Claude Desktop, choose **Code → Local**. **ChatGPT Work Local** uses the same
+Codex package; follow the [client guide](docs/client-install.md#choose-your-client)
+to check that its tools and skill are available in your Work conversation.
+Regular Chat and cloud sessions need a different connection. For manual service
+installation, see [shared setup](docs/runtime.md).
 
 ## Update Meal Concierge
 

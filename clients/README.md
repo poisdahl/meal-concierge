@@ -5,7 +5,7 @@ to install Meal Concierge once and connect the agent to that household.
 
 | Agent | Installation guide |
 |---|---|
-| Codex CLI, Claude Code CLI, Claude Desktop Code | [Codex and Claude Code](../docs/client-install.md) |
+| Codex and Claude Code — desktop app or CLI | [Codex and Claude Code](../docs/client-install.md) |
 | Hermes | [Hermes](../docs/hermes.md) |
 | OpenClaw | [OpenClaw](../docs/openclaw.md) |
 | NanoClaw | [NanoClaw](../docs/nanoclaw.md) |
@@ -15,6 +15,9 @@ Connections use the same household service and shared skill. Adding another
 agent does not require another household installation or a copy of its store
 credentials. The service continues independently of conversations. Generated
 client packages contain local paths and belong on their owner's computer.
+
+For ChatGPT Work Local and the distinction from regular Chat or cloud sessions,
+see [Choose your client](../docs/client-install.md#choose-your-client).
 
 ## PDF attachments
 
