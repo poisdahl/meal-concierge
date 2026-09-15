@@ -13,114 +13,140 @@
 
 <p align="center">
   <a href="#requirements"><img src="assets/icons/oda.png" alt="Oda" title="Oda" width="40" height="40"></a>
-  <a href="https://www.mathem.se/"><img src="assets/icons/mathem.png" alt="Mathem" title="Mathem" width="40" height="40"></a>
+  <a href="#requirements"><img src="assets/icons/mathem.png" alt="Mathem" title="Mathem" width="40" height="40"></a>
   <a href="#requirements"><img src="assets/icons/meny.png" alt="MENY" title="MENY" width="80" height="40"></a>
 </p>
 
 **Plan meals, save recipes and shop for groceries through your AI agent.**
 
 Ask for a weekly menu, adjust portions and preferences, and turn ingredients
-into a shopping cart. Your recipes and menus are saved in your installation.
-The offline recipe collection is optional and is not downloaded or imported
-during installation or updates. You can add it later; Mealie and RecipeSage
-are also optional.
+into a shopping cart. Meal Concierge can find and use online recipes from
+your selected, connected store: Oda, Mathem or MENY.
+You can also save your own recipes and add an optional offline collection.
+No recipe pack is needed to get started.
 
 ## Installation
 
-For **Codex, Claude Code CLI or Claude Desktop’s Code section**, send:
+Your agent platform should already be installed. Send this to **Codex,
+Claude Code or another installation-capable AI agent** with access to the
+computer running your chosen agent. For **Grok Bot**, send it to Grok itself.
+Replace the bracketed agent name:
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge.
-> Follow docs/client-install.md. Preserve existing installations and data.
-> Do not import the optional recipe collection unless I request it separately.
-> Ask which host, store and household to use; let me complete native approvals.
-> Verify the service, recipes and this client’s tools/skill, and report what remains.
+> Install Meal Concierge from https://github.com/poisdahl/meal-concierge
+> for my existing [Hermes / OpenClaw / NanoClaw / Codex / Claude Code / Grok Bot].
+> Follow the matching installation guide linked from README.
+> For a new installation, use the latest main and pin it to a specific commit.
+> Reuse any matching existing installation without resetting data or upgrading it.
+> Ask which host, store and household to use. Let me complete login and required
+> approvals. Do not import the optional recipe collection unless I request it
+> separately. Verify the service, this agent's tools and skill, and recipe access;
+> an empty local bank is normal. Tell me what is ready and what remains.
 
-For **Grok Bot**, send this prompt:
+Meal Concierge runs on Linux, Apple Silicon macOS, or Grok's cloud computer.
+It runs separately from the conversation, so closing a chat does not remove
+saved recipes or settings. The guides below cover the required host setup.
 
-> Install Meal Concierge from https://github.com/poisdahl/meal-concierge.
-> Do not import the optional recipe collection unless I request it separately.
-> Follow docs/grok.md on your cloud computer. Preserve any existing installation
-> and data. Ask which store and household to use, and let me complete login and
-> required approvals. Verify the tools and tell me what remains incomplete.
+### Agent support
 
-For other agents, use the guide below. The service runs on Linux or Apple Silicon
-macOS, or a supported cloud computer; a desktop chat alone does not host it.
+| Your existing agent | Installation guide | What to know |
+|---|---|---|
+| Hermes Agent | [Hermes](docs/hermes.md) | Runs alongside your Hermes installation. |
+| OpenClaw | [OpenClaw](docs/openclaw.md) | Connects to a service on the same host. |
+| NanoClaw | [NanoClaw](docs/nanoclaw.md) | The service runs on the host; trusted agent groups connect from containers. |
+| Codex CLI | [Codex and Claude](docs/client-install.md) | Uses a local plugin connected to the service. |
+| Claude Code CLI / Claude Desktop Code | [Codex and Claude](docs/client-install.md) | Desktop setup uses **Code → Local**. |
+| Grok Bot | [Grok](docs/grok.md) | Uses Grok's cloud computer; group-room recipe delivery supports text only. |
 
-### Add the recipe collection later
-
-Ask your agent: “Import the latest optional recipe collection into my existing
-Meal Concierge installation.” The manual `import-recipes` command selects the
-newest published stable recipe release and verifies its SHA-256 and size.
-See [manual recipe import](docs/runtime.md#versioned-recipe-package-integration)
-for the stopped-service command. Existing recipes remain saved during updates.
-
-## Agent support
-
-| Agent | Setup and current scope |
-|---|---|
-| Hermes Agent | [Installation and connection](docs/reference.md#provider-login-and-startup); established integration |
-| Codex / Claude Code | [Client packages](clients/README.md); native setup and recipe/menu workflows tested |
-| Claude Desktop, Code mode | [Client packages](clients/README.md); setup and recipe import tested |
-| Grok Bot | [Cloud setup](docs/grok.md); guided installation, recipes/menus and live Oda reads tested; checkout and PDF delivery unverified |
-| OpenClaw | [Setup](docs/openclaw.md); native connection and lifecycle tested |
-| NanoClaw | [Setup](docs/nanoclaw.md); native connection and lifecycle tested |
+Use the guide for your actual client: support for one client does not establish
+support for every desktop, IDE or chat mode. For manual service installation,
+see [shared setup](docs/runtime.md).
 
 ## Requirements
 
-Choose **one store per installation**. For shopping, you need your own store
-account, complete contact details and an address in its delivery area.
-Installation does not create an account or add a payment card.
+Choose **one store per installation**. Several agents can share the same
+household installation. Shopping requires your own store account, complete
+contact details and an address in its delivery area.
 
-| Store | What you must set up |
-|---|---|
-| Oda (Norway) | Authorize the connection and log into the same account in the dedicated browser. Saved-card checkout needs a usable card in Oda. |
-| Mathem (Sweden, SEK) | Authorize the connection and log into the same account in the dedicated browser. Saved-card checkout needs a usable card in Mathem. |
-| MENY (Norway) | Log into the dedicated browser, set up home delivery and your Vipps phone number, and approve payments on your phone. |
+**Oda and Mathem follow the same setup:** authorize the store connection, then
+log into the same account in the dedicated browser to enable checkout. Add a
+usable payment card on the store's website if you want saved-card payment.
 
-Enter passwords, cards and approvals only in the store's trusted interface,
-never in chat. A connected store does not by itself confirm that checkout is
-ready.
+| Store | Country / currency | Payment through Meal Concierge |
+|---|---|---|
+| Oda | Norway / NOK | Saved card or Vipps; complete any required approval yourself. |
+| Mathem | Sweden / SEK | Saved card; complete any required approval yourself. |
+| MENY | Norway / NOK | Vipps; configure home delivery and your Vipps phone number, then approve on your phone. |
+
+MENY uses its dedicated browser for the store connection as well as checkout.
+Mathem can also run without a checkout browser and hand you over to its website
+to finish the order. The current Oda installer requires the browser dependencies;
+see [installation requirements](docs/runtime.md#install-and-attach).
+
+Installation does not create store accounts or add payment cards. Enter
+passwords, payment details and approvals in the trusted store or payment
+interface, never in chat.
 
 ## First use
 
 > Plan next week's seven dinners for two.
 
-Review the household settings, then the proposed menu, and ask to save it.
-You can change portions, preferences and recipe sources in chat. Then try:
+Review the household settings and recipe sources, then the proposed menu.
+Ask to save it when you are happy. The local bank may initially be empty;
+online store recipes remain available through the connected sources.
+You can add your own recipes at any time.
 
-- “We already have rice. Show me the groceries we need.”
+Then try:
+
+- “Use what we already have: rice, carrots and lentils.”
+- “Show the groceries for this menu and add what is missing.”
 - “Show my cart and delivery windows.”
 - “Prepare checkout.”
+- “Give me the saved menu's recipes.”
 
-Planning and preparing checkout do not place an order. By default, review and
-confirm the final summary before ordering or cancelling. If a submission's
-result is unclear, ask the agent to check it before trying again.
+Planning and preparing checkout do not place an order. By default, you review
+and confirm the final summary before ordering or cancelling. You can separately
+configure standing authorization. If an order or payment result is unclear,
+ask the agent to check it before trying again.
 
-Ask to receive the saved menu's recipes. New installations default to chat text,
-with PDF and available images where the agent supports them. Email is optional
-and reuses an existing Gmail or SMTP connection with your chosen recipient.
-Ask “Set up recipe email” to inspect the connection and select sender, recipient
-and timing once. A missing host connection has a separate optional
-[email setup step](docs/recipe-delivery.md#email-connection-setup); installing
-Meal Concierge does not create a mailbox. Delivery channels and
-formats are configurable; automatic schedules need support in the host agent.
-See [recipe delivery](docs/recipe-delivery.md) for host-specific limits.
+See the [user guide](docs/usage.md) for favorites, portions, leftovers,
+recurring plans, order changes and dietary preferences.
+[Recipe delivery](docs/recipe-delivery.md) explains chat, PDF and optional email.
+
+### Add or update the recipe collection
+
+The offline collection is optional. Installation and code updates do not
+download or import it. To add or refresh it, ask:
+
+> Import the latest optional recipe collection into my existing Meal Concierge
+> installation. Preserve my recipes and local edits.
+
+The agent uses `import-recipes`, which selects the newest published stable
+recipe pack and verifies its checksum and size. It briefly stops the service
+when no active work will be interrupted, then starts it again.
+See [recipe import](docs/recipe-import.md) for this and other ways to add recipes.
 
 ## Updates and help
 
-Ask the installing agent to follow the [update guide](docs/runtime.md#updates-failures-and-recovery)
-and preserve your existing data and login. Reinstalling or resetting the cloud
-computer is not an update procedure.
+> Update my existing Meal Concierge installation to the latest main, pinned to
+> a specific commit. Follow docs/runtime.md and my agent's installation guide.
+> Preserve my data, login and recipes, update the agent connection if needed,
+> and verify that it works. Do not import a recipe pack.
 
-If tools are missing or login fails, ask the agent to check the installation
-and store connection. Report unresolved errors in a
-[GitHub issue](https://github.com/poisdahl/meal-concierge/issues), including your
-agent, operating system, store and a redacted error message.
+**Code updates leave the recipe collection unchanged**, including collections
+imported by older versions. Update the code first, then request the latest collection
+separately if you want it. A collection import preserves your local edits and
+reports conflicts for review. Reinstalling or resetting the computer is not
+an update procedure.
 
-Household data and sessions stay in the installation; your configured AI model,
-store and recipe services still process relevant requests. Product matching
-does not guarantee the cheapest basket or allergen safety; review ingredients
-and the final checkout price yourself.
+For missing tools, login problems or interrupted setup, ask the agent to follow
+[updates and recovery](docs/runtime.md#updates-failures-and-recovery).
+Report unresolved errors in a [GitHub issue](https://github.com/poisdahl/meal-concierge/issues)
+with your agent, operating system, store and an error message stripped of
+private data.
 
-[Technical setup](docs/runtime.md) · [Reference](docs/reference.md) ·
-[Verified capabilities](docs/acceptance.md) · [MIT License](LICENSE)
+Household data and sessions stay in your installation; your configured AI,
+store and recipe services process relevant requests. Product matching does
+not guarantee the cheapest basket or allergen safety: check ingredients and
+the final checkout price.
+
+[Contributing and technical documentation](CONTRIBUTING.md) · [MIT License](LICENSE)

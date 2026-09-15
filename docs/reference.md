@@ -1,6 +1,7 @@
 # Meal Concierge technical reference
 
-Start with the [installation and first-use guide](../README.md). This reference
+For everyday use, see the [user guide](usage.md); for setup, see the
+[installation guide](runtime.md). This developer and advanced-agent reference
 contains provider behavior, advanced configuration, data contracts and recovery
 details. Run shell examples from the repository root.
 
@@ -14,7 +15,7 @@ details. Run shell examples from the repository root.
 - [Delivery prices and selection](#delivery-prices-and-selection)
 - [Manual cart goods during a weekly menu](#manual-cart-goods-during-a-weekly-menu)
 - [Provider login and startup](#provider-login-and-startup)
-- [Personal recipe-library connections](#personal-recipe-library-connections)
+- [Recipe import sources and retained legacy connections](#recipe-import-sources-and-retained-legacy-connections)
 - [Private recipe bank](#private-recipe-bank)
 - [Deterministic weekly-menu planning](#deterministic-weekly-menu-planning)
 - [Natural-language workflow](#natural-language-workflow)
@@ -63,14 +64,18 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 
 | Capability | Oda | Mathem | MENY |
 |---|---|---|---|
-| Product and recipe search | MCP | MCP | Logged-in browser |
-| Read, change and active-menu sync cart | MCP | MCP | Logged-in browser |
+| Product and recipe search | Store connection | Store connection | Logged-in browser |
+| Read, change and active-menu sync cart | Store connection | Store connection | Logged-in browser |
 | Product favorites, recurring items and menus | Local | Local | Local |
-| Delivery selection / read and track orders | Yes | MCP | Yes |
-| Add, reduce or cancel goods / move an existing order | Yes | Yes, when Mathem exposes the corresponding control for the current order | Yes |
-| Protected checkout | Fresh or standing authorization, reconcile | Guarded saved card with dedicated browser; otherwise manual | Fresh or standing authorization, payment approval through Vipps (a Norwegian mobile payment service), reconcile |
+| Delivery selection / read and track orders | Yes | Yes | Yes |
+| Add, reduce or cancel goods / move an existing order | When the current order permits it | When the current order permits it | When the current order permits it |
+| Protected checkout | Dedicated browser; saved card or Vipps | Dedicated browser; saved card, or manual website checkout without the browser | Dedicated browser; Vipps |
 
-Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
+All three stores use the configured fresh or standing authorization policy and
+reconcile uncertain outcomes before another attempt.
+
+Oda and Mathem share their retail connection and checkout implementation, with
+separate accounts, currencies and store-specific payment controls. Mathem uses `provider="mathem"`, `https://www.mathem.se/mcp` and the separate
 provider OAuth registration `mathem-weekly`. The `retail_mcp.RetailMcpClient`
 transport supports Oda and Mathem; endpoint, OAuth token/client/metadata files,
 operation lock, product identities, recipe sources and delivery references remain bound to the selected provider.

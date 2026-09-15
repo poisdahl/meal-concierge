@@ -79,3 +79,21 @@ contributions must be brought back into that mirror before the next publication.
 Publish from current public `main`, retain contributor attribution and history,
 and apply only intended changes. Preserve public-only files and contribution
 guidance; never replace the public tree with an older snapshot.
+
+## Technical documentation
+
+The [README](README.md) and [user guide](docs/usage.md) cover installation and
+everyday use. Maintainer and advanced integration details live separately:
+
+- [Runtime, ownership and recovery](docs/runtime-reference.md)
+- [Recipe import formats and extraction](docs/recipe-import-reference.md)
+- [Delivery and sender integration](docs/recipe-delivery-reference.md)
+- [Service and workflow contracts](docs/reference.md)
+- [Installation test history](docs/installation-evidence.md)
+- [Provider acceptance](docs/acceptance.md), [Oda/Mathem evidence](docs/oda-mathem-parity.md)
+  and [platform acceptance](docs/platform-acceptance.md)
+
+Dated acceptance records describe the versions and scenarios actually tested.
+They are not installation instructions or a claim that every current client
+has passed every workflow. In particular, older installations automatically
+imported a recipe pack; current installation and code updates do not.

@@ -41,6 +41,23 @@ class OpenClawConfigurationTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn("synthetic-test-value", result.stderr)
 
+    def test_explicit_email_connection_path_is_preserved(self):
+        attachment = self.attachment()
+        attachment["env"]["MEAL_CONCIERGE_EMAIL_CONFIG"] = "/private/My household/email-sender.json"
+        result = self.run_adapter(attachment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        server = json.loads(result.stdout)["mcp"]["servers"]["meal-concierge"]
+        self.assertEqual(server["env"], attachment["env"])
+
+    def test_invalid_email_connection_paths_fail_without_output(self):
+        for path in ("relative.json", "", None, 123):
+            with self.subTest(path=path):
+                attachment = self.attachment()
+                attachment["env"]["MEAL_CONCIERGE_EMAIL_CONFIG"] = path
+                result = self.run_adapter(attachment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+
     def test_relative_socket_and_nonobject_input_fail(self):
         attachment = self.attachment()
         attachment["env"]["MEAL_CONCIERGE_SOCKET"] = "relative.sock"
