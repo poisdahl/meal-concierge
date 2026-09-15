@@ -471,8 +471,12 @@ recipes usable as text; never fetch a source URL to repair them implicitly.
 Builtin entries report `entry_origin=user|bundled|unknown`, independent of
 favorites and archive state. Use that filter only with `library_id=builtin`.
 Preserve returned pack provenance and `locally_modified`; ordinary recipe
-content cannot assign them. Pack reimport conflicts require inspection and
-cannot authorize overwriting local edits, favorites or archive state.
+content cannot assign them. Pack reimport conflicts for recipes still present
+require inspection and cannot authorize overwriting local edits, favorites or
+archive state. A verified installer refresh of an authoritative collection
+permanently deletes bundled identities absent from its complete new snapshot,
+including local edits, archive state and the favorite on that exact removed
+entry. It never deletes user recipes, other packs or their favorites.
 
 Use `meal_concierge_recipes` for libraries/search/get, and
 `meal_concierge_recipe_discovery` for discover/resolve. Search the target week.

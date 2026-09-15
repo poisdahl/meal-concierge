@@ -367,6 +367,8 @@ class BuildRoundtripTests(unittest.TestCase):
             self.assertEqual(original, (root / 'resume' / first['archive']).read_bytes())
             with open_archive(path) as archive:
                 self.assertEqual(archive.verify()['records_count'], 2)
+                self.assertEqual(archive.manifest['display_name'], 'Optional Recipe Collection')
+                self.assertEqual(archive.manifest['membership_mode'], 'authoritative')
                 self.assertEqual(first['expanded_bytes'], sum(info.file_size for info in archive.entries.values()))
                 records = list(archive.records())
                 self.assertEqual([r['recipe_id'] for r in records], ['wikibooks:123', 'wikibooks:124'])

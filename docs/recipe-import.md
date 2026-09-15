@@ -43,11 +43,12 @@ should tell you what was included and what could not be imported.
 
 ## Add or update the recipe collection
 
-The optional collection adds recipes to the local bank for use without fetching
-their source pages. To **install it or update an existing copy**, send:
+The **Optional Recipe Collection** adds recipes to the local bank for use without
+fetching their source pages. To **install it or update an existing copy**, send:
 
-> Import the latest optional recipe collection into my existing Meal Concierge
-> installation. Preserve my own recipes, favorites and local edits. Report the
+> Synchronize the latest Optional Recipe Collection into my existing Meal
+> Concierge installation. Permanently remove collection recipes that are no
+> longer included. Preserve every other local recipe and favorite. Report the
 > imported version and any conflicts or incomplete results.
 
 The agent uses `import-recipes` to select the newest published stable collection
@@ -60,9 +61,14 @@ installation, update the program first and then request the collection separatel
 This includes installations with the old `2026-09-06.5` collection.
 
 Repeated imports do not create another copy of unchanged collection entries.
-Unmodified recipes can receive the newer publisher version; your local edits,
-favorites and archived status are preserved. Conflicts need your review. Entries
-absent from a newer collection are not automatically deleted.
+Recipes that remain can receive the newer publisher version; their local edits,
+favorites and archived status are preserved when conflicts require your review.
+After the complete new collection has been read, entries withdrawn by the
+publisher are permanently deleted. This includes local changes and the favorite
+on that exact withdrawn entry. Your own recipes, entries from other collections
+and all of their favorites remain untouched. An invalid or interrupted import
+does not delete entries merely because they have not yet been seen; absent-entry
+cleanup starts only after the complete record pass.
 
 For the exact command and recovery steps, see
 [manual collection import](runtime.md#versioned-recipe-package-integration).

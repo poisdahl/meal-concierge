@@ -27,6 +27,8 @@ from recipes import MAX_IMPORT_RECORDS, MAX_RECIPE_BYTES, RecipeError
 
 FORMAT = "meal-concierge-recipes"
 FORMAT_VERSION = 1
+DEFAULT_COLLECTION_DISPLAY_NAME = "Optional Recipe Collection"
+AUTHORITATIVE_MEMBERSHIP = "authoritative"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * MAX_ARCHIVE_BYTES
 MAX_RECORDS_BYTES = 512 * 1024 * 1024
@@ -96,6 +98,16 @@ def _manifest(value: Any) -> dict:
         _text(value.get(field), field)
         if field != "normalizer_version" and len(value[field]) > 128:
             raise RecipeError(f"portable {field} exceeds the bank metadata limit")
+    if value.get("display_name") is not None:
+        display_name = _text(value["display_name"], "display_name")
+        if unicodedata.normalize("NFC", display_name).strip() != display_name:
+            raise RecipeError("portable display_name must use canonical text")
+    membership_mode = value.get("membership_mode")
+    if membership_mode is not None and (
+        not isinstance(membership_mode, str)
+        or membership_mode not in {"merge", AUTHORITATIVE_MEMBERSHIP}
+    ):
+        raise RecipeError("portable membership_mode is invalid")
     if type(value.get("recipe_schema_version")) is not int or value["recipe_schema_version"] not in {1, 2}:
         raise RecipeError("unsupported portable recipe schema")
     count = value.get("records_count")
@@ -844,6 +856,8 @@ def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
     with _verified_archive(path, expected_descriptor) as archive:
         return {**_preflight(archive), "archive_sha256": expected_descriptor["sha256"],
                 "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
+                "membership_mode": archive.manifest.get("membership_mode", "merge"),
                 "recipe_schema_version": archive.manifest["recipe_schema_version"]}
 
 
@@ -940,7 +954,8 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
 
     The installer owns the service/state lifetime locks throughout this call.
     This internal API is not an ordinary upload tool. It never restores state
-    or operation journals. Favorites, archives and locally edited recipes are preserved.
+    or operation journals. An authoritative pack snapshot permanently removes
+    its own absent bundled identities after every incoming record has been read.
     """
     from recipe_assets import RecipeAssetError, RecipeAssets
     from recipes import RecipeStore
@@ -958,15 +973,21 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
             assets = RecipeAssets(state / "recipe-assets")
             report = {"status": "in_progress", "archive_sha256": expected_descriptor["sha256"],
                       "pack_id": archive.manifest["pack_id"], "pack_version": archive.manifest["pack_version"],
+                      "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
+                      "membership_mode": archive.manifest.get("membership_mode", "merge"),
                       "total": checked["records_count"], "processed": 0, "created": 0,
-                      "updated": 0, "unchanged": 0, "conflicts": 0, "failed": 0,
+                      "updated": 0, "unchanged": 0, "deleted": 0,
+                      "deleted_favorites": 0, "deleted_locally_modified": 0,
+                      "conflicts": 0, "failed": 0,
                       "report_directory": relative}
             results = []
             _report_bytes(directory, "status.json", canonical_bytes(report))
             current = None
+            present_recipe_ids = set()
             try:
                 for record in archive.records():
                     current = record["recipe_id"]
+                    present_recipe_ids.add(current)
                     image = record["recipe"].get("image")
                     if image:
                         assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
@@ -981,6 +1002,20 @@ def apply_archive(path: Path | str, state_directory: Path | str, household: str,
                         result["reason"] = outcome["reason"]
                     results.append(result)
                     current = None
+                    _report_bytes(directory, "status.json", canonical_bytes(report))
+                if report["membership_mode"] == AUTHORITATIVE_MEMBERSHIP:
+                    deleted = store.delete_absent_pack_records(
+                        pack_id=archive.manifest["pack_id"],
+                        present_recipe_ids=present_recipe_ids,
+                    )
+                    report["deleted"] = len(deleted)
+                    report["deleted_favorites"] = sum(item["was_favorite"] for item in deleted)
+                    report["deleted_locally_modified"] = sum(item["locally_modified"] for item in deleted)
+                    results.extend({"recipe_id": item["recipe_id"], "outcome": "deleted",
+                                    "bank_recipe_id": item["bank_recipe_id"],
+                                    "was_favorite": item["was_favorite"],
+                                    "locally_modified": item["locally_modified"]}
+                                   for item in deleted)
                     _report_bytes(directory, "status.json", canonical_bytes(report))
             except (RecipeError, RecipeAssetError) as exc:
                 report["failed"] += 1

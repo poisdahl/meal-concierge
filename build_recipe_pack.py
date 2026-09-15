@@ -459,7 +459,7 @@ class Covers:
 
 def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None):
     from recipe_assets import RecipeAssetError
-    from recipe_portable import canonical_bytes, write_archive
+    from recipe_portable import AUTHORITATIVE_MEMBERSHIP, DEFAULT_COLLECTION_DISPLAY_NAME, canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe, categories_from_tags
     started = time.monotonic()
     # Resolve only after rejecting symlinks in every root component.
@@ -698,6 +698,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         put('assets/' + asset_id.removeprefix('sha256:') + '.jpg', data)
     manifest = {'format': FORMAT, 'format_version': 1, 'kind': 'bundled',
                 'pack_id': 'wikibooks-themealdb-en', 'pack_version': pack_version,
+                'display_name': DEFAULT_COLLECTION_DISPLAY_NAME,
+                'membership_mode': AUTHORITATIVE_MEMBERSHIP,
                 'recipe_schema_version': 2, 'normalizer_version': NORMALIZER_VERSION,
                 'source_snapshot': {'id': source['snapshot_id'], 'sha256': snapshot_sha256},
                 'scope': source['scope'],

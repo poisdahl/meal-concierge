@@ -22,8 +22,8 @@
 Ask for a weekly menu, adjust portions and preferences, and turn ingredients
 into a shopping cart. Meal Concierge can find and use online recipes from
 your selected, connected store: Oda, Mathem or MENY.
-You can also save your own recipes and add an optional offline collection.
-No recipe pack is needed to get started.
+You can also save your own recipes and add the **Optional Recipe Collection**.
+The collection is not needed to get started.
 
 [Install](#installation) · [Update Meal Concierge](#update-meal-concierge) ·
 [Add or update recipes](#add-or-update-the-recipe-collection) · [User guide](docs/usage.md)
@@ -135,15 +135,21 @@ recurring plans, order changes and dietary preferences.
 
 ### Add or update the recipe collection
 
-The offline collection is optional. Installation and code updates do not
-download or import it. To add or refresh it, ask:
+The **Optional Recipe Collection** is not required. Installation and code
+updates do not download or import it. To add or refresh it, ask:
 
-> Import the latest optional recipe collection into my existing Meal Concierge
-> installation. Preserve my recipes and local edits.
+> Synchronize the latest Optional Recipe Collection into my existing Meal
+> Concierge installation. Permanently remove collection recipes that are no
+> longer included. Preserve every other local recipe and favorite.
 
 The agent uses `import-recipes`, which selects the newest published stable
 recipe pack and verifies its checksum and size. It briefly stops the service
 when no active work will be interrupted, then starts it again.
+An authoritative collection update permanently deletes entries removed by the
+publisher, including the local revisions and favorite attached to that exact
+entry. Recipes and favorites outside this collection are never part of that
+cleanup. An invalid pack or an interruption before the complete record pass
+does not delete absent entries.
 See [recipe import](docs/recipe-import.md) for this and other ways to add recipes.
 
 ## Help and privacy

@@ -523,11 +523,22 @@ The consumer repeats full preflight before making any bank or asset changes.
 
 Each record uses `RecipeStore.import_pack_record` in its own transaction. Stable
 pack/record identity makes reruns idempotent. Existing favorites, archive state,
-local edits and source identities remain intact; differing records produce
-explicit conflicts. Assets are installed before their referencing record.
-Committed records remain available after interruption, and rerunning the same
-verified collection continues without creating duplicates. Conflicts require
-review and are not silently resolved by repeated application.
+local edits and source identities remain intact for records present in the new
+collection; differing records produce explicit conflicts. Assets are installed
+before their referencing record. After the complete record stream of a manifest
+with `membership_mode: authoritative` has been read, one bank transaction deletes
+all bundled entries with that exact `pack_id` whose pack recipe identity is
+absent. Their revisions, bindings, metadata and exact favorite are removed;
+entries and favorites belonging to users or other packs cannot match the delete.
+Managed assets remain content-addressed because frozen menus or deliveries may
+still reference them.
+
+The absent-entry transaction is not attempted after a record failure or
+interruption. Committed records remain available after interruption, and
+rerunning the same verified collection continues without creating duplicates.
+Conflicts for records still present require review and are not silently resolved
+by repeated application. A missing `membership_mode` retains the earlier merge
+behavior for already published compatible packs.
 
 Exact manifest, attribution and coverage bytes are retained before bank writes
 under `pack-metadata/<hash-of-pack-id-and-version>/` within the installation state.

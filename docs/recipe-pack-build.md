@@ -1,6 +1,7 @@
-# Offline source pack build
+# Optional Recipe Collection build
 
-The builder reads a sealed source snapshot and writes a separate derived pack.
+The builder reads a sealed source snapshot and writes a separate derived pack
+whose display name is **Optional Recipe Collection**.
 It does not fetch source APIs, read household data, call an LLM, or modify its
 inputs. Acquisition completeness, successful parsing, shopping readiness and
 redistribution eligibility are separate counts.
@@ -21,6 +22,10 @@ python build_recipe_pack.py \
   --covers-root /absolute/path/to/reviewed-cover-derivatives \
   --covers-manifest-sha256 EXPECTED_COVERS_MANIFEST_JSON_SHA256
 ```
+
+Use a date-based release version such as `2026-09-15.1`; increment the suffix
+when publishing more than one collection on the same date. The display name does
+not change between versions.
 
 The expected digest must come from the reviewed snapshot handoff. The builder
 checks the seal, manifest checksums and every source body it consumes. Input and
@@ -116,9 +121,12 @@ cover counts; it includes no managed images.
 The ZIP contains only the explicit inventory: `manifest.json`, `records.jsonl`,
 `attribution.json`, `coverage.json`, and referenced managed assets. Records use
 the shared envelope `{recipe_id, status, recipe}`. The manifest includes format,
-pack/schema/normalizer versions, source snapshot identity, measured counts,
-build fingerprints and per-file byte counts/checksums. Source responses, logs,
-absolute paths, caches and private inputs are not archive members.
+pack/schema/normalizer versions, `display_name: "Optional Recipe Collection"`,
+`membership_mode: "authoritative"`, source snapshot identity, measured counts,
+build fingerprints and per-file byte counts/checksums. Authoritative membership
+means an installer may permanently delete same-pack recipe identities absent
+from a later complete record stream. Source responses, logs, absolute paths,
+caches and private inputs are not archive members.
 
 Records are staged individually and streamed into JSONL. The shared codec bounds
 each normalized document to 256 KiB, its envelope to 512 KiB, records to 512 MiB,

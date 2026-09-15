@@ -4339,7 +4339,7 @@ class RecipeStore:
 
         The caller establishes archive provenance and installs exact managed
         assets. Each record commits independently so interrupted packs resume.
-        Existing entries, their history, favorites and archive state stay intact.
+        An existing matching entry keeps its history, favorite and archive state.
         """
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
         pack_recipe_id = _bounded_text(recipe_id, "pack recipe_id", required=True, maximum=256)
@@ -4595,6 +4595,73 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
+    @staticmethod
+    def _delete_recipe_rows(connection: sqlite3.Connection, recipe_id: str) -> None:
+        """Remove one built-in identity and its exact local bindings in a caller transaction."""
+        connection.execute(
+            "DELETE FROM discovery_bindings WHERE destination='builtin' AND recipe_id=?",
+            (recipe_id,),
+        )
+        connection.execute(
+            "DELETE FROM library_mappings WHERE library_id='builtin' AND recipe_id=?",
+            (recipe_id,),
+        )
+        connection.execute(
+            "UPDATE library_operations SET discovery_ref=NULL, status='failed', "
+            "result_metadata=NULL, provider_recipe_id=NULL, provider_version=NULL, "
+            "error_code='recipe_deleted', "
+            "error_text='built-in recipe was permanently deleted', updated_at=? "
+            "WHERE library_id='builtin' AND provider_recipe_id=?",
+            (_now(), recipe_id),
+        )
+        connection.execute("DELETE FROM revisions WHERE recipe_id=?", (recipe_id,))
+        # recipe_favorites and recipe_entry_metadata cascade only for this exact id.
+        connection.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
+
+    def delete_absent_pack_records(self, *, pack_id: Any, present_recipe_ids: Iterable[Any]) -> list[dict[str, Any]]:
+        """Delete bundled identities absent from a verified authoritative pack snapshot."""
+        pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
+        if isinstance(present_recipe_ids, (str, bytes, Mapping)):
+            raise RecipeError("present pack recipe ids must be an iterable of identities")
+        present = set()
+        try:
+            for value in present_recipe_ids:
+                present.add(_bounded_text(value, "pack recipe_id", required=True, maximum=256))
+                if len(present) > MAX_IMPORT_RECORDS:
+                    raise RecipeError(f"pack reconciliation exceeds {MAX_IMPORT_RECORDS} recipes")
+        except TypeError as exc:
+            raise RecipeError("present pack recipe ids must be an iterable of identities") from exc
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                rows = connection.execute("""
+                    SELECT r.id, r.revision, r.status, r.content_hash,
+                           m.pack_recipe_id, m.baseline_hash,
+                           coalesce(f.is_favorite, 0) AS is_favorite
+                    FROM recipe_entry_metadata m
+                    JOIN recipes r ON r.id=m.recipe_id
+                    LEFT JOIN recipe_favorites f
+                      ON f.library_id='builtin' AND f.recipe_id=r.id
+                    WHERE m.entry_origin='bundled' AND m.pack_id=?
+                    ORDER BY m.pack_recipe_id
+                """, (pack_id,)).fetchall()
+                deleted = []
+                for row in rows:
+                    if row["pack_recipe_id"] in present:
+                        continue
+                    deleted.append({
+                        "recipe_id": row["pack_recipe_id"],
+                        "bank_recipe_id": row["id"],
+                        "bank_revision": row["revision"],
+                        "status": row["status"],
+                        "was_favorite": bool(row["is_favorite"]),
+                        "locally_modified": row["content_hash"] != row["baseline_hash"],
+                    })
+                    self._delete_recipe_rows(connection, row["id"])
+                return deleted
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank is unavailable") from exc
+
     def delete(self, recipe_id: Any, expected_revision: Any) -> dict[str, Any]:
         """Permanently remove one exact built-in recipe and its local identity metadata."""
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
@@ -4610,24 +4677,7 @@ class RecipeStore:
                     raise RecipeError("recipe was not found")
                 if current["revision"] != expected_revision:
                     raise RecipeError(f"recipe revision conflict; current revision is {current['revision']}")
-                connection.execute(
-                    "DELETE FROM discovery_bindings WHERE destination='builtin' AND recipe_id=?",
-                    (recipe_id,),
-                )
-                connection.execute(
-                    "DELETE FROM library_mappings WHERE library_id='builtin' AND recipe_id=?",
-                    (recipe_id,),
-                )
-                connection.execute(
-                    "UPDATE library_operations SET discovery_ref=NULL, status='failed', "
-                    "result_metadata=NULL, provider_recipe_id=NULL, provider_version=NULL, "
-                    "error_code='recipe_deleted', "
-                    "error_text='built-in recipe was permanently deleted', updated_at=? "
-                    "WHERE library_id='builtin' AND provider_recipe_id=?",
-                    (_now(), recipe_id),
-                )
-                connection.execute("DELETE FROM revisions WHERE recipe_id=?", (recipe_id,))
-                connection.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
+                self._delete_recipe_rows(connection, recipe_id)
                 return {"library_id": "builtin", "recipe_id": recipe_id, "deleted": True}
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
