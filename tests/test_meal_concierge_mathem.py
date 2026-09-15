@@ -1448,11 +1448,9 @@ class MathemTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(HouseholdError, 'Mathem login is required'):
                     client.probe()
 
-    def test_runtime_launcher_does_not_require_browser_for_mathem(self):
+    def test_runtime_launcher_requires_shared_valid_browser_for_oda_and_mathem(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            settings = root / 'config.json'
-            settings.write_text(json.dumps({**existing.CONFIG, 'provider': 'mathem'}))
             wrapper = root / 'python'
             wrapper.write_text(f"""#!{sys.executable}
 import json, os, sys
@@ -1462,43 +1460,102 @@ else:
     os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
 """)
             wrapper.chmod(0o755)
-            result = subprocess.run(['/bin/bash', str(existing.CORE / 'run-service.sh')],
-                env={**os.environ, 'HERMES_PYTHON': str(wrapper), 'HERMES_HOME': str(root),
-                     'MEAL_CONCIERGE_HOME': str(root / 'private'), 'MEAL_CONCIERGE_CONFIG': str(settings),
-                     'MEAL_CONCIERGE_BROWSER_SOCKET_DIR': str(root / 'browser-socket'),
-                     'PATH': '/usr/bin:/bin'}, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            arguments = json.loads(result.stdout)
-            self.assertEqual(arguments[arguments.index('--tokens') + 1], str(root / 'mcp-tokens'))
-            self.assertNotIn('--browser-binary', arguments)
-            self.assertNotIn('--browser-executable', arguments)
-            import service
-            with mock.patch.object(sys, 'argv', ['service.py', *arguments[1:]]), mock.patch.object(service.RetailMcpClient, 'probe', return_value={}), mock.patch.object(service, 'OdaBrowser') as browser, mock.patch.object(service.Server, 'run') as run:
-                service.main()
-            browser.assert_not_called()
-            run.assert_called_once()
             adapter = root / 'agent-browser'
-            adapter.write_text('#!/bin/sh\nexit 0\n'); adapter.chmod(0o700)
+            adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1\\n"\n'); adapter.chmod(0o700)
             chrome = root / 'chromium'
-            chrome.write_text('#!/bin/sh\nexit 0\n'); chrome.chmod(0o700)
-            configured = subprocess.run(['/bin/bash', str(existing.CORE / 'run-service.sh')],
-                env={**os.environ, 'HERMES_PYTHON': str(wrapper), 'HERMES_HOME': str(root),
-                     'MEAL_CONCIERGE_HOME': str(root / 'private'), 'MEAL_CONCIERGE_CONFIG': str(settings),
-                     'MEAL_CONCIERGE_BROWSER_SOCKET_DIR': str(root / 'browser-socket'),
-                     'MEAL_CONCIERGE_AGENT_BROWSER': str(adapter), 'MEAL_CONCIERGE_BROWSER_EXECUTABLE': str(chrome),
-                     'PATH': '/usr/bin:/bin'}, capture_output=True, text=True)
-            self.assertEqual(configured.returncode, 0, configured.stderr)
-            arguments = json.loads(configured.stdout)
-            # Capture the actual Application constructed by the launcher, with
-            # real provider/browser instances but no retailer or listener call.
-            with mock.patch.object(sys, 'argv', ['service.py', *arguments[1:]]), \
-                 mock.patch.object(service.RetailMcpClient, 'probe', return_value={}), \
-                 mock.patch.object(service, 'Server') as server:
-                service.main()
-            app = server.call_args.args[3]
-            self.assertIsInstance(app.browser, MathemBrowser)
-            self.assertIs(app.browser.provider_client, app.provider_client)
-            self.assertEqual(app.browser.profile, root / 'private/browser/profile')
+            chrome.write_text('#!/bin/sh\nprintf "Chromium 140.0\\n"\n'); chrome.chmod(0o700)
+            import service
+            for provider in ('oda', 'mathem'):
+                with self.subTest(provider=provider):
+                    provider_root = root / provider; provider_root.mkdir()
+                    settings = provider_root / 'config.json'
+                    settings.write_text(json.dumps({**existing.CONFIG, 'provider': provider}))
+                    private = provider_root / 'private'
+                    environment = {
+                        **os.environ, 'HERMES_PYTHON': str(wrapper), 'HERMES_HOME': str(provider_root),
+                        'MEAL_CONCIERGE_HOME': str(private), 'MEAL_CONCIERGE_CONFIG': str(settings),
+                        'MEAL_CONCIERGE_BROWSER_SOCKET_DIR': str(provider_root / 'browser-socket'),
+                        'MEAL_CONCIERGE_AGENT_BROWSER': str(provider_root / 'missing-agent-browser'),
+                        'MEAL_CONCIERGE_BROWSER_EXECUTABLE': str(chrome), 'PATH': '/usr/bin:/bin',
+                    }
+                    missing = subprocess.run(
+                        ['/bin/bash', str(existing.CORE / 'run-service.sh')], env=environment,
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(missing.returncode, 0)
+                    self.assertIn('agent-browser is missing', missing.stderr)
+                    self.assertFalse(private.exists())
+
+                    environment['MEAL_CONCIERGE_AGENT_BROWSER'] = str(adapter)
+                    configured = subprocess.run(
+                        ['/bin/bash', str(existing.CORE / 'run-service.sh')], env=environment,
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(configured.returncode, 0, configured.stderr)
+                    arguments = json.loads(configured.stdout)
+                    self.assertEqual(arguments[arguments.index('--tokens') + 1], str(provider_root / 'mcp-tokens'))
+                    self.assertEqual(arguments[arguments.index('--browser-binary') + 1], str(adapter))
+                    self.assertEqual(arguments[arguments.index('--browser-executable') + 1], str(chrome))
+                    with mock.patch.object(sys, 'argv', ['service.py', *arguments[1:]]), \
+                         mock.patch.object(service.RetailMcpClient, 'probe', return_value={}), \
+                         mock.patch.object(service, 'Server') as server:
+                        service.main()
+                    app = server.call_args.args[3]
+                    expected = existing.OdaBrowser if provider == 'oda' else MathemBrowser
+                    self.assertIsInstance(app.browser, expected)
+                    self.assertIs(app.browser.provider_client, app.provider_client)
+                    self.assertEqual(app.browser.profile, private / 'browser/profile')
+
+                    environment.update({
+                        'MEAL_CONCIERGE_AGENT_BROWSER': '',
+                        'MEAL_CONCIERGE_BROWSER_EXECUTABLE': '',
+                        'PATH': str(root) + os.pathsep + '/usr/bin:/bin',
+                    })
+                    discovered = subprocess.run(
+                        ['/bin/bash', str(existing.CORE / 'run-service.sh')], env=environment,
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(discovered.returncode, 0, discovered.stderr)
+                    discovered_arguments = json.loads(discovered.stdout)
+                    self.assertEqual(discovered_arguments[discovered_arguments.index('--browser-binary') + 1], str(adapter))
+                    self.assertEqual(discovered_arguments[discovered_arguments.index('--browser-executable') + 1], str(chrome))
+
+                    bad_arguments = list(arguments)
+                    bad_arguments[bad_arguments.index('--browser-binary') + 1] = str(provider_root / 'missing')
+                    with mock.patch.object(sys, 'argv', ['service.py', *bad_arguments[1:]]), \
+                         mock.patch.object(service, 'ownership', side_effect=AssertionError('must validate before ownership')):
+                        with self.assertRaisesRegex(SystemExit, 'browser prerequisites.*agent-browser is missing'):
+                            service.main()
+
+            bad_adapter = root / 'bad-agent-browser'
+            bad_adapter.write_text('#!/bin/sh\nprintf "agent-browser 0.33.1-beta\\n"\n'); bad_adapter.chmod(0o700)
+            snap = root / 'snap-chromium'
+            snap.write_text('#!/bin/sh\n# snap run chromium\nprintf "Chromium 140.0\\n"\n'); snap.chmod(0o700)
+            long_snap = root / 'long-snap-chromium'
+            long_snap.write_text('#!/bin/sh\n#' + ('x' * 5000) + '\nexec /usr/bin/snap run chromium\n')
+            long_snap.chmod(0o700)
+            wrong_browser = root / 'not-chromium'
+            wrong_browser.write_text('#!/bin/sh\nprintf "Safari 20.0\\n"\n'); wrong_browser.chmod(0o700)
+            settings = root / 'invalid-config.json'
+            settings.write_text(json.dumps({**existing.CONFIG, 'provider': 'mathem'}))
+            for bad_binary, bad_chrome, message in (
+                (bad_adapter, chrome, 'tested agent-browser'),
+                (adapter, snap, 'Snap Chromium'),
+                (adapter, long_snap, 'Snap Chromium'),
+                (adapter, wrong_browser, 'not Chromium or Google Chrome'),
+            ):
+                with self.subTest(message=message):
+                    private = root / ('invalid-' + message.split()[0].lower())
+                    result = subprocess.run(['/bin/bash', str(existing.CORE / 'run-service.sh')], env={
+                        **os.environ, 'HERMES_PYTHON': str(wrapper), 'HERMES_HOME': str(root),
+                        'MEAL_CONCIERGE_HOME': str(private), 'MEAL_CONCIERGE_CONFIG': str(settings),
+                        'MEAL_CONCIERGE_BROWSER_SOCKET_DIR': str(root / 'invalid-browser-socket'),
+                        'MEAL_CONCIERGE_AGENT_BROWSER': str(bad_binary),
+                        'MEAL_CONCIERGE_BROWSER_EXECUTABLE': str(bad_chrome), 'PATH': '/usr/bin:/bin',
+                    }, capture_output=True, text=True)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertFalse(private.exists())
 
 
 class CompactProductApplyTests(unittest.TestCase):

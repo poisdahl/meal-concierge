@@ -43,7 +43,8 @@ directory. Keep source separate from household data.
 
 Follow [external service setup](runtime-reference.md#externally-managed-hosts). Use
 `./install.sh install --manager external` with the chosen store, household and
-explicit paths. Keep data, OAuth tokens and browser profiles in a dedicated
+explicit paths, including the validated browser adapter and Chrome/Chromium.
+Keep data, OAuth tokens and browser profiles in a dedicated
 `/workspace` directory; separate replaceable code and short sockets can use
 `/tmp`. Installation leaves the service stopped and imports no collection.
 
@@ -110,9 +111,12 @@ status and authenticated cart access before calling setup complete.
 
 Use the [runtime update procedure](runtime.md#updates-failures-and-recovery) and
 [external service ownership instructions](runtime-reference.md#externally-managed-hosts).
-Stop only the exact installation when idle, and confirm its service child also
-exited. Never use global `RestartMcpServers` to repair one installation. After an
-update, reconnect its MCP registration and reload the pointer skill.
+From the new source, run `check-browser` against the existing home before stopping
+the healthy execution; repeat any explicit browser paths on `update`. This check
+does not open the browser or require store login. Stop only the exact installation
+when idle, and confirm its service child also exited. Never use global
+`RestartMcpServers` to repair one installation. After an update, reconnect its MCP
+registration and reload the pointer skill.
 
 Code updates preserve recipes, including collections imported by older
 versions. Update the

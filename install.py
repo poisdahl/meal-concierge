@@ -21,6 +21,7 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime_ownership import file_lock, ownership, listener_ownership
+from browser_prerequisites import discover_browser_paths, executable
 
 SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
@@ -147,25 +148,40 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
-def executable(value, candidates, label):
-    for name in ([value] if value else candidates):
-        path = Path(name).expanduser() if '/' in str(name) else Path(shutil.which(name) or '/nonexistent')
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path.absolute())
-    raise RuntimeError(f'{label} is missing; supply its explicit executable path')
+def browser_paths(args, provider, existing=None, *, runtime_path=None):
+    """Discover and validate the same browser prerequisites for every store."""
+    try:
+        return discover_browser_paths(
+            args.agent_browser, args.browser_executable, existing,
+            runtime_path=runtime_path,
+        )
+    except (RuntimeError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
+        label = {'oda': 'Oda', 'mathem': 'Mathem', 'meny': 'MENY'}.get(provider, provider)
+        raise RuntimeError(
+            f'{label} browser prerequisites are not ready: {exc}. '
+            'Install agent-browser@0.33.1 and non-snap Chrome/Chromium, then retry '
+            'with --agent-browser and --browser-executable if discovery cannot find them. '
+            'This check does not require store login.'
+        ) from exc
 
 
-def browser_paths(args, provider):
-    if provider == 'mathem' and not (args.agent_browser or args.browser_executable):
-        return {}
-    adapter = executable(args.agent_browser, ['agent-browser', str(Path.home() / '.local/lib/meal-concierge/node_modules/.bin/agent-browser')], 'agent-browser')
-    version = run(adapter, '--version', capture_output=True, text=True).stdout.strip()
-    if not re.search(r'\b0\.33\.1\b', version):
-        raise RuntimeError('install the tested agent-browser@0.33.1')
-    chrome = executable(args.browser_executable, ['chromium', 'chromium-browser', 'google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', str(Path.home() / 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome')], 'non-snap Chrome/Chromium')
-    if str(Path(chrome).resolve()).startswith('/snap/') or b'/snap/bin/chromium' in Path(chrome).open('rb').read(4096):
-        raise RuntimeError('Snap Chromium cannot access the private browser profile')
-    return {'browser_binary': adapter, 'browser_executable': chrome}
+def merged_runtime_path(stored, current):
+    """Prefer validated update-host tools without dropping old service paths."""
+    stored = stored if stored is not None else os.defpath
+    entries = set(current.split(os.pathsep))
+    additions = []
+    for entry in stored.split(os.pathsep):
+        if entry not in entries:
+            entries.add(entry)
+            additions.append(entry)
+    return os.pathsep.join([current, *additions]) if additions else current
+
+
+def configured_provider(settings):
+    provider = str(settings.get('provider') or 'oda').casefold()
+    if provider not in {'oda', 'meny', 'mathem'}:
+        raise RuntimeError('provider must be oda, meny or mathem')
+    return provider
 
 
 def native_manager():
@@ -393,7 +409,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['import-recipes', 'install', 'update', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['import-recipes', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -414,6 +430,26 @@ def main():
         raise RuntimeError('--recipe-pack applies only to import-recipes')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
+    if args.action == 'check-browser':
+        manifest = home / 'runtime.json'
+        if not manifest.exists():
+            raise RuntimeError('no completed installation; use install with the intended provider and household')
+        meta = json.loads(manifest.read_text())
+        settings = json.loads(Path(meta['paths']['config']).read_text())
+        provider = configured_provider(settings)
+        changing_browser = (
+            not all(meta['paths'].get(key) for key in ('browser_binary', 'browser_executable'))
+            or args.agent_browser is not None or args.browser_executable is not None
+        )
+        stored_runtime_path = meta.get('runtime_path', os.defpath)
+        runtime_path = (
+            merged_runtime_path(stored_runtime_path, os.environ.get('PATH', os.defpath))
+            if changing_browser else stored_runtime_path
+        )
+        checked = browser_paths(args, provider, meta['paths'], runtime_path=runtime_path)
+        print(json.dumps({'provider': provider, **checked}, indent=2))
+        print('Browser prerequisites ready; no store login was performed.')
+        return
     if args.action == 'restore':
         if not args.backup:
             raise RuntimeError('--backup is required')
@@ -458,8 +494,8 @@ def main():
                 with offline(meta):
                     print(backup(meta, args.backup))
                 return
-            assert_stopped(meta)
             if args.action == 'import-recipes':
+                assert_stopped(meta)
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
                     raise RuntimeError('complete the stopped runtime update before importing recipes')
                 expected = latest_recipe_pack()
@@ -507,13 +543,14 @@ def main():
             config_path = Path(paths['config'])
             if config_path.exists():
                 settings = json.loads(config_path.read_text())
-                if args.provider and args.provider != settings.get('provider') or args.household and args.household != settings.get('household'):
+                provider = configured_provider(settings)
+                if args.provider and args.provider != provider or args.household and args.household != settings.get('household'):
                     raise RuntimeError('existing config household/provider differs; no implicit conversion')
             else:
                 if args.adopt or not args.provider or not args.household:
                     raise RuntimeError('new install requires --provider and --household; adoption requires an existing config')
                 settings = {'household': args.household, 'instance': 'household', 'provider': args.provider, 'confirmation_policy': 'fresh', 'primary_recipe_library_id': 'builtin', 'recipe_libraries': [{'library_id': 'builtin', 'provider': 'builtin', 'read_only': False}]}
-            paths.update(browser_paths(args, settings['provider']))
+            paths.update(browser_paths(args, configured_provider(settings)))
             code_root = (args.code_root or Path.home() / '.local/lib/meal-concierge' / args.name).expanduser().resolve()
             # No replaceable tree may contain any user data, or vice versa.
             for target in [home, *[Path(v) for k, v in paths.items() if k not in {'browser_binary', 'browser_executable'}]]:
@@ -522,9 +559,28 @@ def main():
             meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
-        actual_settings = settings or json.loads(Path(meta['paths']['config']).read_text())
-        if manifest.exists() and actual_settings.get('provider') == 'mathem' and (args.agent_browser or args.browser_executable):
-            meta['paths'].update(browser_paths(args, 'mathem'))
+        actual_settings = dict(settings or json.loads(Path(meta['paths']['config']).read_text()))
+        actual_settings['provider'] = configured_provider(actual_settings)
+        if manifest.exists():
+            # Validate prerequisites while a healthy owner may still be running.
+            # Only after this succeeds do we require the caller to stop it and
+            # publish the resolved paths as part of the normal atomic update.
+            changing_browser = (
+                not all(meta['paths'].get(key) for key in ('browser_binary', 'browser_executable'))
+                or args.agent_browser is not None or args.browser_executable is not None
+            )
+            stored_runtime_path = meta.get('runtime_path', os.defpath)
+            runtime_path = (
+                merged_runtime_path(stored_runtime_path, os.environ.get('PATH', os.defpath))
+                if changing_browser else stored_runtime_path
+            )
+            checked_browser_paths = browser_paths(
+                args, actual_settings['provider'], meta['paths'], runtime_path=runtime_path,
+            )
+            assert_stopped(meta)
+            meta['paths'].update(checked_browser_paths)
+            if changing_browser:
+                meta['runtime_path'] = runtime_path
         socket_limit = 103 if platform.system() == 'Darwin' else 107
         socket_paths = [meta['paths']['socket']]
         if actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary'):

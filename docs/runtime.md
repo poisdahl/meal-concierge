@@ -22,10 +22,10 @@ settings and store login belong to the service installation.
 - A separate data directory for each household/store. Additional trusted agents
   should connect to the same installation instead of making copies.
 
-Oda and MENY currently require browser dependencies during installation.
-Mathem permits installation without them for recipes, cart work and manual
-website checkout. To enable saved-card checkout, give Oda and Mathem the same
-browser setup and log into the selected store.
+Oda, Mathem and MENY require the same browser dependencies during installation.
+For Oda and Mathem, dependency validation is separate from both MCP authorization
+and dedicated-browser login; installation does not open a browser or require a
+store account session.
 
 ### 1. Find or create the installation
 
@@ -66,8 +66,9 @@ separate. If a socket path is too long, choose short durable paths with
 `--socket` and `--browser-socket-directory` before installing.
 
 `--uv /absolute/path/to/uv` overrides uv discovery. The installer checks the
-browser paths and version. Use the existing installation's paths when updating;
-never create a second service to repair the first. See
+adapter version and verifies that the other executable is Chrome or non-snap
+Chromium. Use the existing installation's paths when updating; never create a
+second service to repair the first. See
 [existing installation adoption](runtime-reference.md#existing-installations)
 for a deliberate move from a legacy supervisor or Compose layout.
 
@@ -111,9 +112,11 @@ explain `--no-browser` and forwarding the local callback port. Do not put
 passwords, tokens or callback URLs in chat, or copy cookies from another browser.
 Close the visible login browser before the supervised browser reuses its profile.
 
-To add Mathem's optional browser later, use an explicit stopped-service update
-with `--agent-browser` and `--browser-executable`, then log in. Preserve the
-existing home and profile. See [browser setup details](runtime-reference.md#provider-oauth).
+An older Mathem installation may not yet record browser executables. Before its
+next update, follow the preflight and update below; the update records the
+requirements without changing the household, OAuth tokens or existing private
+browser paths. Log in only after the program update. See
+[browser setup details](runtime-reference.md#provider-oauth).
 
 ## Updates, failures and recovery
 
@@ -123,13 +126,28 @@ existing home and profile. See [browser setup details](runtime-reference.md#prov
 > a specific commit. Preserve my data, login and recipes. Follow docs/runtime.md
 > and my agent's guide, refresh the agent connection if needed, and verify it.
 
-First check for active shopping, payment and delivery work. Wait for it to finish;
-resolve uncertain results before maintenance. For a native installation, retain
-the existing home and run:
+Obtain the chosen new source commit first. While the existing service is still
+running, validate the dependencies from that checkout:
+
+```sh
+./install.sh check-browser --home /absolute/data-home
+```
+
+If discovery fails, install the named requirements and retry with
+`--agent-browser /absolute/path` and `--browser-executable /absolute/path`.
+Repeat those explicit arguments on `update`; `check-browser` is read-only and does
+not save them, open a browser or require store login. For a legacy Mathem browser
+upgrade or an explicit browser replacement, run the check and update in the same
+host environment. The validated update environment takes precedence and any
+missing entries from the existing service `PATH` are retained, so an npm adapter
+can keep finding Node without discarding previously available helper locations.
+
+After the check passes, inspect active shopping, payment, delivery and email work.
+Wait for it to finish and resolve uncertain results before maintenance. For a
+native installation, retain the same home and run:
 
 ```sh
 ./install.sh stop --home /absolute/data-home
-# Obtain the chosen new source commit, then run from that checkout:
 ./install.sh update --home /absolute/data-home
 ./install.sh start --home /absolute/data-home
 ./install.sh attach --home /absolute/data-home

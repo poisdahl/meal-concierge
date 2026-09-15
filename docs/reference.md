@@ -69,7 +69,7 @@ compatibility. Fall back to simple text when a richer feature is unverified.
 | Product favorites, recurring items and menus | Local | Local | Local |
 | Delivery selection / read and track orders | Yes | Yes | Yes |
 | Add, reduce or cancel goods / move an existing order | When the current order permits it | When the current order permits it | When the current order permits it |
-| Protected checkout | Dedicated browser; saved card or Vipps | Dedicated browser; saved card, or manual website checkout without the browser | Dedicated browser; Vipps |
+| Protected checkout | Dedicated browser; saved card or Vipps | Dedicated browser; saved card | Dedicated browser; Vipps |
 
 All three stores use the configured fresh or standing authorization policy and
 reconcile uncertain outcomes before another attempt.
@@ -105,13 +105,15 @@ its net price. Review preserves both in `discount_breakdown`; the final browser
 check binds their allocation as well as the aggregate discount and total.
 Other unverified discounts/deposits stop checkout.
 
-When no checkout browser is configured, `prepare` returns `manual_checkout_required`,
-the SEK cart summary and store URL, without creating a payment attempt. Recipe,
-cart and draft/cart_ready operations remain available. Enabling scheduled
-checkout requires its existing amount/delivery/confirmation/dietary gates plus
-the configured, authenticated browser; installation does not log it in.
-Missing login, account binding or a selected saved card in a configured browser
-stops checkout until those prerequisites are resolved.
+Supported Oda and Mathem installations always record the same locally validated
+browser executables. Missing or invalid executables stop service startup before
+it takes data/browser ownership. Older Mathem runtimes may still return a manual
+cart handoff until they follow the documented browser preflight and update path;
+that legacy fallback is not a supported new installation. Scheduled checkout
+requires its existing amount/delivery/confirmation/dietary gates plus the
+configured, authenticated browser; installation does not log it in. Missing
+login, account binding or a selected saved card stops checkout until those
+prerequisites are resolved.
 Existing-order additions begin with the exact modifiable order and independently
 bound receipt account/address. The staged cart inherits that order's delivery;
 it must not create a new delivery reservation or fall back to a new order.

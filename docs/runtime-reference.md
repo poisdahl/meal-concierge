@@ -16,7 +16,8 @@ executable path with `--uv`. The installed runtime
 uses Python 3.12.12 and all versions in `runtime-requirements.txt`, including
 `mcp==2.1.1` and `mcp-types==2.1.1`. Installation verifies both SDK versions and
 loaded module paths inside its own virtual environment. Hermes is not required.
-For Oda/MENY, install `agent-browser@0.33.1` and a non-snap Chromium/Chrome.
+For Oda, Mathem and MENY, install `agent-browser@0.33.1` and a non-snap
+Chromium/Chrome.
 The adapter may need Node.js 24+ on the PATH used to install the service.
 Apple Silicon app discovery includes `/Applications/Google Chrome.app` and
 `~/Applications/Google Chrome.app`. Linux ARM64 needs a distribution Chromium;
@@ -81,12 +82,15 @@ python3 install.py install --manager external --uv /usr/local/bin/uv \
   --home /workspace/meal-concierge/home --code-root /tmp/meal-concierge/program \
   --socket /tmp/meal-concierge/service.sock \
   --browser-socket-directory /tmp/meal-concierge/browser \
+  --agent-browser /absolute/path/to/agent-browser \
+  --browser-executable /absolute/path/to/chromium \
   --provider mathem --household "My household"
 python3 install.py run --home /workspace/meal-concierge/home
 ```
 
 These are example paths and provider choices; inspect the actual host and use
-the user's intended store. Oda/MENY still require their browser dependencies.
+the user's intended store. Oda, Mathem and MENY require the same validated
+browser dependencies.
 The first command performs the declared `uv` staging, verification and migration
 subprocesses; it does not start the service or authenticate a store. Do not treat
 this entry point as a bypass for platform review of its underlying operations.
@@ -111,8 +115,10 @@ stopped. Never kill by a broad command/name match.
 
 Repeated setup should discover the matching installation, inspect its identity
 and attach to its healthy service. `install` refuses an existing installation;
-it does not mean update. Before an explicit `update` or backup, the owner must
-stop that execution and establish that no service survives. External offline
+it does not mean update. Before stopping a healthy execution for `update`, run
+`check-browser` from the new source while the exact execution remains active.
+Repair missing prerequisites first. Then the owner must stop that execution and
+establish that no service survives. Before a backup, stop it directly. External offline
 checks use the existing ownership locks; acquiring those checks can create lock
 files and remove a proven-stale socket, so they are not read-only inventory.
 Busy, invalid or uncertain targets fail without permission to take them over.
@@ -192,22 +198,38 @@ ready publication with this runtime before any older code reads the legacy files
 resolve an uncertain exchange by explicit login rather than replaying a refresh.
 Do not clone refresh credentials across installations.
 
-Oda additionally needs the dedicated browser profile logged into the same
-account, with the intended delivery address and payment method. MCP OAuth does
-not authenticate that browser or prove account binding. Existing protected-order
-browser review remains the account/address check. Mathem also uses a dedicated
-browser for guarded saved-card checkout; its selected MCP address reference
-must match that browser account. MENY retains its dedicated browser login.
+Oda and Mathem additionally need the dedicated browser profile logged into the
+same account, with the intended delivery address and payment method. MCP OAuth
+does not authenticate that browser or prove account binding. Their protected
+browser review remains the account/address check; Mathem's selected MCP address
+reference must match that browser account. MENY retains its dedicated browser login.
 
-Mathem core installation keeps browser prerequisites optional. To enable its
-checkout browser, pass the verified `--agent-browser` and `--browser-executable`
-paths to install, or to an explicit stopped-service update of the same home.
-The installer validates the native adapter version and retains the installation's
-existing private browser profile/home/socket ownership. Log that profile into
-Mathem normally; never copy another browser's cookies or refresh tokens. The
-`run-service.sh` launcher also discovers available browser executables; absent
-prerequisites leave Mathem core operations and the manual checkout handoff usable.
-A configured browser is not evidence of login, account matching or card readiness.
+New Oda and Mathem installations use the same discovery and validation. An older
+Mathem installation may have no `browser_binary` or `browser_executable` in
+`runtime.json`. From the new checkout, validate while its healthy service still
+runs:
+
+```sh
+./install.sh check-browser --home /private/household \
+  --agent-browser /absolute/path/to/agent-browser \
+  --browser-executable /absolute/path/to/chromium
+```
+
+Omit explicit paths when ordinary discovery should find both. The check reads
+the existing provider/paths and performs only bounded local executable/version
+checks; it does not take service/data ownership, change metadata, launch a browser
+or require store login. If explicit paths were needed, repeat them on `update`.
+Only after this passes should the owner finish or reconcile active and uncertain
+work, stop the exact service/external execution, and update the same home. Update
+retains browser home/profile/socket paths, OAuth tokens, state, manager, service
+name/unit and outstanding operation journals. When adding the browser to a legacy
+Mathem installation, or replacing an executable explicitly, it also records the
+validated current `PATH` first and retains any missing entries from the existing
+service `PATH`. Run the check and update from the same host environment so an npm
+adapter keeps its required Node executable without discarding previously available
+helper locations. A configured browser is not evidence of login, account matching
+or card readiness. Log in separately after the update and never copy another
+browser's cookies or refresh tokens.
 
 ## Existing installations
 
@@ -248,14 +270,17 @@ cannot later restart: disabling/retiring that old owner remains mandatory.
 ## Updates, failures and recovery
 
 ```sh
+./install.sh check-browser --home /private/household
 ./install.sh stop --home /private/household
 ./install.sh backup --home /private/household --backup /private/backups/manual-copy
-# Update the product checkout, then:
 ./install.sh update --home /private/household
 ./install.sh start --home /private/household
 ./install.sh attach --home /private/household
 ```
 
+Run `check-browser` from the candidate source before stopping a healthy owner;
+when explicit executable paths are needed, pass the same values to both the check
+and `update`. The check neither takes ownership nor changes the installation.
 The installer refuses updates/backups while the owner is active. It builds and
 checks the candidate venv before migration; under offline lifetime locks it copies
 the full state tree/config, opens and migrates both JSON and SQLite, publishes
