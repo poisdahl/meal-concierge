@@ -458,6 +458,8 @@ def main():
                 return
             assert_stopped(meta)
             if args.action == 'import-recipes':
+                if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
+                    raise RuntimeError('complete the stopped runtime update before importing recipes')
                 expected = latest_recipe_pack()
                 release = Path(meta['release'])
                 archive = stage_recipe_pack(release, args.recipe_pack, expected)

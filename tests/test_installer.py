@@ -397,6 +397,11 @@ class InstallerTests(unittest.TestCase):
                 resolve.assert_called_once_with()
             self.assertFalse(list(release.glob('recipe-pack-*.zip')))
         self.assertEqual(len(RecipeStore(home / 'state/recipes.sqlite3', CONFIG['household']).search()), 1)
+        (home / 'maintenance.json').write_text('{}')
+        with patch.object(sys, 'argv', argv), patch.object(install, 'latest_recipe_pack') as resolve:
+            with self.assertRaisesRegex(RuntimeError, 'complete the stopped runtime update'):
+                install.main()
+            resolve.assert_not_called()
 
     def test_migration_child_keeps_ownership_after_installer_parent_is_killed(self):
         state = self.root / 'state'
