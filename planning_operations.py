@@ -965,13 +965,20 @@ class PlanningOperations:
         anchor_current_date: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
         snapshot = deepcopy(dict(state)) if isinstance(state, Mapping) else self.store.read()
+        web_candidates, web_result = None, None
+        if isinstance(value, Mapping):
+            value = dict(value)
+            web_candidates = value.pop("web_candidates", None)
+            web_result = value.pop("web_search_result", None)
+            if value.get("candidates") is not None and (web_candidates is not None or web_result is not None):
+                raise PlannerError("web_candidates supplement automatic discovery; omit candidates")
         request = self._effective_planner_request(
             value, snapshot, anchor_current_date=anchor_current_date
         )
         collection = None
         if request["candidates"] is None:
             _validate_request(request, allow_discovery=True)
-            collection = self._collect_planner_candidates(request, snapshot)
+            collection = self._collect_planner_candidates(request, snapshot, web_candidates=web_candidates, web_result=web_result)
             request["candidates"] = [{**item["reference"], **({"facts": item["supplied_facts"]} if item.get("supplied_facts") else {})}
                                      for item in collection["candidates"]]
         resolved = self._resolve_planner_candidates(request, snapshot) if collection is None or request["candidates"] else []

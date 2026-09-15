@@ -1514,6 +1514,54 @@ class SourceTests(unittest.TestCase):
 
 
 class PinnedTransportTests(unittest.TestCase):
+    def test_first_party_search_headers_and_post_boundary(self):
+        sent = []
+        with patch.object(sources._PinnedConnection, 'send', side_effect=lambda data: sent.append(data)), patch.object(sources._PinnedConnection, 'getresponse', side_effect=OSError('stop after serialized request')):
+            with self.assertRaises(sources.RecipeImportSourceError):
+                sources._get_bytes('https://www.matprat.no/api/ContentSearch/Search?text=suppe', maximum=100)
+        self.assertIn(b'Referer: https://www.matprat.no/sok/\r\n', b''.join(sent))
+        with patch.object(sources, '_PinnedConnection') as connection:
+            with self.assertRaisesRegex(sources.RecipeImportSourceError, 'unsupported public source POST'):
+                sources._get_bytes('https://www.godfisk.no/private-action', maximum=100, json_body={'q': 'suppe'})
+            connection.assert_not_called()
+
+    def test_https_host_omits_default_port_but_preserves_nondefault_port(self):
+        # Exercise the real HTTP serializer without connecting to the network.
+        for url, expected in [('https://recipes.example/soup', b'Host: recipes.example\r\n'),
+                              ('https://recipes.example:8443/soup', b'Host: recipes.example:8443\r\n')]:
+            sent = []
+            def capture(connection, data):
+                sent.append(data)
+            with patch.object(sources._PinnedConnection, 'send', capture), patch.object(sources._PinnedConnection, 'getresponse', side_effect=OSError('stop after serialized request')):
+                with self.assertRaises(sources.RecipeImportSourceError):
+                    sources._get_bytes(url, maximum=100)
+            self.assertIn(expected, b''.join(sent))
+            self.assertEqual(b''.join(sent).count(b'Host:'), 1)
+
+    def test_firecrawl_preserves_exact_html_source_and_rejects_changed_target(self):
+        url = 'https://recipes.example/soup'
+        html = '<script type="application/ld+json">'+json.dumps({'@type':'Recipe','name':'Soup','recipeYield':'2 servings','recipeIngredient':['200 g carrots'],'recipeInstructions':['Simmer.']})+'</script>'
+        data = {'rawHtml': html, 'metadata': {'url': url, 'statusCode': 200}}
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('8.8.8.8', 443))]
+        with patch.object(sources.socket, 'getaddrinfo', return_value=addresses), patch.object(sources, 'firecrawl_request', return_value=data) as fetch:
+            result = sources.fetch_public_webpage(url, fetch_method='firecrawl')
+            self.assertEqual(result['recipes'][0]['candidate']['name'], 'Soup')
+            self.assertEqual(result['recipes'][0]['candidate']['portions'], 2)
+            self.assertFalse(fetch.call_args.args[1]['storeInCache'])
+            self.assertEqual(fetch.call_args.args[1]['maxAge'], 0)
+            self.assertFalse(fetch.call_args.args[1]['skipTlsVerification'])
+            self.assertEqual(fetch.call_args.args[1]['formats'], ['rawHtml'])
+            data['metadata']['url'] = 'https://other.example/soup'
+            with self.assertRaisesRegex(sources.RecipeImportSourceError, 'exact requested'):
+                sources.fetch_public_webpage(url, fetch_method='firecrawl')
+
+    def test_firecrawl_rejects_private_target_before_cloud_request(self):
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 443))]
+        with patch.object(sources.socket, 'getaddrinfo', return_value=addresses), patch.object(sources, 'firecrawl_request') as fetch:
+            with self.assertRaisesRegex(sources.RecipeImportSourceError, 'nonpublic'):
+                sources.fetch_public_webpage('https://recipes.example/soup', fetch_method='firecrawl')
+            fetch.assert_not_called()
+
     def test_public_page_structured_and_text_fallback_envelopes(self):
         jsonld = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['250 g carrots'], 'recipeInstructions': ['Simmer.']}
         html = '<script type="application/ld+json">' + json.dumps(jsonld) + '</script>'
@@ -2239,6 +2287,8 @@ class ImportApplicationTests(unittest.TestCase):
         self.source = TranscriptTests().source()
 
     def call(self, action, **request):
+        if action == 'import':
+            request.setdefault('storage_decision', {'storage': 'full', 'basis': 'permission', 'evidence': 'Synthetic test recipe supplied by its author.'})
         return self.app.handle({'operation': 'recipes', 'action': action, **request})
 
     def preview(self):
@@ -2247,7 +2297,9 @@ class ImportApplicationTests(unittest.TestCase):
     def test_quoted_serves_import_preserves_source_and_unresolved_count(self):
         for kind in ('pasted_text', 'photo_transcript', 'pdf_transcript'):
             for quote, portions in (('Serves 2', 2), ('sErVeS 2', 2),
-                                    ('Serves 1.5', 1.5), ('Serves 1,5', 1.5)):
+                                    ('Serves 1.5', 1.5), ('Serves 1,5', 1.5),
+                                    ('Porsjoner: 2', 2), ('Porsjoner:2', 2),
+                                    ('Antall porsjoner: 4', 4), ('PORSJONER 1,5', 1.5)):
                 with self.subTest(kind=kind, quote=quote):
                     self.source = TranscriptTests().source()
                     self.source['kind'] = kind
@@ -2578,7 +2630,23 @@ Server(root/'service.sock',os.getgid(),os.getuid(),app).run()
                                 self.assertEqual(tools['meal_concierge_recipe_import'].input_schema['properties']['source_kind']['enum'], ['transcript', 'url', 'library'])
                                 self.assertIn('image_base64', tools['meal_concierge_recipe_cover'].input_schema['properties'])
                                 self.assertIsNone(tools['meal_concierge_recipe_image'].output_schema)
-                                preview_result = await session.call_tool('meal_concierge_recipe_import', {'source_kind': 'transcript', 'transcript': TranscriptTests().source()})
+                                self.assertIsNone(tools['meal_concierge_recipe_web_search'].input_schema['properties']['backend']['default'])
+                                scopes_result = await session.call_tool('meal_concierge_recipe_web_search', {'query': 'vegetable dinner', 'backend': 'host'})
+                                self.assertFalse(scopes_result.is_error)
+                                scopes = json.loads(scopes_result.content[0].text)
+                                self.assertFalse(scopes['searched'])
+                                self.assertEqual(len(scopes['scopes']), 7)
+                                self.assertFalse(scopes['settings']['broad'])
+                                updated = await session.call_tool('meal_concierge_setup', {'action': 'apply', 'keep_current': False, 'changes': {'web_search': {'broad': True}}})
+                                self.assertFalse(updated.is_error)
+                                self.assertTrue(json.loads(updated.content[0].text)['current']['web_search']['broad'])
+                                restored = await session.call_tool('meal_concierge_setup', {'action': 'apply', 'keep_current': False, 'changes': {'web_search': {'broad': False}}})
+                                self.assertFalse(restored.is_error)
+                                self.assertFalse(json.loads(restored.content[0].text)['current']['web_search']['broad'])
+                                missing_result = await session.call_tool('meal_concierge_recipe_import', {'source_kind': 'url', 'url': 'https://matprat.no/synthetic-test'})
+                                self.assertFalse(missing_result.is_error)
+                                self.assertEqual(json.loads(missing_result.content[0].text)['status'], 'storage_decision_required')
+                                preview_result = await session.call_tool('meal_concierge_recipe_import', {'source_kind': 'transcript', 'transcript': TranscriptTests().source(), 'storage_decision': {'storage': 'full', 'basis': 'own_recipe', 'evidence': 'Synthetic recipe authored for this test.'}})
                                 self.assertFalse(preview_result.is_error)
                                 preview = json.loads(preview_result.content[0].text)
                                 # Prepare/serialize bytes in host code through the actual

@@ -120,6 +120,34 @@ and chunk headers. DNS resolution itself uses the system resolver; a slow
 resolver cannot be cancelled synchronously, but an expired connection budget
 prevents subsequent connection attempts.
 
+An explicit `fetch_method=firecrawl` on URL import or `recipes/web_read` uses
+Firecrawl's anonymous public `/v2/scrape` API instead. This sends the public URL
+to Firecrawl without keys, cookies or ambient proxy configuration. It requests
+uncached raw HTML and feeds it through the same JSON-LD/text parser; it does not
+ask another LLM to invent recipe fields. The requested target must resolve to
+public addresses, and the returned metadata must confirm HTTP 200 and the exact
+requested URL. The API request is bounded to 30 seconds and the HTML retains
+the existing size limit. Redirects of our API connection remain forbidden.
+
+`recipes/web_read` returns source evidence without persisting a discovery or
+bank entry. Host conversation/tool logs may still retain the response. Reading
+does not grant storage rights: URL import still requires `storage_decision`
+before fetching, and link-only import never fetches a page, regardless of method.
+Use `web_discovery=true` for automatic reads/imports to enforce source settings.
+Manual user-supplied URLs remain independent of automatic discovery settings.
+
+`recipes/web_search` (MCP `meal_concierge_recipe_web_search`, explicit backend
+`firecrawl`) sends one culinary query and enabled domain filters to anonymous
+Firecrawl search. Returned URLs are filtered again against local settings;
+snippets are not ingredient evidence. It stores no recipes. The CLI/service
+path is identical for Grok and other clients; no Codex plugin is required.
+Free service availability and rate limits are not guaranteed. An unavailable
+response retains scopes for another host search; MCP `backend=host` or CLI
+`recipes/web_search_plan` requests only those scopes without network access.
+The MCP default remains `backend=host`; neither search nor direct import requires
+Firecrawl. The direct HTTP client omits the default TLS port in its Host header,
+matching ordinary HTTPS clients and avoiding MatPrat's `:443` virtual-host redirect.
+
 ### Configured mapped GET APIs
 
 ```python
@@ -581,3 +609,36 @@ It must not overwrite order/email/library outcome journals. The existing
 installer's stopped-service database-plus-assets backup remains the full
 installation recovery path; restoring old journals after possible external
 effects is not a recipe-import operation.
+## Web search and storage assessment
+
+`meal_concierge_recipe_web_search(query)` returns current domain scopes,
+`settings_digest`, `maximum_candidates=8` and `searched=false`. It does not run a
+backend search engine. The host uses its own search capability; when unavailable
+it reports the limitation and continues internal/store planning.
+
+Setup accepts partial `changes.web_search={enabled,broad,sites}` updates. The
+site list, when supplied, replaces the list and contains `{name,domain,enabled}`
+objects. Domains are lowercase DNS names, not URLs. Defaults enable seven
+Norwegian domains; broad search defaults off. Domain matching includes
+subdomains, and explicit exclusions take precedence over broad search.
+
+URL and transcript imports require `storage_decision` before fetching or
+persisting content. A full decision has `storage:"full"`, `basis` (`own_recipe`,
+`permission`, `license`, `private_use`) and concrete `evidence`; `license_url` is
+optional. `own_recipe` is restricted to supplied text. The host must establish
+the basis; the server validates and retains the assessment, not legal truth.
+No decision returns `storage_decision_required`. A decision of
+`{storage:"link_only"}` creates only a bookmark for a URL and does not fetch
+the page. It cannot be used for menu quantities or shopping.
+
+Automatic web imports use `web_discovery=true`, enforcing current source
+settings. Manual URL imports do not depend on search settings. Menu `plan`
+accepts supplemental `planner_input.web_candidates=[{discovery_ref:...}]` and
+`web_search_result={status:"completed"|"unavailable"|"disabled",settings_digest:...}`.
+Omit `candidates` to merge with automatic local/store retrieval. Each supplied
+web candidate must have an enabled source and an explicit full-storage
+assessment. The server rechecks settings and rejects stale search scopes.
+The returned handoff freezes the combined exact references; save/replay does
+not repeat search. Bounded web search never establishes exhaustive absence for
+automatic AI fallback. Link-only content and webpage instructions must not be
+used as a route around these restrictions.

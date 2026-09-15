@@ -154,3 +154,15 @@ across those positions. Repeated preparation is deterministic and has no stock
 side effects. Replanning takes the new request's stock assertion for its whole
 remaining menu, including carried future meals; omission does not reuse old
 stock after possible cooking. The earlier menu/history stays unchanged.
+## Supplemental web discovery
+
+The host can add at most eight assessed full-recipe discovery references using
+`planner_input.web_candidates`, with a current `web_search_result` from the
+configured search scopes. Omit `candidates`: the normal collector evaluates
+these alongside internal and selected-store recipes before source-identity
+deduplication and bounded shortlisting. Exact candidates remain an explicit,
+separate user-selected scope. Web failures are visible in `discovery.sources`;
+missing search does not block local/store results or authorize AI fallback.
+The resulting save reference contains only the frozen combined candidates,
+not a request to repeat web search. See [import reference](recipe-import-reference.md)
+for settings and storage decisions.

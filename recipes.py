@@ -283,7 +283,8 @@ def source_ingredient(text: str, *, item: str | None = None, measure: str | None
         quantity, unit = parse_measure(measure)
     elif item is None:
         for candidate in sorted(UNITS, key=len, reverse=True):
-            matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + r"\s+(.+)", text, re.IGNORECASE)
+            suffix = r"\.?" if candidate in {"stk", "ss", "ts"} else ""
+            matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", text, re.IGNORECASE)
             if matched:
                 quantity, unit = parse_measure(f"{matched[1]} {candidate}")
                 if quantity is not None:
@@ -301,7 +302,7 @@ def source_ingredient(text: str, *, item: str | None = None, measure: str | None
 
 def source_yield(text: str) -> tuple[dict[str, Any], float | None]:
     quantity = unit = portions = None
-    serves = re.fullmatch(r"\s*serves\s+(\d+(?:[.,]\d+)?)\s*", text, re.IGNORECASE)
+    serves = re.fullmatch(r"\s*(?:serves|(?:antall\s+)?porsjoner)(?:\s*:\s*|\s+)(\d+(?:[.,]\d+)?)\s*", text, re.IGNORECASE)
     matched = serves or re.fullmatch(r"\s*(\d+(?:[.,]\d+)?)\s+(.+?)\s*", text)
     if matched:
         try:
@@ -324,12 +325,22 @@ def _rights(value: Any, *, version: int = 2) -> dict[str, Any]:
         raise RecipeError("transient recipes cannot be persisted")
     if storage not in VALID_STORAGE:
         raise RecipeError("rights.storage must be full or link_only")
-    return {
+    result = {
         "storage": storage,
         "license": _bounded_text(value.get("license"), "rights.license", maximum=200),
         "license_url": normalize_source_url(value.get("license_url"), version=version),
         "credit": _bounded_text(value.get("credit"), "rights.credit", maximum=500),
     }
+    if version >= 2 and value.get("storage_decision") is not None:
+        from web_recipes import storage_decision
+        try:
+            decision = storage_decision(value["storage_decision"], source_kind="transcript")
+        except ValueError as exc:
+            raise RecipeError(str(exc)) from exc
+        if decision["storage"] != storage:
+            raise RecipeError("storage decision differs from retained content")
+        result["storage_decision"] = decision
+    return result
 
 
 def _external_snapshot(value: Any, source: Mapping[str, Any], *, version: int = 2) -> dict[str, Any] | None:

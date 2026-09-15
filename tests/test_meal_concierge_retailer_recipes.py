@@ -276,6 +276,10 @@ class RetailerPaginationTests(unittest.TestCase):
                     self.assertFalse(discovery['ai_fallback_eligible'])
                     self.assertEqual(next(x for x in discovery['sources'] if x['source']==provider)['status'],'search_limit')
                 client.rows=[]
+                # Enabled but unsearched web sources do not establish absence.
+                self.assertFalse(app.handle(request)['plan']['discovery']['ai_fallback_eligible'])
+                with store.locked() as state:
+                    state['profile']['recipes']['web_search']['enabled'] = False
                 self.assertTrue(app.handle(request)['plan']['discovery']['ai_fallback_eligible'])
 
 

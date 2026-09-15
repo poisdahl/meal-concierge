@@ -586,6 +586,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         }
 
     def _setup_summary(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        from recipe_search_setup import search_status
         profile = state["profile"]
         meals = profile["meals"]
         return {
@@ -602,6 +603,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 for key in ("dinner_days", "dishes", "batch_dishes", "salads", "cook_days", "eat_days")
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
+            "web_search": deepcopy(profile["recipes"]["web_search"]),
+            "web_search_provider": search_status(self.store.config),
             "payment_note": {
                 "oda": "For new orders, prepare automatically selects the configured existing method. Vipps may require completing a step on the original Oda/Vipps page and approval on your phone. Selecting a method never submits payment. Resolve saved-card ambiguity once with card_last4 in setup.",
                 "mathem": "Saved-card checkout uses the card selected in the dedicated Mathem browser.",
@@ -651,7 +654,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("setup apply needs keep_current true or false and an optional changes object")
         if keep_current and changes:
             raise HouseholdError("keep_current cannot be combined with setup changes")
-        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "checkout_payment"}
+        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "checkout_payment", "web_search"}
         if not set(changes).issubset(allowed):
             raise HouseholdError("setup changes contain unknown fields")
         requested_provider = str(changes.get("provider") or self.provider).casefold()
@@ -697,6 +700,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 profile["recipes"]["sources"] = validate_source_settings({
                     **profile["recipes"]["sources"], **dict(source_changes),
                 })
+            if "web_search" in changes:
+                settings = changes["web_search"]
+                if not isinstance(settings, Mapping) or set(settings) - {"enabled", "broad", "sites"}:
+                    raise HouseholdError("web_search accepts enabled, broad and sites")
+                profile["recipes"]["web_search"].update(deepcopy(dict(settings)))
             validate_profile(profile)
             setup = state["setup"]
             current = self._setup_summary(state)

@@ -28,6 +28,10 @@ The collection is not needed to get started.
 [Install](#installation) · [Update Meal Concierge](#update-meal-concierge) ·
 [Add or update recipes](#add-or-update-the-recipe-collection) · [User guide](docs/usage.md)
 
+Recipe discovery also supports selected Norwegian recipe websites, with no
+search API required. For optional full-web search, choose your host's search,
+Brave Search API, or Firecrawl. See [search choices, secure setup and testing](docs/recipe-search.md).
+
 ## Installation
 
 Your agent platform should already be installed. Send this to **Codex,
