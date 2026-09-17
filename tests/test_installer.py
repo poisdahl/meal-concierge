@@ -659,9 +659,9 @@ class InstallerTests(unittest.TestCase):
                 install.main()
             resolve.assert_not_called()
 
-    def test_local_collection_inspect_and_digest_pinned_import(self):
+    def test_local_collection_inspect_and_digest_pinned_lifecycle(self):
         from recipe_portable import FORMAT, canonical_bytes, write_archive
-        from recipes import normalize_recipe
+        from recipes import RecipeError, normalize_recipe
         recipe = normalize_recipe(RECIPE)
         manifest = {
             'format': FORMAT, 'format_version': 1, 'kind': 'collection',
@@ -716,7 +716,14 @@ class InstallerTests(unittest.TestCase):
             'install.py', 'import-recipe-pack', '--home', str(home),
             '--recipe-pack', str(archive), '--allow-recipe-removals',
         ]
+        unpinned_local_remove_argv = [
+            'install.py', 'remove-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive),
+        ]
         with patch.object(sys, 'argv', unpinned_removal_argv):
+            with self.assertRaisesRegex(RuntimeError, 'requires --expected-sha256'):
+                install.main()
+        with patch.object(sys, 'argv', unpinned_local_remove_argv):
             with self.assertRaisesRegex(RuntimeError, 'requires --expected-sha256'):
                 install.main()
         self.assertFalse((home / 'state/recipes.sqlite3').exists())
@@ -737,12 +744,62 @@ class InstallerTests(unittest.TestCase):
             (report['status'], report['created'], report['kind'], report['pack_revision']),
             ('complete', 1, 'collection', 1),
         )
-        saved = RecipeStore(
+        store = RecipeStore(
             home / 'state/recipes.sqlite3', CONFIG['household']
-        ).search()
+        )
+        saved = store.search()
         self.assertEqual(
             (len(saved), saved[0]['entry_origin'], saved[0]['pack']['pack_id']),
             (1, 'collection', 'family-recipes'),
+        )
+        collection = saved[0]
+        store.set_favorite(
+            collection['library_recipe_ref'], True,
+            idempotency_key='remove-local-collection-favorite',
+        )
+        user = store.save({**recipe, 'name': 'Preserved user recipe'})
+        store.set_favorite(
+            user['library_recipe_ref'], True,
+            idempotency_key='preserve-user-recipe-favorite',
+        )
+        official = store.import_pack_record(
+            {**recipe, 'name': 'Preserved Optional Recipe Collection recipe'},
+            pack_id=install.RECIPE_PACK['pack_id'], recipe_id='official', version='test',
+        )['recipe']
+        store.set_favorite(
+            official['library_recipe_ref'], True,
+            idempotency_key='preserve-official-collection-favorite',
+        )
+
+        wrong_remove_argv = [
+            'install.py', 'remove-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive), '--expected-sha256', '0' * 64,
+        ]
+        with patch.object(sys, 'argv', wrong_remove_argv):
+            with self.assertRaisesRegex(RuntimeError, 'expected-sha256'):
+                install.main()
+        self.assertEqual(store.get(collection['id'])['entry_origin'], 'collection')
+
+        remove_argv = [
+            'install.py', 'remove-recipe-pack', '--home', str(home),
+            '--recipe-pack', str(archive), '--expected-sha256', descriptor['sha256'],
+        ]
+        with patch.object(sys, 'argv', remove_argv), \
+             patch('sys.stdout', new_callable=io.StringIO) as output:
+            install.main()
+        removed = json.loads(output.getvalue().split(': ', 1)[1])
+        self.assertEqual(
+            (removed['status'], removed['kind'], removed['pack_id'],
+             removed['deleted'], removed['deleted_favorites']),
+            ('complete', 'collection', 'family-recipes', 1, 1),
+        )
+        with self.assertRaisesRegex(RecipeError, 'not found'):
+            store.get(collection['id'])
+        self.assertEqual(store.get(user['id'])['entry_origin'], 'user')
+        self.assertEqual(store.get(official['id'])['entry_origin'], 'bundled')
+        self.assertEqual(
+            {row['id'] for row in store.search(limit=10, favorites_only=True)},
+            {user['id'], official['id']},
         )
         self.assertFalse(list(release.glob('recipe-pack-*.zip')))
 

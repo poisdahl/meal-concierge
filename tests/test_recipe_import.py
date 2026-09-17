@@ -1117,6 +1117,72 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual((repeated["deleted"], repeated["deleted_assets"],
                           repeated["deleted_metadata_directories"]), (0, 0, 0))
 
+    def test_optional_and_local_collection_removals_are_origin_scoped(self):
+        from recipe_portable import apply_archive, remove_collection
+        from recipes import RecipeStore
+
+        official = self.apply(self.package())
+        state = self.root / "state"
+        official_ref = official["results"][0]["bank_recipe_ref"]
+        local_manifest = {
+            **self.manifest,
+            "kind": "collection",
+            "pack_id": "family-recipes",
+            "pack_version": "1",
+            "pack_revision": 1,
+            "display_name": "Family recipes",
+            "membership_mode": "merge",
+        }
+        local_record = {
+            **self.record,
+            "recipe_id": "family:one",
+            "recipe": {**self.recipe, "name": "Family lentils"},
+        }
+        source = self.root / "family-records.jsonl"
+        source.write_bytes(canonical_bytes(local_record) + b"\n")
+        archive = self.root / "family-recipes.zip"
+        write_archive(archive, local_manifest, {"records.jsonl": source})
+        descriptor = {
+            key: local_manifest[key]
+            for key in (
+                "format", "format_version", "kind", "pack_id", "pack_version",
+                "pack_revision", "recipe_schema_version", "normalizer_version",
+            )
+        } | {
+            "bytes": archive.stat().st_size,
+            "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+        }
+        local = apply_archive(archive, state, "synthetic-household", descriptor)
+        local_ref = local["results"][0]["bank_recipe_ref"]
+        store = RecipeStore(state / "recipes.sqlite3", "synthetic-household")
+        store.set_favorite(official_ref, True, idempotency_key="keep-optional-favorite")
+        store.set_favorite(local_ref, True, idempotency_key="keep-local-collection-favorite")
+
+        with self.assertRaisesRegex(RecipeError, "selected local collection ZIP was not installed"):
+            remove_collection(state, "synthetic-household", {
+                **descriptor, "sha256": "0" * 64,
+            })
+        self.assertEqual(store.get(official_ref["recipe_id"])["entry_origin"], "bundled")
+        self.assertEqual(store.get(local_ref["recipe_id"])["entry_origin"], "collection")
+
+        optional_removed = remove_collection(state, "synthetic-household", {
+            "pack_id": self.manifest["pack_id"],
+            "display_name": "Optional Recipe Collection",
+        })
+        self.assertEqual((optional_removed["kind"], optional_removed["deleted"]), ("bundled", 1))
+        with self.assertRaisesRegex(RecipeError, "not found"):
+            store.get(official_ref["recipe_id"])
+        self.assertEqual(store.get(local_ref["recipe_id"])["entry_origin"], "collection")
+        self.assertEqual(
+            {row["id"] for row in store.search(limit=10, favorites_only=True)},
+            {local_ref["recipe_id"]},
+        )
+
+        local_removed = remove_collection(state, "synthetic-household", descriptor)
+        self.assertEqual((local_removed["kind"], local_removed["deleted"]), ("collection", 1))
+        with self.assertRaisesRegex(RecipeError, "not found"):
+            store.get(local_ref["recipe_id"])
+
     def test_collection_removal_prunes_only_unreferenced_manifest_assets(self):
         from recipe_portable import remove_collection
         from recipes import RecipeStore

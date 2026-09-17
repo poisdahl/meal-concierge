@@ -383,6 +383,21 @@ agent supplied the ZIP:
   --expected-sha256 SHA256_FROM_INSPECTION
 ```
 
+To remove that exact local collection later, stop the same owner and use the
+same ZIP plus the inspected digest:
+
+```sh
+./install.sh remove-recipe-pack --home /absolute/data-home \
+  --recipe-pack /absolute/family-recipes.zip \
+  --expected-sha256 SHA256_FROM_INSPECTION
+```
+
+This removes only `entry_origin=collection` records with that local pack ID,
+after confirming that the exact ZIP was previously installed, then reclaims only
+its unreferenced assets and retained metadata. It is separate from
+`remove-recipe-collection`, which removes the publisher's Optional Recipe
+Collection only.
+
 The importer derives a descriptor from the selected file, verifies an optional
 digest pin, then copies it into a private immutable staging file while checking
 the same digest and size. Preflight and application reopen only that staged
@@ -401,8 +416,8 @@ and `--expected-sha256` on that exact import. Once authorized and fully read,
 it permanently deletes absent
 recipes belonging to the same `pack_id`, including their local edits, archive
 state and favorites. The flag never widens deletion to another pack or a user
-recipe. There is intentionally no local-pack remove-by-name shortcut; create a
-new authoritative revision only when permanent reconciliation is intended.
+recipe. Local removal likewise has no remove-by-name shortcut: it requires the
+selected ZIP and its exact inspected SHA-256.
 
 The minimum collection manifest fields are:
 

@@ -1072,7 +1072,18 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
                     info = os.stat(entry, dir_fd=directory, follow_symlinks=False)
                     if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT_BYTES:
                         raise RecipeError("retained recipe collection metadata is irregular or oversized")
-                directories.append({"name": name, "manifest": manifest})
+                item = {"name": name, "manifest": manifest}
+                if manifest["kind"] == LOCAL_PACK_KIND:
+                    try:
+                        status = _json(_read_regular_at(
+                            directory, "status.json", MAX_REPORT_BYTES,
+                        ))
+                    except RecipeError:
+                        status = None
+                    digest = status.get("archive_sha256") if isinstance(status, Mapping) else None
+                    if isinstance(digest, str) and _DIGEST.fullmatch(digest):
+                        item["archive_sha256"] = digest
+                directories.append(item)
                 assets.update(
                     "sha256:" + match[1]
                     for item in manifest["files"]
@@ -1157,7 +1168,9 @@ def _state_asset_references(state: Path) -> set[str]:
         raise RecipeError("household state asset references are unavailable") from exc
 
 
-def _remove_pack_metadata(state: Path, inventory: Mapping[str, Any], pack_id: str) -> dict[str, int]:
+def _remove_pack_metadata(
+    state: Path, inventory: Mapping[str, Any], pack_id: str, kind: str,
+) -> dict[str, int]:
     """Delete preflighted target metadata, leaving each manifest until last."""
     deleted_directories = deleted_bytes = 0
     descriptors = []
@@ -1180,7 +1193,11 @@ def _remove_pack_metadata(state: Path, inventory: Mapping[str, Any], pack_id: st
             identity = hashlib.sha256(canonical_bytes([
                 manifest["pack_id"], manifest["pack_version"],
             ])).hexdigest()
-            if identity != name or manifest["pack_id"] != pack_id:
+            if (
+                identity != name
+                or manifest["pack_id"] != pack_id
+                or manifest["kind"] != kind
+            ):
                 raise RecipeError("retained recipe collection metadata changed during removal")
             for entry in entries:
                 if entry not in _PACK_METADATA_FILES and not _PACK_METADATA_TEMPORARY.fullmatch(entry):
@@ -1248,7 +1265,7 @@ def _report_bytes(directory: int, name: str, value: bytes, *, immutable: bool = 
 
 def remove_collection(state_directory: Path | str, household: str,
                       expected_descriptor: Mapping) -> dict[str, Any]:
-    """Permanently remove one installer-selected bundled collection offline.
+    """Permanently remove one installer-selected collection offline.
 
     Database deletion is atomic. File cleanup is deliberately resumable: the
     retained manifests remain as the authoritative cleanup inventory until all
@@ -1259,6 +1276,13 @@ def remove_collection(state_directory: Path | str, household: str,
 
     if not isinstance(expected_descriptor, Mapping):
         raise RecipeError("a trusted recipe collection identity is required")
+    kind = expected_descriptor.get("kind", OFFICIAL_PACK_KIND)
+    if kind == OFFICIAL_PACK_KIND:
+        entry_origin = "bundled"
+    elif kind == LOCAL_PACK_KIND:
+        entry_origin = "collection"
+    else:
+        raise RecipeError("recipe collection removal requires a bundled or local collection identity")
     pack_id = _text(expected_descriptor.get("pack_id"), "pack_id")
     if len(pack_id) > 128:
         raise RecipeError("portable pack_id exceeds the bank metadata limit")
@@ -1269,8 +1293,17 @@ def remove_collection(state_directory: Path | str, household: str,
     assets = RecipeAssets(state / "recipe-assets")
 
     inventory = _pack_metadata_inventory(state, pack_id)
+    if any(item["manifest"]["kind"] != kind for item in inventory["directories"]):
+        raise RecipeError("recipe collection removal identity differs from retained metadata")
+    if kind == LOCAL_PACK_KIND and not any(
+        item.get("archive_sha256") == expected_descriptor.get("sha256")
+        for item in inventory["directories"]
+    ):
+        raise RecipeError(
+            "the selected local collection ZIP was not installed; import its exact ZIP before removal"
+        )
     state_references = _state_asset_references(state)
-    count = store.count_pack_records(pack_id)
+    count = store.count_pack_records(pack_id, entry_origin=entry_origin)
     # Without the retained manifests there is no exact bounded inventory of
     # historical files shipped by this pack, so do not strand them silently.
     if count and not inventory["directories"]:
@@ -1280,7 +1313,11 @@ def remove_collection(state_directory: Path | str, household: str,
 
     deleted = None
     try:
-        deleted = store.delete_absent_pack_records(pack_id=pack_id, present_recipe_ids=())
+        deleted = store.delete_absent_pack_records(
+            pack_id=pack_id,
+            present_recipe_ids=(),
+            entry_origin=entry_origin,
+        )
         retained_references = state_references | store.referenced_asset_ids()
         candidate_assets = inventory["assets"]
         removable_assets = candidate_assets - retained_references
@@ -1293,21 +1330,26 @@ def remove_collection(state_directory: Path | str, household: str,
             "compacted": False,
         }
         metadata_report = (
-            _remove_pack_metadata(state, inventory, pack_id)
+            _remove_pack_metadata(state, inventory, pack_id, kind)
             if inventory["directories"] or inventory["empty_directories"]
             else {"deleted_directories": 0, "deleted_bytes": 0}
         )
     except (OSError, RecipeError, RecipeAssetError) as exc:
         if deleted is not None:
+            rerun_command = (
+                "remove-recipe-pack" if kind == LOCAL_PACK_KIND
+                else "remove-recipe-collection"
+            )
             raise RecipeError(
                 "recipe collection entries were removed, but storage cleanup is incomplete; "
-                "rerun remove-recipe-collection"
+                f"rerun {rerun_command}"
             ) from exc
         raise
 
     retained_candidates = candidate_assets & retained_references
     return {
         "status": "complete",
+        "kind": kind,
         "pack_id": pack_id,
         "display_name": display_name,
         "deleted": len(deleted),
