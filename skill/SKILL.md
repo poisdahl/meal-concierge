@@ -648,6 +648,17 @@ its slots or derived fields into the save request. Each requested `alternatives`
 entry has its own `save_ref` and `selection`. Do not mix `planner_ref` with
 `planner_handoff` or a legacy `menu`. Complete full handoffs from CLI/service
 remain supported as `planner_handoff`; partial handoffs are rejected.
+The MCP selection is intentionally a display projection: it includes every
+dated meal, exact reference, portions, concise reason codes and material
+warnings, with bounded explanatory detail under the existing
+`reason_contributions` field names, but not the full candidate/profile/history evidence. Use
+`candidate_summary`, `work_summary`, discovery source state and bounded unknown summary, and
+`rejected_summary` for concise diagnostics. Never treat omitted verbose evidence
+as absent from the planner; use CLI/service diagnostics when that full evidence
+is actually required.
+If planning returns `mcp_action_response_too_large`, reduce requested alternatives
+or nonessential explicit candidate facts/candidates, or omit candidates to use
+bounded automatic discovery. Do not try to reconstruct the omitted action refs.
 For feedback on an unsaved proposal or product preparation before saving, call
 menu `resolve_handoff` with the chosen `save_ref` as `planner_ref`. Pass its
 returned complete `planner_handoff` unchanged to feedback/products; do not
