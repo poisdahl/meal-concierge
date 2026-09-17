@@ -45,7 +45,9 @@ class EmailOperations:
         cap = binding["capabilities"]
         preferences = job["sender_preferences"]
         assets = RecipeAssets(self.store.directory / "recipe-assets")
-        rendered = render_menu(job["menu_snapshot"], assets, images=preferences["images"] and cap.get("images", False))
+        show_estimate_labels = job.get("show_estimate_labels", preferences.get("show_estimate_labels", True))
+        rendered = render_menu(job["menu_snapshot"], assets, images=preferences["images"] and cap.get("images", False),
+                               show_estimate_labels=show_estimate_labels)
         rendered = limit_images(rendered, cap["attachment_limit"])
         warnings = list(rendered["warnings"])
         for field in ("pdf", "images"):
@@ -62,7 +64,8 @@ class EmailOperations:
                 warnings.append("PDF generation failed; complete recipe text remains available")
         raw = render_email(rendered, recipient=binding["recipient"], sender=binding["sender"], subject=job["subject"], pdf=pdf)
         if len(raw) > cap["message_limit"]:
-            rendered = render_menu(job["menu_snapshot"], assets, images=False)
+            rendered = render_menu(job["menu_snapshot"], assets, images=False,
+                                   show_estimate_labels=show_estimate_labels)
             raw = render_email(rendered, recipient=binding["recipient"], sender=binding["sender"], subject=job["subject"])
             warnings.append("Attachments omitted to fit the sender limit; complete recipe text retained")
             if len(raw) > cap["message_limit"]:
@@ -80,7 +83,8 @@ class EmailOperations:
         job["sender_warnings"] = warnings
 
     def _email_media_payload(self, menu: Mapping[str, Any], fallback_html: str,
-                             request: Mapping[str, Any], *, test: bool = False) -> dict[str, Any]:
+                             request: Mapping[str, Any], *, test: bool = False,
+                             show_estimate_labels: bool = True) -> dict[str, Any]:
         supported = request.get("images_supported", False)
         if not isinstance(supported, bool):
             raise HouseholdError("images_supported must be a boolean")
@@ -88,14 +92,15 @@ class EmailOperations:
                for group in ("dishes", "salads") if isinstance(menu.get(group), list) for recipe in menu[group]):
             # Queued jobs can predate image-credit rendering. Upgrade both
             # alternatives from their frozen snapshot, never from the bank.
-            fallback_html = menu_email_html(menu, test=test)
+            fallback_html = menu_email_html(menu, test=test, show_estimate_labels=show_estimate_labels)
         media = prepare_recipe_media(menu, RecipeAssets(self.store.directory / "recipe-assets"),
                                      images_supported=supported)
         payload = {"html": fallback_html, "inline_images": media["inline_images"],
                    "image_warnings": media["image_warnings"]}
         if media["image_cids"]:
             payload["html_without_images"] = fallback_html
-            payload["html"] = menu_email_html(menu, test=test, image_cids=media["image_cids"])
+            payload["html"] = menu_email_html(menu, test=test, image_cids=media["image_cids"],
+                                              show_estimate_labels=show_estimate_labels)
         return payload
 
     @staticmethod
@@ -501,6 +506,8 @@ class EmailOperations:
                 created = not existing
                 rescheduled = False
                 if not existing:
+                    email_preferences = locked["recipe_delivery"]["preferences"]["email"]
+                    show_estimate_labels = email_preferences.get("show_estimate_labels", True)
                     sender_binding = locked["recipe_delivery"].get("sender_binding")
                     if sender_binding and sender_binding["timing"] == "on_request":
                         raise HouseholdError("email is configured on request only; select delivery-day email explicitly first")
@@ -508,7 +515,9 @@ class EmailOperations:
                         "order_id": order_id, "delivery_date": delivery_date, "status": "pending", "sent_at": None,
                         "provider": self.provider,
                         "recipient_snapshot": recipient, "menu_snapshot": snapshot,
-                        "subject": f"Ukesmeny og oppskrifter – {period}", "html": menu_email_html(snapshot),
+                        "subject": f"Ukesmeny og oppskrifter – {period}",
+                        "html": menu_email_html(snapshot, show_estimate_labels=show_estimate_labels),
+                        "show_estimate_labels": show_estimate_labels,
                         "automation_key": automation_key, "automation_protocol": 0,
                         **({"sender_binding": deepcopy(sender_binding), "sender_preferences": deepcopy(locked["recipe_delivery"]["preferences"]["email"])} if sender_binding else {}),
                         **({"delivery_hold": True} if legacy_held(locked) else {}),
@@ -587,12 +596,14 @@ class EmailOperations:
                 "test": True,
                 "recipient": recipient,
                 "subject": f"TEST – Ukesmeny og oppskrifter – {period}",
-                "html": menu_email_html(menu, test=True),
+                "html": menu_email_html(menu, test=True,
+                                        show_estimate_labels=job.get("show_estimate_labels", True)),
                 "order_id": order_id,
                 "mark_sent_after_success": False,
                 "next": "Send this test once; do not call mark_sent.",
             }
-            result.update(self._email_media_payload(menu, result["html"], request, test=True))
+            result.update(self._email_media_payload(menu, result["html"], request, test=True,
+                                                    show_estimate_labels=job.get("show_estimate_labels", True)))
             if self.email_automation_profile:
                 result["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
             return self._email_payload_within_transport(result)
@@ -745,10 +756,12 @@ class EmailOperations:
                 payload = {
                     "dispatch": True, "send": True, "recipient": recipient,
                     "subject": jobs[0].get("subject") or f"Ukesmeny og oppskrifter – {period}",
-                    "html": jobs[0].get("html") or menu_email_html(menu),
+                    "html": jobs[0].get("html") or menu_email_html(
+                        menu, show_estimate_labels=jobs[0].get("show_estimate_labels", True)),
                     "provider": email_job_provider(jobs[0]), "order_id": order_id, "claim_token": claim_token,
                 }
-                payload.update(self._email_media_payload(menu, payload["html"], request))
+                payload.update(self._email_media_payload(menu, payload["html"], request,
+                                                        show_estimate_labels=jobs[0].get("show_estimate_labels", True)))
                 if "scheduler" in jobs[0]:
                     payload["scheduler"] = self._scheduler_invocation(jobs[0])
                     payload["occurrence_id"] = self._email_occurrence(jobs[0])

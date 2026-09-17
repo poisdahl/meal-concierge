@@ -238,7 +238,8 @@ def format_portions(value: Any) -> str:
         return str(value or "")
 
 
-def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None) -> str:
+def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None,
+                    show_estimate_labels: bool = True) -> str:
     escape = lambda value: html.escape(str(value or ""))
 
     def ingredients(values: Any) -> str:
@@ -250,7 +251,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 raw = str(value.get("raw") or "").strip()
                 text = " ".join(part for part in (amount, item) if part) if amount else raw or item
                 estimates = [e for evidence in value.get("evidence", {}).values() for e in evidence_inputs(evidence) if e.get("basis") == "estimate"]
-                if estimates:
+                if estimates and show_estimate_labels:
                     if all(e.get("acceptance") for e in estimates):
                         text += " (godkjent anslag)"
                     elif all(e.get("acceptance") or e.get("project_review") for e in estimates):
@@ -441,7 +442,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         for recipe, cooking_label in cooking_recipes:
             portions_text = f"{format_portions(recipe['portions'])} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
             portion_evidence = recipe.get("portions_evidence") or {}
-            if portion_evidence.get("basis") == "estimate":
+            if portion_evidence.get("basis") == "estimate" and show_estimate_labels:
                 if portion_evidence.get("acceptance"):
                     portions_text += " (godkjent anslag)"
                 elif portion_evidence.get("project_review"):

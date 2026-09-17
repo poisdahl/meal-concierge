@@ -125,8 +125,8 @@ class DeliveryOperations:
                     raise HouseholdError("changes must select chat or email format preferences")
                 new = deepcopy(delivery["preferences"])
                 for channel, values in changes.items():
-                    if not isinstance(values, dict) or not values or not set(values) <= {"enabled", "pdf", "images"} or any(type(v) is not bool for v in values.values()):
-                        raise HouseholdError("channel preferences are enabled/pdf/images booleans")
+                    if not isinstance(values, dict) or not values or not set(values) <= {"enabled", "pdf", "images", "show_estimate_labels"} or any(type(v) is not bool for v in values.values()):
+                        raise HouseholdError("channel preferences are enabled/pdf/images/show_estimate_labels booleans")
                     if values.get("enabled") is False:
                         raise HouseholdError("use disable for explicit channel disable and queued-work accounting")
                     if channel == "email" and values.get("enabled") is True:
@@ -375,23 +375,26 @@ class DeliveryOperations:
                 job["warnings"].append(f"{channel}: image previews unavailable")
             # PDF covers follow the channel's image preference, even when its
             # native preview transport cannot show inline images.
+            show_estimate_labels = pref.get("show_estimate_labels", True)
             for images in {False, image_output, pref["images"]}:
-                if images not in cache:
-                    cache[images] = render_menu(menu, assets, images=images)
-            rendered = cache[image_output]
+                key = (images, show_estimate_labels)
+                if key not in cache:
+                    cache[key] = render_menu(menu, assets, images=images, show_estimate_labels=show_estimate_labels)
+            rendered = cache[(image_output, show_estimate_labels)]
             if channel == "email":
                 rendered = limit_images(rendered, cap.get("attachment_limit", 0))
             job["warnings"].extend(f"{channel}: {w}" for w in rendered["warnings"])
-            job["warnings"].extend(f"{channel}: {w}" for w in cache[pref["images"]]["warnings"])
+            job["warnings"].extend(f"{channel}: {w}" for w in cache[(pref["images"], show_estimate_labels)]["warnings"])
             pdf = None
             if pref["pdf"]:
                 if not cap.get("pdf") or not cap.get("attachment_limit"):
                     job["warnings"].append(f"{channel}: PDF attachment unsupported; recipe text remains available")
                 else:
                     try:
-                        if pref["images"] not in pdf_cache:
-                            pdf_cache[pref["images"]] = render_pdf(cache[pref["images"]])
-                        pdf = pdf_cache[pref["images"]]
+                        key = (pref["images"], show_estimate_labels)
+                        if key not in pdf_cache:
+                            pdf_cache[key] = render_pdf(cache[key])
+                        pdf = pdf_cache[key]
                     except Exception:
                         job["warnings"].append(f"{channel}: PDF generation failed; recipe text remains available")
                     if pdf is not None and len(pdf) > cap["attachment_limit"]:
@@ -413,11 +416,11 @@ class DeliveryOperations:
                 if len(raw) > cap["message_limit"]:
                     # One email is one dispatch. Do not truncate recipes or
                     # silently fan out emails when the actual sender rejects it.
-                    raw = render_email(cache[False], **destination, subject="Ukesmeny " + str(menu.get("week")))
+                    raw = render_email(cache[(False, show_estimate_labels)], **destination, subject="Ukesmeny " + str(menu.get("week")))
                     job["warnings"].append("email: attachments omitted to fit native message limit")
                 if len(raw) > cap["message_limit"]:
                     job["warnings"].append("email: complete recipe text exceeds native message limit; email not dispatched")
-                    for text in split_text(cache[False]["html"], 100000):
+                    for text in split_text(cache[(False, show_estimate_labels)]["html"], 100000):
                         part(channel, "text_fallback", text)
                         job["parts"][-1]["status"] = "unavailable"
                 else:
