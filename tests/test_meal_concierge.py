@@ -2061,8 +2061,8 @@ class CoreTestsBase:
             store = StateStore(Path(temp), CONFIG)
             with store.locked() as state:
                 state["product_favorites"] = [{"product_id": "1", "product_name": "A", "quantity": 1}]
-            store.update_profile({"meals": {"dishes": 4, "maximum_active_minutes": 40, "target_active_minutes": [15, 40]}, "cuisine": {"base_style": "Nordic"}, "products": {"priority": ["quality", "price"]}})
-            store.reset_profile(["meals.dishes", "products.priority"])
+            store.update_profile({"meals": {"dinner_days": 4, "dishes": 4, "maximum_active_minutes": 40, "target_active_minutes": [15, 40]}, "cuisine": {"base_style": "Nordic"}, "products": {"priority": ["quality", "price"]}})
+            store.reset_profile(["meals.dinner_days", "meals.dishes", "products.priority"])
             state = store.read()
             self.assertEqual(state["profile"]["meals"]["dishes"], 7)
             self.assertEqual(state["profile"]["cuisine"]["base_style"], "Nordic")

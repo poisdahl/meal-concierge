@@ -46,6 +46,7 @@ from core import (
     delivery_candidate_digest,
     delivery_price_display,
     due_recurring,
+    finalize_recurring_profile_write,
     mask_email,
     masked_status,
     put_item,
@@ -765,7 +766,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "payment_choices": ["saved_card", "vipps"] if self.provider == "oda" else ["vipps" if self.provider == "meny" else "saved_card"],
             "weekly_menu": {
                 key: deepcopy(meals[key])
-                for key in ("dinner_days", "dishes", "batch_dishes", "salads", "cook_days", "eat_days")
+                for key in (
+                    "meal_mode", "recurring_batch_accepted", "dinner_days", "dishes",
+                    "batch_dishes", "salads", "cook_days", "eat_days",
+                )
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
             "web_search": deepcopy(profile["recipes"]["web_search"]),
@@ -839,7 +843,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     if (pending and pending.get("status") != "awaiting_confirmation") or any(state.get(key) for key in ("pending_cancellation", "pending_cart_change", "order_change")):
                         raise HouseholdError("finish the pending provider operation before changing checkout_payment")
                     state["checkout_payment"] = payment
-            profile = state["profile"]
+            previous_profile = state["profile"]
+            profile = deepcopy(previous_profile)
             meals = profile["meals"]
             for field in ("people", "portions"):
                 if field in changes:
@@ -871,6 +876,13 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     raise HouseholdError("web_search accepts enabled, broad and sites")
                 profile["recipes"]["web_search"].update(deepcopy(dict(settings)))
             validate_profile(profile)
+            finalize_recurring_profile_write(
+                previous_profile,
+                profile,
+                provided_meal_fields=frozenset(),
+                setup=True,
+            )
+            state["profile"] = profile
             setup = state["setup"]
             current = self._setup_summary(state)
             if setup["status"] == "complete" and canonical(current) == canonical(before):
