@@ -1126,26 +1126,36 @@ provider cart, delivery, order, checkout or payment state.
 The MCP menu tool returns one compact JSON text block without a duplicate
 structured result. For planning, the winner has `save_ref` and `selection`;
 requested `alternatives` appear in rank order, each with its own `save_ref`
-and `selection`. References retain the complete request and both digests, while
-selections retain every slot and reason. This separates the small save payload
-from the presentation evidence without discarding either. The full service/CLI
-handoffs are unchanged. For existing pre-save feedback and product preparation,
+and `selection`. References retain the complete request and both digests. Each
+MCP selection retains all dated meals, exact references, names, portions,
+bounded explanatory `reason_contributions`, total score, material soft relaxations, and
+batch allocation with complete server-bounded guidance when applicable. Recurring batch
+selections express all eating dates and portions through concise dated slots,
+exact source meals and their allocations. Alternative fresh
+selections retain their exact dated meals; batch alternatives retain all eating
+dates and portions plus exact source meals and batch allocation. Repeated reasons
+and guidance detail is bounded on alternatives and remains complete in the unchanged
+service/CLI result. Repeated candidate scope, content
+digests, hard-constraint passes, tie-break data and verbose reason detail remain
+in the unchanged service/CLI result. For existing pre-save feedback and product preparation,
 call menu `resolve_handoff` with the selected `save_ref` as `planner_ref`. This
 read-only action revalidates the reference and returns a complete
 `planner_handoff` for those tools without saving the menu. The caller need not
 reconstruct a handoff from the presentation fields; stale references are rejected.
-The MCP plan also retains candidate evaluations (including usage and blockers),
-all discovery source/unknown/rejected facts, cooking experiences and work limits,
-and exposes the effective preferences as `effective_profile` and
-`effective_feedback`. Nonempty discovery rejections use `rejected_groups`: each
-group contains shared `hard_constraints` and `detail_fields` (when present) plus
-`recipes` with every remaining summary field unchanged. Groups are consecutive;
-flatten them in order and merge each group's shared fields into each recipe to
-recover the exact original rejection list. Empty `rejected` lists stay empty.
-It omits the repeated canonical input/history journal and
-standalone selection views. When no handoff is available, any existing request and all
-issues remain in the plan. Core RPC and CLI results retain their full existing
-shape; other MCP menu actions retain their result fields.
+The MCP plan retains bounded issues (adding the requested targets to otherwise-generic
+strict infeasibility), a count and bounded examples of material unknown candidates, candidate pass/unknown/fail
+counts, non-pass blockers and selected-candidate advisories, discovery source status and work,
+summarized rejection counts, and planner explored-state/limit figures. It omits
+the repeated resolved request, canonical input/history, effective profile and
+feedback, complete candidate evaluations, cooking-experience journal and
+standalone full selections. `no_plan` and `needs_input` therefore remain
+actionable without echoing those large structures. Core RPC and CLI results
+retain their full existing shape; other MCP menu actions retain their result
+fields. If an otherwise valid explicit request would make its directly usable
+action references exceed the 45,000-character MCP wire budget, MCP returns a
+compact `needs_input` issue instead of a response that the client would spill;
+reduce alternatives or nonessential candidate facts/candidates, or omit explicit
+candidates to use bounded automatic discovery. CLI/service planning remains unchanged.
 
 To favorite one unambiguously selected unsaved discovery, Hermes first saves
 its exact `discovery_ref` to the resolved destination with a stable save

@@ -31,7 +31,7 @@ MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 
 def synthetic_recipe(index):
     return {
-        "name": f"Synthetic dinner {index}", "portions": 2,
+        "name": f"Syntetisk blåbærmiddag {index}", "portions": 2,
         "ingredients": [{"raw": f"200 g gulrot {index}", "item": f"gulrot {index}",
                          "quantity": 200, "unit": "g", "scalable": True}],
         "steps": ["Prepare this synthetic ingredient carefully. " * 50],
@@ -40,6 +40,19 @@ def synthetic_recipe(index):
                    "external_id": str(index), "relationship": "user_supplied"},
         "rights": {"storage": "full", "credit": "Synthetic test content"},
     }
+
+
+def blocker_recipe(index):
+    recipe = synthetic_recipe(100 + index)
+    recipe["name"] = f"Syntetisk melkedessert {index}"
+    recipe["tags"] = ["dessert"]
+    recipe["ingredients"] = [
+        {"raw": f"10 g melkekomponent {index}-{item}",
+         "item": f"melkekomponent {index}-{item}", "quantity": 10,
+         "unit": "g", "scalable": True}
+        for item in range(40)
+    ]
+    return recipe
 
 
 def serve(root, empty):
@@ -72,6 +85,8 @@ def serve(root, empty):
     manifest_path = root / "manifest.json"
     if not manifest_path.exists():
         origins = {}
+        planner_candidates = []
+        blocker_candidates = []
         if not empty:
             for index in range(1, 8):
                 if index % 2:
@@ -80,21 +95,56 @@ def serve(root, empty):
                     stored = app.recipes.import_pack_record(synthetic_recipe(index), pack_id="synthetic-mc41",
                         recipe_id=str(index), version="1")["recipe"]
                 origins[stored["id"]] = stored["entry_origin"]
+                planner_candidates.append({"recipe_ref": {"id": stored["id"], "revision": stored["revision"]}})
             # Drafts make the compact catalog genuinely span multiple pages.
             for index in range(8, 30):
-                app.recipes.save(synthetic_recipe(index), status="draft", idempotency_key=f"seed-{index}")
-        manifest_path.write_text(json.dumps({"origins": origins}))
+                stored = app.recipes.save(synthetic_recipe(index), status="draft", idempotency_key=f"seed-{index}")
+                if index < 10:
+                    planner_candidates.append({"recipe_ref": {"id": stored["id"], "revision": stored["revision"]}})
+            for index in range(12):
+                stored = app.recipes.save(blocker_recipe(index), idempotency_key=f"blocker-{index}")
+                blocker_candidates.append({"recipe_ref": {
+                    "id": stored["id"], "revision": stored["revision"]}})
+        manifest_path.write_text(json.dumps({
+            "origins": origins, "planner_candidates": planner_candidates,
+            "blocker_candidates": blocker_candidates,
+        }))
     Server(root / "s.sock", os.getgid(), os.getuid(), app).run()
+
+
+def relay_mcp(root):
+    """Record and forward the real newline-framed MCP server stdout."""
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-B", str(SOURCE / "mcp_server.py")],
+        stdin=sys.stdin.buffer, stdout=subprocess.PIPE, stderr=sys.stderr.buffer,
+        env=os.environ.copy(),
+    )
+    try:
+        with (root / "mcp-stdout.jsonl").open("ab", buffering=0) as log:
+            while line := process.stdout.readline():
+                log.write(line)
+                sys.stdout.buffer.write(line)
+                sys.stdout.buffer.flush()
+        return process.wait()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
 class MenuProjectionTests(unittest.TestCase):
-    def test_rejection_groups_preserve_order_missing_metadata_and_input(self):
+    def test_projection_summarizes_rejections_and_preserves_input(self):
         spec = importlib.util.spec_from_file_location("menu_projection_test", SOURCE / "mcp_server.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         first = {"name": "Draft", "recipe_ref": {"id": "one", "revision": 1},
-                 "hard_constraints": {"status": "fail", "reasons": ["draft"]},
+                 "hard_constraints": {"status": "fail", "reasons": [
+                     {"code": "not_materializable", "status": "fail", "detail": "draft"}]},
                  "detail_fields": {"steps": "not_loaded"}, "source": {"author": None}}
         second = {**first, "name": "Other", "recipe_ref": {"id": "two", "revision": 2}}
         missing = {"name": "No metadata", "source": {"author": None}}
@@ -103,15 +153,161 @@ class MenuProjectionTests(unittest.TestCase):
         original = {"status": "no_plan", "discovery": {"rejected": rejected, "unknown": ["kept"]}}
         before = deepcopy(original)
         projected = module._menu_plan_projection(original)
-        groups = projected["discovery"]["rejected_groups"]
-        self.assertEqual([len(group["recipes"]) for group in groups], [2, 1, 1, 1])
-        self.assertEqual(groups[0]["hard_constraints"], first["hard_constraints"])
-        self.assertEqual(groups[0]["detail_fields"], first["detail_fields"])
-        reconstructed = [{**recipe, **{key: value for key, value in group.items() if key != "recipes"}}
-                         for group in groups for recipe in group["recipes"]]
-        self.assertEqual(reconstructed, rejected)
-        self.assertEqual(projected["discovery"]["unknown"], ["kept"])
+        self.assertEqual(projected["discovery"]["rejected_summary"], {
+            "count": 5,
+            "reasons": [{"code": "not_materializable", "status": "fail", "count": 3}],
+        })
+        self.assertEqual(projected["discovery"]["unknown_summary"], {
+            "count": 1, "examples": [],
+        })
+        self.assertNotIn("rejected", projected["discovery"])
         self.assertEqual(original, before)
+
+    def test_projection_bounds_unknown_discovery_examples(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_unknown_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        unknown = [{
+            "name": (f'Unknown recipe {index} "\\' * 20),
+            "discovery_ref": {"source": "synthetic", "id": f"unknown-{index}"},
+            "hard_constraints": {"status": "unknown", "reasons": [{
+                "code": "dietary_assessment", "status": "unknown",
+                "detail": {"term": (f'ingredient {index} "\\' * 20),
+                           "condition": "metadata_missing"},
+            }]},
+        } for index in range(80)]
+        projected = module._menu_plan_projection({
+            "status": "no_plan", "discovery": {"unknown": unknown, "rejected": []},
+        })
+        summary = projected["discovery"]["unknown_summary"]
+        self.assertEqual((summary["count"], len(summary["examples"]), summary["omitted"]),
+                         (80, 6, 74))
+        text = json.dumps({"plan": projected}, ensure_ascii=False, separators=(",", ":"))
+        wire = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}], "isError": False,
+        }}, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(wire), 40000)
+
+    def test_projection_preserves_distinct_warnings_for_winner_and_alternative(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_warning_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        first = {"recipe_ref": {"id": "one", "revision": 1}}
+        second = {"recipe_ref": {"id": "two", "revision": 1}}
+        dietary = lambda term: {
+            "code": "dietary_assessment", "status": "advisory",
+            "detail": {"kind": "sensitivity", "term": term, "condition": "unknown"},
+        }
+        plan = {
+            "status": "planned",
+            "selection": {"slots": [{"reference": first}]},
+            "alternatives": [{"selection": {"slots": [{"reference": second}]}}],
+            "candidate_evaluations": [
+                {"reference": first, "hard_constraints": {
+                    "status": "pass", "reasons": [dietary("melk"), dietary("nøtter")] }},
+                {"reference": second, "hard_constraints": {
+                    "status": "pass", "reasons": [dietary("selleri")] }},
+            ],
+        }
+        projected = module._menu_plan_projection(plan)
+        warnings = projected["candidate_summary"]["warnings"]
+        self.assertEqual({json.dumps(item["reference"], sort_keys=True) for item in warnings},
+                         {json.dumps(first, sort_keys=True), json.dumps(second, sort_keys=True)})
+        first_reason = next(item for item in warnings if item["reference"] == first)["reasons"][0]
+        self.assertEqual(first_reason["count"], 2)
+        self.assertEqual({detail["term"] for detail in first_reason["details"]}, {"melk", "nøtter"})
+
+    def test_projection_preserves_warning_for_recurring_source(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_batch_warning_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        reference = {"recipe_ref": {"id": "one", "revision": 1}}
+        plan = {
+            "status": "planned",
+            "selection": {
+                "slots": [{"date": "2026-09-21", "source_date": "2026-09-21", "portions": 2}],
+                "source_slots": [{"date": "2026-09-21", "reference": reference}],
+            },
+            "candidate_evaluations": [{
+                "reference": reference,
+                "hard_constraints": {"status": "pass", "reasons": [{
+                    "code": "dietary_assessment", "status": "advisory",
+                    "detail": {"kind": "sensitivity", "term": "selleri", "condition": "unknown"},
+                }]},
+            }],
+        }
+        warnings = module._menu_plan_projection(plan)["candidate_summary"]["warnings"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("selleri", json.dumps(warnings, ensure_ascii=False))
+
+    def test_projection_groups_fifty_reasons_across_three_seven_slot_selections(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_budget_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        request = {"week": "2026-W39", "candidates": [
+            {"recipe_ref": {"id": f"rec_{index:024x}", "revision": 1}}
+            for index in range(7)
+        ]}
+        reasons = [
+            {"code": "dietary_preference", "weight": -30,
+             "detail": {"kind": "preference",
+                        "term": (f'preferanseingrediens {index} "\\' * 12)[:200],
+                        "condition": "preference_deviation"}}
+            for index in range(50)
+        ]
+        def selection(rank):
+            return {
+                "selection_digest": f"digest-{rank}", "total_score": -10_500,
+                "soft_relaxations": [],
+                "slots": [{
+                    "date": f"2026-09-{21 + day}", "reference": request["candidates"][day],
+                    "recipe_key": f"recipe-{day}", "name": f"Middag {day}", "portions": 2,
+                    "reason_contributions": deepcopy(reasons),
+                } for day in range(7)],
+                "plan_reason_contributions": [],
+            }
+        selections = [selection(index) for index in range(3)]
+        def save_ref(index):
+            return {"planner_version": "weekly-menu-v4", "input_digest": "a" * 64,
+                    "selection_digest": "b" * 63 + str(index), "request": request}
+        plan = {
+            "status": "planned", "save_ref": save_ref(0), "selection": selections[0],
+            "alternatives": [{"save_ref": save_ref(index), "selection": selections[index]}
+                             for index in range(1, 3)],
+        }
+        projected = module._menu_plan_projection(plan)
+        reason = projected["selection"]["slots"][0]["reason_contributions"][0]
+        self.assertEqual((reason["count"], len(reason["details"]), reason["omitted_details"]),
+                         (50, 3, 47))
+        text = json.dumps({"plan": projected}, ensure_ascii=False, separators=(",", ":"))
+        wire = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}], "isError": False,
+        }}, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(wire), 40000)
+
+    def test_projection_compacts_escape_heavy_strict_issue(self):
+        spec = importlib.util.spec_from_file_location("menu_projection_issue_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        tokens = [(f'vegetable {index} "\\' * 8)[:80] for index in range(350)]
+        plan = {
+            "status": "needs_input",
+            "request": {"strict_targets": ["minimum_vegetable_types"]},
+            "issues": [{
+                "target": "minimum_vegetable_types", "status": "unknown",
+                "detail": {"minimum": 400, "observed": tokens},
+            }],
+        }
+        projected = module._menu_plan_projection(plan)
+        issue = projected["issues"][0]
+        self.assertEqual((issue["target"], issue["status"]),
+                         ("minimum_vegetable_types", "unknown"))
+        self.assertIn("omitted_items", json.dumps(issue))
+        text = json.dumps({"plan": projected}, ensure_ascii=False, separators=(",", ":"))
+        wire = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [{"type": "text", "text": text}], "isError": False,
+        }}, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(wire), 40000)
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
@@ -166,7 +362,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
         params = StdioServerParameters(command=sys.executable,
-            args=["-I", "-B", str(SOURCE / "mcp_server.py")], cwd=str(self.root),
+            args=["-I", "-B", str(HERE), "--relay-mcp", str(self.root)], cwd=str(self.root),
             env={"MEAL_CONCIERGE_SOCKET": str(self.sock), "HOME": str(self.root), "TMPDIR": str(self.root)})
         with (self.root / "bridge.log").open("a") as log:
             async with stdio_client(params, errlog=log) as (read, write):
@@ -186,6 +382,17 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(text, dict)
             self.assertEqual(result.content[0].text, json.dumps(text, ensure_ascii=False, separators=(",", ":")))
             self.last_menu_text = result.content[0].text
+            lines = (self.root / "mcp-stdout.jsonl").read_text().splitlines()
+            self.last_menu_wire = next(
+                line for line in reversed(lines)
+                if (raw := json.loads(line)).get("result", {}).get("content", [{}])[0].get("text")
+                == result.content[0].text
+            )
+            raw = json.loads(self.last_menu_wire)
+            self.assertEqual(raw["result"]["content"][0]["text"], result.content[0].text)
+            if isinstance(text.get("plan"), dict) and "selection" in text["plan"]:
+                self.assertIn('\\"plan\\"', self.last_menu_wire)
+                self.assertIn("blåbærmiddag", self.last_menu_wire)
         else:
             self.assertIsInstance(result.structured_content, dict)
             self.assertEqual(text, result.structured_content)
@@ -220,6 +427,68 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def week():
         future = datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=7)
         return future.strftime("%G-W%V")
+
+    def assert_compact_selection(self, compact, full, *, alternative=False):
+        def aggregate(reasons):
+            result = {}
+            for reason in reasons:
+                item = result.setdefault(reason["code"], {"weight": 0, "count": 0})
+                item["weight"] += reason["weight"]
+                item["count"] += 1
+            return result
+
+        for field in ("selection_digest", "total_score", "soft_relaxations"):
+            self.assertEqual(compact[field], full[field])
+        slot_fields = ("date", "reference", "recipe_key", "name", "portions",
+                       "source_date", "kind", "new_shopping_requirements")
+        self.assertEqual(
+            [{key: slot[key] for key in slot_fields if key in slot}
+             for slot in compact["slots"]],
+            [{key: slot[key] for key in slot_fields if key in slot}
+             for slot in full["slots"]],
+        )
+        reason_slots = zip(compact["slots"], full["slots"], strict=True)
+        if "source_slots" in full:
+            self.assertTrue(all("reason_contributions" not in slot for slot in compact["slots"]))
+            reason_slots = zip(compact["source_slots"], full["source_slots"], strict=True)
+        for compact_slot, full_slot in reason_slots:
+            self.assertEqual(
+                {reason["code"]: {
+                    "weight": reason["weight"], "count": reason.get("count", 1),
+                } for reason in compact_slot["reason_contributions"]},
+                aggregate(full_slot["reason_contributions"]),
+            )
+            if alternative:
+                self.assertTrue(all(
+                    "detail" not in reason and "details" not in reason
+                    for reason in compact_slot["reason_contributions"]
+                ))
+        self.assertEqual(
+            {reason["code"]: {
+                "weight": reason["weight"], "count": reason.get("count", 1),
+            } for reason in compact.get("plan_reason_contributions", [])},
+            aggregate(full.get("plan_reason_contributions", [])),
+        )
+        if "source_slots" in full:
+            self.assertEqual(
+                [{key: slot[key] for key in ("date", "reference", "recipe_key", "name", "portions")}
+                 for slot in compact["source_slots"]],
+                [{key: slot[key] for key in ("date", "reference", "recipe_key", "name", "portions")}
+                 for slot in full["source_slots"]],
+            )
+        if "batches" in full:
+            batch_fields = ("source_date", "eating_dates", "batch", "prepared_portions",
+                            "consumed_at_source", "recipe_key", "name")
+            self.assertEqual(
+                [{key: batch[key] for key in batch_fields if key in batch}
+                 for batch in compact["batches"]],
+                [{key: batch[key] for key in batch_fields if key in batch}
+                 for batch in full["batches"]],
+            )
+            for compact_batch, full_batch in zip(compact["batches"], full["batches"], strict=True):
+                self.assertEqual(compact_batch["guidance"], {
+                    key: value for key, value in full_batch["guidance"].items()
+                })
 
     async def test_compact_pages_and_no_ref_week_save_cli_restart(self):
         before = self.bank_counts()
@@ -265,7 +534,16 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             via_cli = (await self.cli({"operation": "menu", "action": "plan", "planner_input": {"week": self.week()}}))["plan"]
             warm_seconds = time.monotonic() - started
             self.assertEqual(via_cli["selection_digest"], planned["selection_digest"])
-            self.assertEqual(via_cli["save_handoff"], {**planned["save_ref"], "selection": planned["selection"]})
+            self.assertEqual(
+                {key: via_cli["save_handoff"][key] for key in planned["save_ref"]},
+                planned["save_ref"],
+            )
+            self.assertEqual(
+                [(slot["date"], slot["reference"], slot["name"], slot["portions"])
+                 for slot in via_cli["selection"]["slots"]],
+                [(slot["date"], slot["reference"], slot["name"], slot["portions"])
+                 for slot in planned["selection"]["slots"]],
+            )
             self.assertLess(len(json.dumps(planned["save_ref"])), len(json.dumps(via_cli["save_handoff"])) / 4)
             self.assertEqual(planned["alternatives"], [])
             print(json.dumps({"mc41_runtime": {"summary_bytes": summary_bytes, "full_bytes": full_bytes,
@@ -296,42 +574,86 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await self.call(client, "setup", action="apply", keep_current=True)
             request = {"week": self.week(), "alternatives": 3}
             planned = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
-            # Regression: 22 draft rejections previously pushed three handoffs to 68,840 chars.
-            # The native acceptance client truncates each whole result at 64,000.
-            self.assertLess(len(self.last_menu_text), 64000)
-            print(json.dumps({"mc41_mcp_three_alternatives_chars": len(self.last_menu_text)}), flush=True)
+            self.assertLess(len(self.last_menu_wire), 40000)
+            print(json.dumps({"mc41_mcp_three_alternatives_wire_chars": len(self.last_menu_wire)}), flush=True)
             full = (await self.cli({"operation": "menu", "action": "plan", "planner_input": request}))["plan"]
             choices = [{"save_ref": planned["save_ref"], "selection": planned["selection"]}, *planned["alternatives"]]
-            handoffs = [{**choice["save_ref"], "selection": choice["selection"]} for choice in choices]
-            self.assertEqual(len(handoffs), 3)
-            self.assertEqual(handoffs, full["save_handoffs"])
+            self.assertEqual(len(choices), 3)
+            self.assertEqual(
+                [choice["save_ref"] for choice in choices],
+                [{key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest", "request")}
+                 for handoff in full["save_handoffs"]],
+            )
+            for index, (choice, full_selection) in enumerate(
+                    zip(choices, full["selections"], strict=True)):
+                self.assert_compact_selection(
+                    choice["selection"], full_selection, alternative=index > 0)
             self.assertEqual(full["selection"], full["selections"][0])
             self.assertEqual(full["request"], full["canonical_input"]["request"])
-            self.assertEqual(planned["effective_profile"], full["canonical_input"]["profile"])
-            self.assertEqual(planned["effective_feedback"], full["canonical_input"]["feedback"])
-            for field in ("candidate_evaluations", "work_limits", "input_digest", "selection_digest",
-                          "planner_version", "explored_states", "cooking_experiences"):
+            for field in ("input_digest", "selection_digest", "planner_version", "explored_states"):
                 self.assertEqual(planned[field], full[field])
             for field in ("sources", "unknown"):
-                self.assertEqual(planned["discovery"][field], full["discovery"][field])
-            restored_rejections = []
-            for group in planned["discovery"]["rejected_groups"]:
-                metadata = {key: value for key, value in group.items() if key != "recipes"}
-                restored_rejections.extend({**recipe, **metadata} for recipe in group["recipes"])
-            self.assertEqual(restored_rejections, full["discovery"]["rejected"])
-            self.assertEqual(len(restored_rejections), 22)
-            self.assertTrue({"canonical_input", "selections", "save_handoff", "save_handoffs", "request"}.isdisjoint(planned))
+                if field == "sources":
+                    self.assertEqual(planned["discovery"][field], full["discovery"][field])
+            self.assertEqual(
+                planned["discovery"]["rejected_summary"]["count"],
+                len(full["discovery"]["rejected"]),
+            )
+            self.assertEqual(planned["candidate_summary"]["counts"], {"pass": 7, "unknown": 0, "fail": 0})
+            self.assertTrue({
+                "canonical_input", "candidate_evaluations", "cooking_experiences", "effective_profile",
+                "effective_feedback", "request", "selections", "save_handoff", "save_handoffs", "work_limits",
+            }.isdisjoint(planned))
 
-            # A failed plan has no handoff carrying its request or explanation.
-            insufficient = {"week": self.week(), "candidates": full["request"]["candidates"][:1]}
+            # Failed outcomes retain concise blockers without echoing the full request/evaluations.
+            exact = json.loads((self.root / "manifest.json").read_text())["planner_candidates"]
+            insufficient = {"week": self.week(), "candidates": [*exact[:6], *exact[7:9]]}
             no_plan = (await self.call(client, "menu", action="plan", planner_input=insufficient))["plan"]
+            self.assertLess(len(self.last_menu_wire), 40000)
             no_plan_cli = (await self.cli({"operation": "menu", "action": "plan", "planner_input": insufficient}))["plan"]
             self.assertEqual(no_plan["status"], "no_plan")
-            for field in ("request", "issues", "candidate_evaluations"):
-                self.assertEqual(no_plan[field], no_plan_cli[field])
+            self.assertEqual(no_plan["issues"], no_plan_cli["issues"])
+            self.assertEqual(no_plan["issues"][0]["code"], "insufficient_hard_constraint_candidates")
+            self.assertEqual(no_plan["candidate_summary"]["counts"], {"pass": 6, "unknown": 0, "fail": 2})
+            self.assertEqual(len(no_plan["candidate_summary"]["blockers"]), 2)
+            self.assertTrue({"request", "candidate_evaluations"}.isdisjoint(no_plan))
             self.assertNotIn("save_ref", no_plan)
 
-            await self.call(client, "profile", action="update", changes={"meals": {"portions": 3}})
+            await self.call(client, "profile", action="update",
+                            changes={"diet": {"minimum_fish_portions": 1}})
+            needs_input_request = {
+                "week": self.week(), "candidates": full["request"]["candidates"][:7],
+                "strict_targets": ["minimum_fish_portions"],
+            }
+            needs_input = (await self.call(
+                client, "menu", action="plan", planner_input=needs_input_request))["plan"]
+            needs_input_cli = (await self.cli({
+                "operation": "menu", "action": "plan",
+                "planner_input": needs_input_request,
+            }))["plan"]
+            self.assertEqual(needs_input["status"], "needs_input")
+            self.assertEqual(needs_input["issues"], needs_input_cli["issues"])
+            self.assertEqual(needs_input["issues"][0]["target"], "minimum_fish_portions")
+            self.assertEqual(needs_input["candidate_summary"]["counts"],
+                             {"pass": 7, "unknown": 0, "fail": 0})
+            self.assertLess(len(self.last_menu_wire), 40000)
+
+            complete_without_fish = [{
+                **candidate,
+                "facts": {"dietary_facets": {
+                    "source": "explicit", "values": [], "complete": True,
+                    "vegetable_types": [],
+                }},
+            } for candidate in full["request"]["candidates"][:7]]
+            strict_no_plan = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "candidates": complete_without_fish,
+                "strict_targets": ["minimum_fish_portions"],
+            }))["plan"]
+            self.assertEqual(strict_no_plan["status"], "no_plan")
+            self.assertEqual(strict_no_plan["issues"][0]["code"], "strict_targets_infeasible")
+            self.assertEqual(strict_no_plan["issues"][0]["targets"], ["minimum_fish_portions"])
+            self.assertLess(len(self.last_menu_wire), 40000)
+
             stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_ref": choices[1]["save_ref"]})
             self.assertFalse(stale.is_error, stale)
             self.assertEqual(json.loads(stale.content[0].text)["status"], "rejected")
@@ -344,6 +666,182 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.call(client, "menu"))["menu"], saved)
             self.assertEqual(saved["planner_selection"]["selection_digest"], alternative["selection_digest"])
 
+    async def test_nine_exact_candidates_fit_wire_and_save_after_restart(self):
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        self.assertEqual(len(manifest["planner_candidates"]), 9)
+        request = {"week": self.week(), "candidates": manifest["planner_candidates"]}
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            planned = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
+            self.assertEqual(planned["status"], "planned")
+            self.assertEqual(planned["explored_states"], 5040)
+            self.assertEqual(set(planned["save_ref"]), {
+                "planner_version", "input_digest", "selection_digest", "request"})
+            self.assertEqual(planned["candidate_summary"]["counts"], {"pass": 7, "unknown": 0, "fail": 2})
+            self.assertEqual(len(planned["candidate_summary"]["blockers"]), 2)
+            self.assertEqual(len(planned["selection"]["slots"]), 7)
+            self.assertTrue(all(slot["reason_contributions"] for slot in planned["selection"]["slots"]))
+            self.assertTrue(all("detail" in reason or "details" in reason
+                                for slot in planned["selection"]["slots"]
+                                for reason in slot["reason_contributions"]))
+            self.assertLess(len(self.last_menu_wire), 40000)
+            print(json.dumps({"mc41_mcp_nine_candidates_wire_chars": len(self.last_menu_wire)}), flush=True)
+            full = (await self.cli({"operation": "menu", "action": "plan",
+                                    "planner_input": request}))["plan"]
+            self.assertEqual(len(full["candidate_evaluations"]), 9)
+            self.assertIn("canonical_input", full)
+            self.assertEqual(
+                {key: full["save_handoff"][key] for key in planned["save_ref"]},
+                planned["save_ref"],
+            )
+            saved = (await self.call(client, "menu", action="save",
+                                     planner_ref=planned["save_ref"]))["menu"]
+        self.stop_service()
+        await self.start_service()
+        async with self.client() as client:
+            self.assertEqual((await self.call(client, "menu"))["menu"], saved)
+            replay = await self.call(client, "menu", action="save", planner_ref=planned["save_ref"])
+            self.assertTrue(replay["idempotent"])
+
+    async def test_batch_plan_fits_wire_and_saves(self):
+        all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        meals = {
+            "meal_mode": "batch", "dinner_days": 7, "dishes": 3, "batch_dishes": 3,
+            "portions": 2, "prepared_portion_range": [4, 8],
+            "cook_days": ["Monday", "Wednesday", "Friday"], "eat_days": all_days,
+            "recurring_batch_accepted": True,
+        }
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            await self.call(client, "profile", action="update", changes={"meals": meals})
+            manifest = json.loads((self.root / "manifest.json").read_text())
+            guidance = {
+                "basis": "synthetic explicit basis for planned leftovers",
+                "suitability": "suitable",
+                "storage": ("synthetic storage context " + "s" * 90
+                            + "; discard rather than serve after the stated interval"),
+                "reheating": "synthetic reheating guidance for the chosen dish",
+            }
+            candidates = [
+                {**candidate, "facts": {"batch_guidance": guidance}}
+                for candidate in manifest["planner_candidates"][:3]
+            ]
+            request = {"week": self.week(), "candidates": candidates, "alternatives": 3}
+            planned = (await self.call(client, "menu", action="plan",
+                                       planner_input=request))["plan"]
+            self.assertEqual(planned["status"], "planned")
+            self.assertEqual(len(planned["selection"]["slots"]), 7)
+            self.assertEqual(len(planned["selection"]["source_slots"]), 3)
+            self.assertEqual(len(planned["selection"]["batches"]), 3)
+            self.assertEqual(len(planned["alternatives"]), 2)
+            self.assertLess(len(self.last_menu_wire), 45000)
+            print(json.dumps({"mc41_mcp_batch_wire_chars": len(self.last_menu_wire)}), flush=True)
+            full = (await self.cli({"operation": "menu", "action": "plan",
+                                    "planner_input": request}))["plan"]
+            choices = [{"save_ref": planned["save_ref"], "selection": planned["selection"]},
+                       *planned["alternatives"]]
+            self.assertEqual(
+                [choice["save_ref"] for choice in choices],
+                [{key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest", "request")}
+                 for handoff in full["save_handoffs"]],
+            )
+            for index, (choice, full_selection) in enumerate(
+                    zip(choices, full["selections"], strict=True)):
+                self.assert_compact_selection(
+                    choice["selection"], full_selection, alternative=index > 0)
+            self.assertEqual(planned["selection"]["batches"][0]["guidance"], {
+                key: value for key, value in guidance.items()
+            })
+            self.assertIn("discard rather than serve",
+                          planned["selection"]["batches"][0]["guidance"]["storage"])
+            saved = (await self.call(client, "menu", action="save",
+                                     planner_ref=choices[1]["save_ref"]))["menu"]
+            self.assertEqual(len(saved["slots"]), 7)
+            self.assertEqual(len(saved["batches"]), 3)
+            self.assertEqual(saved["planner_selection"]["selection_digest"],
+                             choices[1]["save_ref"]["selection_digest"])
+
+    async def test_oversized_exact_action_refs_return_compact_needs_input(self):
+        all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        meals = {
+            "meal_mode": "batch", "dinner_days": 7, "dishes": 3, "batch_dishes": 3,
+            "portions": 2, "prepared_portion_range": [4, 8],
+            "cook_days": ["Monday", "Wednesday", "Friday"], "eat_days": all_days,
+            "recurring_batch_accepted": True,
+        }
+        guidance = {
+            "basis": "synthetic explicit basis " + "b" * 970,
+            "suitability": "suitable",
+            "storage": "synthetic storage guidance " + "s" * 970,
+            "reheating": "synthetic reheating guidance " + "r" * 968,
+        }
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            await self.call(client, "profile", action="update", changes={"meals": meals})
+            exact = []
+            for index in range(200, 212):
+                saved = (await self.cli({
+                    "operation": "recipes", "action": "save",
+                    "recipe": synthetic_recipe(index),
+                    "idempotency_key": f"oversized-{index}",
+                }))["recipe"]
+                exact.append({"recipe_ref": {
+                    "id": saved["id"], "revision": saved["revision"],
+                }})
+            candidates = [
+                {**candidate, "facts": {"batch_guidance": guidance}}
+                for candidate in exact
+            ]
+            planned = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "candidates": candidates, "alternatives": 3,
+            }))["plan"]
+            self.assertEqual(planned["status"], "needs_input")
+            self.assertEqual(planned["issues"][0]["code"], "mcp_action_response_too_large")
+            self.assertGreater(planned["issues"][0]["projected_wire_chars"], 50000)
+            self.assertEqual(planned["issues"][0]["maximum_wire_chars"], 45000)
+            self.assertNotIn("save_ref", planned)
+            self.assertLess(len(self.last_menu_wire), 4000)
+
+    async def test_selected_dietary_warnings_remain_specific_and_compact(self):
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            await self.call(client, "profile", action="update", changes={
+                "diet": {"rules": [{"kind": "preference", "term": "gulrot"}]},
+            })
+            planned = (await self.call(client, "menu", action="plan",
+                                       planner_input={"week": self.week()}))["plan"]
+            self.assertEqual(planned["status"], "planned")
+            warnings = planned["candidate_summary"]["warnings"]
+            self.assertEqual(len(warnings), 7)
+            self.assertTrue(all(any(reason["code"] == "dietary_assessment"
+                                    for reason in warning["reasons"])
+                                for warning in warnings))
+            self.assertIn("gulrot", json.dumps(warnings, ensure_ascii=False))
+            self.assertTrue(all(any(reason["code"] == "dietary_preference"
+                                    and "gulrot" in json.dumps(reason, ensure_ascii=False)
+                                    for reason in slot["reason_contributions"])
+                                for slot in planned["selection"]["slots"]))
+            self.assertLess(len(self.last_menu_wire), 40000)
+
+    async def test_blocker_heavy_no_plan_keeps_wire_bounded(self):
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        self.assertEqual(len(manifest["blocker_candidates"]), 12)
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            await self.call(client, "profile", action="update", changes={
+                "diet": {"rules": [{"kind": "allergy", "term": "melk"}]},
+            })
+            planned = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "candidates": manifest["blocker_candidates"],
+            }))["plan"]
+            self.assertEqual(planned["status"], "no_plan")
+            self.assertEqual(planned["candidate_summary"]["counts"],
+                             {"pass": 0, "unknown": 0, "fail": 12})
+            self.assertEqual(len(planned["candidate_summary"]["blockers"]), 12)
+            self.assertIn("melk", json.dumps(planned["candidate_summary"], ensure_ascii=False))
+            self.assertLess(len(self.last_menu_wire), 40000)
+            print(json.dumps({"mc41_mcp_blocker_no_plan_wire_chars": len(self.last_menu_wire)}), flush=True)
+
     async def test_resolved_handoff_supports_unsaved_products_and_feedback(self):
         async with self.client() as client:
             await self.call(client, "setup", action="apply", keep_current=True)
@@ -351,7 +849,14 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                                        planner_input={"week": self.week()}))["plan"]
             handoff = (await self.call(client, "menu", action="resolve_handoff",
                                       planner_ref=planned["save_ref"]))["planner_handoff"]
-            self.assertEqual(handoff, {**planned["save_ref"], "selection": planned["selection"]})
+            self.assertEqual(
+                {key: handoff[key] for key in planned["save_ref"]}, planned["save_ref"])
+            self.assertEqual(
+                [(slot["date"], slot["reference"], slot["name"], slot["portions"])
+                 for slot in handoff["selection"]["slots"]],
+                [(slot["date"], slot["reference"], slot["name"], slot["portions"])
+                 for slot in planned["selection"]["slots"]],
+            )
             self.assertIsNone((await self.call(client, "menu"))["menu"])
             # Explicit synthetic pantry coverage avoids any product-provider effects.
             decisions = [{"source": {"collection": "dishes", "recipe_index": i,
@@ -396,7 +901,9 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--serve":
+    if len(sys.argv) > 1 and sys.argv[1] == "--relay-mcp":
+        raise SystemExit(relay_mcp(Path(sys.argv[2])))
+    elif len(sys.argv) > 1 and sys.argv[1] == "--serve":
         serve(Path(sys.argv[2]), "--empty" in sys.argv[3:])
     else:
         unittest.main()

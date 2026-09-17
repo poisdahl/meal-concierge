@@ -519,37 +519,415 @@ def meal_concierge_migration(action: Literal["prepare", "inspect", "execute"] = 
     return rpc("migration", action=action, source_library_id=source_library_id, destination_library_id=destination_library_id, source_refs=source_refs, query=query, filters=filters, metadata_options=metadata_options, plan_id=plan_id, confirmation=confirmation)
 
 
+def _compact_plan_reason(reason: Any) -> dict[str, Any] | None:
+    """Return the stable, concise part of a planner scoring reason."""
+    if not isinstance(reason, dict) or not isinstance(reason.get("code"), str):
+        return None
+    compact = {"code": reason["code"]}
+    if isinstance(reason.get("weight"), int) and not isinstance(reason.get("weight"), bool):
+        compact["weight"] = reason["weight"]
+    if "detail" in reason:
+        compact["detail"] = _concise_detail(reason["detail"])
+    return compact
+
+
+def _compact_plan_reasons(reasons: Any, *, details: bool = True) -> list[dict[str, Any]]:
+    """Aggregate repeated scoring codes while retaining bounded examples."""
+    if not isinstance(reasons, list):
+        return []
+    groups: dict[str, dict[str, Any]] = {}
+    signatures: dict[str, set[str]] = {}
+    distinct: dict[str, int] = {}
+    for reason in reasons:
+        compact = _compact_plan_reason(reason)
+        if compact is None:
+            continue
+        code = compact["code"]
+        group = groups.setdefault(code, {"code": code, "weight": 0, "count": 0})
+        group["weight"] += compact.get("weight", 0)
+        group["count"] += 1
+        if details and "detail" in compact:
+            signature = json.dumps(
+                compact["detail"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            seen = signatures.setdefault(code, set())
+            if signature not in seen:
+                seen.add(signature)
+                distinct[code] = distinct.get(code, 0) + 1
+                group.setdefault("details", [])
+                if len(group["details"]) < 3:
+                    group["details"].append(compact["detail"])
+    for code, group in groups.items():
+        details = group.pop("details", [])
+        if group["count"] == 1 and details:
+            group["detail"] = details[0]
+        elif details:
+            group["details"] = details
+        omitted = distinct.get(code, 0) - len(details)
+        if omitted > 0:
+            group["omitted_details"] = omitted
+        if group["count"] == 1:
+            group.pop("count")
+    return list(groups.values())
+
+
+def _bounded_detail(value: Any, depth: int = 0) -> Any:
+    """Bound trusted diagnostic values while preserving their useful leading facts."""
+    if isinstance(value, str):
+        if len(value) <= 80:
+            return value
+        return {
+            "excerpt": value[:79] + "…",
+            "sha256": hashlib.sha256(value.encode()).hexdigest()[:16],
+        }
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if depth >= 2:
+        return "additional nested detail omitted"
+    if isinstance(value, list):
+        items = [_bounded_detail(item, depth + 1) for item in value[:6]]
+        if len(value) > 6:
+            items.append({"omitted_items": len(value) - 6})
+        return items
+    if isinstance(value, dict):
+        priority = (
+            "kind", "term", "condition", "target", "status", "blocked", "basis",
+            "value", "values", "minimum", "observed", "finding_id", "detail",
+        )
+        ordered = [key for key in priority if key in value]
+        ordered.extend(key for key in value if key not in ordered)
+        keys = ordered[:8]
+        compact = {str(key): _bounded_detail(value[key], depth + 1) for key in keys}
+        if len(value) > len(keys):
+            compact["omitted_fields"] = len(value) - len(keys)
+        return compact
+    return _bounded_detail(str(value), depth)
+
+
+def _concise_detail(value: Any) -> Any:
+    projected = _bounded_detail(value)
+    encoded = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= 400:
+        return projected
+    return {"summary": encoded[:399] + "…", "truncated": True}
+
+
+def _compact_issue(issue: Any, strict_targets: Any = None) -> Any:
+    if not isinstance(issue, dict):
+        return _bounded_detail(issue)
+    compact = {
+        key: issue[key]
+        for key in ("code", "status", "target", "required", "eligible", "evaluated")
+        if key in issue
+    }
+    if issue.get("code") == "strict_targets_infeasible" and isinstance(strict_targets, list):
+        compact["targets"] = strict_targets
+    for key in ("unknown", "detail", "shortages"):
+        if key in issue:
+            compact[key] = _bounded_detail(issue[key])
+    for key in ("required_portions", "available_portions"):
+        if key in issue:
+            compact[key] = issue[key]
+    return compact
+
+
+def _compact_batch(batch: Any) -> dict[str, Any]:
+    if not isinstance(batch, dict):
+        return {}
+    compact = {
+        key: batch[key]
+        for key in (
+            "source_date", "eating_dates", "batch", "prepared_portions",
+            "consumed_at_source", "recipe_key", "name",
+        )
+        if key in batch
+    }
+    guidance_value = batch.get("guidance")
+    if isinstance(guidance_value, dict):
+        compact["guidance"] = {
+            key: guidance_value[key]
+            for key in ("basis", "suitability", "storage", "reheating")
+            if key in guidance_value
+        }
+    return compact
+
+
+def _compact_plan_slot(
+    slot: Any, *, reasons: bool = True, reason_details: bool = True
+) -> dict[str, Any]:
+    if not isinstance(slot, dict):
+        return {}
+    compact = {
+        key: slot[key]
+        for key in (
+            "date", "reference", "recipe_key", "name", "portions", "source_date",
+            "kind", "new_shopping_requirements",
+        )
+        if key in slot
+    }
+    if reasons:
+        compact_reasons = _compact_plan_reasons(
+            slot.get("reason_contributions", []), details=reason_details
+        )
+        if compact_reasons:
+            compact["reason_contributions"] = compact_reasons
+    return compact
+
+
+def _compact_plan_selection(selection: Any, *, alternative: bool = False) -> dict[str, Any]:
+    """Keep display and warning fields; the save_ref carries exact action state."""
+    if not isinstance(selection, dict):
+        return {}
+    compact = {
+        key: selection[key]
+        for key in ("selection_digest", "total_score", "soft_relaxations")
+        if key in selection
+    }
+    if "batches" in selection:
+        compact["batches"] = [
+            _compact_batch(batch)
+            for batch in selection.get("batches", [])
+        ]
+    recurring = "source_slots" in selection
+    if recurring:
+        compact["slots"] = [
+            _compact_plan_slot(slot, reasons=False)
+            for slot in selection.get("slots", [])
+        ]
+    else:
+        compact["slots"] = [
+            _compact_plan_slot(slot, reason_details=not alternative)
+            for slot in selection.get("slots", [])
+        ]
+    if recurring:
+        compact["source_slots"] = [
+            _compact_plan_slot(slot, reason_details=not alternative)
+            for slot in selection.get("source_slots", [])
+        ]
+    plan_reasons = _compact_plan_reasons(
+        selection.get("plan_reason_contributions", []), details=not alternative
+    )
+    if plan_reasons:
+        compact["plan_reason_contributions"] = plan_reasons
+    strict = selection.get("strict_targets")
+    if isinstance(strict, dict):
+        issues = [
+            item for item in strict.get("results", [])
+            if isinstance(item, dict) and item.get("status") != "pass"
+        ]
+        if issues:
+            compact["strict_target_issues"] = [_compact_issue(item) for item in issues]
+    return compact
+
+
+def _compact_constraint_reasons(constraints: Any) -> list[dict[str, Any]]:
+    if not isinstance(constraints, dict):
+        return []
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for reason in constraints.get("reasons", []):
+        if not isinstance(reason, dict) or reason.get("status") == "pass":
+            continue
+        key = (str(reason.get("code", "unknown")), str(reason.get("status", "unknown")))
+        group = groups.setdefault(key, {
+            "code": key[0], "status": key[1], "count": 0, "details": [],
+        })
+        group["count"] += 1
+        if "detail" in reason:
+            detail = _concise_detail(reason["detail"])
+            signature = json.dumps(detail, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            existing = {
+                json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                for item in group["details"]
+            }
+            if signature not in existing:
+                group["distinct_details"] = group.get("distinct_details", 0) + 1
+                if len(group["details"]) < 3:
+                    group["details"].append(detail)
+    for group in groups.values():
+        if not group["details"]:
+            group.pop("details")
+        distinct = group.pop("distinct_details", 0)
+        if distinct > len(group.get("details", [])):
+            group["omitted_details"] = distinct - len(group.get("details", []))
+    return list(groups.values())
+
+
+def _candidate_summary(plan: dict[str, Any]) -> dict[str, Any] | None:
+    evaluations = plan.get("candidate_evaluations")
+    if not isinstance(evaluations, list):
+        return None
+    counts = {"pass": 0, "unknown": 0, "fail": 0}
+    blockers = []
+    warnings = []
+    selections = [plan.get("selection")]
+    selections.extend(
+        item.get("selection") for item in plan.get("alternatives", [])
+        if isinstance(item, dict)
+    )
+    selected = set()
+    for selection in selections:
+        if not isinstance(selection, dict):
+            continue
+        for field in ("slots", "source_slots"):
+            selected.update(
+                json.dumps(slot.get("reference"), sort_keys=True, separators=(",", ":"))
+                for slot in selection.get(field, [])
+                if isinstance(slot, dict) and isinstance(slot.get("reference"), dict)
+            )
+    for evaluation in evaluations:
+        if not isinstance(evaluation, dict):
+            continue
+        constraints = evaluation.get("hard_constraints")
+        status = constraints.get("status") if isinstance(constraints, dict) else None
+        if status in counts:
+            counts[status] += 1
+        reasons = _compact_constraint_reasons(constraints)
+        item = {
+                **({"reference": evaluation["reference"]} if "reference" in evaluation else {}),
+                "status": status or "unknown",
+                "reasons": reasons,
+        }
+        if status != "pass":
+            blockers.append(item)
+        elif reasons and json.dumps(
+            evaluation.get("reference"), sort_keys=True, separators=(",", ":")
+        ) in selected:
+            warnings.append(item)
+    return {
+        "total": sum(counts.values()), "counts": counts, "blockers": blockers,
+        **({"warnings": warnings} if warnings else {}),
+    }
+
+
+def _compact_discovery(discovery: Any) -> dict[str, Any] | None:
+    if not isinstance(discovery, dict):
+        return None
+    compact = {
+        key: value for key, value in discovery.items()
+        if key not in {"unknown", "rejected"}
+    }
+    unknown = []
+    for recipe in discovery.get("unknown", []):
+        if not isinstance(recipe, dict):
+            continue
+        unknown.append({
+            **{key: recipe[key] for key in ("name", "recipe_ref", "discovery_ref") if key in recipe},
+            "reasons": _compact_constraint_reasons(recipe.get("hard_constraints")),
+        })
+    compact["unknown_summary"] = {
+        "count": len(discovery.get("unknown", [])),
+        "examples": unknown[:6],
+        **({"omitted": len(unknown) - 6} if len(unknown) > 6 else {}),
+    }
+
+    reason_counts: dict[tuple[str, str], int] = {}
+    rejected = discovery.get("rejected", [])
+    for recipe in rejected:
+        constraints = recipe.get("hard_constraints") if isinstance(recipe, dict) else None
+        for reason in _compact_constraint_reasons(constraints):
+            key = (str(reason.get("code", "unknown")), str(reason.get("status", "unknown")))
+            reason_counts[key] = reason_counts.get(key, 0) + int(reason.get("count", 1))
+    compact["rejected_summary"] = {
+        "count": len(rejected) if isinstance(rejected, list) else 0,
+        "reasons": [
+            {"code": code, "status": status, "count": count}
+            for (code, status), count in sorted(reason_counts.items())
+        ],
+    }
+    return compact
+
+
 def _menu_plan_projection(plan: dict[str, Any]) -> dict[str, Any]:
-    """Keep complete decision evidence separate from compact exact save refs."""
-    projected = {key: value for key, value in plan.items()
-                 if key not in {"canonical_input", "selections", "save_handoff", "save_handoffs"}}
-    canonical = plan.get("canonical_input", {})
-    for field in ("profile", "feedback"):
-        if field in canonical:
-            projected["effective_" + field] = canonical[field]
-    if plan.get("save_handoff") is not None:
-        projected.pop("request", None)  # Already present in the compact save_ref.
-    discovery = plan.get("discovery", {})
-    if discovery.get("rejected"):
-        groups = []
-        previous_metadata = None
-        for recipe in discovery["rejected"]:
-            metadata = {key: recipe[key] for key in ("hard_constraints", "detail_fields") if key in recipe}
-            if metadata != previous_metadata:
-                groups.append({**metadata, "recipes": []})
-                previous_metadata = metadata
-            groups[-1]["recipes"].append({key: value for key, value in recipe.items() if key not in metadata})
-        projected["discovery"] = {key: value for key, value in discovery.items() if key != "rejected"}
-        projected["discovery"]["rejected_groups"] = groups
+    """Project full planner evidence into the bounded MCP presentation contract."""
+    omitted = {
+        "canonical_input", "candidate_evaluations", "cooking_experiences", "request",
+        "selection", "selections", "save_handoff", "save_handoffs", "alternatives",
+        "work_limits", "discovery", "issues",
+    }
+    projected = {
+        key: plan[key] for key in ("status", "save_ref")
+        if key in plan
+    }
+    if "selection" in plan:
+        projected["selection"] = _compact_plan_selection(plan["selection"])
+    if "alternatives" in plan:
+        projected["alternatives"] = [
+            {
+                **({"save_ref": item["save_ref"]} if isinstance(item, dict) and "save_ref" in item else {}),
+                **({"selection": _compact_plan_selection(item["selection"], alternative=True)}
+                   if isinstance(item, dict) and "selection" in item else {}),
+            }
+            for item in plan["alternatives"]
+        ]
+    projected.update({
+        key: value for key, value in plan.items()
+        if key not in omitted and key not in projected
+    })
+    request = plan.get("request")
+    if isinstance(plan.get("issues"), list):
+        strict_targets = request.get("strict_targets") if isinstance(request, dict) else None
+        projected["issues"] = [
+            _compact_issue(issue, strict_targets)
+            for issue in plan["issues"]
+        ]
+    summary = _candidate_summary(plan)
+    if summary is not None:
+        projected["candidate_summary"] = summary
+    work_limits = plan.get("work_limits")
+    if isinstance(work_limits, dict):
+        projected["work_summary"] = {
+            **({"explored_states": plan["explored_states"]} if "explored_states" in plan else {}),
+            **{key: work_limits[key] for key in ("maximum_candidates", "maximum_explored_states")
+               if key in work_limits},
+        }
+    discovery = _compact_discovery(plan.get("discovery"))
+    if discovery is not None:
+        projected["discovery"] = discovery
     return projected
 
 
-@server.tool(structured_output=False, description="Accepted recurring batch settings produce complete linked eating slots and per-source quantities/guidance before save, with no fresh weekly batch confirmation. Shortfalls name the needed adjustment once. For automatic weekly selection, pass planner_input with week and optional dates/portions, omitting candidates. Explicit dates preserve accepted batch mode. A user-approved one-plan prepared_portion_range override leaves the permanent profile unchanged. Unknown required specialist equipment excludes a recipe; prefer ordinary-tool alternatives. Optional available_ingredients is at most 32 distinct exact item names with quantity/unit when known and use_first=true when explicitly requested. Pass only the user's current stock assertions: names influence ranking through loaded ingredients; unknown quantities/units never establish coverage. Quantified compatible stock is allocated once over the whole menu. This is request context, not persistent inventory. The server searches bounded local and selected retailer sources and returns discovery statuses; save only the complete unchanged save_ref as planner_ref. " + "Get, deterministically plan, save, add a dated meal or clear the current menu. For an explicit request such as dessert for two on Thursday, brunch for four on Sunday, or sauce and side dishes with dinner, search the requested recipe category, resolve a suitable exact reference, then use add_slot with slot_input={date:ISO-date,meal_type,portions:integer,reference:{recipe_ref:{id,revision}} or {discovery_ref}} plus a stable idempotency_key and the current exact menu_ref. Omit menu_ref only when there is no current menu. meal_type accepts every recipe category: breakfast/brunch/lunch/dinner/starter/side/dessert/snack/baking/bread/drink/sauce/dressing/condiment/preserve. It appends to the same week, preserves other dishes and their portions, and supports multiple courses on a date. It saves local planning only; returned shopping_comparison describes ingredient changes. The normal plan/replan operations select dinners; replan remaining_dates preserves non-dinner slots.  Plan accepts a bounded candidate list containing only exact built-in recipe_ref values or still-valid discovery_ref values. It returns one ranked winner by default: pass the small four-field save_ref unchanged as planner_ref to save; never copy or reconstruct selection. selection contains the complete slots and reasons for display. Requested alternatives contain their own save_ref and selection in rank order. The reference binds the exact resolved request, planner_version, input_digest and selection_digest; save recomputes the full selection and rejects stale or changed references. For pre-save feedback or product preparation, resolve_handoff with the unchanged planner_ref returns the current validated full planner_handoff without saving; pass that returned object unchanged to those tools. Existing complete five-field planner_handoff saves remain supported and strict; never mix planner_ref with planner_handoff or menu. Menu returns one compact JSON text block. Discovery rejected_groups share identical hard_constraints and detail_fields across their recipes; groups and recipes retain original order. Candidate facts may contain only structured non-safety facts explicitly supplied by the user or an authoritative source—never model inference or recipe prose. Caller facts.safety assertions remain unsupported. Missing generic safety metadata is advisory during planning; known allergy/never-buy conflicts require alternatives and actual products are reassessed before checkout. Unknown default time, nutrition and perishability facts are named and unscored. Explicit strict_targets make supported unknowns blocking. Highest-ranked means only within the returned planner version and exact candidate scope, not objectively best. Planner save re-resolves locally, revalidates profile/history/hard constraints/digests, freezes the selected snapshots and changes no provider cart. Legacy save still accepts a menu with exact recipe refs or complete inline recipes. Structured menus expose stable slot IDs. Lock is explicit desired state for exact menu_ref and slot_id. replan_prepare accepts exact remaining_dates and planner_input, optionally locked_slot_ids, and returns one complete replan for unchanged replan_apply. Past/cooked/locked slots are carried and history remains immutable through a linked successor; any cart/order change requires a separate explicit action. Legacy schedules are never guessed into slots. Explicit batch_prepare links dinner slots only and takes exact menu_ref and batch_spec with source slot/snapshot, exact portions, structured current-user suitability/storage/interval and target leftover slots. Show the unchanged batch_plan and get a clear current-user confirmation before batch_apply with its digest and confirmation statement; never invent consent or safety facts, and a bare boolean is insufficient. Batch source cooking requires actual_batch prepared/consumed portions; leftovers require a confirmed matching source. These facts never establish food-safety compliance.")
+MCP_MENU_WIRE_BUDGET = 45_000
+
+
+def _mcp_text_wire_chars(text: str) -> int:
+    """Conservatively measure the newline-framed JSON-RPC tool result."""
+    wrapper = {
+        "jsonrpc": "2.0", "id": 1,
+        "result": {"content": [{"type": "text", "text": text}], "isError": False},
+    }
+    return len(json.dumps(wrapper, ensure_ascii=False, separators=(",", ":"))) + 1
+
+
+def _bounded_menu_plan_result(result: dict[str, Any]) -> dict[str, Any]:
+    projected = {**result, "plan": _menu_plan_projection(result["plan"])}
+    text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    wire_chars = _mcp_text_wire_chars(text)
+    if wire_chars < MCP_MENU_WIRE_BUDGET:
+        return projected
+    return {
+        **{key: value for key, value in result.items() if key != "plan"},
+        "plan": {
+            "status": "needs_input",
+            "issues": [{
+                "code": "mcp_action_response_too_large",
+                "projected_wire_chars": wire_chars,
+                "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+                "suggestions": [
+                    "request fewer alternatives",
+                    "remove nonessential candidate facts or candidates",
+                    "omit candidates to use bounded automatic discovery",
+                ],
+            }],
+        },
+    }
+
+
+@server.tool(structured_output=False, description="Accepted recurring batch settings produce complete linked eating slots and per-source quantities/guidance before save, with no fresh weekly batch confirmation. Shortfalls name the needed adjustment once. For automatic weekly selection, pass planner_input with week and optional dates/portions, omitting candidates. Explicit dates preserve accepted batch mode. A user-approved one-plan prepared_portion_range override leaves the permanent profile unchanged. Unknown required specialist equipment excludes a recipe; prefer ordinary-tool alternatives. Optional available_ingredients is at most 32 distinct exact item names with quantity/unit when known and use_first=true when explicitly requested. Pass only the user's current stock assertions: names influence ranking through loaded ingredients; unknown quantities/units never establish coverage. Quantified compatible stock is allocated once over the whole menu. This is request context, not persistent inventory. The server searches bounded local and selected retailer sources and returns discovery statuses; save only the complete unchanged save_ref as planner_ref. " + "Get, deterministically plan, save, add a dated meal or clear the current menu. For an explicit request such as dessert for two on Thursday, brunch for four on Sunday, or sauce and side dishes with dinner, search the requested recipe category, resolve a suitable exact reference, then use add_slot with slot_input={date:ISO-date,meal_type,portions:integer,reference:{recipe_ref:{id,revision}} or {discovery_ref}} plus a stable idempotency_key and the current exact menu_ref. Omit menu_ref only when there is no current menu. meal_type accepts every recipe category: breakfast/brunch/lunch/dinner/starter/side/dessert/snack/baking/bread/drink/sauce/dressing/condiment/preserve. It appends to the same week, preserves other dishes and their portions, and supports multiple courses on a date. It saves local planning only; returned shopping_comparison describes ingredient changes. The normal plan/replan operations select dinners; replan remaining_dates preserves non-dinner slots.  Plan accepts a bounded candidate list containing only exact built-in recipe_ref values or still-valid discovery_ref values. It returns one ranked winner by default: pass the small four-field save_ref unchanged as planner_ref to save; never copy or reconstruct selection. selection contains every dated meal, exact reference, portions, concise reasons and material warnings for display; verbose planner evidence remains available through CLI/service diagnostics. Requested alternatives contain their own save_ref and selection in rank order. The reference binds the exact resolved request, planner_version, input_digest and selection_digest; save recomputes the full selection and rejects stale or changed references. For pre-save feedback or product preparation, resolve_handoff with the unchanged planner_ref returns the current validated full planner_handoff without saving; pass that returned object unchanged to those tools. Existing complete five-field planner_handoff saves remain supported and strict; never mix planner_ref with planner_handoff or menu. Menu returns one compact JSON text block. Discovery retains source/unknown state and summarized rejection counts; candidate_summary retains counts, non-pass blockers and selected-candidate advisories, and work_summary retains explored-state limits. Candidate facts may contain only structured non-safety facts explicitly supplied by the user or an authoritative source—never model inference or recipe prose. Caller facts.safety assertions remain unsupported. Missing generic safety metadata is advisory during planning; known allergy/never-buy conflicts require alternatives and actual products are reassessed before checkout. Unknown default time, nutrition and perishability facts are named and unscored. Explicit strict_targets make supported unknowns blocking. Highest-ranked means only within the returned planner version and exact candidate scope, not objectively best. Planner save re-resolves locally, revalidates profile/history/hard constraints/digests, freezes the selected snapshots and changes no provider cart. Legacy save still accepts a menu with exact recipe refs or complete inline recipes. Structured menus expose stable slot IDs. Lock is explicit desired state for exact menu_ref and slot_id. replan_prepare accepts exact remaining_dates and planner_input, optionally locked_slot_ids, and returns one complete replan for unchanged replan_apply. Past/cooked/locked slots are carried and history remains immutable through a linked successor; any cart/order change requires a separate explicit action. Legacy schedules are never guessed into slots. Explicit batch_prepare links dinner slots only and takes exact menu_ref and batch_spec with source slot/snapshot, exact portions, structured current-user suitability/storage/interval and target leftover slots. Show the unchanged batch_plan and get a clear current-user confirmation before batch_apply with its digest and confirmation statement; never invent consent or safety facts, and a bare boolean is insufficient. Batch source cooking requires actual_batch prepared/consumed portions; leftovers require a confirmed matching source. These facts never establish food-safety compliance.")
 def meal_concierge_menu(action: Literal["get", "assess", "plan", "save", "add_slot", "resolve_handoff", "clear", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"] = "get", menu: dict[str, Any] | None = None, planner_input: dict[str, Any] | None = None, planner_handoff: dict[str, Any] | None = None, planner_ref: dict[str, Any] | None = None, menu_id: str | None = None, expected_revision: int | None = None, allow_repeat_keys: list[str] | None = None, override_reason: str | None = None, interactive: bool = True, menu_ref: dict[str, Any] | None = None, slot_id: str | None = None, locked: bool | None = None, remaining_dates: list[str] | None = None, locked_slot_ids: list[str] | None = None, as_of_date: str | None = None, replan: dict[str, Any] | None = None, batch_spec: dict[str, Any] | None = None, batch_plan: dict[str, Any] | None = None, batch_confirmation: dict[str, Any] | None = None, slot_input: dict[str, Any] | None = None, idempotency_key: str | None = None) -> Any:
     from mcp.types import CallToolResult, TextContent
     result = rpc("menu", slot_input=slot_input, idempotency_key=idempotency_key, batch_spec=batch_spec, batch_plan=batch_plan, batch_confirmation=batch_confirmation, menu_ref=menu_ref, slot_id=slot_id, locked=locked, remaining_dates=remaining_dates, locked_slot_ids=locked_slot_ids, as_of_date=as_of_date, replan=replan, action=action, menu=menu, planner_input=planner_input, planner_handoff=planner_handoff, planner_ref=planner_ref, menu_id=menu_id, expected_revision=expected_revision, allow_repeat_keys=allow_repeat_keys or [], override_reason=override_reason, interactive=interactive)
     if action == "plan" and "plan" in result:
-        result = {**result, "plan": _menu_plan_projection(result["plan"])}
+        result = _bounded_menu_plan_result(result)
     return CallToolResult(content=[TextContent(
         type="text", text=json.dumps(result, ensure_ascii=False, separators=(",", ":")))])
 
