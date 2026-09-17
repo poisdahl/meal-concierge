@@ -1166,8 +1166,17 @@ def run(args, settings=None) -> None:
             inbox_info = recipe_pack_inbox.lstat()
         except OSError as exc:
             raise SystemExit("recipe-pack inbox is unavailable") from exc
-        if not stat.S_ISDIR(inbox_info.st_mode) or inbox_info.st_mode & 0o077:
+        if not stat.S_ISDIR(inbox_info.st_mode) or inbox_info.st_mode & 0o007:
             raise SystemExit("recipe-pack inbox must be a private directory")
+        if inbox_info.st_mode & 0o070 and not inbox_info.st_mode & stat.S_ISGID:
+            raise SystemExit("shared recipe-pack inbox must preserve its trusted group")
+        try:
+            inbox_descriptor = os.open(
+                recipe_pack_inbox, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            raise SystemExit("recipe-pack inbox is unavailable to this service") from exc
+        os.close(inbox_descriptor)
     app = Application(
         StateStore(args.state, settings),
         provider_client,

@@ -404,7 +404,10 @@ An operator-managed host may opt in to an inbox instead of stopping its service
 for every local collection change. Pass a private, absolute, service-visible
 directory with `service.py --recipe-pack-inbox /absolute/inbox`. Mount that
 directory read-only into the service and keep the service state on its existing
-private writable volume. The corresponding MCP client needs two absolute paths:
+private writable volume. A host where the agent and service use different UIDs
+may use one setgid directory owned by their dedicated trusted group: it must
+have no `other` permissions, and staging grants that group read-only access only
+after the complete ZIP is fsynced. The corresponding MCP client needs two absolute paths:
 `MEAL_CONCIERGE_RECIPE_PACK_DOWNLOADS` is the agent's direct download directory
 and `MEAL_CONCIERGE_RECIPE_PACK_INBOX` is its writable view of the same inbox.
 The client first checks `meal_concierge_recipe_pack(action=status)`.
