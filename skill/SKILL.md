@@ -514,6 +514,15 @@ without the reviewed `--expected-sha256`. A merge pack
 cannot delete omissions. `kind: private` is a full-history backup format, not a
 shareable collection, and must use the separate private restore workflow.
 
+To remove a user-selected local collection, use `remove-recipe-pack` with the
+same ZIP and its inspected `--expected-sha256`, after stopping the exact owner.
+It hard-deletes only `entry_origin=collection` entries with that exact local
+`pack_id`, then prunes only its unreferenced assets and retained metadata. Never
+use `remove-recipe-collection` for a local ZIP: that command is only for the
+publisher's Optional Recipe Collection. A local removal is explicit and cannot
+select user recipes, publisher bundles, another local collection or their
+favorites.
+
 Removing the entire Optional Recipe Collection is installation maintenance, not
 a recipe MCP action. On an explicit request, update an older runtime first,
 verify that no active work will be interrupted, stop the exact installation,
