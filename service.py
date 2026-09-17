@@ -20,11 +20,13 @@ import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import sys
 import socket
 import struct
 import threading
 import time
+import tempfile
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -158,6 +160,9 @@ from email_operations import EmailOperations
 from delivery_operations import DeliveryOperations
 
 
+_RECIPE_PACK_ARCHIVE_ID = re.compile(r"[0-9a-f]{64}\.zip\Z")
+
+
 class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations, DeliveryOperations):
     def _now(self) -> datetime:
         return now()
@@ -167,6 +172,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         *, email_provider_clients: Mapping[str, Any] | None = None,
         external_recipe_sources: Mapping[str, Any] | None = None,
         recipe_library_adapters: Mapping[str, RecipeLibraryAdapter] | None = None,
+        recipe_pack_inbox: Path | None = None,
     ):
         self.store = store
         self.recipes = RecipeStore(store.directory / "recipes.sqlite3", str(store.config["household"]))
@@ -188,6 +194,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.recipe_planner_lock = threading.RLock()
         self.recipe_planner_lock_path = store.directory / "recipe-planner.lock"
         self.product_plan_lock = threading.RLock()
+        self.recipe_pack_inbox = recipe_pack_inbox
         self.provider_client = provider_client
         self.provider = str(store.config.get("provider") or "oda").casefold()
         self.email_provider_clients = {**dict(email_provider_clients or {}), self.provider: provider_client}
@@ -314,6 +321,152 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
+    @staticmethod
+    def _recipe_pack_archive_id(value: Any) -> str:
+        if not isinstance(value, str) or _RECIPE_PACK_ARCHIVE_ID.fullmatch(value) is None:
+            raise HouseholdError("recipe pack archive_id must be one staged SHA-256 ZIP name")
+        return value
+
+    @staticmethod
+    def _recipe_pack_expected_sha256(value: Any, archive_id: str) -> str:
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise HouseholdError("recipe pack expected_sha256 must be a lowercase SHA-256")
+        if value != archive_id.removesuffix(".zip"):
+            raise HouseholdError("recipe pack archive_id differs from expected_sha256")
+        return value
+
+    @contextmanager
+    def _staged_recipe_pack(self, archive_id: str, expected_sha256: str | None = None):
+        """Copy an untrusted inbox member into the service-owned state before use."""
+        from recipe_portable import CHUNK_BYTES, MAX_ARCHIVE_BYTES
+
+        if self.recipe_pack_inbox is None:
+            raise HouseholdError("this managed installation has no local recipe-pack inbox")
+        inbox = Path(self.recipe_pack_inbox)
+        try:
+            inbox_descriptor = os.open(
+                inbox, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            )
+        except OSError as exc:
+            raise HouseholdError("local recipe-pack inbox is unavailable") from exc
+        source_descriptor = None
+        destination_descriptor = None
+        temporary: Path | None = None
+        try:
+            try:
+                source_descriptor = os.open(
+                    archive_id, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_descriptor
+                )
+                source_info = os.fstat(source_descriptor)
+            except OSError as exc:
+                raise HouseholdError("selected local recipe pack is unavailable") from exc
+            if (
+                not stat.S_ISREG(source_info.st_mode)
+                or not 0 < source_info.st_size <= MAX_ARCHIVE_BYTES
+            ):
+                raise HouseholdError("selected local recipe pack is not a bounded regular file")
+            staging = self.store.directory / ".recipe-pack-staging"
+            staging.mkdir(mode=0o700, exist_ok=True)
+            staging_info = staging.lstat()
+            if not stat.S_ISDIR(staging_info.st_mode) or staging_info.st_mode & 0o077:
+                raise HouseholdError("service recipe-pack staging is unavailable")
+            destination_descriptor, raw_temporary = tempfile.mkstemp(
+                prefix=".incoming-", suffix=".zip", dir=staging
+            )
+            temporary = Path(raw_temporary)
+            digest = hashlib.sha256()
+            copied = 0
+            while chunk := os.read(source_descriptor, CHUNK_BYTES):
+                copied += len(chunk)
+                if copied > MAX_ARCHIVE_BYTES:
+                    raise HouseholdError("selected local recipe pack exceeds the supported size")
+                digest.update(chunk)
+                offset = 0
+                while offset < len(chunk):
+                    written = os.write(destination_descriptor, chunk[offset:])
+                    if written <= 0:
+                        raise HouseholdError("service recipe-pack staging made no progress")
+                    offset += written
+            os.fsync(destination_descriptor)
+            os.close(destination_descriptor)
+            destination_descriptor = None
+            actual_sha256 = digest.hexdigest()
+            if expected_sha256 is not None and actual_sha256 != expected_sha256:
+                raise HouseholdError("selected local recipe pack differs from expected_sha256")
+            yield temporary, actual_sha256, copied
+        finally:
+            if destination_descriptor is not None:
+                os.close(destination_descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+            os.close(inbox_descriptor)
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _recipe_pack(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Inspect or change one explicitly staged local collection in-process."""
+        action = request.get("action", "status")
+        fields = set(request)
+        fields.discard("contract")
+        if action == "status":
+            if fields != {"operation", "action"}:
+                raise HouseholdError("recipe-pack status accepts no other arguments")
+            return {
+                "available": self.recipe_pack_inbox is not None,
+                "mode": "managed_local_inbox" if self.recipe_pack_inbox is not None else None,
+                "actions": ["inspect", "import", "remove"] if self.recipe_pack_inbox is not None else [],
+                "archive_id": "sha256.zip",
+            }
+        if action not in {"inspect", "import", "remove"}:
+            raise HouseholdError("unknown recipe-pack action")
+        archive_id = self._recipe_pack_archive_id(request.get("archive_id"))
+        common = {"operation", "action", "archive_id"}
+        if action == "inspect":
+            if fields != common:
+                raise HouseholdError("recipe-pack inspect accepts only archive_id")
+            with self._staged_recipe_pack(archive_id) as (archive, _digest, _bytes):
+                from recipe_portable import PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive
+                return inspect_local_archive(
+                    archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
+                )
+        expected_sha256 = self._recipe_pack_expected_sha256(
+            request.get("expected_sha256"), archive_id
+        )
+        if action == "import":
+            if fields != common | {"expected_sha256", "allow_recipe_removals"}:
+                raise HouseholdError("recipe-pack import needs archive_id, expected_sha256 and allow_recipe_removals")
+            allow_removals = request.get("allow_recipe_removals")
+            if not isinstance(allow_removals, bool):
+                raise HouseholdError("recipe-pack import allow_recipe_removals must be true or false")
+            with self._staged_recipe_pack(archive_id, expected_sha256) as (archive, _digest, _bytes):
+                from recipe_portable import (
+                    PUBLISHER_RECIPE_PACK_IDS, apply_archive, inspect_local_archive,
+                    preflight_archive,
+                )
+                descriptor = inspect_local_archive(
+                    archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
+                )
+                preflight_archive(archive, descriptor)
+                return apply_archive(
+                    archive, self.store.directory, str(self.store.config["household"]),
+                    descriptor, allow_removals=allow_removals,
+                )
+        if fields != common | {"expected_sha256"}:
+            raise HouseholdError("recipe-pack removal needs only archive_id and expected_sha256")
+        with self._staged_recipe_pack(archive_id, expected_sha256) as (archive, _digest, _bytes):
+            from recipe_portable import (
+                PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive, remove_collection,
+            )
+            descriptor = inspect_local_archive(
+                archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
+            )
+            return remove_collection(
+                self.store.directory, str(self.store.config["household"]), descriptor
+            )
+
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
@@ -353,6 +506,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     with self._recipe_planner_operation():
                         result = self._handle(request)
                 else:
+                    result = self._handle(request)
+            elif operation == "recipe_pack":
+                with self._recipe_planner_operation(), self.product_plan_lock:
                     result = self._handle(request)
             elif operation in {"recipes", "feedback", "migration"} or (
                 operation == "menu" and (
@@ -426,6 +582,15 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         if operation == "migration":
             from recipe_migration import Migration
             return Migration(self).handle(request)
+        if operation == "recipe_pack":
+            state = self.store.read()
+            if any(state.get(field) for field in (
+                "pending_cart_change", "pending_checkout", "pending_cancellation", "order_change",
+            )):
+                raise HouseholdError(
+                    "finish the active cart, checkout, cancellation or order change before changing a local recipe collection"
+                )
+            return self._recipe_pack(request)
         if operation == "recipes":
             return self._recipes(request)
         if operation == "menu":
@@ -890,6 +1055,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--state", type=Path, required=True)
     result.add_argument("--tokens", type=Path)
     result.add_argument("--maintenance", type=Path)
+    result.add_argument("--recipe-pack-inbox", type=Path)
     result.add_argument("--socket", type=Path, default=Path("/tmp/meal-concierge.sock"))
     result.add_argument("--socket-group", type=int, default=os.getgid())
     result.add_argument("--agent-uid", type=int, default=os.getuid())
@@ -992,12 +1158,23 @@ def run(args, settings=None) -> None:
             vipps_phone_number=settings.get("vipps_phone_number"),
             **browser_arguments,
         )
+    recipe_pack_inbox = args.recipe_pack_inbox
+    if recipe_pack_inbox is not None:
+        if not recipe_pack_inbox.is_absolute():
+            raise SystemExit("recipe-pack inbox must be an absolute private directory")
+        try:
+            inbox_info = recipe_pack_inbox.lstat()
+        except OSError as exc:
+            raise SystemExit("recipe-pack inbox is unavailable") from exc
+        if not stat.S_ISDIR(inbox_info.st_mode) or inbox_info.st_mode & 0o077:
+            raise SystemExit("recipe-pack inbox must be a private directory")
     app = Application(
         StateStore(args.state, settings),
         provider_client,
         checkout_browser,
         email_provider_clients=email_provider_clients,
         recipe_library_adapters=recipe_library_adapters,
+        recipe_pack_inbox=recipe_pack_inbox,
     )
     Server(args.socket, args.socket_group, args.agent_uid, app).run()
 
