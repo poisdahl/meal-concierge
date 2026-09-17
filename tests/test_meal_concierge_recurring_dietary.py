@@ -61,6 +61,14 @@ class RecurringDietaryTests(unittest.TestCase):
     def profile(self, **changes):
         return self.app.handle({'operation': 'profile', 'action': 'update', 'changes': changes})
 
+    def accepted_meals(self, **changes):
+        meals = deepcopy(self.store.read()['profile']['meals'])
+        meals.update(changes, recurring_batch_accepted=True)
+        return {key: meals[key] for key in (
+            'meal_mode', 'dinner_days', 'dishes', 'batch_dishes', 'portions',
+            'prepared_portion_range', 'cook_days', 'eat_days', 'recurring_batch_accepted',
+        )}
+
     def call(self, action, **values):
         return self.app.handle({'operation': 'checkout', 'action': action, **values})
 
@@ -75,8 +83,14 @@ class RecurringDietaryTests(unittest.TestCase):
         return self.call('notice_result', notice_token=notice['notice_token'], send_outcome='sent', sender_receipt=receipt)
 
     def batch(self, high=8):
-        self.profile(meals={'meal_mode': 'batch', 'dishes': 2, 'batch_dishes': 2,
-            'cook_days': ['Monday', 'Thursday'], 'prepared_portion_range': [4, high], 'recurring_batch_accepted': True})
+        meals = deepcopy(self.store.read()['profile']['meals'])
+        meals.update(meal_mode='batch', dishes=2, batch_dishes=2,
+            cook_days=['Monday', 'Thursday'], prepared_portion_range=[4, high],
+            recurring_batch_accepted=True)
+        self.profile(meals={key: meals[key] for key in (
+            'meal_mode', 'dinner_days', 'dishes', 'batch_dishes', 'portions',
+            'prepared_portion_range', 'cook_days', 'eat_days', 'recurring_batch_accepted',
+        )})
         candidates = []
         for index in range(4):
             saved = self.app.handle({'operation': 'recipes', 'action': 'save',
@@ -85,6 +99,72 @@ class RecurringDietaryTests(unittest.TestCase):
         self.candidates = candidates
         self.profile(recipes={'sources': {'oda': False, 'meny': False, 'mathem': False, 'themealdb': False, 'wikibooks': False}})
         return self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37'}})['plan']
+
+    def test_recurring_writes_are_atomic_visible_and_repair_legacy_state(self):
+        self.profile(meals=self.accepted_meals(meal_mode='batch', dishes=2, batch_dishes=2,
+            cook_days=['Monday', 'Thursday']))
+        shown = self.app.handle({'operation': 'setup', 'action': 'show'})['current']['weekly_menu']
+        self.assertEqual(shown['meal_mode'], 'batch')
+        self.assertTrue(shown['recurring_batch_accepted'])
+
+        before = self.store.read()
+        with self.assertRaisesRegex(HouseholdError, 'one changes.meals object containing meal_mode, dinner_days'):
+            self.app.handle({'operation': 'setup', 'action': 'apply', 'keep_current': False,
+                'changes': {'people': 3, 'weekly_menu': {'dinner_days': 7, 'dishes': 7, 'batch_dishes': 0}}})
+        self.assertEqual(self.store.read(), before)
+
+        invalid = {'meal_mode': 'batch', 'dinner_days': 7, 'dishes': 7, 'batch_dishes': 0,
+            'portions': 2, 'prepared_portion_range': [4, 8],
+            'cook_days': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+            'eat_days': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+            'recurring_batch_accepted': True}
+        with self.assertRaisesRegex(HouseholdError, 'batch count must fit cooking days'):
+            self.profile(meals=invalid)
+        self.assertEqual(self.store.read(), before)
+
+        repaired = self.profile(meals={'meal_mode': 'fresh', 'dinner_days': 7, 'dishes': 7,
+            'batch_dishes': 0, 'cook_days': invalid['cook_days'], 'eat_days': invalid['eat_days']})['profile']
+        self.assertFalse(repaired['meals']['recurring_batch_accepted'])
+        self.assertIsNone(bp.recurring_layout(repaired, ['2026-09-07', '2026-09-08', '2026-09-09',
+            '2026-09-10', '2026-09-11', '2026-09-12', '2026-09-13']))
+
+    def test_recurring_changes_clear_acceptance_but_unrelated_legacy_writes_remain_possible(self):
+        self.profile(meals=self.accepted_meals(meal_mode='batch', dishes=2, batch_dishes=2,
+            cook_days=['Monday', 'Thursday']))
+        before = self.store.read()
+        with self.assertRaisesRegex(HouseholdError, 'complete recurring definition'):
+            self.profile(meals={'prepared_portion_range': [3, 4], 'recurring_batch_accepted': True})
+        self.assertEqual(self.store.read(), before)
+        changed = self.profile(meals={'prepared_portion_range': [3, 4]})['profile']
+        self.assertFalse(changed['meals']['recurring_batch_accepted'])
+
+        with self.store.locked() as state:
+            state['profile']['meals'].update(meal_mode='batch', batch_dishes=0,
+                recurring_batch_accepted=True)
+        reopened = Application(StateStore(Path(self.temp.name), CONFIG), self.provider, self.browser)
+        updated = reopened.handle({'operation': 'profile', 'action': 'update',
+            'changes': {'cuisine': {'base_style': 'Legacy still editable'}}})['profile']
+        self.assertEqual(updated['cuisine']['base_style'], 'Legacy still editable')
+        self.assertTrue(updated['meals']['recurring_batch_accepted'])
+
+    def test_incoherent_profile_overrides_remain_loadable_and_repairable(self):
+        with tempfile.TemporaryDirectory(prefix='mc129-overrides-') as directory:
+            config = deepcopy(CONFIG)
+            config['profile_overrides'] = {'meals': {
+                'meal_mode': 'batch', 'batch_dishes': 0, 'recurring_batch_accepted': True,
+            }}
+            store = StateStore(Path(directory), config)
+            self.assertEqual(store.read()['profile']['meals']['meal_mode'], 'batch')
+            unrelated = store.update_profile({'cuisine': {'base_style': 'Legacy override'}})
+            self.assertEqual(unrelated['cuisine']['base_style'], 'Legacy override')
+            before = store.read()
+            with self.assertRaisesRegex(HouseholdError, 'complete recurring definition'):
+                store.update_profile({'meals': {'recurring_batch_accepted': True}})
+            self.assertEqual(store.read(), before)
+            repaired = store.update_profile({'meals': {
+                'meal_mode': 'fresh', 'dinner_days': 7, 'dishes': 7, 'batch_dishes': 0,
+            }})
+            self.assertFalse(repaired['meals']['recurring_batch_accepted'])
 
     def shop(self, plan):
         menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_handoff': plan['save_handoff']})['menu']
@@ -131,7 +211,7 @@ class RecurringDietaryTests(unittest.TestCase):
 
     def test_preferred_batch_size_never_truncates_accepted_meal_coverage(self):
         self.batch(4)
-        self.profile(meals={'prepared_portion_range': [3, 4]})
+        self.profile(meals=self.accepted_meals(prepared_portion_range=[3, 4]))
         plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37'}})['plan']
         self.assertEqual(plan['status'], 'planned')
         menu, _products = self.shop(plan)
@@ -205,8 +285,9 @@ class RecurringDietaryTests(unittest.TestCase):
         plan = self.batch()
         with self.assertRaisesRegex(HouseholdError, 'consumption must match'):
             self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37', 'portions': 3}})
-        self.profile(meals={'meal_mode': 'mixed', 'dinner_days': 5, 'eat_days': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-            'cook_days': ['Monday', 'Tuesday', 'Friday'], 'dishes': 3, 'batch_dishes': 1})
+        self.profile(meals=self.accepted_meals(meal_mode='mixed', dinner_days=5,
+            eat_days=['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+            cook_days=['Monday', 'Tuesday', 'Friday'], dishes=3, batch_dishes=1))
         mixed = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {'week': '2026-W37'}})['plan']
         self.assertEqual(mixed['status'], 'planned')
         self.assertEqual(mixed['selection']['batches'][0]['source_date'], '2026-09-08')

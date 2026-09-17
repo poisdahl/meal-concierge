@@ -35,6 +35,23 @@ STATE_VERSION = 12
 RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
 
+RECURRING_DEFINITION_FIELDS = frozenset({
+    "meal_mode",
+    "dinner_days",
+    "dishes",
+    "batch_dishes",
+    "portions",
+    "prepared_portion_range",
+    "cook_days",
+    "eat_days",
+})
+RECURRING_MEAL_FIELDS = RECURRING_DEFINITION_FIELDS | {"recurring_batch_accepted"}
+RECURRING_PROFILE_UPDATE_GUIDANCE = (
+    "use meal_concierge_profile action=update with one changes.meals object containing "
+    "meal_mode, dinner_days, dishes, batch_dishes, portions, prepared_portion_range, "
+    "cook_days, eat_days and recurring_batch_accepted"
+)
+
 
 DEFAULT_PROFILE: dict[str, Any] = {
     "meals": {
@@ -277,6 +294,79 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
         raise HouseholdError("profile dinner_time must use HH:MM")
     if any(not 0 <= value <= 1 for value in profile["diet"]["plate"].values()):
         raise HouseholdError("profile plate fractions must be between zero and one")
+
+
+def finalize_recurring_profile_write(
+    previous: Mapping[str, Any], candidate: dict[str, Any], *,
+    provided_meal_fields: frozenset[str], setup: bool = False,
+) -> None:
+    """Validate recurring settings only when this write changes their definition."""
+    before = previous["meals"]
+    meals = candidate["meals"]
+    changed = {field for field in RECURRING_MEAL_FIELDS if before[field] != meals[field]}
+    acceptance_explicit = "recurring_batch_accepted" in provided_meal_fields
+    if not changed and not acceptance_explicit:
+        return
+    if setup and (
+        before["meal_mode"] != "fresh"
+        or meals["meal_mode"] != "fresh"
+        or before["recurring_batch_accepted"]
+        or meals["recurring_batch_accepted"]
+    ):
+        raise HouseholdError(f"recurring batch settings require one atomic update; {RECURRING_PROFILE_UPDATE_GUIDANCE}")
+    if not acceptance_explicit:
+        meals["recurring_batch_accepted"] = False
+    elif meals["recurring_batch_accepted"]:
+        if meals["meal_mode"] == "fresh":
+            raise HouseholdError("fresh mode cannot retain accepted recurring batch settings")
+        missing = RECURRING_DEFINITION_FIELDS - provided_meal_fields
+        if missing:
+            raise HouseholdError(
+                "recurring_batch_accepted=true requires the complete recurring definition in the same atomic update; "
+                f"missing {', '.join(sorted(missing))}; {RECURRING_PROFILE_UPDATE_GUIDANCE}"
+            )
+
+    weekdays = {
+        "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+        "friday": 4, "saturday": 5, "sunday": 6,
+    }
+    dinner_days = meals["dinner_days"]
+    eating = sorted(weekdays[day.casefold()] for day in meals["eat_days"])
+    if not 1 <= dinner_days <= 7 or len(eating) < dinner_days:
+        raise HouseholdError("recurring settings need one to seven dinner days covered by eat_days")
+    eating = eating[:dinner_days]
+    mode = meals["meal_mode"]
+    if mode == "fresh":
+        if meals["recurring_batch_accepted"]:
+            raise HouseholdError("fresh mode cannot retain accepted recurring batch settings")
+        if meals["dishes"] != dinner_days or meals["batch_dishes"] != 0:
+            raise HouseholdError(
+                "fresh recurring settings require one dish per dinner day and batch_dishes=0"
+            )
+        return
+    if not meals["recurring_batch_accepted"]:
+        return
+
+    cooking_weekdays = {weekdays[day.casefold()] for day in meals["cook_days"]}
+    cooking = [day for day in eating if day in cooking_weekdays]
+    if not cooking or cooking[0] != eating[0] or len(cooking) != meals["dishes"]:
+        raise HouseholdError(
+            "accepted recurring cooking days must start on the first eating day and match dishes"
+        )
+    count = meals["batch_dishes"]
+    if not 1 <= count <= len(cooking) or (mode == "batch" and count != len(cooking)):
+        raise HouseholdError(
+            "accepted recurring batch count must fit cooking days; batch mode requires every dish to be a batch"
+        )
+    batch_days = {
+        day for index, day in enumerate(cooking)
+        if any(day < eating_day < (cooking[index + 1] if index + 1 < len(cooking) else 8)
+               for eating_day in eating)
+    }
+    if len(batch_days) != count:
+        raise HouseholdError(
+            "accepted recurring batch_dishes must match cooking sessions with dependent eating days"
+        )
 
 
 def recurring_schedule(value: Any, today: date) -> dict[str, Any]:
@@ -1019,20 +1109,31 @@ class StateStore:
 
     def update_profile(self, changes: Mapping[str, Any]) -> dict[str, Any]:
         with self.locked() as state:
-            _merge(state["profile"], changes)
-            validate_profile(state["profile"])
-            return deepcopy(state["profile"])
+            previous = state["profile"]
+            candidate = deepcopy(previous)
+            _merge(candidate, changes)
+            validate_profile(candidate)
+            meal_changes = changes.get("meals") if isinstance(changes, Mapping) else None
+            finalize_recurring_profile_write(
+                previous,
+                candidate,
+                provided_meal_fields=frozenset(meal_changes) if isinstance(meal_changes, Mapping) else frozenset(),
+            )
+            state["profile"] = candidate
+            return deepcopy(candidate)
 
     def reset_profile(self, paths: list[str] | None = None) -> dict[str, Any]:
         defaults = initial_state(self.config)["profile"]
         with self.locked() as state:
+            previous = state["profile"]
+            candidate = deepcopy(previous)
             if not paths:
-                state["profile"] = defaults
+                candidate = defaults
             else:
                 for path in paths:
                     parts = path.split(".")
                     source: Any = defaults
-                    target: Any = state["profile"]
+                    target: Any = candidate
                     for part in parts[:-1]:
                         if not isinstance(source, dict) or part not in source or not isinstance(target, dict) or part not in target:
                             raise HouseholdError(f"unknown profile field: {path}")
@@ -1040,8 +1141,17 @@ class StateStore:
                     if not isinstance(source, dict) or parts[-1] not in source or not isinstance(target, dict):
                         raise HouseholdError(f"unknown profile field: {path}")
                     target[parts[-1]] = deepcopy(source[parts[-1]])
-            validate_profile(state["profile"])
-            return deepcopy(state["profile"])
+            validate_profile(candidate)
+            finalize_recurring_profile_write(
+                previous,
+                candidate,
+                provided_meal_fields=(
+                    RECURRING_MEAL_FIELDS if not paths else
+                    frozenset(path.removeprefix("meals.") for path in paths if path.startswith("meals."))
+                ),
+            )
+            state["profile"] = candidate
+            return deepcopy(candidate)
 
 
 def mask_email(value: str | None) -> str | None:
