@@ -22,6 +22,7 @@ import urllib.request
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime_ownership import file_lock, ownership, listener_ownership
 from browser_prerequisites import discover_browser_paths, executable
+from recipe_portable import PUBLISHER_RECIPE_PACK_IDS
 
 SOURCE = Path(__file__).resolve().parent
 PYTHON = '3.12.12'
@@ -34,7 +35,7 @@ RECIPE_PACK = {
     'kind': 'bundled',
     'recipe_schema_version': 2,
     'normalizer_version': '2',
-    'pack_id': 'wikibooks-themealdb-en',
+    'pack_id': PUBLISHER_RECIPE_PACK_IDS[0],
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
 

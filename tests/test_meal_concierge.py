@@ -484,6 +484,7 @@ class CoreTestsBase:
         self.assertEqual(module.rpc_timeout("cart", {"action": "get"}), 120)
         self.assertEqual(module.rpc_timeout("delivery", {"action": "list"}), 300)
         self.assertEqual(module.rpc_timeout("checkout", {"action": "submit"}), 660)
+        self.assertEqual(module.rpc_timeout("recipe_pack", {"action": "import"}), 660)
         module.rpc = mock.Mock(return_value={})
         module.meal_concierge_checkout(action='confirm', confirmation_id='review-one', dietary_review_digest='digest-one', weekly=True)
         self.assertEqual(module.rpc.call_args.kwargs['dietary_review_digest'], 'digest-one')
@@ -496,7 +497,18 @@ class CoreTestsBase:
         module.meal_concierge_checkout("auto", occurrence="2026-W36", scheduler=scheduler)
         module.rpc.assert_called_with("checkout", action="auto", occurrence="2026-W36", confirmation_id=None,
                                       idempotency_key=None, scheduler=scheduler)
+        archive_id = "a" * 64 + ".zip"
+        module.rpc = mock.Mock(return_value={})
+        module.meal_concierge_recipe_pack(
+            "import", archive_id=archive_id, expected_sha256="a" * 64,
+            allow_recipe_removals=True,
+        )
+        module.rpc.assert_called_with(
+            "recipe_pack", action="import", archive_id=archive_id,
+            expected_sha256="a" * 64, allow_recipe_removals=True,
+        )
         self.assertIn("meal_concierge_product_favorites", module.server.tools)
+        self.assertIn("meal_concierge_recipe_pack", module.server.tools)
         self.assertNotIn("meal_concierge_favorites", module.server.tools)
         module.meal_concierge_product_favorites("add", product_id=MENY_PRODUCT, product_name="Brokkoli", quantity=2)
         module.rpc.assert_called_with(

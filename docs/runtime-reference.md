@@ -398,6 +398,31 @@ its unreferenced assets and retained metadata. It is separate from
 `remove-recipe-collection`, which removes the publisher's Optional Recipe
 Collection only.
 
+### Managed local-pack inbox
+
+An operator-managed host may opt in to an inbox instead of stopping its service
+for every local collection change. Pass a private, absolute, service-visible
+directory with `service.py --recipe-pack-inbox /absolute/inbox`. Mount that
+directory read-only into the service and keep the service state on its existing
+private writable volume. The corresponding MCP client needs two absolute paths:
+`MEAL_CONCIERGE_RECIPE_PACK_DOWNLOADS` is the agent's direct download directory
+and `MEAL_CONCIERGE_RECIPE_PACK_INBOX` is its writable view of the same inbox.
+The client first checks `meal_concierge_recipe_pack(action=status)`.
+
+The managed tool accepts only a direct ZIP filename from the configured download
+directory. `stage` copies it under a SHA-256-based opaque archive ID; `inspect`
+then binds identity, revision, count and digest. `import` and `remove` require
+that same archive ID and inspected digest. An authoritative import needs the
+explicit `allow_recipe_removals=true` field. The service snapshots the untrusted
+inbox member into its private state before reading it, serializes the operation
+against recipe planning and cart work, and rejects active cart, checkout,
+cancellation or order-change state. It never downloads a URL, accepts a general
+path, stops the service, or changes anything beyond the exact local collection.
+
+Do not enable this optional route by mounting a general agent data directory
+into the service. The inbox must contain only staged collection archives; the
+service still treats every archive as untrusted and validates the complete pack.
+
 The importer derives a descriptor from the selected file, verifies an optional
 digest pin, then copies it into a private immutable staging file while checking
 the same digest and size. Preflight and application reopen only that staged

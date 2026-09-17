@@ -33,6 +33,8 @@ DEFAULT_COLLECTION_DISPLAY_NAME = "Optional Recipe Collection"
 AUTHORITATIVE_MEMBERSHIP = "authoritative"
 OFFICIAL_PACK_KIND = "bundled"
 LOCAL_PACK_KIND = "collection"
+# Local collections must not reuse a publisher's reserved pack identity.
+PUBLISHER_RECIPE_PACK_IDS = ("wikibooks-themealdb-en",)
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 MAX_EXPANDED_BYTES = 2 * MAX_ARCHIVE_BYTES
 MAX_RECORDS_BYTES = 512 * 1024 * 1024
