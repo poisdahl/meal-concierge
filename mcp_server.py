@@ -87,8 +87,14 @@ def _stage_local_recipe_pack(source_file: str | None) -> dict[str, Any]:
             ):
                 raise OSError("selected downloaded ZIP is not a bounded regular file")
             inbox_info = inbox.lstat()
-            if not stat.S_ISDIR(inbox_info.st_mode):
-                raise OSError("managed recipe-pack inbox is unavailable")
+            if (
+                not stat.S_ISDIR(inbox_info.st_mode)
+                or inbox_info.st_mode & 0o007
+            ):
+                raise OSError("managed recipe-pack inbox is not private")
+            shared_group = bool(inbox_info.st_mode & 0o070)
+            if shared_group and not inbox_info.st_mode & stat.S_ISGID:
+                raise OSError("shared managed recipe-pack inbox must preserve its trusted group")
             destination_descriptor, raw_temporary = tempfile.mkstemp(
                 prefix=".stage-", suffix=".zip", dir=inbox
             )
@@ -107,6 +113,12 @@ def _stage_local_recipe_pack(source_file: str | None) -> dict[str, Any]:
                         raise OSError("managed recipe-pack staging made no progress")
                     offset += written
             os.fsync(destination_descriptor)
+            if shared_group:
+                staged_info = os.fstat(destination_descriptor)
+                if staged_info.st_gid != inbox_info.st_gid:
+                    raise OSError("managed recipe-pack staging did not preserve its trusted group")
+                os.fchmod(destination_descriptor, 0o640)
+                os.fsync(destination_descriptor)
             os.close(destination_descriptor)
             destination_descriptor = None
             archive_id = digest.hexdigest() + ".zip"
@@ -128,10 +140,13 @@ def _stage_local_recipe_pack(source_file: str | None) -> dict[str, Any]:
                         if existing_bytes > _MAX_RECIPE_PACK_BYTES:
                             raise OSError("managed recipe-pack inbox contains an oversized staged ZIP")
                         existing_digest.update(chunk)
+                    if existing_digest.hexdigest() != digest.hexdigest():
+                        raise OSError("managed recipe-pack inbox contains a conflicting staged ZIP")
+                    if shared_group:
+                        os.fchown(existing_descriptor, -1, inbox_info.st_gid)
+                        os.fchmod(existing_descriptor, 0o640)
                 finally:
                     os.close(existing_descriptor)
-                if existing_digest.hexdigest() != digest.hexdigest():
-                    raise OSError("managed recipe-pack inbox contains a conflicting staged ZIP")
             return {
                 "staged": True, "archive_id": archive_id,
                 "sha256": digest.hexdigest(), "bytes": copied,

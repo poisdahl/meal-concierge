@@ -194,11 +194,13 @@ class ManagedRecipePackTests(unittest.TestCase):
         payload = b"synthetic local recipe collection"
         (downloads / "collection (1).zip").write_bytes(payload)
         module.rpc = mock.Mock(return_value={"available": True})
+        self.inbox.chmod(0o2770)
         with mock.patch.dict(os.environ, {
             "MEAL_CONCIERGE_RECIPE_PACK_DOWNLOADS": str(downloads),
             "MEAL_CONCIERGE_RECIPE_PACK_INBOX": str(self.inbox),
         }, clear=False):
             staged = module._stage_local_recipe_pack("collection (1).zip")
+            os.chmod(self.inbox / (hashlib.sha256(payload).hexdigest() + ".zip"), 0o600)
             repeated = module._stage_local_recipe_pack("collection (1).zip")
         digest = hashlib.sha256(payload).hexdigest()
         self.assertEqual(
@@ -206,6 +208,9 @@ class ManagedRecipePackTests(unittest.TestCase):
         )
         self.assertEqual(repeated, staged)
         self.assertEqual((self.inbox / staged["archive_id"]).read_bytes(), payload)
+        staged_info = (self.inbox / staged["archive_id"]).stat()
+        self.assertEqual(staged_info.st_mode & 0o777, 0o640)
+        self.assertEqual(staged_info.st_gid, self.inbox.stat().st_gid)
         (self.inbox / staged["archive_id"]).write_bytes(b"conflicting staged content")
         with mock.patch.dict(os.environ, {
             "MEAL_CONCIERGE_RECIPE_PACK_DOWNLOADS": str(downloads),
