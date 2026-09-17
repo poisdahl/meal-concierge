@@ -15,7 +15,7 @@ from recipe_email import _plain_text, prepare_recipe_media
 from service_common import format_portions, menu_email_html, meal_type_label
 
 
-def render_menu(menu, assets, *, images=True):
+def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
     media = prepare_recipe_media(menu, assets, images_supported=images)
     covers = {}
     for descriptor in media["inline_images"]:
@@ -50,7 +50,7 @@ def render_menu(menu, assets, *, images=True):
                      f"{format_portions(slot['portions'])} porsjoner" if slot.get("portions") else None) if v))
     if dates:
         frozen['schedule'] = []  # The canonical dated slots already cover this plan.
-    full = menu_email_html(frozen, image_cids=media["image_cids"])
+    full = menu_email_html(frozen, image_cids=media["image_cids"], show_estimate_labels=show_estimate_labels)
     if dates:
         position = full.index("</h1>") + len("</h1>")
         full = full[:position] + "<h2>Datoer</h2>" + "".join("<p>" + html.escape(v) + "</p>" for v in dates) + full[position:]

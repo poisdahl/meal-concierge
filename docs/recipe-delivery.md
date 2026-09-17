@@ -9,6 +9,11 @@ New installations use chat text by default, with PDF and available images where
 the agent supports them. You can choose formats and channels independently.
 Older installations keep their existing delivery preferences.
 
+`show_estimate_labels` controls whether internal estimate provenance is rendered
+next to a quantity or portion in future chat, PDF and email output. Turning it
+off does not remove or alter the stored evidence, nor does it change frozen
+outbound jobs.
+
 ## Chat, PDF and images
 
 - “Show the recipes here.”

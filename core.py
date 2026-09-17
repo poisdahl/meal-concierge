@@ -195,8 +195,8 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
 
 def initial_recipe_delivery(*, legacy_email: bool = False, legacy: bool = False) -> dict[str, Any]:
     return {"preferences": {
-        "chat": {"enabled": not legacy, "pdf": True, "images": True},
-        "email": {"enabled": legacy_email, "pdf": True, "images": True},
+        "chat": {"enabled": not legacy, "pdf": True, "images": True, "show_estimate_labels": True},
+        "email": {"enabled": legacy_email, "pdf": True, "images": True, "show_estimate_labels": True},
     }, "paused": False, "legacy_email_disabled": False, "jobs": {}}
 
 
@@ -756,8 +756,16 @@ def _migrate_state(
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
     state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
-    state.setdefault("recipe_delivery", initial_recipe_delivery(
+    delivery = state.setdefault("recipe_delivery", initial_recipe_delivery(
         legacy=True, legacy_email=valid_email_address(state.get("email_recipient"))))
+    preferences = delivery.get("preferences") if isinstance(delivery, dict) else None
+    if not isinstance(preferences, dict):
+        raise HouseholdError("recipe delivery preferences are invalid")
+    for channel in ("chat", "email"):
+        preference = preferences.get(channel)
+        if not isinstance(preference, dict):
+            raise HouseholdError("recipe delivery preferences are invalid")
+        preference.setdefault("show_estimate_labels", True)
     batch = state.get("batch_outcomes")
     if not isinstance(batch, dict) or set(batch) != {"sources", "leftovers"} or any(not isinstance(v,dict) or len(v)>2000 for v in batch.values()):
         raise HouseholdError("household batch outcomes are invalid")
