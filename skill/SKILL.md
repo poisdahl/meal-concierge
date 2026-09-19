@@ -622,7 +622,35 @@ default; this grants neither full-storage rights nor guaranteed availability.
 Read selected original pages rather than using search snippets for quantities.
 Assess rights as above, then import at most eight useful full recipes with
 `web_discovery=true`; do not save personal bank entries unless requested.
-Use only returned full `discovery_ref` values in `planner_input.web_candidates`
+Inspect the imported recipe's `readiness`, ingredients, person portions and
+method before handing it to the planner. If supported source facts were left
+unparsed or the recipe needs a culinary adaptation, resolve the exact discovery
+and use the existing `convert` action with its `discovery_ref`, `recipe_digest`,
+`source_schema_version` and the complete schema-2 recipe. Reuse source amounts
+when present; keep justified estimates and assumptions explicit. Recheck the
+returned readiness and pass the new discovery reference, not the superseded one.
+The first text interpretation keeps source metadata quoted from the fetched page;
+put a Norwegian title, translated ingredient names and culinary classification
+in the subsequent conversion while retaining the original source text and
+attribution. Resolve `carrots or parsnips` and similar alternatives to one
+source-supported choice before conversion or product preparation.
+Never change units only to make readiness pass: one garlic clove is not one whole
+garlic, and one unspecified packet does not establish its grams or servings.
+
+Read the method for dependencies such as hummus from earlier in the week or soup
+from yesterday. Resolve the actual referenced source recipe before making a
+standalone adaptation. Establish the required amount, source yield and allocated
+fraction, then include that fraction of its ingredients and the complete needed
+method once. Do not buy both the prepared component and its raw ingredients.
+An unknown dependency or allocation remains unsuitable for an automatic
+standalone menu even if the numeric readiness check passes; choose another dish
+or use an explicitly supported, complete linked menu. Preserve original wording
+and explain the adaptation. Keep household preferences separate from source
+facts: a fullgrain substitution must have a compatible preparation method,
+including water, cooking time or dough changes where needed; otherwise select a
+suitable different recipe.
+
+Use only the resulting usable full `discovery_ref` values in `planner_input.web_candidates`
 (each entry is `{discovery_ref:...}`). Include
 `web_search_result={status:"completed",settings_digest:<returned digest>}`.
 If search is unavailable, report it and pass status `unavailable`, continuing

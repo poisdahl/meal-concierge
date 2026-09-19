@@ -182,7 +182,7 @@ def _instructions(value: Any, unsupported: set[str], depth: int = 0) -> list[str
     return result
 
 
-def _extract(raw: Any, *, kind: str, source_url: str | None) -> dict[str, Any]:
+def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: bool = False) -> dict[str, Any]:
     if not isinstance(raw, dict) or not _type(raw.get("@type"), "Recipe"):
         raise RecipeImportReaderError("source entry must be a JSON-LD Recipe")
     try:
@@ -235,8 +235,10 @@ def _extract(raw: Any, *, kind: str, source_url: str | None) -> dict[str, Any]:
     extracted = {
         "name": name,
         "language": _text(raw.get("inLanguage"), "inLanguage", 20) or "und",
-        "ingredients": _strings(raw.get("recipeIngredient"), "recipeIngredient", 500, 200),
-        "steps": _instructions(raw.get("recipeInstructions"), unsupported),
+        "ingredients": ([] if allow_incomplete and raw.get("recipeIngredient") in (None, "", []) else
+                        _strings(raw.get("recipeIngredient"), "recipeIngredient", 500, 200)),
+        "steps": ([] if allow_incomplete and raw.get("recipeInstructions") in (None, "", []) else
+                  _instructions(raw.get("recipeInstructions"), unsupported)),
         "yield_text": _text(raw.get("recipeYield"), "recipeYield", 500),
         "description": _text(raw.get("description"), "description", MAX_TEXT),
         "notes": _text("\n\n".join(notes), "author notes", MAX_TEXT),
@@ -289,7 +291,8 @@ class _JSONLDScripts(HTMLParser):
                 raise RecipeImportReaderError("webpage has too many JSON-LD scripts")
 
 
-def read_webpage_jsonld(data: bytes | str, *, source_url: str, allow_empty: bool = False) -> list[dict[str, Any]]:
+def read_webpage_jsonld(data: bytes | str, *, source_url: str, allow_empty: bool = False,
+                        allow_incomplete: bool = False) -> list[dict[str, Any]]:
     """Extract every Recipe, preserving ambiguity for the caller to resolve."""
     url = _url(source_url, "source_url")
     if url is None or not url.startswith("https://"):
@@ -308,7 +311,7 @@ def read_webpage_jsonld(data: bytes | str, *, source_url: str, allow_empty: bool
                 pending.extend(reversed(value))
             elif isinstance(value, dict):
                 if _type(value.get("@type"), "Recipe"):
-                    result.append(_extract(value, kind="web", source_url=url))
+                    result.append(_extract(value, kind="web", source_url=url, allow_incomplete=allow_incomplete))
                     if len(result) > MAX_RECORDS:
                         raise RecipeImportReaderError("webpage has too many recipes")
                 if "@graph" in value:
@@ -369,7 +372,25 @@ class _WebpageText(HTMLParser):
             else:
                 names, containers = {"td", "th"}, {"tr", "table"}
             self._close(names, containers | {"template", "svg", "math"})
-        hidden = any(key == "hidden" or key == "aria-hidden" and (value or "").casefold() == "true" for key, value in attrs)
+        attributes = {key: value for key, value in attrs}
+        style: dict[str, tuple[str, bool]] = {}
+        for declaration in (attributes.get("style") or "").split(";"):
+            if ":" in declaration:
+                key, value = declaration.split(":", 1)
+                key, value = key.strip().casefold(), value.strip().casefold()
+                important = re.search(r"!\s*important\s*$", value) is not None
+                value = re.sub(r"\s*!\s*important\s*$", "", value)
+                current = style.get(key)
+                if current is None or important or not current[1]:
+                    style[key] = (value, important)
+        display = style.get("display", (None, False))[0]
+        visibility = style.get("visibility", (None, False))[0]
+        content_visibility = style.get("content-visibility", (None, False))[0]
+        hidden = ("hidden" in attributes or "inert" in attributes
+                  or (attributes.get("aria-hidden") or "").strip().casefold() == "true"
+                  or display == "none"
+                  or visibility in {"hidden", "collapse"}
+                  or content_visibility == "hidden")
         ignored = self.ignored or tag in self._ignored or hidden
         if not ignored and tag in self._blocks:
             self._append("\n")
@@ -395,17 +416,51 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
     text. Text has no inferred recipe fields or authority and must be presented
     as untrusted source content to the calling agent.
     """
-    recipes = read_webpage_jsonld(data, source_url=source_url, allow_empty=True)
-    if recipes:
-        return {"mode": "structured", "recipes": recipes, "text": None, "requires_interpretation": False}
+    raw = _input_text(data, MAX_WEBPAGE_BYTES)
+    recipes = read_webpage_jsonld(raw, source_url=source_url, allow_empty=True, allow_incomplete=True)
+    # Classify each advertised record independently. One incomplete sibling
+    # must not erase usable structured recipes, and a physical yield remains
+    # valid structured evidence even though person portions stay unresolved.
+    complete, incomplete = [], []
+    for record in recipes:
+        target = complete if (record["extracted"]["ingredients"] and record["extracted"]["steps"]
+                              and record["extracted"]["yield_text"]) else incomplete
+        target.append(record)
+    if complete:
+        return {"mode": "structured", "recipes": complete, "incomplete_recipes": incomplete,
+                "text": None, "requires_interpretation": False}
     parser = _WebpageText()
-    parser.feed(_input_text(data, MAX_WEBPAGE_BYTES))
+    parser.feed(raw)
     parser.close()
     if any(tag in parser._ignored for tag, _ in parser.stack):
         raise RecipeImportReaderError("webpage text has an unclosed non-text element")
-    text = "\n".join(line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split())))
-    text = _text(text, "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
-    return {"mode": "text", "recipes": [], "text": text, "source_url": _url(source_url, "source_url"),
+    visible_lines = [line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split()))]
+    def record_lines(record):
+        extracted = record["extracted"]
+        return [value for value in (
+            extracted["name"], extracted["yield_text"], *extracted["ingredients"], *extracted["steps"],
+            extracted["description"], extracted["notes"], *extracted["tags"]
+        ) if value]
+    def bounded_text(lines):
+        retained, size = [], 0
+        for line in lines:
+            if retained and line == retained[-1]:
+                continue
+            encoded = len((line + "\n").encode("utf-8"))
+            if size + encoded > MAX_WEBPAGE_TEXT_BYTES:
+                break
+            retained.append(line)
+            size += encoded
+        return _text("\n".join(retained), "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
+    record_texts = [{"record_index": index, "text": bounded_text(record_lines(record))}
+                    for index, record in enumerate(incomplete)]
+    if len(incomplete) > 1:
+        return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete,
+                "record_texts": record_texts, "text": None, "source_url": _url(source_url, "source_url"),
+                "requires_record_selection": True, "requires_interpretation": True}
+    text = bounded_text([*(record_lines(incomplete[0]) if incomplete else []), *visible_lines])
+    return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete, "text": text,
+            "source_url": _url(source_url, "source_url"),
             "requires_interpretation": True}
 
 
@@ -536,8 +591,23 @@ def read_transcript(value: Any) -> dict[str, Any]:
 
     ingredients = []
     ingredient_excerpts = selected("ingredients", 200)
+    temporal = (r"(?:yesterday(?:'s)?|earlier(?:\s+(?:this|in\s+the))?\s+(?:meal|menu|week)|"
+                r"previous\s+(?:meal|menu)|last\s+(?:meal|menu)|leftovers?|i\s+går|gårsdagens|"
+                r"tidligere(?:\s+(?:denne|i))?\s+(?:måltid|meny|uke)|forrige\s+(?:måltid|meny|uke)|rester(?:ne)?)")
+    dependency_patterns = (
+        re.compile(rf"\b(?:from|fra)\b.{{0,50}}\b{temporal}\b", re.IGNORECASE),
+        re.compile(rf"\b(?:use|add|fold|stir|mix|bruk|tilsett|vend|rør|bland)\b.{{0,80}}\b{temporal}\b", re.IGNORECASE),
+        re.compile(rf"\b{temporal}\b.{{0,50}}\b(?:soup|hummus|sauce|stew|suppe|saus|gryte|mos|deig)\b", re.IGNORECASE),
+    )
+    def has_dependency(text):
+        return any(pattern.search(text) for pattern in dependency_patterns)
     for item in ingredient_excerpts:
         quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount",))
+        if (re.search(r"\b(?:or|eller)\b", quote, re.IGNORECASE)
+                or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", quote, re.UNICODE)):
+            raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
+        if has_dependency(quote):
+            raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
         ingredient = source_ingredient(quote)
         for evidence in ingredient["evidence"].values():
             evidence["input"] = evidence_input
@@ -549,6 +619,8 @@ def read_transcript(value: Any) -> dict[str, Any]:
         ingredients.append(ingredient)
     step_excerpts = selected("steps", 100)
     steps = [excerpt(item, "step", maximum=MAX_TEXT)[0] for item in step_excerpts]
+    if any(has_dependency(step) for step in steps):
+        raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
     note_excerpts = selected("notes", 100, optional=True)
     notes = "\n\n".join(excerpt(item, "note", maximum=MAX_TEXT)[0] for item in note_excerpts)
     notes = _text(notes, "combined transcript notes", MAX_TEXT) or None
@@ -566,22 +638,35 @@ def read_transcript(value: Any) -> dict[str, Any]:
             portions_evidence = {"basis": "estimate", "input": evidence_input, "assumptions": assumptions}
     tags = selected("tags", 50, optional=True)
     tags = [_text(tag, "tag", 80, required=True) for tag in tags]
+    name = _text(interpretation.get("name"), "name", 300, required=True)
+    language = _text(interpretation.get("language"), "language", 20) or "und"
+    categories = interpretation.get("categories")
+    if categories is not None:
+        if not isinstance(categories, list):
+            raise RecipeImportReaderError("categories must be a list of host classifications")
+        categories = [_text(category, "category", 80, required=True) for category in categories]
+    else:
+        categories = categories_from_tags(tags)
     source_pages = [{"page": page, "text": text, "issue": page_issues.get(page)} for page, text in sorted(page_text.items())]
     source_digest = hashlib.sha256(json.dumps({"kind": kind, "pages": source_pages, "attribution": attribution},
         ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     candidate = normalize_recipe(bind_recipe_source({
-        "schema_version": 2, "name": _text(interpretation.get("name"), "name", 300, required=True),
-        "language": _text(interpretation.get("language"), "language", 20) or "und",
+        "schema_version": 2, "name": name,
+        "language": language,
         "source": {"kind": kind, "external_id": "sha256:" + source_digest,
                    "relationship": "user_supplied", "original": attribution},
         "rights": {"storage": "full"}, "ingredients": ingredients, "steps": steps,
         "yield": yield_value, "portions": portions, "portions_evidence": portions_evidence,
         "tags": tags, "notes": notes,
-        "categories": interpretation.get("categories", categories_from_tags(tags)),
+        "categories": categories,
     }))
+    metadata_basis = {"name": "host_interpretation", "language": "host_inference" if language != "und" else "unknown",
+                      "tags": "host_classification" if tags else "none",
+                      "categories": "host_classification" if categories else "none"}
     return {"candidate": candidate, "source_context": {"kind": kind, "content_sha256": source_digest,
         "source_mode": "supplied_text" if kind == "pasted_text" else "host_transcript",
-        "attribution_status": "declared" if any(attribution.values()) else "unknown"},
+        "attribution_status": "declared" if any(attribution.values()) else "unknown",
+        "metadata_basis": metadata_basis},
         "page_issues": [{"page": page, "issue": issue} for page, issue in sorted(page_issues.items())],
         "source_excerpts": {"ingredients": [{"page": item["page"], "quote": item["quote"]} for item in ingredient_excerpts],
                             "steps": deepcopy(step_excerpts), "notes": deepcopy(note_excerpts)},

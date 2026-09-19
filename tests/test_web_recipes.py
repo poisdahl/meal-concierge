@@ -308,6 +308,151 @@ class WebRecipeTests(unittest.TestCase):
         self.assertIn('menu', saved)
         self.assertEqual(len(self.app.recipes.search()), 1)
 
+    def test_interpreted_web_source_uses_attributed_url_for_enabled_scope(self):
+        url = 'https://www.matprat.no/text-recipe'
+        structured = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['200 g carrots'],
+                      'recipeInstructions': ['Simmer.']}
+        html = ('<script type="application/ld+json">' + json.dumps(structured) + '</script>'
+                '<article><h1>Soup</h1><p>Serves 2</p><p>200 g carrots</p><p>Simmer.</p></article>')
+        interpretation = {'name': 'Soup',
+            'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+            'steps': [{'page': 1, 'quote': 'Simmer.'}],
+            'yield': {'page': 1, 'quote': 'Serves 2'}}
+        with patch('recipe_import_sources._get_bytes', return_value=(html.encode(), 'text/html')) as fetch:
+            first = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                'url': url, 'web_discovery': True, 'storage_decision': DECISION})
+            self.assertTrue(first['requires_interpretation'])
+            imported = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                'url': url, 'web_discovery': True, 'storage_decision': DECISION,
+                'interpretation': interpretation})
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(imported['recipe']['source']['kind'], 'pasted_text')
+        self.assertEqual(imported['recipe']['source']['url'], url)
+        self.assertEqual(imported['recipe']['source']['original']['url'], url)
+        self.assertEqual(imported['import_report']['source_context']['metadata_basis']['name'],
+                         'host_interpretation')
+        result, _, _ = self.plan([{'discovery_ref': imported['discovery_ref']}],
+            {'status': 'completed', 'settings_digest': self.scopes()['settings_digest']})
+        self.assertEqual(result['status'], 'planned')
+        self.assertTrue(imported['readiness']['scaling_ready'])
+        saved = self.app.handle({'operation': 'menu', 'action': 'save',
+                                 'planner_handoff': result['save_handoff']})['menu']
+        self.assertIn(url, json.dumps(saved))
+
+    def test_structured_only_incomplete_page_can_be_interpreted_then_converted(self):
+        url = 'https://www.matprat.no/incomplete-structured-only'
+        structured = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['200 g carrots'],
+                      'recipeInstructions': ['Simmer.']}
+        html = '<script type="application/ld+json">' + json.dumps(structured) + '</script>'
+        interpretation = {'name': 'Soup', 'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+                          'steps': [{'page': 1, 'quote': 'Simmer.'}]}
+        with patch('recipe_import_sources._get_bytes', return_value=(html.encode(), 'text/html')):
+            first = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                'url': url, 'web_discovery': True, 'storage_decision': DECISION})
+            self.assertEqual(first['text'], 'Soup\n200 g carrots\nSimmer.')
+            self.assertEqual(first['incomplete_recipes'][0]['extracted']['name'], 'Soup')
+            imported = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                'url': url, 'web_discovery': True, 'storage_decision': DECISION,
+                'interpretation': interpretation})
+        self.assertFalse(imported['readiness']['scaling_ready'])
+        self.assertEqual(imported['import_report']['incomplete_recipes'][0]['extracted']['ingredients'], ['200 g carrots'])
+        converted = deepcopy(imported['recipe'])
+        converted['portions'] = 2
+        converted['portions_evidence'] = {'basis': 'estimate', 'input': 'JSON-LD omitted person portions',
+                                           'assumptions': 'This recipe serves two people.'}
+        result = self.app.handle({'operation': 'recipes', 'action': 'convert',
+            'discovery_ref': imported['discovery_ref'], 'recipe_digest': imported['recipe_digest'],
+            'source_schema_version': 2, 'recipe': converted})
+        self.assertTrue(result['readiness']['scaling_ready'])
+        self.assertEqual(result['suggested_status'], 'active')
+
+    def test_multiple_incomplete_records_cannot_fuse_and_import_by_exact_index(self):
+        url = 'https://www.matprat.no/multiple-incomplete'
+        cross_records = [
+            {'@type': 'Recipe', 'name': 'Carrot soup', 'recipeIngredient': ['200 g carrots'],
+             'recipeYield': '2 servings'},
+            {'@type': 'Recipe', 'name': 'Bread', 'recipeInstructions': ['Bake at 200 C.'],
+             'recipeYield': '4 servings'},
+        ]
+        cross_html = '<script type="application/ld+json">' + json.dumps(cross_records) + '</script>'
+        fused = {'name': 'Carrot soup', 'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+                 'steps': [{'page': 1, 'quote': 'Bake at 200 C.'}],
+                 'yield': {'page': 1, 'quote': '4 servings'}}
+        with patch('recipe_import_sources._get_bytes', return_value=(cross_html.encode(), 'text/html')):
+            first = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                'url': url, 'web_discovery': True, 'storage_decision': DECISION})
+            self.assertTrue(first['requires_record_selection'])
+            with self.assertRaisesRegex(RecipeError, 'record_index'):
+                self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                    'url': url, 'web_discovery': True, 'storage_decision': DECISION,
+                    'interpretation': fused})
+            for index in (0, 1):
+                with self.subTest(index=index), self.assertRaisesRegex(RecipeError, 'quote is absent'):
+                    self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                        'url': url, 'web_discovery': True, 'storage_decision': DECISION,
+                        'record_index': index, 'interpretation': fused})
+        self.assertEqual(self.app.recipes.search(), [])
+
+        independent = [
+            {'@type': 'Recipe', 'name': 'Carrots', 'recipeIngredient': ['200 g carrots'],
+             'recipeInstructions': ['Simmer.']},
+            {'@type': 'Recipe', 'name': 'Parsnips', 'recipeIngredient': ['300 g parsnips'],
+             'recipeInstructions': ['Roast.']},
+        ]
+        html = '<script type="application/ld+json">' + json.dumps(independent) + '</script>'
+        interpretations = [
+            {'name': 'Carrots', 'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+             'steps': [{'page': 1, 'quote': 'Simmer.'}]},
+            {'name': 'Parsnips', 'ingredients': [{'page': 1, 'quote': '300 g parsnips'}],
+             'steps': [{'page': 1, 'quote': 'Roast.'}]},
+        ]
+        imported = []
+        with patch('recipe_import_sources._get_bytes', return_value=(html.encode(), 'text/html')):
+            for index, interpretation in enumerate(interpretations):
+                imported.append(self.app.handle({'operation': 'recipes', 'action': 'import',
+                    'source_kind': 'url', 'url': url, 'web_discovery': True,
+                    'storage_decision': DECISION, 'record_index': index,
+                    'interpretation': interpretation}))
+        self.assertNotEqual(imported[0]['source_identity'], imported[1]['source_identity'])
+        self.assertEqual([item['recipe']['name'] for item in imported], ['Carrots', 'Parsnips'])
+        self.assertEqual([item['recipe']['ingredients'][0]['item'] for item in imported], ['carrots', 'parsnips'])
+        self.assertEqual([item['import_report']['source_context']['record_index'] for item in imported], [0, 1])
+
+    def test_transcript_attribution_cannot_authorize_web_candidate(self):
+        url = 'https://www.matprat.no/spoofed-attribution'
+        transcript = {'kind': 'pasted_text',
+            'pages': [{'page': 1, 'text': 'Soup\nServes 2\n200 g carrots\nSimmer.'}],
+            'interpretation': {'name': 'Soup',
+                'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+                'steps': [{'page': 1, 'quote': 'Simmer.'}],
+                'yield': {'page': 1, 'quote': 'Serves 2'}},
+            'attribution': {'url': url}}
+        imported = self.app.handle({'operation': 'recipes', 'action': 'import',
+            'source_kind': 'transcript', 'transcript': transcript, 'storage_decision': DECISION})
+        self.assertIsNone(imported['recipe']['source'].get('url'))
+        self.assertEqual(imported['recipe']['source']['original']['url'], url)
+        with self.assertRaisesRegex(RecipeError, 'enabled source and assessed full storage'):
+            self.plan([{'discovery_ref': imported['discovery_ref']}],
+                {'status': 'completed', 'settings_digest': self.scopes()['settings_digest']})
+
+    def test_semantic_ambiguity_is_rejected_before_web_discovery(self):
+        for ingredient, step, error in (
+                ('200 g hummus', 'Fold in hummus from yesterday menu.', 'cross-meal'),
+                ('200 g carrots or parsnips', 'Simmer.', 'alternatives')):
+            text = f'Dinner\nServes 2\n{ingredient}\n{step}'
+            page = {'mode': 'text', 'requires_interpretation': True, 'text': text,
+                    'recipes': [], 'source_url': 'https://www.matprat.no/ambiguous'}
+            interpretation = {'name': 'Dinner',
+                'ingredients': [{'page': 1, 'quote': ingredient}],
+                'steps': [{'page': 1, 'quote': step}],
+                'yield': {'page': 1, 'quote': 'Serves 2'}}
+            with self.subTest(ingredient=ingredient), patch('recipe_operations.fetch_public_webpage', return_value=page):
+                with self.assertRaisesRegex(RecipeError, error):
+                    self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
+                        'url': page['source_url'], 'web_discovery': True, 'storage_decision': DECISION,
+                        'interpretation': interpretation})
+        self.assertEqual(self.app.recipes.search(), [])
+
     def test_stale_or_excluded_web_refs_fail_manual_url_still_imports(self):
         imported = self.imported()
         before = self.scopes()
@@ -336,6 +481,22 @@ class WebRecipeTests(unittest.TestCase):
         result = self.app.handle({'operation': 'recipes', 'action': 'convert', 'discovery_ref': imported['discovery_ref'],
             'recipe_digest': imported['recipe_digest'], 'source_schema_version': 2, 'recipe': edited})
         self.assertEqual(result['recipe']['rights']['storage_decision'], DECISION)
+        self.assertTrue(result['readiness']['scaling_ready'])
+        self.assertTrue(all(item['scalable'] for item in result['shopping_requirements']))
+        self.assertEqual(result['suggested_status'], 'active')
+
+    def test_conversion_returns_unresolved_readiness(self):
+        imported = self.imported()
+        edited = deepcopy(imported['recipe'])
+        edited['ingredients'][0].update({'quantity': None, 'unit': None, 'scalable': False,
+            'evidence': {'quantity': {'basis': 'unknown'}, 'unit': {'basis': 'unknown'}}})
+        result = self.app.handle({'operation': 'recipes', 'action': 'convert',
+            'discovery_ref': imported['discovery_ref'], 'recipe_digest': imported['recipe_digest'],
+            'source_schema_version': 2, 'recipe': edited})
+        self.assertFalse(result['readiness']['scaling_ready'])
+        self.assertIn('ingredients.0.quantity', result['readiness']['missing_decisions'])
+        self.assertFalse(result['shopping_requirements'][0]['scalable'])
+        self.assertEqual(result['suggested_status'], 'draft')
 
     def test_web_recipe_reaches_scaled_menu_and_grocery_requirements(self):
         from product_planner import menu_requirements

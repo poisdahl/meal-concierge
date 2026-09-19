@@ -260,8 +260,9 @@ import unittest
 
 from recipe_import_readers import (
     MAX_RECORD_BYTES as SOURCE_RECORD_BYTES, RecipeImportReaderError, read_recipesage_export,
-    read_webpage_jsonld, source_candidate,
+    read_transcript, read_webpage, read_webpage_jsonld, source_candidate,
 )
+from recipes import scale_recipe
 
 
 def recipesage_fixture():
@@ -1760,7 +1761,8 @@ class PinnedTransportTests(unittest.TestCase):
             fetch.assert_not_called()
 
     def test_public_page_structured_and_text_fallback_envelopes(self):
-        jsonld = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['250 g carrots'], 'recipeInstructions': ['Simmer.']}
+        jsonld = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['250 g carrots'],
+                  'recipeInstructions': ['Simmer.'], 'recipeYield': '2 servings'}
         html = '<script type="application/ld+json">' + json.dumps(jsonld) + '</script>'
         with patch.object(sources, '_get_bytes', return_value=(html.encode(), 'text/html')) as fetch:
             result = sources.fetch_public_webpage('https://recipes.example/soup')
@@ -1852,11 +1854,22 @@ class WebpageTextTests(unittest.TestCase):
         self.assertNotIn('21/2', result['text'])
 
     def test_nested_hidden_lists_and_templates_stay_inert(self):
-        for hidden in ('<ul hidden><li>HIDDEN_TEXT</li></ul>', '<template><li>HIDDEN_TEXT</li></template>'):
+        for hidden in ('<ul hidden><li>HIDDEN_TEXT</li></ul>', '<template><li>HIDDEN_TEXT</li></template>',
+                       '<div inert>HIDDEN_TEXT</div>', '<div aria-hidden=" TRUE ">HIDDEN_TEXT</div>',
+                       '<div style=" display : NONE ">HIDDEN_TEXT</div>',
+                       '<div style="display:none !important">HIDDEN_TEXT</div>',
+                       '<div style="display:none !important; display:block">HIDDEN_TEXT</div>',
+                       '<div style="display:none ! important; display:block">HIDDEN_TEXT</div>',
+                       '<div style="visibility: hidden">HIDDEN_TEXT</div>',
+                       '<div style="visibility:hidden!important; visibility:visible">HIDDEN_TEXT</div>',
+                       '<div style="content-visibility:hidden">HIDDEN_TEXT</div>'):
             result = read_webpage('<ul><li>Visible' + hidden + '</li></ul><p>Recipe</p>', source_url='https://example.org')
             self.assertNotIn('HIDDEN_TEXT', result['text'])
             self.assertIn('Visible', result['text'])
             self.assertIn('Recipe', result['text'])
+        visible = read_webpage('<div style="display:block !important; display:none">VISIBLE_IMPORTANT</div>',
+                               source_url='https://example.org')
+        self.assertIn('VISIBLE_IMPORTANT', visible['text'])
 
     def test_structured_recipe_precedes_unsupported_page_text(self):
         recipe = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['200 g lentils'], 'recipeInstructions': ['Simmer.'], 'recipeYield': '2 servings'}
@@ -1864,6 +1877,117 @@ class WebpageTextTests(unittest.TestCase):
         self.assertEqual(result['mode'], 'structured')
         self.assertEqual(result['recipes'][0]['extracted']['name'], 'Soup')
         self.assertIsNone(result['text'])
+
+    def test_incomplete_structured_recipe_uses_visible_text_interpretation(self):
+        for missing in ('recipeIngredient', 'recipeInstructions', 'recipeYield'):
+            recipe = {'@type': 'Recipe', 'name': 'Soup', 'recipeIngredient': ['200 g lentils'],
+                      'recipeInstructions': ['Simmer.'], 'recipeYield': '2 servings'}
+            del recipe[missing]
+            html = ('<script type="application/ld+json">' + json.dumps(recipe) + '</script>'
+                    '<article><h1>Soup</h1><p>Serves 2</p><p>200 g lentils</p><p>Simmer.</p></article>')
+            with self.subTest(missing=missing):
+                result = read_webpage(html, source_url='https://example.org/recipe')
+                self.assertEqual(result['mode'], 'text')
+                self.assertTrue(result['requires_interpretation'])
+                self.assertEqual(result['recipes'], [])
+                self.assertIn('Serves 2', result['text'])
+
+    def test_physical_yield_and_complete_sibling_stay_structured(self):
+        complete = {'@type': 'Recipe', 'name': 'Loaf', 'recipeIngredient': ['350 g flour'],
+                    'recipeInstructions': ['Bake.'], 'recipeYield': '2 loaves'}
+        incomplete = {'@type': 'Recipe', 'name': 'Teaser', 'recipeInstructions': ['Subscribe.']}
+        result = read_webpage('<script type="application/ld+json">' +
+                              json.dumps([complete, incomplete]) + '</script><nav>Home About</nav>',
+                              source_url='https://example.org/recipes')
+        self.assertEqual(result['mode'], 'structured')
+        self.assertEqual([item['extracted']['name'] for item in result['recipes']], ['Loaf'])
+        self.assertEqual([item['extracted']['name'] for item in result['incomplete_recipes']], ['Teaser'])
+        self.assertIsNone(source_candidate(result['recipes'][0])['portions'])
+        self.assertIsNone(result['text'])
+
+    def test_all_incomplete_structured_only_page_returns_source_facts(self):
+        incomplete = {'@type': 'Recipe', 'name': 'Partial soup',
+                      'recipeInstructions': ['Simmer.'], 'recipeYield': '2 servings'}
+        result = read_webpage('<script type="application/ld+json">' + json.dumps(incomplete) + '</script>',
+                              source_url='https://example.org/partial')
+        self.assertEqual(result['mode'], 'text')
+        self.assertTrue(result['requires_interpretation'])
+        self.assertEqual(result['text'], 'Partial soup\n2 servings\nSimmer.')
+        self.assertEqual(result['incomplete_recipes'][0]['extracted']['ingredients'], [])
+
+    def test_multiple_incomplete_records_have_separate_quote_namespaces(self):
+        records = [
+            {'@type': 'Recipe', 'name': 'Carrot soup', 'recipeIngredient': ['200 g carrots'],
+             'recipeYield': '2 servings'},
+            {'@type': 'Recipe', 'name': 'Bread', 'recipeInstructions': ['Bake at 200 C.'],
+             'recipeYield': '4 servings'},
+        ]
+        result = read_webpage('<script type="application/ld+json">' + json.dumps(records) + '</script>',
+                              source_url='https://example.org/partials')
+        self.assertTrue(result['requires_record_selection'])
+        self.assertIsNone(result['text'])
+        self.assertEqual(result['record_texts'], [
+            {'record_index': 0, 'text': 'Carrot soup\n2 servings\n200 g carrots'},
+            {'record_index': 1, 'text': 'Bread\n4 servings\nBake at 200 C.'},
+        ])
+
+    def test_complete_multiple_structured_recipes_preserve_record_choice(self):
+        def recipe(name):
+            return {'@type': 'Recipe', 'name': name, 'recipeIngredient': ['200 g lentils'],
+                    'recipeInstructions': [{'@type': 'HowToSection', 'name': 'Finish',
+                                            'itemListElement': [{'@type': 'HowToStep', 'text': 'Simmer.'}]}],
+                    'recipeYield': '2 servings'}
+        result = read_webpage('<script type="application/ld+json">' + json.dumps([recipe('One'), recipe('Two')]) + '</script>',
+                              source_url='https://example.org/recipes')
+        self.assertEqual(result['mode'], 'structured')
+        self.assertEqual([item['extracted']['name'] for item in result['recipes']], ['One', 'Two'])
+
+    def test_semantic_dependencies_and_alternatives_require_resolution(self):
+        for reference, ingredient, step, error in (
+                ('Use hummus from earlier this week', 'Use hummus from earlier this week', 'Warm and serve.', 'cross-meal'),
+                ('Fold in hummus from yesterday menu.', '200 g hummus', 'Fold in hummus from yesterday menu.', 'cross-meal'),
+                ('Use hummus from earlier menu.', '200 g hummus', 'Use hummus from earlier menu.', 'cross-meal'),
+                ('Add soup yesterday.', '200 g soup', 'Add soup yesterday.', 'cross-meal'),
+                ("Use yesterday's hummus.", '200 g hummus', "Use yesterday's hummus.", 'cross-meal'),
+                ('Add leftover soup.', '200 g soup', 'Add leftover soup.', 'cross-meal'),
+                ('Bruk hummus fra tidligere meny.', '200 g hummus', 'Bruk hummus fra tidligere meny.', 'cross-meal'),
+                ('Tilsett suppen fra gårsdagens meny.', '200 g suppe', 'Tilsett suppen fra gårsdagens meny.', 'cross-meal'),
+                ('Bruk rester fra forrige måltid.', '200 g rester', 'Bruk rester fra forrige måltid.', 'cross-meal'),
+                ('200 g carrots or parsnips', '200 g carrots or parsnips', 'Simmer.', 'alternatives'),
+                ('200 g carrots/parsnips', '200 g carrots/parsnips', 'Simmer.', 'alternatives'),
+                ('200 g gulrøtter|pastinakk', '200 g gulrøtter|pastinakk', 'Kok.', 'alternatives')):
+            source = {'kind': 'pasted_text', 'pages': [{'page': 1, 'text':
+                f'Dinner\nServes 2\n{ingredient}\n{step}'}],
+                'interpretation': {'name': 'Dinner',
+                    'ingredients': [{'page': 1, 'quote': ingredient}],
+                    'steps': [{'page': 1, 'quote': step}],
+                    'yield': {'page': 1, 'quote': 'Serves 2'}}}
+            with self.subTest(reference=reference):
+                with self.assertRaisesRegex(RecipeImportReaderError, error):
+                    read_transcript(source)
+
+    def test_interpreted_metadata_is_explicitly_host_derived(self):
+        source = {'kind': 'pasted_text', 'pages': [{'page': 1, 'text':
+            'Vanlig suppe\nPorsjoner: 2\n200 g gulrøtter\nLa småkoke.'}],
+            'interpretation': {'name': 'Plain soup', 'language': 'nb-NO', 'tags': ['Family'],
+                'categories': ['dinner'], 'ingredients': [{'page': 1, 'quote': '200 g carrots'}],
+                'steps': [{'page': 1, 'quote': 'Simmer.'}], 'yield': {'page': 1, 'quote': 'Serves 2'}}}
+        source['interpretation']['ingredients'][0]['quote'] = '200 g gulrøtter'
+        source['interpretation']['steps'][0]['quote'] = 'La småkoke.'
+        source['interpretation']['yield']['quote'] = 'Porsjoner: 2'
+        recipe = read_transcript(source)['candidate']
+        self.assertEqual((recipe['name'], recipe['language'], recipe['tags'], recipe['categories']),
+                         ('Plain soup', 'nb-NO', ['Family'], ['dinner']))
+        result = read_transcript(source)
+        self.assertEqual(result['source_context']['metadata_basis'], {
+            'name': 'host_interpretation', 'language': 'host_inference',
+            'tags': 'host_classification', 'categories': 'host_classification'})
+        footer = deepcopy(source)
+        footer['pages'][0]['text'] += '\nFooter links: dinner dessert en'
+        footer['interpretation'].update(language='en', tags=['dinner'], categories=['dessert'])
+        footer_result = read_transcript(footer)
+        self.assertEqual(footer_result['source_context']['metadata_basis']['language'], 'host_inference')
+        self.assertNotIn('source', footer_result['source_context']['metadata_basis'].values())
 
     def test_malformed_structured_recipe_does_not_silently_downgrade(self):
         with self.assertRaises(RecipeImportReaderError):
@@ -2433,6 +2557,7 @@ class TranscriptTests(unittest.TestCase):
 
     def test_same_input_identity_is_stable_across_interpretation_and_page_order(self):
         value = self.source()
+        value['pages'][0]['text'] += '\nMy interpreted soup title'
         first = read_transcript(value)
         value['pages'].reverse()
         value['interpretation']['name'] = 'My interpreted soup title'
@@ -2547,6 +2672,7 @@ class ImportApplicationTests(unittest.TestCase):
         self.assertEqual(self.app.recipes.search(), [])
 
     def test_actual_transcript_preview_save_edit_reimport_conflict(self):
+        self.source['pages'][0]['text'] += '\nReinterpreted lentil soup'
         preview = self.preview()
         self.assertFalse(preview['personal_entry_created'])
         self.assertEqual(preview['suggested_status'], 'draft')
