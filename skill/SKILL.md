@@ -946,6 +946,14 @@ regenerates the exact plan and requires the reviewed digest. Drift requires a ne
 never silently substitute another plan. All-at-home completion retains explicit extras and removes earlier menu purchases.
 Unattributed existing cart contents still require reconciliation.
 
+If products apply stops for cart or menu drift, reconcile that exact state and
+then rerun products prepare/apply. Never work around the stop with raw cart
+ensure/change, a scratch script, or a hand-copied product list. In particular,
+the selection's package count is the menu requirement, not an increment to add
+to the package already in the cart. Raw additions made for menu ingredients do
+not carry menu ownership and can survive a later dish replacement as apparent
+household extras, causing duplicate or obsolete products.
+
 Raw cart sync/reconcile always requires the exact current
 `menu_ref={menu_id,revision,digest}`. Supply complete product requirements, not
 raw deltas. Same-SKU starting quantities count toward need; only exact goods the

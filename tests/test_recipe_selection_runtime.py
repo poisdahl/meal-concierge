@@ -311,6 +311,129 @@ class MenuProjectionTests(unittest.TestCase):
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
+class ProductProjectionTests(unittest.TestCase):
+    @staticmethod
+    def module():
+        spec = importlib.util.spec_from_file_location("product_projection_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_projection_preserves_candidate_choice_and_summarizes_dietary_evidence(self):
+        module = self.module()
+        findings = [{
+            "product_ref": 66905,
+            "finding_id": f"finding-{index}",
+            "kind": "preference",
+            "term": f"term-{index}",
+            "condition": "unknown",
+            "blocked": False,
+            "source": "retailer_fields",
+            "evidence": {"ingredients": "very long evidence " * 100},
+        } for index in range(9)]
+        plan = {
+            "status": "needs_input",
+            "product_plan_digest": "a" * 64,
+            "requirements": [{
+                "requirement_id": "req:chicken",
+                "item": "Strimlet kylling",
+                "quantity": {"numerator": 900, "denominator": 1},
+                "unit": "g",
+                "status": "needs_input",
+                "dietary_assessments": findings,
+                "observation": {
+                    "provider": "oda",
+                    "query": "strimlet kylling",
+                    "products": [{
+                        "product_ref": 66905,
+                        "name": "Ytterøy Kylling lårbiff strimlet",
+                        "availability": "available",
+                        "package": {"quantity": {"numerator": 500, "denominator": 1}, "unit": "g"},
+                        "purchase_options": [{"package_count": 1, "price_kind": "exact", "merchandise_ore": 10140}],
+                        "dietary_evidence": {"ingredients": "Lårkjøtt av kylling " * 100},
+                    }],
+                },
+            }],
+            "unresolved_requirements": [{"requirement_id": "req:chicken", "reason": "exact_candidate_scope_needs_selection"}],
+        }
+        before = deepcopy(plan)
+        projected = module._product_result_projection({"apply_arguments": None, "product_plan": plan})
+        requirement = projected["product_plan"]["requirements"][0]
+        self.assertEqual(requirement["observation"]["products"][0]["product_ref"], 66905)
+        self.assertEqual(requirement["dietary_summary"][0]["unknown"][0]["terms"],
+                         [f"term-{index}" for index in range(9)])
+        self.assertNotIn("dietary_assessments", requirement)
+        self.assertEqual(plan, before)
+
+    def test_thirteen_selected_requirements_fit_wire_budget_and_keep_package_count(self):
+        module = self.module()
+        findings = [{
+            "product_ref": 66905,
+            "finding_id": f"finding-{index}",
+            "kind": "preference",
+            "term": (f'preference {index} "\\' * 10),
+            "condition": "unknown",
+            "blocked": False,
+            "source": "retailer_fields",
+            "evidence": {"ingredients": "evidence " * 200},
+        } for index in range(9)]
+        requirements = []
+        for index in range(13):
+            product_ref = 66905 + index
+            candidates = [{
+                "product_ref": product_ref + offset,
+                "name": f"Candidate {index}-{offset}",
+                "availability": "available",
+                "package": {"quantity": {"numerator": 500, "denominator": 1}, "unit": "g"},
+                "purchase_options": [{"package_count": 1, "price_kind": "exact", "merchandise_ore": 10140}],
+                "dietary_evidence": {"ingredients": "retailer ingredients " * 100},
+            } for offset in range(5)]
+            requirements.append({
+                "requirement_id": f"req:{index}", "item": f"Ingredient {index}",
+                "quantity": {"numerator": 900, "denominator": 1}, "unit": "g",
+                "status": "selected", "dietary_assessments": findings,
+                "observation": {"provider": "oda", "query": f"ingredient {index}", "products": candidates},
+                "selection": {
+                    "coverage": {"numerator": 1000, "denominator": 1},
+                    "required": {"numerator": 900, "denominator": 1},
+                    "unit": "g", "package_count": 2, "merchandise_ore": 20280,
+                    "mandatory_deposit_ore": 0, "total_payable_ore": 20280,
+                    "products": [{
+                        "product_ref": product_ref, "name": f"Selected {index}", "quantity": 2,
+                        "merchandise_ore": 20280, "mandatory_deposit_ore": 0,
+                        "total_payable_ore": 20280, "dietary_assessments": findings,
+                    }],
+                },
+            })
+        result = {
+            "apply_arguments": {"action": "apply", "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+                                "product_plan_digest": "a" * 64},
+            "product_plan": {"status": "prepared", "product_plan_digest": "a" * 64,
+                             "requirements": requirements, "unresolved_requirements": []},
+        }
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(len(projected["product_plan"]["requirements"]), 13)
+        chicken = projected["product_plan"]["requirements"][0]
+        self.assertEqual(chicken["selection"]["package_count"], 2)
+        self.assertEqual(chicken["observation"]["candidate_count"], 5)
+        self.assertEqual(projected["apply_arguments"], result["apply_arguments"])
+
+    def test_oversized_apply_binding_returns_bounded_non_actionable_result(self):
+        module = self.module()
+        projected = module._bounded_product_result({
+            "apply_arguments": {"action": "apply", "planner_handoff": {"payload": "x" * 60_000}},
+            "product_plan": {"status": "prepared", "requirements": []},
+            "unexpected_diagnostics": "y" * 60_000,
+        })
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["reason"], "mcp_action_response_too_large")
+        self.assertNotIn("apply_arguments", projected)
+
+
+@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
 class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.assertEqual(importlib.metadata.version("mcp"), "2.1.1")
@@ -375,24 +498,25 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool("meal_concierge_" + tool, arguments)
         self.assertFalse(result.is_error, result)
         text = json.loads(result.content[0].text)
-        if tool == "menu":
+        if tool in {"menu", "products"}:
             self.assertEqual(len(result.content), 1)
             self.assertEqual(result.content[0].type, "text")
             self.assertIsNone(result.structured_content)
             self.assertIsInstance(text, dict)
             self.assertEqual(result.content[0].text, json.dumps(text, ensure_ascii=False, separators=(",", ":")))
-            self.last_menu_text = result.content[0].text
-            lines = (self.root / "mcp-stdout.jsonl").read_text().splitlines()
-            self.last_menu_wire = next(
-                line for line in reversed(lines)
-                if (raw := json.loads(line)).get("result", {}).get("content", [{}])[0].get("text")
-                == result.content[0].text
-            )
-            raw = json.loads(self.last_menu_wire)
-            self.assertEqual(raw["result"]["content"][0]["text"], result.content[0].text)
-            if isinstance(text.get("plan"), dict) and "selection" in text["plan"]:
-                self.assertIn('\\"plan\\"', self.last_menu_wire)
-                self.assertIn("blåbærmiddag", self.last_menu_wire)
+            if tool == "menu":
+                self.last_menu_text = result.content[0].text
+                lines = (self.root / "mcp-stdout.jsonl").read_text().splitlines()
+                self.last_menu_wire = next(
+                    line for line in reversed(lines)
+                    if (raw := json.loads(line)).get("result", {}).get("content", [{}])[0].get("text")
+                    == result.content[0].text
+                )
+                raw = json.loads(self.last_menu_wire)
+                self.assertEqual(raw["result"]["content"][0]["text"], result.content[0].text)
+                if isinstance(text.get("plan"), dict) and "selection" in text["plan"]:
+                    self.assertIn('\\"plan\\"', self.last_menu_wire)
+                    self.assertIn("blåbærmiddag", self.last_menu_wire)
         else:
             self.assertIsInstance(result.structured_content, dict)
             self.assertEqual(text, result.structured_content)
@@ -864,7 +988,10 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                          for i in range(7)]
             prepared = await self.call(client, "products", action="prepare",
                                        planner_handoff=handoff, ingredient_decisions=decisions)
-            self.assertEqual(prepared["product_plan"]["binding"]["planner_handoff"], handoff)
+            self.assertEqual(prepared["apply_arguments"]["planner_handoff"], handoff)
+            self.assertEqual(prepared["product_plan"]["binding"]["planner_selection"], {
+                key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest")
+            })
             self.assertEqual(prepared["product_plan"]["requirements"], [])
             accepted = await self.call(client, "feedback", action="accept",
                                       planner_handoff=handoff, idempotency_key="accept-resolved")
