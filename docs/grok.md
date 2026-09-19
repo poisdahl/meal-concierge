@@ -64,11 +64,17 @@ a way to bypass a denied operation.
 
 ### 3. Install the shared skill
 
-Inspect existing skills. Grok's native `update_state` supports `target: "skill"`,
-`action: "write"`, `name`, `description` and Markdown `body`; omit `id` to create
-one new skill. Create a short pointer requiring the installed
+Inspect existing skills and identify every pointer for the same installed path,
+MCP and household/store identity. Grok's native `update_state` supports
+`target: "skill"`, `action: "write"`, `name`, `description` and Markdown `body`.
+Reuse each matching pointer's existing `id`; omit `id` only when none exists and
+one new skill must be created. If several match, update all of them and report
+the duplicates for separate owner-directed cleanup; do not create another. Create
+a short pointer requiring the installed
 `PROGRAM_ROOT/current/skill/SKILL.md` to be read before meal work, bound to the
-actual MCP namespace and household/store identity.
+actual MCP namespace and household/store identity. Set the pointer's
+`description` to the exact `description` from that installed `SKILL.md`
+frontmatter; do not invent or retain a broader Grok-specific description.
 
 Resolve all maintained skill links and helpers against that installed skill
 folder. Do not copy its PDF helper into Grok's workflow folder. Select the skill
@@ -116,7 +122,11 @@ the healthy execution; repeat any explicit browser paths on `update`. This check
 does not open the browser or require store login. Stop only the exact installation
 when idle, and confirm its service child also exited. Never use global
 `RestartMcpServers` to repair one installation. After an update, reconnect its MCP
-registration and reload the pointer skill.
+registration. Rewrite every matching pointer by its `id`, set its `description`
+to the exact `description` from the newly installed `SKILL.md` frontmatter,
+preserve or update its body binding to the actual MCP and household/store
+identity, report any duplicates for separate owner-directed cleanup, then reload
+the pointer skill.
 
 Code updates preserve recipes, including collections imported by older
 versions. Update the

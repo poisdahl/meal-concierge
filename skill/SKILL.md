@@ -1,6 +1,6 @@
 ---
 name: meal-concierge
-description: Plan meals, select grocery packages, manage the household cart, and complete supported Oda, Mathem or MENY order and recipe-email steps.
+description: Use only for household operation of an installed Meal Concierge service, not for Meal Concierge software development, code review, testing, deployment, installation, updates, client packaging, plugin work, or skill maintenance. Covers setup/status, meal and grocery planning, carts and supported store orders, recipe delivery, and operational recovery or reconciliation.
 ---
 
 # Meal Concierge
