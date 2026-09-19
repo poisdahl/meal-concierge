@@ -318,6 +318,13 @@ class SenderTests(unittest.TestCase):
                                 await client.initialize()
                                 configured = await client.call_tool("meal_concierge_email_sender", {"action": "configure", "recipient": "recipient@example.test"})
                                 self.assertFalse(configured.is_error, configured.content)
+                                rejected = await client.call_tool("meal_concierge_email_sender", {
+                                    "action": "send", "request_id": "missing-intent",
+                                    "delivery_requested": False,
+                                })
+                                self.assertTrue(rejected.is_error, rejected.content)
+                                self.assertIn("explicit request", rejected.content[0].text)
+                                self.assertNotIn("ToolError", rejected.content[0].text)
                                 menu_result = await client.call_tool("meal_concierge_menu", {"action": "get"})
                                 self.assertFalse(menu_result.is_error, menu_result.content)
                                 menu_payload = menu_result.structured_content or json.loads(menu_result.content[0].text)
