@@ -7337,6 +7337,125 @@ class CartPlanTests(unittest.TestCase):
             self.assertEqual(store.read()["menu"], original)
             self.assertEqual(store.read()["cart_plan"]["supplemental_quantities"][product_id], 1)
 
+    def test_managed_product_apply_fence_blocks_every_raw_write_until_apply_completes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, application, product_id = self.app(directory, "oda")
+            self.sync(application, product_id)
+            provider._mutate_cart({"operations": [{"productId": 20, "quantity": 1}]})
+            stopped = self.sync(application, product_id)
+            self.assertTrue(stopped["cart_reconciliation_required"])
+            with store.locked() as state:
+                state["managed_product_apply_fence"] = {
+                    "menu_ref": application._cart_menu_ref(state.get("menu")),
+                    "started_at": "2026-09-19T12:00:00+00:00",
+                }
+            calls_before = list(provider.calls)
+
+            attempts = [
+                {"operation": "cart", "action": "ensure", "requirements": [
+                    {"product_id": product_id, "product_name": "Fullkornspasta", "quantity": 3},
+                ]},
+                {"operation": "cart", "action": "change", "operations": [
+                    {"product_id": product_id, "quantity": 1},
+                ]},
+                {"operation": "cart", "action": "apply", "operations": [
+                    {"product_id": product_id, "quantity": 1},
+                ]},
+                {"operation": "cart", "action": "set", "operations": [
+                    {"product_id": product_id, "quantity": 1},
+                ]},
+                {"operation": "cart", "action": "update", "operations": [
+                    {"product_id": product_id, "quantity": 1},
+                ]},
+                {"operation": "cart", "action": "sync",
+                 "menu_ref": application._cart_menu_ref(store.read().get("menu")),
+                 "requirements": [
+                     {"product_id": product_id, "product_name": "Fullkornspasta", "quantity": 3},
+                 ]},
+                {"operation": "cart", "action": "weekly",
+                 "menu_ref": application._cart_menu_ref(store.read().get("menu"))},
+            ]
+            for attempt in attempts:
+                with self.subTest(action=attempt["action"]), self.assertRaisesRegex(
+                    HouseholdError, "complete a fresh products prepare/apply"
+                ):
+                    application.handle(attempt)
+            self.assertEqual(provider.calls, calls_before)
+
+            read = application.handle({"operation": "cart", "action": "get"})
+            self.assertEqual(
+                {str(item["product_id"]): item["quantity"] for item in read["items"]},
+                {product_id: 2, "20": 1},
+            )
+            reconciled = application.handle({
+                "menu_ref": application._cart_menu_ref(store.read().get("menu")),
+                "operation": "cart", "action": "reconcile", "decision": "keep_current",
+                "cart_digest": stopped["cart_plan"]["cart_digest"],
+            })
+            self.assertTrue(reconciled["reconciled"])
+            with self.assertRaisesRegex(HouseholdError, "complete a fresh products prepare/apply"):
+                application.handle({"operation": "cart", "action": "change",
+                                    "operations": [{"product_id": "20", "quantity": 1}]})
+
+    def test_raw_write_rechecks_the_menu_cart_fence_immediately_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, application, product_id = self.app(directory, "oda")
+            self.sync(application, product_id)
+            original_call = provider.call
+
+            def fence_after_cart_read(tool, arguments, **kwargs):
+                result = original_call(tool, arguments, **kwargs)
+                if tool == "get_cart":
+                    with store.locked() as state:
+                        state["managed_product_apply_fence"] = {
+                            "menu_ref": application._cart_menu_ref(state.get("menu")),
+                            "started_at": "2026-09-19T12:00:00+00:00",
+                        }
+                return result
+
+            provider.call = fence_after_cart_read
+            writes = sum(tool == "manipulate_cart" for tool, _arguments in provider.calls)
+            with self.assertRaisesRegex(HouseholdError, "complete a fresh products prepare/apply"):
+                application.handle({"operation": "cart", "action": "change",
+                                    "operations": [{"product_id": product_id, "quantity": 1}]})
+            self.assertEqual(sum(tool == "manipulate_cart" for tool, _arguments in provider.calls), writes)
+
+    def test_managed_sync_rebinds_a_fenced_plan_after_an_unverified_cart_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, _provider, _browser, application, product_id = self.app(directory, "oda")
+            self.sync(application, product_id)
+            with store.locked() as state:
+                state["cart_plan"]["status"] = "needs_input"
+                state["cart_plan"]["pending_cart_digest"] = None
+                state["cart_plan"]["approved_cart_digest"] = None
+
+            stopped = self.sync(application, product_id)
+
+            self.assertTrue(stopped["cart_reconciliation_required"])
+            self.assertEqual(stopped["reason"], "cart_or_menu_changed_before_sync")
+            self.assertEqual(
+                store.read()["cart_plan"]["pending_cart_digest"],
+                stopped["cart_plan"]["cart_digest"],
+            )
+
+    def test_explicit_menu_clear_releases_the_product_apply_fence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, application, product_id = self.app(directory, "oda")
+            with store.locked() as state:
+                state["managed_product_apply_fence"] = {
+                    "menu_ref": application._cart_menu_ref(state.get("menu")),
+                    "started_at": "2026-09-19T12:00:00+00:00",
+                }
+
+            application.handle({
+                "operation": "menu", "action": "clear",
+                "menu_id": "menu_cart_plan_test", "expected_revision": 1,
+            })
+            self.assertNotIn("managed_product_apply_fence", store.read())
+            application.handle({"operation": "cart", "action": "change",
+                                "operations": [{"product_id": product_id, "quantity": 1}]})
+            self.assertEqual(provider.cart["items"][0]["quantity"], 2)
+
 
 class FlowTests(unittest.TestCase):
     def setUp(self):

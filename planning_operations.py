@@ -1189,6 +1189,7 @@ class PlanningOperations:
                         usage["status"] = "cancelled"
                 state["menu"] = None
                 state["cart_plan"] = None
+                state.pop("managed_product_apply_fence", None)
                 return {"menu": None}
         if action == "save":
             setup_gate = self._setup_gate(request)
@@ -2039,6 +2040,13 @@ class PlanningOperations:
             raise PlannerError("cost comparison cannot fit the response transport; reduce candidate scope")
         return {"cost_comparison": comparison}
 
+    def _start_managed_product_apply_fence(self) -> None:
+        with self.store.locked() as state:
+            state["managed_product_apply_fence"] = {
+                "menu_ref": deepcopy(self._cart_menu_ref(state.get("menu"))),
+                "started_at": self._now().isoformat(),
+            }
+
     def _products(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
         if action == "record_ingredients":
@@ -2120,6 +2128,7 @@ class PlanningOperations:
                 expected_digest = request.get("product_plan_digest")
                 if not isinstance(expected_digest, str) or re.fullmatch(r"[a-f0-9]{64}", expected_digest) is None:
                     raise HouseholdError("apply needs the exact reviewed product_plan_digest")
+                self._start_managed_product_apply_fence()
                 fresh_binding, menu, expected_menu_ref = self._product_binding(
                     menu_ref=request.get("menu_ref"), planner_handoff=request.get("planner_handoff"),
                     require_saved_planner=True,
@@ -2135,10 +2144,12 @@ class PlanningOperations:
                 if not isinstance(binding, Mapping):
                     raise HouseholdError("prepared product plan binding is invalid")
                 if binding.get("kind") == "saved_menu":
+                    self._start_managed_product_apply_fence()
                     fresh_binding, menu, expected_menu_ref = self._product_binding(
                         menu_ref=binding.get("menu_ref")
                     )
                 elif binding.get("kind") == "planner_selection":
+                    self._start_managed_product_apply_fence()
                     fresh_binding, menu, expected_menu_ref = self._product_binding(
                         planner_handoff=binding.get("planner_handoff"),
                         require_saved_planner=True,
@@ -2198,6 +2209,7 @@ class PlanningOperations:
                     if self._cart_menu_ref(state.get("menu")) != expected_menu_ref:
                         raise HouseholdError("menu changed before recording pantry coverage")
                     state["product_plan_completion"] = {"menu_ref": deepcopy(expected_menu_ref), "nothing_to_buy": True, "product_plan_digest": supplied["product_plan_digest"]}
+                    state.pop("managed_product_apply_fence", None)
                 return {"applied": True, "cart_changed": bool(cart_result.get("applied_operations")), "nothing_to_buy": True, "product_plan": supplied}
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
@@ -2216,6 +2228,7 @@ class PlanningOperations:
                 if canonical(self._cart_menu_ref(state.get("menu"))) != canonical(expected_menu_ref):
                     raise HouseholdError("menu changed before recording the applied product plan")
                 state.pop("product_plan_completion", None)
+                state.pop("managed_product_apply_fence", None)
                 state["cart_plan"]["product_plan_digest"] = supplied["product_plan_digest"]
                 state["cart_plan"]["product_plan_summary"] = {
                     key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions", "coverage_status")
@@ -2576,6 +2589,12 @@ class PlanningOperations:
                     current["product_names"].update(first_names)
                     current["updated_at"] = self._now().isoformat()
                     approved_idempotent = True
+                elif current.get("status") == "needs_input" and current.get("pending_cart_digest") != first_digest:
+                    # A failed post-write read can leave the plan fenced without
+                    # a digest. The next managed sync must bind the observed cart
+                    # so the owner can reconcile it instead of reaching for a raw
+                    # cart write to escape the fence.
+                    self._set_cart_needs_input(current, first_live, first_names)
                 elif current.get("last_synced_digest") != first_digest:
                     self._set_cart_needs_input(current, first_live, first_names)
                 elif requirements_changed:
@@ -2965,6 +2984,14 @@ class PlanningOperations:
             plan["updated_at"] = self._now().isoformat()
         state.pop("product_plan_completion", None)
 
+    @staticmethod
+    def _require_raw_cart_write_allowed(state: Mapping[str, Any]) -> None:
+        if state.get("managed_product_apply_fence"):
+            raise HouseholdError(
+                "complete a fresh products prepare/apply before raw cart changes; "
+                "reconcile its pending menu cart question first when required"
+            )
+
     def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any]) -> None:
         quantities, names = self._cart_lines(cart_summary(cart))
         if quantities != pending["expected"] and not pending.get("dispatch_finished"):
@@ -2986,6 +3013,8 @@ class PlanningOperations:
 
     def _cart(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "get")
+        if action in {"change", "apply", "set", "update", "ensure", "sync", "weekly"}:
+            self._require_raw_cart_write_allowed(self.store.read())
         if action == 'weekly':
             state = self.store.read()
             plan = state.get('cart_plan') or {}
@@ -3090,6 +3119,7 @@ class PlanningOperations:
                 with self.store.locked() as locked:
                     if locked.get("pending_cart_change") or canonical(locked.get("order_change")) != canonical(change):
                         raise HouseholdError("cart operation changed before dispatch")
+                    self._require_raw_cart_write_allowed(locked)
                     if (locked.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
                         raise HouseholdError("reconcile the pending checkout before changing the cart")
                     pending = {"provider": self.provider, "before": before, "expected": expected,

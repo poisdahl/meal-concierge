@@ -1179,6 +1179,10 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertFalse(result["applied"])
         self.assertTrue(result["menu_binding_stale"])
         self.assertNotIn("manipulate_cart", [name for name, _arguments in self.provider.calls])
+        with self.assertRaisesRegex(HouseholdError, "complete a fresh products prepare/apply"):
+            self.app.handle({"operation": "cart", "action": "ensure", "requirements": [
+                {"product_id": "10", "product_name": "Fixture Mel", "quantity": 2},
+            ]})
 
     def test_menu_clear_waits_for_product_apply_check_and_write_boundary(self):
         plan = self.prepare(approve=True)
