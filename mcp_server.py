@@ -981,6 +981,34 @@ def _compact_product(product: Any, *, include_dietary: bool = True) -> dict[str,
     return compact
 
 
+def _compact_candidate_product(product: Any) -> dict[str, Any]:
+    """Keep an exact candidate choice without duplicating display-only fields."""
+    if not isinstance(product, dict):
+        return {}
+    compact = {
+        key: product[key]
+        for key in (
+            "product_ref", "name", "availability", "package", "package_limit",
+        )
+        if key in product
+    }
+    options = product.get("purchase_options")
+    if isinstance(options, list):
+        compact["purchase_options"] = [{
+            key: option[key]
+            for key in (
+                "package_count", "price_kind", "eligibility", "offer_kind",
+                "merchandise_ore", "mandatory_deposit_ore", "total_payable_ore",
+            )
+            if key in option
+        } for option in options if isinstance(option, dict)]
+    findings = product.get("dietary_assessments", product.get("dietary_findings"))
+    dietary = _compact_dietary_findings(findings, default_product_ref=product.get("product_ref"))
+    if dietary:
+        compact["dietary_summary"] = dietary
+    return compact
+
+
 def _compact_product_observation(observation: Any, *, candidate_limit: int) -> dict[str, Any]:
     if not isinstance(observation, dict):
         return {}
@@ -990,7 +1018,9 @@ def _compact_product_observation(observation: Any, *, candidate_limit: int) -> d
         for key in ("provider", "query", "observed_at", "scope", "unavailable_reason")
         if key in observation
     }
-    compact["products"] = [_compact_product(product) for product in products[:candidate_limit]]
+    compact["products"] = [
+        _compact_candidate_product(product) for product in products[:candidate_limit]
+    ]
     if len(products) > candidate_limit:
         compact["omitted_products"] = len(products) - candidate_limit
     return compact
@@ -1020,8 +1050,17 @@ def _compact_product_selection(selection: Any) -> dict[str, Any]:
 def _compact_product_requirement(requirement: Any, *, candidate_limit: int) -> dict[str, Any]:
     if not isinstance(requirement, dict):
         return {}
-    omitted = {"observation", "selection", "dietary_assessments"}
+    omitted = {
+        "observation", "selection", "dietary_assessments", "identity", "search",
+        "gross_quantity", "confirmed_pantry_quantity",
+    }
     compact = {key: value for key, value in requirement.items() if key not in omitted}
+    if ("gross_quantity" in requirement
+            and requirement["gross_quantity"] != requirement.get("quantity")):
+        compact["gross_quantity"] = requirement["gross_quantity"]
+    pantry = requirement.get("confirmed_pantry_quantity")
+    if isinstance(pantry, dict) and pantry.get("numerator") != 0:
+        compact["confirmed_pantry_quantity"] = pantry
     if "selection" in requirement:
         compact["selection"] = _compact_product_selection(requirement["selection"])
     observation = requirement.get("observation")
@@ -1092,12 +1131,95 @@ def _product_result_projection(result: dict[str, Any], *, candidate_limit: int =
     return projected
 
 
+def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
+    """Retain an actionable bounded choice when a maximum menu cannot carry diagnostics."""
+    if not isinstance(plan, dict):
+        return plan
+    compact = _compact_product_plan(plan, candidate_limit=candidate_limit)
+    unresolved = plan.get("unresolved_requirements")
+    issue_by_id = {
+        issue.get("requirement_id"): issue
+        for issue in unresolved if isinstance(issue, dict) and issue.get("requirement_id")
+    } if isinstance(unresolved, list) else {}
+    compact_requirements = []
+    represented = set()
+    for requirement in plan.get("requirements", []):
+        if not isinstance(requirement, dict):
+            continue
+        requirement_id = requirement.get("requirement_id")
+        issue = issue_by_id.get(requirement_id)
+        row = {
+            key: requirement[key]
+            for key in ("requirement_id", "item", "quantity", "unit", "status")
+            if key in requirement
+        }
+        if isinstance(issue, dict):
+            represented.add(requirement_id)
+            row["issue"] = {
+                key: value for key, value in issue.items()
+                if key not in {"requirement_id", "item"}
+            }
+        if ("gross_quantity" in requirement
+                and requirement["gross_quantity"] != requirement.get("quantity")):
+            row["gross_quantity"] = requirement["gross_quantity"]
+        pantry = requirement.get("confirmed_pantry_quantity")
+        if isinstance(pantry, dict) and pantry.get("numerator") != 0:
+            row["confirmed_pantry_quantity"] = pantry
+        if not isinstance(issue, dict) or issue.get("reason") != "exact_candidate_scope_needs_selection":
+            if "sources" in requirement:
+                row["sources"] = requirement["sources"]
+        observation = requirement.get("observation")
+        if isinstance(observation, dict):
+            products = observation.get("products") if isinstance(observation.get("products"), list) else []
+            row["observation"] = {
+                "products": [
+                    _compact_candidate_product(product)
+                    for product in products[:candidate_limit]
+                ],
+                **({"omitted_products": len(products) - candidate_limit}
+                   if len(products) > candidate_limit else {}),
+                **({"unavailable_reason": observation["unavailable_reason"]}
+                   if "unavailable_reason" in observation else {}),
+            }
+        if "selection" in requirement:
+            row["selection"] = _compact_product_selection(requirement["selection"])
+        dietary = _compact_dietary_findings(requirement.get("dietary_assessments"))
+        if dietary:
+            row["dietary_summary"] = dietary
+        compact_requirements.append(row)
+    compact["requirements"] = compact_requirements
+    remaining = [
+        issue for issue in unresolved
+        if not isinstance(issue, dict) or issue.get("requirement_id") not in represented
+    ] if isinstance(unresolved, list) else []
+    if remaining:
+        compact["unresolved_requirements"] = remaining
+    else:
+        compact.pop("unresolved_requirements", None)
+    compact["projection"] = "minimal_actionable"
+    return compact
+
+
+def _minimal_product_result_projection(result: dict[str, Any], *, candidate_limit: int = 1) -> dict[str, Any]:
+    projected = dict(result)
+    for key in ("product_plan", "fresh_product_plan", "postwrite_product_plan"):
+        if key in projected:
+            projected[key] = _minimal_product_plan(
+                projected[key], candidate_limit=candidate_limit
+            )
+    return projected
+
+
 def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
     for candidate_limit in (5, 3, 1):
         projected = _product_result_projection(result, candidate_limit=candidate_limit)
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
         if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET:
             return projected
+    projected = _minimal_product_result_projection(result)
+    text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET:
+        return projected
     original_status = result.get("status")
     original_reason = result.get("reason")
     return {
