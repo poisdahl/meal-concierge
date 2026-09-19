@@ -1017,6 +1017,16 @@ def plan_week(
         "reference_key": item["reference_key"],
         "content_digest": item["content_digest"],
     } for item in prepared]
+    slot_scores = {
+        (candidate["reference_key"], index): sum(
+            reason["weight"] for reason in _slot_reasons(
+                candidate, day, index, len(source_dates), profile
+            )
+        )
+        for candidate in eligible
+        for index, day in enumerate(source_dates)
+    }
+    plan_scores: dict[tuple[str, ...], int] = {}
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}
     strict_failures = 0
@@ -1039,12 +1049,25 @@ def plan_week(
         if strict["status"] == "fail":
             strict_failures += 1
             continue
-        selection = _selection(
-            selected, source_dates, profile, input_digest, scope, strict,
-            checked["portions"], recurring=layout,
-        )
-        ranked.append(selection)
-        ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"], item["selection_digest"]))
+        subset = tuple(sorted(item["reference_key"] for item in selected))
+        if subset not in plan_scores:
+            plan_scores[subset] = sum(
+                reason["weight"] for reason in _plan_reasons(selected, profile)
+            )
+        tie_break = tuple(item["reference_key"] for item in selected)
+        ranked.append({
+            "selected": selected,
+            "strict": strict,
+            "total_score": plan_scores[subset] + sum(
+                slot_scores[(item["reference_key"], index)]
+                for index, item in enumerate(selected)
+            ),
+            "tie_break": tie_break,
+        })
+        # Exact references are unique within every permutation, so tie_break is
+        # itself unique. The selection digest can be computed only for the
+        # retained winners without changing the deterministic ordering.
+        ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"]))
         del ranked[checked["alternatives"]:]
     if not ranked:
         if strict_unknowns:
@@ -1054,20 +1077,32 @@ def plan_week(
             issues = [{"code": "strict_targets_infeasible", "evaluated": strict_failures}]
             status = "no_plan"
         return {**base_result, "status": status, "issues": issues, "selections": []}
+    selections = []
+    for rank in ranked:
+        selection = _selection(
+            rank["selected"], source_dates, profile, input_digest, scope,
+            rank["strict"], checked["portions"], recurring=layout,
+        )
+        if (
+            selection["total_score"] != rank["total_score"]
+            or tuple(selection["tie_break"]) != rank["tie_break"]
+        ):
+            raise PlannerError("planner ranking and selection materialization disagree")
+        selections.append(selection)
     handoffs = [{
         "planner_version": PLANNER_VERSION,
         "input_digest": input_digest,
         "selection_digest": selection["selection_digest"],
         "request": deepcopy(public_request),
         "selection": deepcopy(selection),
-    } for selection in ranked]
+    } for selection in selections]
     return {
         **base_result,
         "status": "planned",
         "explored_states": explored_states,
-        "selection": deepcopy(ranked[0]),
-        "selection_digest": ranked[0]["selection_digest"],
-        "selections": ranked,
+        "selection": deepcopy(selections[0]),
+        "selection_digest": selections[0]["selection_digest"],
+        "selections": selections,
         "save_handoff": deepcopy(handoffs[0]),
         "save_handoffs": handoffs,
     }
