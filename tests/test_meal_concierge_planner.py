@@ -217,6 +217,28 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(len(result["selections"]), 3)
         self.assertEqual(materializations, 3)
 
+    def test_plan_score_preserves_selected_order(self):
+        candidates = self.save_candidates(2)
+        request = self.request(
+            candidates, dates=["2026-09-07", "2026-09-08"], alternatives=1,
+        )
+
+        def order_sensitive_reasons(selected, _profile):
+            reference_keys = [item["reference_key"] for item in selected]
+            return [{
+                "code": "test:order_sensitive",
+                "weight": 100 if reference_keys[0] == max(reference_keys) else 0,
+                "detail": reference_keys,
+            }]
+
+        with mock.patch("planner._plan_reasons", side_effect=order_sensitive_reasons):
+            result = self.plan(request)
+        tie_break = result["selection"]["tie_break"]
+        self.assertEqual(tie_break[0], max(tie_break))
+        self.assertEqual(result["selection"]["total_score"], 100 + sum(
+            slot["score"] for slot in result["selection"]["slots"]
+        ))
+
     def test_missing_safety_metadata_is_advisory_without_accepting_caller_clearance(self):
         candidate = self.save_candidates(1)[0]
         with self.store.locked() as state:

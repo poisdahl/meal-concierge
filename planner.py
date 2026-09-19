@@ -1026,7 +1026,6 @@ def plan_week(
         for candidate in eligible
         for index, day in enumerate(source_dates)
     }
-    plan_scores: dict[tuple[str, ...], int] = {}
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}
     strict_failures = 0
@@ -1049,16 +1048,13 @@ def plan_week(
         if strict["status"] == "fail":
             strict_failures += 1
             continue
-        subset = tuple(sorted(item["reference_key"] for item in selected))
-        if subset not in plan_scores:
-            plan_scores[subset] = sum(
-                reason["weight"] for reason in _plan_reasons(selected, profile)
-            )
         tie_break = tuple(item["reference_key"] for item in selected)
         ranked.append({
             "selected": selected,
             "strict": strict,
-            "total_score": plan_scores[subset] + sum(
+            "total_score": sum(
+                reason["weight"] for reason in _plan_reasons(selected, profile)
+            ) + sum(
                 slot_scores[(item["reference_key"], index)]
                 for index, item in enumerate(selected)
             ),
