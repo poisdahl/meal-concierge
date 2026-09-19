@@ -126,11 +126,23 @@ class WeeklyFlowTests(unittest.TestCase):
             'candidate_approvals': [{'requirement_id': r['requirement_id'], 'candidate_refs': ['10']} for r in preview['requirements']]})
         pending = self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})
         self.assertTrue(pending['cart_reconciliation_required'])
+        writes = sum(tool == 'manipulate_cart' for tool, _arguments in self.provider.calls)
+        with self.assertRaisesRegex(HouseholdError, 'complete a fresh products prepare/apply'):
+            self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+                {'product_id': '10', 'product_name': 'Gulrot', 'quantity': 3}]})
+        self.assertEqual(sum(tool == 'manipulate_cart' for tool, _arguments in self.provider.calls), writes)
         reconciled = self.app.handle({'operation': 'cart', 'action': 'reconcile', 'menu_ref': mp.menu_ref(menu),
             'cart_digest': pending['cart_plan']['cart_digest'], 'decision': 'restore_missing', 'exclude_product_ids': ['10']})
         self.assertTrue(reconciled['reconciled'])
         self.assertFalse(any(i['missing_quantity'] for i in reconciled['cart_plan']['items']))
-        self.assertTrue(self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})['applied'])
+        with self.assertRaisesRegex(HouseholdError, 'complete a fresh products prepare/apply'):
+            self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+                {'product_id': '10', 'product_name': 'Gulrot', 'quantity': 3}]})
+        applied = self.app.handle({'operation': 'products', **approved['apply_arguments'], 'cart_change_requested': True})
+        self.assertTrue(applied['applied'])
+        self.assertNotIn('managed_product_apply_fence', self.store.read())
+        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+            {'product_id': '50', 'product_name': 'Spirer', 'quantity': 1}]})['idempotent'])
         self.recurring('20')  # Changed requirements must not revive withdrawn extras.
         self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
         self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'10': 2, '50': 1, '20': 1})
@@ -172,6 +184,20 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertFalse(stale['applied'])
         self.assertTrue(stale['fresh_product_plan']['requirements'])
         self.assertTrue(all(d['action'] == 'include' for d in stale['fresh_product_plan']['ingredient_decisions']))
+        with self.assertRaisesRegex(HouseholdError, 'complete a fresh products prepare/apply'):
+            self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
+                {'product_id': '50', 'product_name': 'Oregano extra', 'quantity': 2}]})
+        recovered_preview = self.app.handle({
+            'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})['product_plan']
+        recovered_plan = self.app.handle({
+            'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu),
+            'candidate_approvals': [{'requirement_id': row['requirement_id'], 'candidate_refs': ['10']}
+                                    for row in recovered_preview['requirements']],
+        })
+        recovered = self.app.handle({
+            'operation': 'products', **recovered_plan['apply_arguments'], 'cart_change_requested': True})
+        self.assertTrue(recovered['applied'])
+        self.assertNotIn('managed_product_apply_fence', self.store.read())
         with self.assertRaises(HouseholdError):
             self.app.handle({'operation': 'products', 'action': 'record_ingredients',
                 'menu_ref': {**mp.menu_ref(menu), 'revision': 999}, 'ingredient_decisions': included})
