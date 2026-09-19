@@ -360,6 +360,7 @@ class ProductProjectionTests(unittest.TestCase):
         projected = module._product_result_projection({"apply_arguments": None, "product_plan": plan})
         requirement = projected["product_plan"]["requirements"][0]
         self.assertEqual(requirement["observation"]["products"][0]["product_ref"], 66905)
+        self.assertNotIn("gross_quantity", requirement)
         self.assertEqual(requirement["dietary_summary"][0]["unknown"][0]["terms"],
                          [f"term-{index}" for index in range(9)])
         self.assertNotIn("dietary_assessments", requirement)
@@ -420,6 +421,122 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertEqual(chicken["observation"]["candidate_count"], 5)
         self.assertEqual(projected["apply_arguments"], result["apply_arguments"])
 
+    def test_sixty_four_candidate_requirements_fit_wire_budget_and_remain_actionable(self):
+        module = self.module()
+        requirements = []
+        unresolved = []
+        for index in range(64):
+            products = [{
+                "provider": "oda",
+                "product_ref": index * 10 + offset,
+                "product_id": index * 10 + offset,
+                "name": f"Candidate {index}-{offset}",
+                "availability": "available",
+                "package": {
+                    "quantity": {"numerator": 500, "denominator": 1}, "unit": "g",
+                },
+                "purchase_options": [{
+                    "package_count": 1,
+                    "price_kind": "exact",
+                    "eligibility": "confirmed",
+                    "offer_kind": "regular",
+                    "merchandise_ore": 1000 + offset,
+                    "mandatory_deposit_ore": 0,
+                    "total_payable_ore": 1000 + offset,
+                    "comparable_merchandise_unit_price": {
+                        "numerator": 2, "denominator": 1, "unit": "g",
+                        "display_ore_per_unit": "2.00",
+                    },
+                }],
+                "display": {
+                    "package": "Synthetic package, 500 g",
+                    "price": "10.00",
+                    "unit_price": "2.00",
+                    "unit_name": "kg",
+                },
+            } for offset in range(5)]
+            requirement_id = f"req:{index:024d}"
+            requirements.append({
+                "requirement_id": requirement_id,
+                "identity": f"ingredient {index}",
+                "item": f"Ingredient {index}",
+                "search": f"Ingredient {index}",
+                "quantity": {"numerator": 900, "denominator": 1},
+                "gross_quantity": {"numerator": 900, "denominator": 1},
+                "confirmed_pantry_quantity": {"numerator": 0, "denominator": 1},
+                "unit": "g",
+                "sources": [{"collection": "dishes", "recipe_index": index // 10,
+                             "ingredient_index": index % 10}],
+                "status": "needs_input",
+                "observation": {
+                    "provider": "oda", "query": f"Ingredient {index}",
+                    "observed_at": "2026-09-19T12:00:00+00:00",
+                    "scope": {"kind": "provider_search", "returned": 5,
+                              "semantics": "bounded_relevance_ranked"},
+                    "products": products,
+                },
+            })
+            unresolved.append({
+                "requirement_id": requirement_id,
+                "item": f"Ingredient {index}",
+                "reason": "exact_candidate_scope_needs_selection",
+            })
+        result = {
+            "apply_arguments": None,
+            "product_plan": {
+                "status": "needs_input",
+                "product_plan_digest": "a" * 64,
+                "requirements": requirements,
+                "unresolved_requirements": unresolved,
+            },
+        }
+        result["product_plan"]["unresolved_requirements"][0] = {
+            "requirement_id": requirements[0]["requirement_id"],
+            "item": requirements[0]["item"],
+            "reason": "provider_search_deadline",
+        }
+        result["product_plan"]["unresolved_requirements"].append({
+            "reason": "product_budget_exceeded",
+            "budget_ore": 10_000,
+            "known_minimum_ore": 12_000,
+        })
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        projection_sizes = {
+            limit: module._mcp_text_wire_chars(json.dumps(
+                module._product_result_projection(result, candidate_limit=limit),
+                ensure_ascii=False, separators=(",", ":"),
+            ))
+            for limit in (5, 3, 1)
+        }
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertIn("product_plan", projected, projection_sizes)
+        self.assertEqual(projected["product_plan"]["status"], "needs_input")
+        self.assertEqual(projected["product_plan"]["projection"], "minimal_actionable")
+        self.assertEqual(len(projected["product_plan"]["requirements"]), 64)
+        self.assertEqual(
+            projected["product_plan"]["unresolved_requirements"],
+            [{"reason": "product_budget_exceeded", "budget_ore": 10_000,
+              "known_minimum_ore": 12_000}],
+        )
+        self.assertEqual(projected["product_plan"]["requirements"][0]["issue"]["reason"],
+                         "provider_search_deadline")
+        self.assertIn("sources", projected["product_plan"]["requirements"][0])
+        for requirement in projected["product_plan"]["requirements"][1:]:
+            self.assertEqual(
+                requirement["issue"]["reason"],
+                "exact_candidate_scope_needs_selection",
+            )
+            self.assertNotIn("sources", requirement)
+            products = requirement["observation"]["products"]
+            self.assertGreaterEqual(len(products), 1)
+            self.assertIn("product_ref", products[0])
+            self.assertIn("package", products[0])
+            self.assertIn("purchase_options", products[0])
+            self.assertNotIn("display", products[0])
+        self.assertEqual(result, before)
+
     def test_oversized_apply_binding_returns_bounded_non_actionable_result(self):
         module = self.module()
         projected = module._bounded_product_result({
@@ -431,6 +548,48 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
         self.assertEqual(projected["reason"], "mcp_action_response_too_large")
         self.assertNotIn("apply_arguments", projected)
+
+    def test_escape_heavy_candidate_name_fails_closed(self):
+        module = self.module()
+        result = {
+            "apply_arguments": {
+                "action": "apply", "product_plan_digest": "a" * 64,
+            },
+            "product_plan": {
+                "status": "needs_input",
+                "requirements": [{
+                    "requirement_id": "req:hostile",
+                    "item": "Hostile candidate",
+                    "quantity": {"numerator": 1, "denominator": 1},
+                    "unit": "piece",
+                    "status": "needs_input",
+                    "observation": {"products": [{
+                        "product_ref": 1,
+                        "name": '\\\"' * 30_000,
+                        "availability": "available",
+                        "purchase_options": [{
+                            "package_count": 1,
+                            "price_kind": "exact",
+                            "eligibility": "confirmed",
+                            "total_payable_ore": 100,
+                        }],
+                    }]},
+                }],
+                "unresolved_requirements": [{
+                    "requirement_id": "req:hostile",
+                    "item": "Hostile candidate",
+                    "reason": "exact_candidate_scope_needs_selection",
+                }],
+            },
+        }
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["reason"], "mcp_action_response_too_large")
+        self.assertNotIn("apply_arguments", projected)
+        self.assertNotIn("product_plan", projected)
+        self.assertEqual(result, before)
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
