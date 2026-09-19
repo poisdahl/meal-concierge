@@ -93,11 +93,30 @@ class RecipeOperations:
                 if page["requires_interpretation"]:
                     if request.get("interpretation") is None:
                         return {**page, "personal_entry_created": False, "source_kind": "url"}
-                    result = read_transcript({"kind": "pasted_text", "pages": [{"page": 1, "text": page["text"]}],
+                    records = page.get("record_texts") or []
+                    if page.get("requires_record_selection"):
+                        index = request.get("record_index")
+                        if type(index) is not int or not 0 <= index < len(records):
+                            raise RecipeError("record_index must select one incomplete source recipe before interpretation")
+                        interpretation_text = records[index]["text"]
+                    else:
+                        if request.get("record_index") not in {None, 0}:
+                            raise RecipeError("record_index does not select an available incomplete source recipe")
+                        index, interpretation_text = 0, page["text"]
+                    verified_url = normalize_source_url(request["url"], version=2)
+                    result = read_transcript({"kind": "pasted_text", "pages": [{"page": 1, "text": interpretation_text}],
                         "interpretation": request["interpretation"], "attribution": {"url": request["url"]}})
-                    context = {"kind": "web", "url": request["url"], "source_mode": "verified_page_text"}
+                    # Transcript attribution is declarative. Only this branch has
+                    # fetched the requested public page, so bind its normalized
+                    # URL as the service-verified primary source for web gating.
+                    result["candidate"]["source"]["url"] = verified_url
+                    result["incomplete_recipes"] = deepcopy(page.get("incomplete_recipes", []))
+                    context = {**result["source_context"], "kind": "web", "url": verified_url,
+                               "source_mode": "verified_page_text"}
+                    if page.get("incomplete_recipes"):
+                        context["record_index"] = index
                     result["source_context"] = context
-                    identity = self._import_identity("public", "web:text", normalize_source_url(request["url"]))
+                    identity = self._import_identity("public", "web:text:record", [verified_url, index]) if records else self._import_identity("public", "web:text", verified_url)
                 else:
                     if request.get("interpretation") is not None:
                         raise RecipeError("structured URL import does not accept replacement interpretation")
@@ -148,7 +167,7 @@ class RecipeOperations:
                         "import_report": {"image_status": "omitted", "content_status": "link_only"}}
             scaled = scale_recipe(recipe)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
-            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count") if key in result}
+            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes") if key in result}
             return {**snapshot, "import_report": report, "readiness": scaled["readiness"],
                     "shopping_requirements": scaled["shopping_requirements"], "suggested_status": "active" if ready else "draft",
                     "personal_entry_created": False}
@@ -554,8 +573,9 @@ class RecipeOperations:
             if not isinstance(reference, dict) or set(reference) != {"discovery_ref"}:
                 raise RecipeError("web_candidates require exact discovery_ref values")
             recipe = self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
+            source = recipe.get("source") or {}
             rights = recipe.get("rights") or {}
-            if (not url_enabled((recipe.get("source") or {}).get("url"), web_settings)
+            if (not url_enabled(source.get("url"), web_settings)
                     or rights.get("storage") != "full"
                     or (rights.get("storage_decision") or {}).get("storage") != "full"):
                 raise RecipeError("web candidate requires an enabled source and assessed full storage")
@@ -3146,7 +3166,12 @@ class RecipeOperations:
             self._require_recipe_provider(converted)
             result = self.recipes.persist_discovery(converted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
-            return {**result, "personal_entry_created": False}
+            scaled = scale_recipe(converted)
+            ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
+            return {**result, "readiness": scaled["readiness"],
+                    "shopping_requirements": scaled["shopping_requirements"],
+                    "suggested_status": "active" if ready else "draft",
+                    "personal_entry_created": False}
         if action == "detail":
             return self._recipe_detail(request)
         if action == "libraries":
