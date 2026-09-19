@@ -339,7 +339,7 @@ def meal_concierge_catalog(action: Literal["products", "recipes", "usuals"], que
     return rpc("catalog", action=action, query=query, limit=limit)
 
 
-@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries, and an incomplete plan cannot be applied. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit; it never claims cheapest or final payable total. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare also returns compact apply_arguments for a prepared plan. Apply accepts those unchanged arguments (exact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; the returned arguments never grant authority themselves. The compact route regenerates the plan and requires the identical reviewed digest before any cart write. It rereads all product facts, stops on drift, then reuses guarded idempotent cart sync; it never orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
+@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries, and an incomplete plan cannot be applied. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit; it never claims cheapest or final payable total. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare also returns compact apply_arguments for a prepared plan. If prepared details cannot fit the MCP response, projection=apply_arguments_only preserves those exact arguments and any observation_drift summary while omitting the detailed product plan. Apply accepts those unchanged arguments (exact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; the returned arguments never grant authority themselves. The compact route regenerates the plan and requires the identical reviewed digest before any cart write. It rereads all product facts, stops on drift, then reuses guarded idempotent cart sync; it never orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
 def meal_concierge_products(
     action: Literal["prepare", "apply", "lowest_cost", "record_ingredients"] = "prepare",
     planner_input: dict[str, Any] | None = None,
@@ -1210,6 +1210,58 @@ def _minimal_product_result_projection(result: dict[str, Any], *, candidate_limi
     return projected
 
 
+def _prepared_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Keep a completed prepare actionable when its diagnostic plan cannot fit."""
+    plan = result.get("product_plan")
+    arguments = result.get("apply_arguments")
+    if (
+        not isinstance(plan, dict)
+        or plan.get("status") != "prepared"
+        or not isinstance(arguments, dict)
+        or arguments.get("action") != "apply"
+        or "cart_change_requested" in arguments
+    ):
+        return None
+    digest = plan.get("product_plan_digest")
+    if (
+        not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or arguments.get("product_plan_digest") != digest
+    ):
+        return None
+    drift = result.get("observation_drift")
+    if drift is not None:
+        if (
+            not isinstance(drift, dict)
+            or drift.get("status") not in {"unchanged", "changed"}
+            or not isinstance(drift.get("previous_product_plan_digest"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}", drift["previous_product_plan_digest"]
+            ) is None
+            or drift.get("current_product_plan_digest") != digest
+        ):
+            return None
+    projected = {
+        "status": "prepared",
+        "projection": "apply_arguments_only",
+        "details_omitted": True,
+        "product_plan_digest": digest,
+        "apply_arguments": arguments,
+        **({"observation_drift": {
+            "status": drift["status"],
+            "previous_product_plan_digest": drift["previous_product_plan_digest"],
+            "current_product_plan_digest": drift["current_product_plan_digest"],
+        }} if drift is not None else {}),
+        "next": (
+            "For a clear current cart-change request, call products apply with these "
+            "unchanged apply_arguments and cart_change_requested=true. The service will "
+            "regenerate the product plan and require the identical digest before any write."
+        ),
+    }
+    text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    return projected if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET else None
+
+
 def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
     for candidate_limit in (5, 3, 1):
         projected = _product_result_projection(result, candidate_limit=candidate_limit)
@@ -1219,6 +1271,9 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
     projected = _minimal_product_result_projection(result)
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
     if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET:
+        return projected
+    projected = _prepared_apply_arguments_projection(result)
+    if projected is not None:
         return projected
     original_status = result.get("status")
     original_reason = result.get("reason")

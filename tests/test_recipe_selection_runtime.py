@@ -540,14 +540,109 @@ class ProductProjectionTests(unittest.TestCase):
     def test_oversized_apply_binding_returns_bounded_non_actionable_result(self):
         module = self.module()
         projected = module._bounded_product_result({
-            "apply_arguments": {"action": "apply", "planner_handoff": {"payload": "x" * 60_000}},
-            "product_plan": {"status": "prepared", "requirements": []},
+            "apply_arguments": {
+                "action": "apply", "planner_handoff": {"payload": "x" * 60_000},
+                "product_plan_digest": "a" * 64,
+            },
+            "product_plan": {
+                "status": "prepared", "product_plan_digest": "a" * 64,
+                "requirements": [],
+            },
             "unexpected_diagnostics": "y" * 60_000,
         })
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
         self.assertEqual(projected["reason"], "mcp_action_response_too_large")
         self.assertNotIn("apply_arguments", projected)
+
+    def test_oversized_prepared_plan_returns_exact_bounded_apply_arguments(self):
+        module = self.module()
+        arguments = {
+            "action": "apply",
+            "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+            "candidate_approvals": [{"requirement_id": "req:1", "candidate_refs": [123]}],
+            "ingredient_decisions": [],
+            "budget_ore": None,
+            "price_mode": "exact",
+            "product_plan_digest": "a" * 64,
+        }
+        result = {
+            "apply_arguments": arguments,
+            "product_plan": {
+                "status": "prepared",
+                "product_plan_digest": "a" * 64,
+                "requirements": [{
+                    "requirement_id": "req:1",
+                    "item": "Oversized prepared detail " + "x" * 60_000,
+                    "status": "selected",
+                }],
+                "unresolved_requirements": [],
+            },
+            "observation_drift": {
+                "status": "changed",
+                "previous_product_plan_digest": "c" * 64,
+                "current_product_plan_digest": "a" * 64,
+            },
+        }
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["status"], "prepared")
+        self.assertEqual(projected["projection"], "apply_arguments_only")
+        self.assertIs(projected["details_omitted"], True)
+        self.assertEqual(projected["product_plan_digest"], "a" * 64)
+        self.assertEqual(projected["apply_arguments"], arguments)
+        self.assertEqual(projected["observation_drift"], result["observation_drift"])
+        self.assertNotIn("cart_change_requested", projected["apply_arguments"])
+        self.assertNotIn("product_plan", projected)
+        self.assertEqual(result, before)
+
+    def test_apply_only_projection_rejects_inconsistent_or_authorizing_arguments(self):
+        module = self.module()
+        base = {
+            "apply_arguments": {
+                "action": "apply", "product_plan_digest": "a" * 64,
+            },
+            "product_plan": {
+                "status": "prepared", "product_plan_digest": "a" * 64,
+                "requirements": [{"item": "x" * 60_000}],
+            },
+        }
+        cases = {
+            "digest_mismatch": {
+                **deepcopy(base),
+                "apply_arguments": {
+                    "action": "apply", "product_plan_digest": "b" * 64,
+                },
+            },
+            "invalid_digest": {
+                **deepcopy(base),
+                "apply_arguments": {"action": "apply", "product_plan_digest": "not-a-digest"},
+                "product_plan": {
+                    **deepcopy(base["product_plan"]), "product_plan_digest": "not-a-digest",
+                },
+            },
+            "authority_injected": {
+                **deepcopy(base),
+                "apply_arguments": {
+                    **deepcopy(base["apply_arguments"]), "cart_change_requested": True,
+                },
+            },
+            "malformed_drift": {
+                **deepcopy(base),
+                "observation_drift": {
+                    "status": "unchanged",
+                    "previous_product_plan_digest": "c" * 64,
+                    "current_product_plan_digest": "b" * 64,
+                },
+            },
+        }
+        for name, result in cases.items():
+            with self.subTest(name=name):
+                projected = module._bounded_product_result(result)
+                self.assertEqual(projected["reason"], "mcp_action_response_too_large")
+                self.assertNotIn("apply_arguments", projected)
 
     def test_escape_heavy_candidate_name_fails_closed(self):
         module = self.module()
