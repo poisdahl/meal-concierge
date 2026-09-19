@@ -16,6 +16,7 @@ import unittest
 from unittest import mock
 
 from core import StateStore
+import planner
 from planner import MAX_EXPLORED_STATES, MAX_HISTORY_RECORDS, PlannerError
 from service import Application, Server
 
@@ -191,6 +192,30 @@ class WeeklyPlannerTests(unittest.TestCase):
                 self.assertEqual(
                     slot["score"], sum(reason["weight"] for reason in slot["reason_contributions"])
                 )
+
+    def test_maximum_week_materializes_only_returned_alternatives(self):
+        candidates = self.save_candidates(8)
+        request = self.request(
+            candidates,
+            dates=[f"2026-09-{day:02}" for day in range(7, 14)],
+            alternatives=3,
+        )
+        original = planner._selection
+        materializations = 0
+
+        def bounded_materialization(*args, **kwargs):
+            nonlocal materializations
+            materializations += 1
+            if materializations > request["alternatives"]:
+                raise AssertionError("planner materialized a discarded permutation")
+            return original(*args, **kwargs)
+
+        with mock.patch("planner._selection", side_effect=bounded_materialization):
+            result = self.plan(request)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["explored_states"], 40_320)
+        self.assertEqual(len(result["selections"]), 3)
+        self.assertEqual(materializations, 3)
 
     def test_missing_safety_metadata_is_advisory_without_accepting_caller_clearance(self):
         candidate = self.save_candidates(1)[0]
