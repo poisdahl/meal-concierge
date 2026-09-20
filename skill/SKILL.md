@@ -1214,8 +1214,10 @@ recipes, preferences or planner weights. Accept/reject/swap feedback uses the
 exact returned handoff/slot references; favorites remain separate native state.
 
 Menu lock takes exact menu ref/slot and desired boolean. Replan_prepare takes
-explicit remaining dates and candidates; unchanged replan_apply preserves past,
-cooked and locked slots plus predecessor snapshots. Product/cart changes remain
+explicit remaining dates and candidates; pass its exact apply_arguments unchanged
+to replan_apply. The opaque replan_ref remains available when large plan details
+are omitted, and the service rejects missing, changed or stale references. Apply
+preserves past, cooked and locked slots plus predecessor snapshots. Product/cart changes remain
 separate. For recurring meals use profile meals.meal_mode=fresh|batch|mixed,
 batch_dishes, dishes, prepared_portion_range, existing portions consumed per
 meal, and exact cook_days/eat_days. Set recurring_batch_accepted=true only after

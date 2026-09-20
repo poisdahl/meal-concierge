@@ -1184,6 +1184,74 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("save_ref", planned)
             self.assertLess(len(self.last_menu_wire), 4000)
 
+    async def test_oversized_replan_returns_exact_durable_apply_handoff(self):
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            planned = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "candidates": manifest["planner_candidates"][:7],
+            }))["plan"]
+            current = (await self.call(
+                client, "menu", action="save", planner_ref=planned["save_ref"]
+            ))["menu"]
+
+            oversized = synthetic_recipe(900)
+            oversized["name"] = "Syntetisk stor erstatningsmiddag"
+            oversized["steps"] = [
+                f"Syntetisk trinn {index}: " + (chr(97 + index % 26) * 3_500)
+                for index in range(45)
+            ]
+            saved = (await self.cli({
+                "operation": "recipes", "action": "save", "recipe": oversized,
+                "idempotency_key": "oversized-replan-candidate",
+            }))["recipe"]
+            candidate = {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}
+            replacement_date = current["slots"][-1]["date"]
+            request = {
+                "operation": "menu", "action": "replan_prepare",
+                "menu_ref": {key: current[key] for key in ("menu_id", "revision", "digest")},
+                "remaining_dates": [replacement_date],
+                "planner_input": {"candidates": [candidate]},
+            }
+            full = await self.cli(request)
+            self.assertGreater(len(json.dumps(full, ensure_ascii=False).encode()), 132 * 1024)
+
+            compact = await self.call(client, "menu", **{
+                key: value for key, value in request.items() if key != "operation"
+            })
+            self.assertEqual(compact["replan"]["status"], "prepared")
+            self.assertEqual(compact["replan"]["projection"], "apply_arguments_only")
+            self.assertTrue(compact["replan"]["details_omitted"])
+            self.assertEqual(compact["apply_arguments"], full["apply_arguments"])
+            self.assertRegex(compact["apply_arguments"]["replan_ref"], r"^replan_[a-f0-9]{64}$")
+            self.assertEqual(
+                compact["replan"]["replan_digest"],
+                compact["apply_arguments"]["replan_ref"].removeprefix("replan_"),
+            )
+            self.assertLess(len(self.last_menu_wire), 45_000)
+            self.assertIn(candidate, [
+                slot["reference"] for slot in compact["replan"]["successor_summary"]["slots"]
+            ])
+
+        self.stop_service()
+        await self.start_service()
+        async with self.client() as client:
+            applied = await self.call(client, "menu", **compact["apply_arguments"])
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["projection"], "committed_menu_ref")
+            self.assertLess(len(self.last_menu_wire), 45_000)
+            self.assertEqual(
+                next(slot for slot in applied["menu_summary"]["slots"] if slot["date"] == replacement_date)["reference"],
+                candidate,
+            )
+            current = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
+            self.assertEqual(
+                applied["menu_ref"],
+                {key: current[key] for key in ("menu_id", "revision", "digest")},
+            )
+            replay = await self.call(client, "menu", **compact["apply_arguments"])
+            self.assertTrue(replay["idempotent"])
+
     async def test_selected_dietary_warnings_remain_specific_and_compact(self):
         async with self.client() as client:
             await self.call(client, "setup", action="apply", keep_current=True)

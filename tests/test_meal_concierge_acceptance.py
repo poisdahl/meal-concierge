@@ -121,6 +121,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         import json
         state = case.store.read()
         state["version"] = 11
+        state["menu_planning"].pop("prepared")
         state["pending_checkout"].pop("automatic_checkout")
         case.store.path.write_text(json.dumps(state))
         reopened = Application(StateStore(case.store.directory, case.store.config), case.oda, case.browser)

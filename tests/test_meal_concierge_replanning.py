@@ -29,9 +29,13 @@ class ReplanningTests(unittest.TestCase):
 
     def prepare(self, menu=None, **changes):
         menu = menu or self.menu
+        return self.prepare_result(menu=menu, **changes)['replan']
+
+    def prepare_result(self, menu=None, **changes):
+        menu = menu or self.menu
         return self.app.handle({'operation':'menu', 'action':'replan_prepare', 'menu_ref':mp.menu_ref(menu),
             'remaining_dates':['2026-09-08', '2026-09-09'],
-            'planner_input':self.fixture.request(self.candidates[3:]), **changes})['replan']
+            'planner_input':self.fixture.request(self.candidates[3:]), **changes})
 
     def cook(self, slot, menu=None, **changes):
         menu = menu or self.menu
@@ -49,7 +53,10 @@ class ReplanningTests(unittest.TestCase):
         before = self.store.read()
         prepared = self.prepare(planner_input={'candidates':self.candidates[3:]})
         self.assertEqual(prepared, self.prepare(planner_input={'candidates':self.candidates[3:]}))
-        self.assertEqual(before, self.store.read())
+        after_prepare = self.store.read()
+        self.assertEqual(len(after_prepare['menu_planning']['prepared']), 1)
+        after_prepare['menu_planning']['prepared'] = before['menu_planning']['prepared']
+        self.assertEqual(before, after_prepare)
         result = self.apply(prepared)
         successor = result['menu']
         self.assertEqual(successor['slots'][:2], self.menu['slots'][:2])
@@ -69,6 +76,27 @@ class ReplanningTests(unittest.TestCase):
         self.assertEqual(state['menu_planning']['outcomes'][locked['slot_id']]['outcome'], 'cooked')
         self.assertNotIn(locked['recipe_key'], state['recipe_usage'][successor['menu_id']]['recipe_keys'])
         self.assertEqual(self.fixture.provider.calls, [])
+
+    def test_opaque_replan_ref_is_durable_exact_and_replay_safe(self):
+        prepared = self.prepare_result(planner_input={'candidates':self.candidates[3:]})
+        arguments = prepared['apply_arguments']
+        self.assertEqual(arguments['action'], 'replan_apply')
+        self.assertRegex(arguments['replan_ref'], r'^replan_[a-f0-9]{64}$')
+        self.assertEqual(arguments['replan_ref'], 'replan_' + prepared['replan']['replan_digest'])
+        self.assertIn(arguments['replan_ref'], self.store.read()['menu_planning']['prepared'])
+
+        restarted = Application(StateStore(Path(self.fixture.temp.name), CONFIG), self.fixture.provider, object())
+        result = restarted.handle({'operation':'menu', **arguments})
+        self.assertEqual(result['menu']['supersedes'], mp.menu_ref(self.menu))
+        self.assertNotIn(arguments['replan_ref'], self.store.read()['menu_planning']['prepared'])
+        self.assertTrue(restarted.handle({'operation':'menu', **arguments})['idempotent'])
+        with self.assertRaisesRegex(HouseholdError, 'exact server-returned'):
+            restarted.handle({'operation':'menu', 'action':'replan_apply',
+                              'replan_ref':arguments['replan_ref'].removeprefix('replan_')})
+
+        forged = arguments['replan_ref'][:-1] + ('0' if arguments['replan_ref'][-1] != '0' else '1')
+        with self.assertRaisesRegex(HouseholdError, 'stale, missing|another menu'):
+            restarted.handle({'operation':'menu', 'action':'replan_apply', 'replan_ref':forged})
 
     def test_stale_date_revision_locks_and_payload_do_not_write(self):
         prepared = self.prepare(planner_input={'candidates':self.candidates[3:]})
@@ -187,6 +215,35 @@ class ReplanningTests(unittest.TestCase):
 
 
 class ReplanMigrationTests(unittest.TestCase):
+    def test_v12_migration_backs_up_before_adding_prepared_replan_store(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(directory, CONFIG)
+            legacy = store.read()
+            legacy['version'] = 12
+            legacy['menu_planning'].pop('prepared')
+            store.path.write_text(json.dumps(legacy))
+            migrated = StateStore(directory, CONFIG)
+            self.assertEqual(migrated.read()['version'], 13)
+            self.assertEqual(migrated.read()['menu_planning']['prepared'], {})
+            backup = Path(directory) / 'state-v12.backup.json'
+            self.assertEqual(json.loads(backup.read_text()), legacy)
+            self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
+            before = backup.read_bytes()
+            StateStore(directory, CONFIG)
+            self.assertEqual(backup.read_bytes(), before)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(directory, CONFIG)
+            legacy = store.read()
+            legacy['version'] = 12
+            legacy['menu_planning'].pop('prepared')
+            store.path.write_text(json.dumps(legacy))
+            before = store.path.read_bytes()
+            with mock.patch('core._atomic_json', side_effect=OSError('fixture backup failure')):
+                with self.assertRaises(OSError):
+                    StateStore(directory, CONFIG)
+            self.assertEqual(store.path.read_bytes(), before)
+
     def test_v8_and_v7_private_backups_atomic_idempotent_and_unknown_newer(self):
         for version in (7,8):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
@@ -197,7 +254,7 @@ class ReplanMigrationTests(unittest.TestCase):
                 legacy['menu'] = {'schedule':[{'day':'Monday','meal':'unknown'}]}
                 store.path.write_text(json.dumps(legacy))
                 migrated = StateStore(directory, CONFIG)
-                self.assertEqual(migrated.read()['version'], 12)
+                self.assertEqual(migrated.read()['version'], 13)
                 self.assertEqual(migrated.read()['menu'], legacy['menu'])
                 backup = Path(directory)/f'state-v{version}.backup.json'
                 self.assertEqual(json.loads(backup.read_text()), legacy)
