@@ -1954,11 +1954,18 @@ class PlanningOperations:
                 continue
             approval = requirement.get("candidate_approval") if isinstance(requirement, Mapping) else None
             if isinstance(approval, Mapping):
-                values.append({
+                compact = {
                     key: deepcopy(approval[key])
-                    for key in ("requirement_id", "candidate_refs", "max_excess", "search_query", "package_count", "quantity_basis")
+                    for key in (
+                        "requirement_id", "candidate_refs", "max_excess", "search_query",
+                        "package_count", "quantity_basis", "semantic_authorization", "shared_package",
+                    )
                     if key in approval
-                })
+                }
+                if "shared_package" in compact:
+                    compact.pop("package_count", None)
+                    compact.pop("quantity_basis", None)
+                values.append(compact)
         return values
 
     @staticmethod
@@ -2104,6 +2111,9 @@ class PlanningOperations:
         stable_approvals = []
         for requirement_id, approval in approvals.items():
             value = {key: deepcopy(item) for key, item in approval.items() if key != "source"}
+            if "shared_package" in value:
+                value.pop("package_count", None)
+                value.pop("quantity_basis", None)
             if "search_query" not in value and len(value["candidate_refs"]) == 1:
                 products = observations.get(requirement_id, {}).get("products", [])
                 chosen = next((
@@ -2447,6 +2457,17 @@ class PlanningOperations:
                             "reason": "a previously selected product or its authority context changed; review a fresh partial plan",
                             "fresh_product_plan": revalidated,
                         }
+                if revalidated.get("status") == "prepared":
+                    completed = self._products({
+                        "action": "apply",
+                        "product_plan": revalidated,
+                        "product_plan_digest": revalidated["product_plan_digest"],
+                        "cart_change_requested": True,
+                        "_deadline": deadline,
+                    })
+                    if completed.get("applied") is True:
+                        completed["completed_from_partial"] = True
+                    return completed
                 combined_digest = revalidated.get("partial_product_plan_digest")
                 requirements = partial_cart_requirements(revalidated, combined_digest)
                 selected_lines = [{
@@ -2673,12 +2694,39 @@ class PlanningOperations:
                     and observed_dinners == expected_dinners
                     )
                 )
-                state["cart_plan"]["product_plan_summary"]["quantity_estimates"] = [
-                    {"item": row["item"], "quantity": deepcopy(row["quantity"]), "unit": row["unit"],
-                     "quantity_basis": row["selection"]["quantity_basis"],
-                     "packages": [{"name": p["name"], "quantity": p["quantity"]} for p in row["selection"]["products"]]}
-                    for row in supplied["requirements"] if row.get("selection", {}).get("coverage_status") == "practical_estimate"
-                ]
+                requirements_by_id = {
+                    row.get("requirement_id"): row for row in supplied["requirements"]
+                    if isinstance(row, Mapping)
+                }
+                quantity_estimates = []
+                for row in supplied["requirements"]:
+                    selection = row.get("selection", {})
+                    if (
+                        selection.get("coverage_status") != "practical_estimate"
+                        or selection.get("counts_toward_cart_and_totals") is False
+                    ):
+                        continue
+                    estimate = {
+                        "item": row["item"], "quantity": deepcopy(row["quantity"]),
+                        "unit": row["unit"], "quantity_basis": selection["quantity_basis"],
+                        "packages": [
+                            {"name": product["name"], "quantity": product["quantity"]}
+                            for product in selection["products"]
+                        ],
+                    }
+                    allocation = selection.get("shared_package_allocation")
+                    if isinstance(allocation, Mapping):
+                        estimate["shared_requirements"] = [
+                            {
+                                "item": requirements_by_id[member]["item"],
+                                "quantity": deepcopy(requirements_by_id[member]["quantity"]),
+                                "unit": requirements_by_id[member]["unit"],
+                            }
+                            for member in allocation.get("requirement_ids", [])
+                            if member in requirements_by_id
+                        ]
+                    quantity_estimates.append(estimate)
+                state["cart_plan"]["product_plan_summary"]["quantity_estimates"] = quantity_estimates
             price_verification = self._verified_cart_product_amounts(
                 supplied, cart_result.get("cart")
             )

@@ -968,6 +968,263 @@ class ProductPlannerTests(unittest.TestCase):
             {"candidate_ref_reused_across_requirements"},
         )
 
+    def test_current_user_can_authorize_narrow_title_level_semantic_differences(self):
+        cases = (
+            ("fryst rosenkål", "Rosenkål", "frozen title omission"),
+            ("hermetiske sorte bønner", "Økologiske sorte bønner", "canned title omission"),
+            ("rømme 9 % fett", "Lettrømme 10%", "approved nearby fat variant"),
+            ("sour cream 9 % fat", "Sour cream 10%", "approved English nearby fat variant"),
+            ("grädde 36 % fett", "Grädde 37%", "approved Swedish nearby fat variant"),
+        )
+        for item, name, reason in cases:
+            with self.subTest(item=item):
+                value = menu({"item": item, "quantity": 300, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", name, 300, "g", [option(1200)])
+                base = {
+                    "requirement_id": requirement["requirement_id"],
+                    "candidate_refs": ["10"],
+                }
+                def plan(approval):
+                    return build_product_plan(
+                        provider="oda", binding={}, menu=value,
+                        observations={requirement["requirement_id"]: observation(item, [candidate])},
+                        candidate_approvals=[approval],
+                    )
+                self.assertEqual(
+                    plan(base)["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+                authorized = plan({**base, "semantic_authorization": {
+                    "candidate_ref": "10", "authorized_by": "current_user", "reason": reason,
+                }})
+                self.assertEqual(authorized["status"], "prepared")
+                validate_product_plan(authorized, authorized["product_plan_digest"])
+                compact = Application._plan_approvals(authorized)
+                self.assertEqual(plan(compact[0])["product_plan_digest"], authorized["product_plan_digest"])
+                changed = deepcopy(authorized)
+                changed["requirements"][0]["candidate_approval"]["semantic_authorization"]["reason"] += " changed"
+                with self.assertRaisesRegex(HouseholdError, "changed"):
+                    validate_product_plan(changed, authorized["product_plan_digest"])
+
+    def test_semantic_authorization_cannot_bypass_identity_or_allergy_safety(self):
+        cases = (
+            ("fryst torsk", "Laks", "fish species"),
+            ("hermetiske sorte bønner", "Kikerter", "legume identity"),
+            ("fryst torsk", "Torskeburger", "processed fish form"),
+            ("fryst torsk", "Torsk med reker", "compound fish product"),
+            ("fryst torsk", "Torsk i olje", "prepared fish product"),
+            ("hermetiske sorte bønner", "Sorte bønner i chilisaus", "flavoured prepared beans"),
+            ("hermetiske sorte bønner", "Sorte bønner taco mix", "bean mix"),
+            ("hermetiske sorte bønner", "Sorte bønner med mais", "compound bean product"),
+            ("hermetiske sorte bønner", "Sorte bønner med peanøtter", "allergen-bearing bean product"),
+            ("rømme 9 % fett", "TINE Lettrømme 10% med hvitløk", "flavoured sour cream"),
+            ("rømme 9 % fett", "Lettrømme 10% løk og dill", "flavoured sour cream"),
+            ("rømme med hvitløk 9 % fett", "Lettrømme 10%", "dropped requested flavor"),
+            ("rømme løk og dill 9 % fett", "TINE Lettrømme 10%", "dropped requested flavors"),
+            ("yoghurt vanilje 3 % fett", "Yoghurt 4%", "dropped yogurt flavor"),
+            ("seterrømme 9 % fett", "Lettrømme 10%", "changed sour cream subtype"),
+        )
+        for item, name, reason in cases:
+            with self.subTest(item=item):
+                value = menu({"item": item, "quantity": 300, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", name, 300, "g", [option(1200)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(item, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                        "semantic_authorization": {
+                            "candidate_ref": "10", "authorized_by": "current_user", "reason": reason,
+                        },
+                    }],
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(plan["unresolved_requirements"][0]["reason"], "semantic_authorization_not_applicable")
+
+        value = menu({"item": "rømme 9 % fett", "quantity": 300, "unit": "g"})
+        requirement = menu_requirements(value)[0][0]
+        candidate = product("10", "TINE Lettrømme 10%", 300, "g", [option(1200)])
+        candidate["dietary_evidence"] = {"allergens": ["melk"]}
+        plan = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={requirement["requirement_id"]: observation("rømme", [candidate])},
+            candidate_approvals=[{
+                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                "semantic_authorization": {
+                    "candidate_ref": "10", "authorized_by": "current_user", "reason": "approved fat variant",
+                },
+            }],
+            dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": "melk"}]}},
+        )
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+
+        title_allergens = (
+            ("sjokolade", "TINE Melkesjokolade", "melk"),
+            ("pålegg", "Peanøttsmør", "peanøtter"),
+            ("nudler", "Eggnudler", "egg"),
+        )
+        for item, name, allergen in title_allergens:
+            with self.subTest(title_allergen=allergen):
+                value = menu({"item": item, "quantity": 300, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", name, 300, "g", [option(1200)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(item, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                    }],
+                    dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": allergen}]}},
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+
+        value = menu({"item": "sorte bønner", "quantity": 300, "unit": "g"})
+        requirement = menu_requirements(value)[0][0]
+        candidate = product("10", "Sorte bønner med peanøtter", 300, "g", [option(1200)])
+        plan = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={requirement["requirement_id"]: observation("sorte bønner", [candidate])},
+            candidate_approvals=[{
+                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+            }],
+            dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": "peanøtter"}]}},
+        )
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+
+    def test_shared_package_is_atomic_and_counted_once(self):
+        value = menu(
+            {"item": "egg", "quantity": 1, "unit": "count"},
+            {"item": "eggeplomme", "quantity": 2, "unit": "count"},
+        )
+        requirements = menu_requirements(value)[0]
+        shared = product("28866", "Egg frittgående 12-pk", 12, "count", [
+            option(500), option(800, packages=2, offer_kind="multi_buy"),
+        ])
+        observations = {
+            requirement["requirement_id"]: observation(requirement["search"], [shared])
+            for requirement in requirements
+        }
+        member_ids = [requirement["requirement_id"] for requirement in requirements]
+        authority = {
+            "requirement_ids": member_ids,
+            "package_count": 1,
+            "quantity_basis": "One observed 12-egg package covers the egg and yolk requirements together.",
+            "authorized_by": "current_user",
+        }
+        approvals = [{
+            "requirement_id": requirement["requirement_id"],
+            "candidate_refs": ["28866"],
+            "shared_package": authority,
+        } for requirement in requirements]
+        plan = build_product_plan(
+            provider="oda", binding={}, menu=value, observations=observations,
+            candidate_approvals=approvals,
+        )
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual(plan["totals"]["package_count"], 1)
+        self.assertEqual(plan["totals"]["total_payable_ore"], 500)
+        self.assertEqual(cart_requirements(plan), [{
+            "product_id": "28866", "product_name": "Egg frittgående 12-pk", "quantity": 1,
+        }])
+        self.assertEqual(
+            sum(row["selection"]["counts_toward_cart_and_totals"] for row in plan["requirements"]),
+            1,
+        )
+        compact = Application._plan_approvals(plan)
+        self.assertTrue(all("shared_package" in approval for approval in compact))
+        replayed = build_product_plan(
+            provider="oda", binding={}, menu=value, observations=observations,
+            candidate_approvals=compact,
+        )
+        self.assertEqual(replayed["product_plan_digest"], plan["product_plan_digest"])
+
+        insufficient = deepcopy(approvals)
+        tiny = product("28866", "Egg enkeltvis", 1, "count", [option(100)])
+        blocked = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={requirement["requirement_id"]: observation(requirement["search"], [tiny]) for requirement in requirements},
+            candidate_approvals=insufficient,
+        )
+        self.assertEqual(blocked["status"], "needs_input")
+        self.assertIn("shared_package_group_unavailable", {row["reason"] for row in blocked["unresolved_requirements"]})
+
+        exact_value = menu(
+            {"item": "First", "quantity": 100, "unit": "g"},
+            {"item": "Second", "quantity": 100, "unit": "g"},
+        )
+        exact_requirements = menu_requirements(exact_value)[0]
+        exact_ids = [row["requirement_id"] for row in exact_requirements]
+        exact_authority = {
+            "requirement_ids": exact_ids, "package_count": 1,
+            "quantity_basis": "One observed 200 g package covers both 100 g requirements.",
+            "authorized_by": "current_user",
+        }
+        inconsistent = build_product_plan(
+            provider="oda", binding={}, menu=exact_value,
+            observations={
+                exact_requirements[0]["requirement_id"]: observation("First", [product("10", "Shared", 200, "g", [option(500)])]),
+                exact_requirements[1]["requirement_id"]: observation("Second", [product("10", "Shared", 100, "g", [option(500)])]),
+            },
+            candidate_approvals=[{
+                "requirement_id": row["requirement_id"], "candidate_refs": ["10"],
+                "shared_package": exact_authority,
+            } for row in exact_requirements],
+        )
+        self.assertEqual(inconsistent["status"], "needs_input")
+        self.assertIn("shared_package_group_unavailable", {row["reason"] for row in inconsistent["unresolved_requirements"]})
+
+    def test_shared_package_handles_live_pepper_and_butter_requirement_shapes(self):
+        cases = (
+            (
+                "14401", "Sort pepper", 40, "g",
+                ({"item": "nymalt pepper", "quantity": 1, "unit": "tsp"},
+                 {"item": "pepper", "quantity": 1, "unit": "tsp"}),
+            ),
+            (
+                "127", "TINE Smør", 500, "g",
+                ({"item": "smør", "quantity": 100, "unit": "g"},
+                 {"item": "smør", "quantity": 1, "unit": "tbsp"}),
+            ),
+        )
+        for reference, name, amount, unit, needs in cases:
+            with self.subTest(reference=reference):
+                value = menu(*needs)
+                requirements = menu_requirements(value)[0]
+                candidate = product(reference, name, amount, unit, [option(2500)])
+                member_ids = [requirement["requirement_id"] for requirement in requirements]
+                shared = {
+                    "requirement_ids": member_ids, "package_count": 1,
+                    "quantity_basis": "One observed package covers both listed cooking requirements.",
+                    "authorized_by": "current_user",
+                }
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(requirement["search"], [candidate])
+                        for requirement in requirements
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [reference], "shared_package": shared,
+                    } for requirement in requirements],
+                )
+                self.assertEqual(plan["status"], "prepared", plan)
+                self.assertEqual(plan["totals"]["package_count"], 1)
+                self.assertEqual(plan["totals"]["total_payable_ore"], 2500)
+                self.assertEqual(cart_requirements(plan)[0]["quantity"], 1)
+
+    def test_plain_iodized_salt_is_an_ordinary_salt_candidate(self):
+        plan = prepared(
+            menu({"item": "salt", "quantity": 500, "unit": "g"}),
+            [product("68498", "Jozo fint salt med jod", 500, "g", [option(1990)])],
+        )
+        self.assertEqual(plan["status"], "prepared")
+
     def test_unknown_candidate_blocks_cheapest_claim_instead_of_being_ignored(self):
         menu_value = menu({"item": "Mel", "quantity": 500, "unit": "g"})
         exact = product("10", "Første hvetemel", 500, "g", [option(1000)])
@@ -1315,6 +1572,134 @@ class ProductRuntimeTests(unittest.TestCase):
         })
         self.assertTrue(result["applied"], result)
         self.assertIn("Stable Flour 500 g", [args["queries"][0] for name, args in calls if name == "product_search"])
+
+    def test_shared_compact_apply_persists_one_estimate_with_every_covered_need(self):
+        menu_value = {
+            **self.menu,
+            "dishes": [{"shopping_requirements": [
+                {"item": "First", "quantity": 100, "unit": "g", "scalable": True},
+                {"item": "Second", "quantity": 100, "unit": "g", "scalable": True},
+            ]}],
+        }
+        with self.store.locked() as state:
+            state["menu"] = deepcopy(menu_value)
+        requirements = menu_requirements(menu_value)[0]
+        member_ids = [row["requirement_id"] for row in requirements]
+        shared = {
+            "requirement_ids": member_ids, "package_count": 1,
+            "quantity_basis": "One observed 500 g package covers both 100 g requirements.",
+            "authorized_by": "current_user",
+        }
+        response = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": row["requirement_id"], "candidate_refs": ["10"],
+                "shared_package": shared,
+            } for row in requirements],
+        })
+        arguments = response["apply_arguments"]
+        self.assertTrue(all("shared_package" in row for row in arguments["candidate_approvals"]))
+        applied = self.app.handle({
+            "operation": "products", **arguments, "cart_change_requested": True,
+        })
+        self.assertTrue(applied["applied"], applied)
+        estimates = self.store.read()["cart_plan"]["product_plan_summary"]["quantity_estimates"]
+        self.assertEqual(len(estimates), 1)
+        self.assertEqual({row["item"] for row in estimates[0]["shared_requirements"]}, {"First", "Second"})
+        self.assertEqual(estimates[0]["packages"][0]["quantity"], 1)
+
+    def test_cumulative_partial_with_shared_package_completes_as_full_plan(self):
+        menu_value = {
+            **self.menu,
+            "dishes": [{"shopping_requirements": [
+                {"item": "egg", "quantity": 1, "unit": "count", "scalable": True},
+                {"item": "eggeplomme", "quantity": 2, "unit": "count", "scalable": True},
+                {"item": "eple", "quantity": 1, "unit": "count", "scalable": True},
+            ]}],
+        }
+        with self.store.locked() as state:
+            state["menu"] = deepcopy(menu_value)
+        requirements = menu_requirements(menu_value)[0]
+        by_item = {row["item"]: row for row in requirements}
+        eggs = product("28866", "Egg frittgående 12-pk", 12, "count", [option(500)])
+        apple = product("30", "Eple", 1, "count", [option(300)])
+        original = self.provider.call
+
+        def scoped(tool_name, arguments, **kwargs):
+            if tool_name == "product_search":
+                self.provider.calls.append((tool_name, deepcopy(arguments)))
+                query = arguments["queries"][0].casefold()
+                candidate = apple if query in {"eple", "apple"} else eggs
+                return observation(arguments["queries"][0], [candidate])
+            return original(tool_name, arguments, **kwargs)
+
+        self.provider.call = scoped
+        shared_ids = [by_item[item]["requirement_id"] for item in ("egg", "eggeplomme")]
+        shared = {
+            "requirement_ids": shared_ids,
+            "package_count": 1,
+            "quantity_basis": "One observed 12-egg package covers the egg and yolk needs together.",
+            "authorized_by": "current_user",
+        }
+        first = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": requirement_id, "candidate_refs": ["28866"],
+                "shared_package": shared,
+            } for requirement_id in shared_ids],
+        })
+        first_applied = self.app.handle({
+            "operation": "products", **first["partial_apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertTrue(first_applied["partial_applied"], first_applied)
+        self.assertEqual(self.provider.cart["count"], 1)
+
+        final = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": by_item["eple"]["requirement_id"],
+                "candidate_refs": ["30"],
+            }],
+        })
+        original_prepare = self.app._prepare_products
+        prepare_calls = 0
+
+        def drift_before_full_validation(**kwargs):
+            nonlocal prepare_calls
+            prepare_calls += 1
+            if prepare_calls == 3:
+                apple["purchase_options"][0].update(
+                    merchandise_ore=400, total_payable_ore=400,
+                )
+            return original_prepare(**kwargs)
+
+        cart_before_stale_apply = deepcopy(self.provider.cart)
+        self.app._prepare_products = drift_before_full_validation
+        try:
+            stale = self.app.handle({
+                "operation": "products", **final["partial_apply_arguments"],
+                "cart_change_requested": True,
+            })
+        finally:
+            self.app._prepare_products = original_prepare
+            apple["purchase_options"][0].update(
+                merchandise_ore=300, total_payable_ore=300,
+            )
+        self.assertFalse(stale["applied"], stale)
+        self.assertEqual(self.provider.cart, cart_before_stale_apply)
+
+        completed = self.app.handle({
+            "operation": "products", **final["partial_apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertTrue(completed["applied"], completed)
+        self.assertTrue(completed["completed_from_partial"])
+        cart_plan = self.store.read()["cart_plan"]
+        self.assertIn("product_plan_digest", cart_plan)
+        self.assertNotIn("partial_product_plan_digest", cart_plan)
+        self.assertEqual(self.provider.cart["count"], 2)
+        self.assertEqual({item["product_id"] for item in self.provider.cart["items"]}, {28866, 30})
 
     def test_multi_candidate_approval_keeps_requirement_query_scope(self):
         self.provider.product_count = 2

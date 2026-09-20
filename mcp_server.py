@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Hermes stdio MCP surface for the household-local meal service."""
 
-from __future__ import annotations
-
 import hashlib
 import os
 from pathlib import Path
@@ -11,7 +9,7 @@ import re
 import stat
 import sys
 import tempfile
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -26,6 +24,33 @@ _LOCAL_RECIPE_PACK_SOURCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ ()-]{0,199}\.zi
 _LOCAL_RECIPE_PACK_ARCHIVE = re.compile(r"[0-9a-f]{64}\.zip\Z")
 _MAX_RECIPE_PACK_BYTES = 1024 * 1024 * 1024
 _RECIPE_PACK_CHUNK_BYTES = 128 * 1024
+
+
+class SemanticAuthorization(TypedDict):
+    candidate_ref: str | int
+    authorized_by: Literal["current_user"]
+    reason: str
+
+
+class SharedPackageAuthorization(TypedDict):
+    requirement_ids: list[str]
+    package_count: int
+    quantity_basis: str
+    authorized_by: Literal["current_user"]
+
+
+class RequiredCandidateApproval(TypedDict):
+    requirement_id: str
+    candidate_refs: list[str | int]
+
+
+class CandidateApproval(RequiredCandidateApproval, total=False):
+    max_excess: dict[str, int] | int | float | str
+    search_query: str
+    package_count: int
+    quantity_basis: str
+    semantic_authorization: SemanticAuthorization
+    shared_package: SharedPackageAuthorization
 
 
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
@@ -339,14 +364,14 @@ def meal_concierge_catalog(action: Literal["products", "recipes", "usuals"], que
     return rpc("catalog", action=action, query=query, limit=limit)
 
 
-@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries. An incomplete plan cannot be fully applied, but reviewed selected lines may return partial_apply_arguments for an idempotent selected-only sync while checkout stays blocked. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit or an explicitly declared expected/minimum variable weight; it labels coverage and merchandise cost as estimates, never claims cheapest or final payable total, and leaves checkout as price authority. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant; returned apply arguments automatically bind selected refs to their observed product-name query. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare returns compact apply_arguments for a complete plan and partial_apply_arguments when at least one line is selected in an incomplete plan. If details cannot fit the MCP response, a compact arguments-only projection preserves the actionable continuation while omitting diagnostics. Apply accepts those unchanged arguments (exact compact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; returned arguments never grant authority themselves. Full compact apply regenerates the plan and requires the identical reviewed digest. Partial compact apply rereads only selected facts, syncs only selected lines without recurring goods, records no complete digest and keeps checkout blocked until later full apply. Both stop on selected drift and reuse guarded idempotent cart sync; neither orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
+@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries. An incomplete plan cannot be fully applied, but reviewed selected lines may return partial_apply_arguments for an idempotent selected-only sync while checkout stays blocked. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit or an explicitly declared expected/minimum variable weight; it labels coverage and merchandise cost as estimates, never claims cheapest or final payable total, and leaves checkout as price authority. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant; returned apply arguments automatically bind selected refs to their observed product-name query. A semantic_authorization may bind one exact selected ref, authorized_by=current_user and a reason only for a nearby dairy-fat variant or a frozen/canned property omitted from the product title; it cannot override identity, form, species or dietary checks. A shared_package must be repeated unchanged for every listed requirement, select one common ref, and include authorized_by=current_user, one package_count and quantity_basis; the group is atomic and contributes its SKU, quantity and cost exactly once. Both authorities are transient, preserved in compact apply arguments and bound by the reviewed digest. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare returns compact apply_arguments for a complete plan and partial_apply_arguments when at least one line is selected in an incomplete plan. If details cannot fit the MCP response, a compact arguments-only projection preserves the actionable continuation while omitting diagnostics. Apply accepts those unchanged arguments (exact compact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; returned arguments never grant authority themselves. Full compact apply regenerates the plan and requires the identical reviewed digest. Partial compact apply rereads only selected facts, syncs only selected lines without recurring goods, records no complete digest and keeps checkout blocked until later full apply. Both stop on selected drift and reuse guarded idempotent cart sync; neither orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
 def meal_concierge_products(
     action: Literal["prepare", "apply", "lowest_cost", "record_ingredients"] = "prepare",
     planner_input: dict[str, Any] | None = None,
     menu_ref: dict[str, Any] | None = None,
     planner_handoff: dict[str, Any] | None = None,
     planner_selection_ref: dict[str, Any] | None = None,
-    candidate_approvals: list[dict[str, Any]] | None = None,
+    candidate_approvals: list[CandidateApproval] | None = None,
     ingredient_decisions: list[dict[str, Any]] | None = None,
     budget_ore: int | None = None,
     price_mode: Literal["exact", "estimate"] = "exact",
@@ -1044,6 +1069,7 @@ def _compact_product_selection(selection: Any) -> dict[str, Any]:
             "observed_package", "observed_package_description", "surplus_quantity",
             "excess_score", "package_count", "merchandise_ore",
             "mandatory_deposit_ore", "total_payable_ore",
+            "shared_package_allocation", "counts_toward_cart_and_totals",
         )
         if key in selection
     }

@@ -74,11 +74,73 @@ def matches(term, value, *, milk_ambiguity=False):
         for match in re.finditer(r'(?<!\w)' + re.escape(text(term)) + r'(?!\w)', normalized):
             before = normalized[max(0, match.start() - 35):match.start()]
             after = normalized[match.end():match.end() + 12]
-            if milk_ambiguity and re.search(r'(?:oat|almond|soy|soya|coconut|rice|havre|mandel|soja|kokos|ris)[- ]*$', before):
+            if milk_ambiguity and re.search(
+                r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+                r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',
+                before,
+            ):
                 continue
-            if re.search(r'(?:does not contain|contains no|without|no|uten|fri for|inneholder ikke|innehåller inte)\s*$', before) or re.match(r'[- ]?(?:free|fri|fritt)\b', after):
+            if re.search(
+                r'(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)'
+                r'(?:\s+(?:added|tilsatt|tillsatt|traces? of|spor av|spår av))?\s*$',
+                before,
+            ) or re.match(r'[- ]?(?:free|fri|fritt)\b', after):
                 continue
             return True
+    return False
+
+
+def title_allergen_negated(term, value):
+    """Return whether the whole product title explicitly negates this allergen."""
+    normalized_term = text(term)
+    if normalized_term in {'milk', 'melk', 'mjölk'}:
+        allergen_words = r'(?:milk|melk|mjölk)'
+    elif normalized_term in {'peanut', 'peanuts', 'peanøtt', 'peanøtter', 'jordnöt', 'jordnötter'}:
+        allergen_words = r'(?:peanut|peanuts|peanøtt|peanøtter|jordnöt|jordnötter)'
+    elif normalized_term in {'egg', 'ägg'}:
+        allergen_words = r'(?:egg|ägg)'
+    else:
+        return False
+    return re.search(
+        r'\b(?:does\s+not\s+contain|contains\s+no|without|no|uten|utan|fri\s+for|fri\s+från|inneholder\s+ikke|innehåller\s+inte)'
+        r'(?:\s+(?:added|tilsatt|tillsatt|traces?\s+of|spor\s+av|spår\s+av))?\s+'
+        + allergen_words + r'\b',
+        text(value),
+    ) is not None
+
+
+def title_positive_match(term, value):
+    """Recognize a bounded set of literal allergen-bearing title compounds."""
+    milk_pattern = (
+        r'\b(?:melke(?:sjokolade|pulver|protein|fett|drikk|glass)'
+        r'|mjölk(?:choklad|pulver|protein|fett|dryck|glass)'
+        r'|milk\s*(?:chocolate|powder|protein|drink|ice\s*cream))\b'
+    )
+    peanut_pattern = (
+        r'\b(?:(?:peanøtt|peanut)(?:smør|butter|olje|oil|mel|flour|saus|sauce|kake|cake|er|s)?'
+        r'|jordnöt(?:ssmör|solja|ssås|skaka|smör|olja|sås|kaka|ter)?)\b'
+    )
+    egg_pattern = r'\b(?:egg(?:nudler|pasta|pulver|protein|erøre|salat)?|ägg(?:nudlar|pasta|pulver|protein|röra|sallad)?)\b'
+    patterns = {
+        **{key: milk_pattern for key in ('milk', 'melk', 'mjölk')},
+        **{key: peanut_pattern for key in ('peanut', 'peanuts', 'peanøtt', 'peanøtter', 'jordnöt', 'jordnötter')},
+        **{key: egg_pattern for key in ('egg', 'ägg')},
+    }
+    normalized_term = text(term)
+    pattern = patterns.get(normalized_term)
+    normalized_value = text(value)
+    if pattern is None or title_allergen_negated(term, value):
+        return False
+    for match in re.finditer(pattern, normalized_value):
+        before = normalized_value[max(0, match.start() - 35):match.start()]
+        if normalized_term in {'milk', 'melk', 'mjölk'} and re.search(
+            r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+            r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
+        ):
+            continue
+        if re.search(r'(?:without|no|uten|utan)\s*$', before):
+            continue
+        return True
     return False
 
 
@@ -95,15 +157,21 @@ def assess(profile, item, *, recipe=False):
         terms = aliases.get(text(term), [term])
         # Culinary form exclusions can be stated in the retail name even when
         # the ingredient label just says 'lentils'. Names are not allergen proof.
-        rule_evidence = {**evidence}
-        if text(term) == 'dry whole legumes':
-            rule_evidence['product_name'] = item.get('name', '')
-        present = any(matches(t, rule_evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'}) for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms)
+        # A title cannot prove allergen absence, but a literal positive match is
+        # retailer evidence and must never be ignored by product authorization.
+        rule_evidence = {**evidence, 'product_name': item.get('name', '')}
+        present = any(
+            not (field == 'product_name' and title_allergen_negated(term, rule_evidence.get(field, '')))
+            and matches(t, rule_evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'})
+            for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms
+        )
+        if not present and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity', 'never_buy'}:
+            present = title_positive_match(term, rule_evidence.get('product_name', ''))
         # An unlisted term is not an allergen-free claim (synonyms/compound ingredients).
         free = not recipe and any(text(v) == text(term) for v in evidence.get('allergen_free_from', []) if isinstance(v, str)) if isinstance(evidence.get('allergen_free_from', []), list) else False
         condition = ('preference_deviation' if kind == 'preference' else 'sensitivity_conflict' if kind == 'sensitivity' else 'conflict') if present else 'compatible_label' if free else 'unknown'
         finding = {**rule, 'condition': condition, 'product_ref': item.get('product_ref'), 'item': item.get('name'),
-                   'source': 'recipe_ingredients' if recipe else 'retailer_fields' if any(k in evidence for k in ('ingredients', 'allergens', 'may_contain', 'allergen_free_from')) else 'unavailable',
+                   'source': 'recipe_ingredients' if recipe else 'retailer_fields' if item.get('name') or any(k in evidence for k in ('ingredients', 'allergens', 'may_contain', 'allergen_free_from')) else 'unavailable',
                    'evidence': deepcopy(rule_evidence), 'blocked': condition == 'conflict',
                    'unknown': 'Exact retail ingredient/allergen suitability remains unresolved.' if condition == 'unknown' else None}
         finding['finding_id'] = digest(finding)
