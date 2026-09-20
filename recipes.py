@@ -4382,17 +4382,28 @@ class RecipeStore:
                     result = self._record(connection, existing, created=False)
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
-                    if content_hash == existing["baseline_hash"]:
-                        connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?", (version, existing["id"]))
-                        result.update(self._entry_metadata(connection, existing["id"]))
-                        return {"outcome": "unchanged", "recipe": result}
-                    # Publisher updates always change content. A same-content
-                    # status transition in history is a durable local decision,
-                    # including after any number of intervening pack upgrades.
+                    # A same-content status transition in history is a durable
+                    # local decision, including after any number of pack upgrades.
                     history = list(connection.execute(
                         "SELECT revision,status,document FROM revisions WHERE recipe_id=? ORDER BY revision", (existing["id"],)))
                     local_status = any(old["status"] != new["status"] and old["document"] == new["document"]
                                        for old, new in zip(history, history[1:]))
+                    if content_hash == existing["baseline_hash"]:
+                        next_status = (existing["status"] if local_status or existing["status"] == "archived"
+                                       else "active" if status == "ready" else "draft")
+                        if existing["status"] != next_status:
+                            revision, updated_at = existing["revision"] + 1, _now()
+                            connection.execute(
+                                "UPDATE recipes SET revision=?,status=?,updated_at=? WHERE id=?",
+                                (revision, next_status, updated_at, existing["id"]),
+                            )
+                            connection.execute(
+                                "INSERT INTO revisions VALUES(?,?,?,?,?)",
+                                (existing["id"], revision, next_status, existing["document"], updated_at),
+                            )
+                        connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?", (version, existing["id"]))
+                        result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (existing["id"],)).fetchone(), created=False)
+                        return {"outcome": "updated" if existing["status"] != next_status else "unchanged", "recipe": result}
                     next_status = existing["status"] if local_status or existing["status"] == "archived" else ("active" if status == "ready" else "draft")
                     validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(existing["document"]))
                     duplicate = self._source_duplicate(connection, recipe)
