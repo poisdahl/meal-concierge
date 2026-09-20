@@ -15,7 +15,7 @@ import unicodedata
 from core import HouseholdError
 
 
-PRODUCT_PLAN_VERSION = "product-plan-v2"
+PRODUCT_PLAN_VERSION = "product-plan-v3"
 MAX_REQUIREMENTS = 64
 MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
@@ -269,7 +269,7 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
     bare_identity_forms = (
         (r"^(?:smør|butter)$", rf"(?:^|\s)(?:(?:meieri|ekte|saltet|usaltet|lettsaltet)smør|smør){package_tail}$|^(?:(?:salted|unsalted|cultured|dairy)\s+)?butter{package_tail}$"),
         (r"^(?:mel|hvetemel|flour|vetemjöl)$", rf"(?:^|\s)(?:siktet\s+)?hvetemel(?:\s+siktet)?{package_tail}$|^(?:mel|flour){package_tail}$|(?:^|\s)(?:plain|wheat)\s+flour{package_tail}$|(?:^|\s)vetemjöl{package_tail}$"),
-        (r"^salt$", rf"(?:^|\s)(?:havsalt|flaksalt|bordsalt|finsalt|grovsalt|salt)(?:\s+(?:fint|grovt|flak))?{package_tail}$|^(?:sea\s+salt|table\s+salt){package_tail}$"),
+        (r"^salt$", rf"(?:^|\s)(?:(?:fint|grovt)\s+salt|havsalt|flaksalt|bordsalt|finsalt|grovsalt|salt)(?:\s+(?:fint|grovt|flak|med\s+jod))?{package_tail}$|^(?:sea\s+salt|table\s+salt){package_tail}$"),
         (r"^(?:ris|rice)$", rf"(?:^|\s)(?:jasminris|basmatiris|fullkornsris|villris|sushiris|grøtris|risottoris|ris){package_tail}$|(?:^|\s)(?:(?:jasmine|basmati|brown|white|wild|sushi|arborio|risotto|long[-\s]grain)\s+rice|rice){package_tail}$"),
         (r"^(?:melk|milk|mjölk)$", rf"(?:^|\s)(?:helmelk|lettmelk|skummet\s+melk|standardmjölk|lättmjölk|skummjölk|melk|mjölk)(?:\s+(?:lett|hel))?{package_tail}$|^(?:(?:whole|skimmed|semi[-\s]skimmed|dairy)\s+milk|milk){package_tail}$"),
         (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:^|\s)(?:(?:fersk|fresh)\s+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
@@ -323,7 +323,7 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
     legumes = {
         "chickpea": r"\b(?:kikert|kikerter|chickpea|chickpeas)\b",
         "white_bean": r"\b(?:hvite?\s+bønner?|white\s+beans?)\b",
-        "black_bean": r"\b(?:svarte?\s+bønner?|black\s+beans?)\b",
+        "black_bean": r"\b(?:(?:svarte?|sorte?)\s+bønner?|black\s+beans?)\b",
         "kidney_bean": r"\b(?:kidneybønner?|kidney\s+beans?)\b",
         "lentil": r"\b(?:linse|linser|lentil|lentils)\b",
     }
@@ -388,6 +388,88 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
     if wanted_meat and not offered_meat and re.search(r"\b(?:kjøttdeig|farse|köttfärs|mince|minced meat)\b", offered):
         return True
     return False
+
+
+def _authorized_semantic_difference(
+    requirement: Mapping[str, Any], product: Mapping[str, Any]
+) -> list[str] | None:
+    """Return the narrow title-level differences a current user may authorize.
+
+    Identity, form, explicit contradictory state, dietary and species checks
+    remain in ``semantic_product_conflict`` and cannot be bypassed here.
+    """
+    wanted = str(requirement.get("item") or "").casefold()
+    offered = str(product.get("name") or "").casefold()
+    if not wanted or not offered or not semantic_product_conflict(requirement, product):
+        return None
+    wanted_features = _semantic_features(wanted)
+    offered_features = _semantic_features(offered)
+    stripped = wanted
+    differences: list[str] = []
+    if wanted_features["state"] == "frozen" and offered_features["state"] is None:
+        stripped = re.sub(r"\b(?:fryst|frossen|frysta|frozen)\b", " ", stripped)
+        differences.append("frozen_not_in_product_title")
+    if wanted_features["treatment"] == "canned" and offered_features["treatment"] is None:
+        stripped = re.sub(r"\b(?:hermetisk|hermetiske|canned|tinned)\b", " ", stripped)
+        differences.append("canned_not_in_product_title")
+
+    wanted_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", wanted)
+    offered_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", offered)
+    dairy_classes = {
+        "sour_cream": r"\b(?:rømme|lettrømme|seterrømme|sour\s+cream)\b",
+        "cream": r"\b(?:fløte|cream|grädde)\b",
+        "milk": r"\b(?:melk|milk|mjölk)\b",
+        "yogurt": r"\b(?:yoghurt|yogurt)\b",
+    }
+    wanted_dairy = next((name for name, pattern in dairy_classes.items() if re.search(pattern, wanted)), None)
+    offered_dairy = next((name for name, pattern in dairy_classes.items() if re.search(pattern, offered)), None)
+    if wanted_percent and offered_percent and wanted_dairy and wanted_dairy == offered_dairy:
+        wanted_fat = float(wanted_percent.group(1).replace(",", "."))
+        offered_fat = float(offered_percent.group(1).replace(",", "."))
+        if wanted_fat != offered_fat and abs(wanted_fat - offered_fat) <= 2:
+            stripped = re.sub(r"(?:minst|at\s+least)?\s*\d+(?:[.,]\d+)?\s*%\s*(?:fett|fat)?", " ", stripped)
+            differences.append("nearby_dairy_fat_percentage")
+    if not differences:
+        return None
+    def title_tokens(value: str) -> list[str]:
+        tokens = re.findall(r"[a-zæøåöä]+|\d+(?:[.,]\d+)?|%", value)
+        metadata = {
+            "%", "g", "kg", "ml", "l", "cl", "stk", "pk", "pakke",
+            "økologisk", "økologiske", "organic", "norsk", "norske",
+        }
+        return [token for token in tokens if token not in metadata and not token[0].isdigit()]
+
+    # Fail closed on every residual title token. This makes the authority about
+    # exactly one omitted qualifier or nearby fat value, never a prepared,
+    # flavoured, compound or allergen-bearing addition.
+    if any(name in differences for name in (
+        "frozen_not_in_product_title", "canned_not_in_product_title",
+    )):
+        if title_tokens(offered) != title_tokens(stripped):
+            return None
+    if "nearby_dairy_fat_percentage" in differences:
+        allowed_dairy_titles = {
+            "sour_cream": {("rømme",), ("lettrømme",), ("seterrømme",), ("sour", "cream")},
+            "cream": {("fløte",), ("kremfløte",), ("matfløte",), ("vispgrädde",), ("grädde",), ("cream",)},
+            "milk": {("melk",), ("lettmelk",), ("helmelk",), ("skummet", "melk"), ("milk",), ("mjölk",)},
+            "yogurt": {("yoghurt",), ("yogurt",)},
+        }
+        dairy_class = wanted_dairy
+        offered_title = title_tokens(offered)
+        if offered_title and offered_title[0] == "tine":
+            offered_title = offered_title[1:]
+        if tuple(offered_title) not in allowed_dairy_titles[dairy_class]:
+            return None
+        wanted_title = title_tokens(stripped)
+        # The one reviewed subtype substitution is ordinary rømme to
+        # lettrømme. Every other residual title, including flavors and named
+        # dairy subtypes, must remain exact after removing the fat percentage.
+        if wanted_title != offered_title and not (
+            wanted_title == ["rømme"] and offered_title == ["lettrømme"]
+        ):
+            return None
+    stripped_requirement = {**requirement, "item": " ".join(stripped.split())}
+    return differences if not semantic_product_conflict(stripped_requirement, product) else None
 
 
 def _positive_fraction(value: Any) -> Fraction | None:
@@ -650,7 +732,10 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         raise HouseholdError("candidate_approvals must be a bounded list")
     approvals = {}
     for raw in value:
-        if not isinstance(raw, Mapping) or set(raw).difference({"requirement_id", "candidate_refs", "max_excess", "search_query", "package_count", "quantity_basis"}):
+        if not isinstance(raw, Mapping) or set(raw).difference({
+            "requirement_id", "candidate_refs", "max_excess", "search_query",
+            "package_count", "quantity_basis", "semantic_authorization", "shared_package",
+        }):
             raise HouseholdError("candidate approval has unknown fields")
         requirement_id = raw.get("requirement_id")
         refs = raw.get("candidate_refs")
@@ -686,7 +771,68 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             if maximum > 100:
                 raise HouseholdError("candidate approval max_excess is too large")
             approval["max_excess"] = _fraction_json(maximum)
+        if raw.get("semantic_authorization") is not None:
+            authority = raw["semantic_authorization"]
+            if (
+                not isinstance(authority, Mapping)
+                or set(authority) != {"candidate_ref", "authorized_by", "reason"}
+                or authority.get("authorized_by") != "current_user"
+                or authority.get("candidate_ref") not in refs
+                or not isinstance(authority.get("reason"), str)
+                or not 1 <= len(authority["reason"].strip()) <= 600
+            ):
+                raise HouseholdError(
+                    "semantic_authorization needs one selected candidate_ref, authorized_by=current_user and a bounded reason"
+                )
+            approval["semantic_authorization"] = {
+                "candidate_ref": authority["candidate_ref"],
+                "authorized_by": "current_user",
+                "reason": authority["reason"].strip(),
+            }
+        if raw.get("shared_package") is not None:
+            shared = raw["shared_package"]
+            if (
+                not isinstance(shared, Mapping)
+                or set(shared) != {"requirement_ids", "package_count", "quantity_basis", "authorized_by"}
+                or shared.get("authorized_by") != "current_user"
+                or not isinstance(shared.get("requirement_ids"), list)
+                or not 2 <= len(shared["requirement_ids"]) <= MAX_REQUIREMENTS
+                or any(member not in requirement_ids for member in shared["requirement_ids"])
+                or len(set(shared["requirement_ids"])) != len(shared["requirement_ids"])
+                or requirement_id not in shared["requirement_ids"]
+                or len(refs) != 1
+                or type(shared.get("package_count")) is not int
+                or not 1 <= shared["package_count"] <= MAX_PACKAGES_PER_REQUIREMENT
+                or not isinstance(shared.get("quantity_basis"), str)
+                or not 1 <= len(shared["quantity_basis"].strip()) <= 600
+                or "package_count" in raw or "quantity_basis" in raw or "max_excess" in raw
+            ):
+                raise HouseholdError(
+                    "shared_package needs every exact requirement_id, one candidate, authorized_by=current_user, package_count and quantity_basis"
+                )
+            approval["shared_package"] = {
+                "requirement_ids": sorted(shared["requirement_ids"]),
+                "package_count": shared["package_count"],
+                "quantity_basis": shared["quantity_basis"].strip(),
+                "authorized_by": "current_user",
+            }
+            # Reuse the established practical-package path, but the allocation
+            # is validated and counted atomically below across every member.
+            approval["package_count"] = shared["package_count"]
+            approval["quantity_basis"] = shared["quantity_basis"].strip()
         approvals[requirement_id] = approval
+    shared_members: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for approval in approvals.values():
+        shared = approval.get("shared_package")
+        if isinstance(shared, Mapping):
+            shared_members.setdefault(tuple(shared["requirement_ids"]), []).append(approval)
+    for members, group in shared_members.items():
+        if len(group) != len(members) or {approval["requirement_id"] for approval in group} != set(members):
+            raise HouseholdError("shared_package must be repeated unchanged by every member requirement")
+        if len({canonical(approval["shared_package"]) for approval in group}) != 1:
+            raise HouseholdError("shared_package member authority differs")
+        if len({canonical(approval["candidate_refs"]) for approval in group}) != 1:
+            raise HouseholdError("shared_package members must select the same exact candidate")
     return approvals
 
 
@@ -1159,13 +1305,22 @@ def build_product_plan(
     reused_refs = {
         reference for reference, owners in ref_owners.items() if len(owners) > 1
     }
+    shared_groups: dict[tuple[str, ...], dict[str, Any]] = {}
+    for approval in approvals.values():
+        shared = approval.get("shared_package")
+        if not isinstance(shared, Mapping):
+            continue
+        members = tuple(shared["requirement_ids"])
+        shared_groups[members] = deepcopy(dict(shared))
+    valid_shared_refs: set[str | int] = set()
+    for members in shared_groups:
+        refs = {approvals[member]["candidate_refs"][0] for member in members}
+        if len(refs) == 1:
+            reference = next(iter(refs))
+            if ref_owners.get(reference) == set(members):
+                valid_shared_refs.add(reference)
     planned = []
     unresolved = deepcopy(structural_unresolved)
-    merchandise = deposit = payable = packages = 0
-    exact_known_minimum = 0
-    estimated_merchandise = False
-    payable_known = True
-    excess = Fraction(0)
     for requirement in requirements:
         requirement_id = requirement["requirement_id"]
         observation = observations.get(requirement_id)
@@ -1176,18 +1331,28 @@ def build_product_plan(
             item["status"] = "needs_input"
             planned.append(item)
             continue
-        semantic_mismatches = {
-            product.get("product_ref")
-            for product in observation.get("products", [])
-            if isinstance(product, Mapping) and semantic_product_conflict(requirement, product)
-        }
+        approval = approvals.get(requirement_id)
+        semantic_mismatches = {}
+        for product in observation.get("products", []):
+            if isinstance(product, Mapping) and semantic_product_conflict(requirement, product):
+                semantic_mismatches[product.get("product_ref")] = _authorized_semantic_difference(
+                    requirement, product
+                )
+        authority = approval.get("semantic_authorization") if approval else None
+        authorized_semantic_ref = (
+            authority.get("candidate_ref")
+            if isinstance(authority, Mapping)
+            and semantic_mismatches.get(authority.get("candidate_ref"))
+            else None
+        )
+        excluded_semantic_refs = set(semantic_mismatches) - {authorized_semantic_ref}
         safe_observation = deepcopy(dict(observation))
         safe_observation["products"] = [
             product for product in safe_observation.get("products", [])
-            if product.get("product_ref") not in semantic_mismatches
+            if product.get("product_ref") not in excluded_semantic_refs
         ]
-        if semantic_mismatches:
-            safe_observation["excluded_candidate_count"] = len(semantic_mismatches)
+        if excluded_semantic_refs:
+            safe_observation["excluded_candidate_count"] = len(excluded_semantic_refs)
             safe_observation["excluded_candidate_reason"] = "candidate_semantic_mismatch"
         for product in safe_observation.get("products", []):
             product["candidate_approval"] = {
@@ -1201,27 +1366,40 @@ def build_product_plan(
             item["status"] = "needs_input"
             planned.append(item)
             continue
-        approval = approvals.get(requirement_id)
         if approval is None:
             unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "exact_candidate_scope_needs_selection"})
             item["status"] = "needs_input"
             planned.append(item)
             continue
         item["candidate_approval"] = deepcopy(approval)
-        if semantic_mismatches.intersection(approval["candidate_refs"]):
+        if authorized_semantic_ref is not None:
+            item["semantic_authorized_differences"] = deepcopy(
+                semantic_mismatches[authorized_semantic_ref]
+            )
+        if authority is not None and authorized_semantic_ref is None:
+            unresolved.append({
+                "requirement_id": requirement_id,
+                "item": requirement["item"],
+                "reason": "semantic_authorization_not_applicable",
+                "candidate_refs": [authority["candidate_ref"]],
+            })
+            item["status"] = "needs_input"
+            planned.append(item)
+            continue
+        if excluded_semantic_refs.intersection(approval["candidate_refs"]):
             unresolved.append({
                 "requirement_id": requirement_id,
                 "item": requirement["item"],
                 "reason": "candidate_semantic_mismatch",
                 "candidate_refs": sorted(
-                    semantic_mismatches.intersection(approval["candidate_refs"]),
+                    excluded_semantic_refs.intersection(approval["candidate_refs"]),
                     key=_ref_sort_key,
                 ),
             })
             item["status"] = "needs_input"
             planned.append(item)
             continue
-        if reused_refs.intersection(approval["candidate_refs"]):
+        if (reused_refs - valid_shared_refs).intersection(approval["candidate_refs"]):
             unresolved.append({
                 "requirement_id": requirement_id,
                 "item": requirement["item"],
@@ -1262,26 +1440,100 @@ def build_product_plan(
             item["status"] = "selected"
             item["selection"] = selection
             selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
-            merchandise += selection["merchandise_ore"]
-            selection_has_estimate = any(
-                product.get("price_status") == "estimate"
-                for product in selection.get("products", [])
-            )
-            estimated_merchandise = estimated_merchandise or selection_has_estimate
-            for product in selection.get("products", []):
-                if product.get("price_status") != "estimate":
-                    exact_known_minimum += product["merchandise_ore"]
-                    if isinstance(product.get("mandatory_deposit_ore"), int):
-                        exact_known_minimum += product["mandatory_deposit_ore"]
-            if selection["total_payable_ore"] is None:
-                payable_known = False
-            else:
-                deposit += selection["mandatory_deposit_ore"]
-                payable += selection["total_payable_ore"]
-            packages += selection["package_count"]
-            if selection["excess_score"] is not None:
-                excess += _read_fraction(selection["excess_score"])
         planned.append(item)
+    planned_by_id = {item.get("requirement_id"): item for item in planned}
+    for members, shared in shared_groups.items():
+        rows = [planned_by_id.get(member) for member in members]
+        selections = [row.get("selection") if isinstance(row, Mapping) else None for row in rows]
+        reference = approvals[members[0]]["candidate_refs"][0]
+        valid_group = all(
+            isinstance(row, Mapping)
+            and row.get("status") == "selected"
+            and isinstance(selection, Mapping)
+            and len(selection.get("products", [])) == 1
+            and selection["products"][0].get("product_ref") == reference
+            and selection["products"][0].get("quantity") == shared["package_count"]
+            for row, selection in zip(rows, selections)
+        )
+        if valid_group:
+            selected_products = [selection["products"][0] for selection in selections]
+            comparable_products = [
+                {key: value for key, value in product.items() if key != "dietary_assessments"}
+                for product in selected_products
+            ]
+            valid_group = len({canonical(product) for product in comparable_products}) == 1
+        if valid_group:
+            valid_group = len({
+                canonical(selection.get("observed_package"))
+                for selection in selections
+            }) == 1
+        # When the package exposes the same physical dimension as every need,
+        # the declared shared count must cover their sum. Other dimensions rely
+        # on the user's explicit bounded culinary quantity_basis, just like the
+        # existing practical-package contract.
+        if valid_group:
+            units = {row.get("unit") for row in rows}
+            package = selections[0].get("observed_package")
+            if len(units) == 1:
+                unit = next(iter(units))
+                size = _package_quantity(package, unit)
+                if size is not None:
+                    required = sum(
+                        (_read_fraction(row["quantity"], positive=True) for row in rows),
+                        Fraction(0),
+                    )
+                    valid_group = shared["package_count"] * size >= required
+        if not valid_group:
+            for row in rows:
+                if isinstance(row, dict) and row.get("status") == "selected":
+                    row["status"] = "needs_input"
+                    row.pop("selection", None)
+            unresolved.append({
+                "reason": "shared_package_group_unavailable",
+                "requirement_ids": list(members),
+                "candidate_ref": reference,
+            })
+            continue
+        owner = min(members)
+        allocation = {
+            **deepcopy(shared),
+            "candidate_ref": reference,
+            "owner_requirement_id": owner,
+        }
+        for row, selection in zip(rows, selections):
+            selection["shared_package_allocation"] = deepcopy(allocation)
+            selection["counts_toward_cart_and_totals"] = row["requirement_id"] == owner
+
+    # Shared allocations expose the selection on every requirement for review,
+    # while exactly one deterministic owner contributes packages and money.
+    merchandise = deposit = payable = packages = 0
+    exact_known_minimum = 0
+    estimated_merchandise = False
+    payable_known = True
+    excess = Fraction(0)
+    for row in planned:
+        selection = row.get("selection") if isinstance(row, Mapping) else None
+        if not isinstance(selection, Mapping) or selection.get("counts_toward_cart_and_totals") is False:
+            continue
+        merchandise += selection["merchandise_ore"]
+        selection_has_estimate = any(
+            product.get("price_status") == "estimate"
+            for product in selection.get("products", [])
+        )
+        estimated_merchandise = estimated_merchandise or selection_has_estimate
+        for product in selection.get("products", []):
+            if product.get("price_status") != "estimate":
+                exact_known_minimum += product["merchandise_ore"]
+                if isinstance(product.get("mandatory_deposit_ore"), int):
+                    exact_known_minimum += product["mandatory_deposit_ore"]
+        if selection["total_payable_ore"] is None:
+            payable_known = False
+        else:
+            deposit += selection["mandatory_deposit_ore"]
+            payable += selection["total_payable_ore"]
+        packages += selection["package_count"]
+        if selection["excess_score"] is not None:
+            excess += _read_fraction(selection["excess_score"])
     stock_covers_menu = bool(menu.get("available_ingredients")) and any(
         recipe.get("shopping_requirements") for collection in ("dishes", "salads") for recipe in menu[collection]
     )
@@ -1377,6 +1629,8 @@ def cart_requirements(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         selection = requirement.get("selection") if isinstance(requirement, Mapping) else None
         if not isinstance(selection, Mapping):
             raise HouseholdError("prepared product plan has an incomplete selection")
+        if selection.get("counts_toward_cart_and_totals") is False:
+            continue
         for product in selection.get("products", []):
             if not isinstance(product, Mapping):
                 raise HouseholdError("prepared product plan product is invalid")

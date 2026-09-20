@@ -389,6 +389,29 @@ The first call exposes at most five relevance-ranked search
 results per requirement and returns `needs_input`; search order, names and
 promotional text never establish substitution safety. A subsequent current user
 choice must name the exact approved candidate refs for each exact requirement.
+When the product title omits a frozen/canned property or differs only by a
+nearby dairy fat percentage, that approval may carry
+`semantic_authorization={candidate_ref,authorized_by:"current_user",reason}`.
+The authority is transient, appears in the reviewed plan and compact apply
+arguments, and is covered by `product_plan_digest`. It cannot override identity,
+species, explicitly contradictory form/state, allergy, sensitivity or never-buy
+checks. After removing only the authorized qualifier and ordinary package or
+organic-label metadata, the complete product title must still be the exact base
+identity; extra ingredients, flavors and prepared forms fail closed. Literal
+allergens in a product title are positive retailer evidence. A title change that
+makes the authority inapplicable stops apply.
+Common bounded Norwegian, English and Swedish allergen compounds such as
+milk chocolate, peanut butter and egg noodles count as positive title evidence;
+free-from and unrelated near-token words do not.
+
+One observed package may cover two or more requirements only when every member
+repeats the same `shared_package={requirement_ids,package_count,quantity_basis,
+authorized_by:"current_user"}` and selects the same sole candidate ref. The
+group is atomic. Exact compatible dimensions are checked against the combined
+need; other culinary dimensions retain the explicit practical quantity basis.
+The plan shows the allocation on every member, while one deterministic owner
+contributes the SKU, package quantity and cost. Multi-buy offers and cart
+quantities are therefore evaluated once for the shared package.
 Only confirmed availability, package evidence, offer eligibility and complete
 product-level payable amounts enter the bounded combination search.
 Configured allergy/sensitivity and avoid rules are also hard at the product
@@ -1811,7 +1834,7 @@ do not establish exact dates. Assessment reports unknowns and explicit ingredien
 conflicts; it does not certify nutrition or allergy safety. Automatic checkout
 requires ready menu coverage and an applied product plan for that exact menu.
 
-Product plans use `product-plan-v2`. `ingredient_decisions` binds a source position
+Product plans use `product-plan-v3`. `ingredient_decisions` binds a source position
 (`collection`, `recipe_index`, `ingredient_index`) to `include`, optional `omit`,
 `have_all`, or `have_quantity` with a compatible unit. Quantities are pantry stock
 allocated to that source, not an inventory to subtract repeatedly. Prepared plans

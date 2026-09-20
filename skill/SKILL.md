@@ -925,6 +925,22 @@ basis; a product's declared piece count is such a basis, a guessed piece weight
 is not. Never mark ingredients as already at home to hide unresolved coverage. Plain
 cooking water stays in the recipe but is excluded from shopping by default;
 explicit `include` can request it, and named bottled/mineral water is distinct.
+If the current user explicitly accepts a nearby dairy-fat variant or confirms
+that a selected title omits its frozen/canned property, include that exact ref in
+`semantic_authorization` with `authorized_by: current_user` and their concise
+reason. Never use it for another identity or species, an explicit form/state
+contradiction, extra title ingredients or flavors, or any allergy, sensitivity
+or never-buy conflict. Only ordinary package/organic metadata may remain around
+the exact base identity. A literal title allergen is positive evidence and must
+block. The returned digest binds the authority; use the unchanged compact apply
+arguments.
+
+When one observed physical package covers several requirements, repeat one
+identical `shared_package` object in every member's candidate approval. It must
+list all member requirement IDs, one package count, a concise quantity basis and
+`authorized_by: current_user`; every member selects the same sole ref. Review the
+combined need. Treat the group atomically and use the returned apply arguments,
+which count that SKU, quantity and cost exactly once even when an offer exists.
 For a normal culinary package decision where a source tsp/count requirement
 cannot be converted exactly to the retailer's grams, or drained content differs
 from the package's net weight, keep the source amount and

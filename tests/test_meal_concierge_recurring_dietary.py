@@ -337,6 +337,72 @@ class RecurringDietaryTests(unittest.TestCase):
         self.assertTrue(self.call('confirm', confirmation_id=prepared['confirmation_id'], dietary_review=[finding['finding_id']])['dietary_review_required'])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    def test_product_title_allergen_compounds_are_bounded_positive_evidence(self):
+        from dietary_assessment import assess
+        positives = (
+            ('melk', 'TINE Melkesjokolade'),
+            ('peanøtter', 'Peanøttsmør'),
+            ('egg', 'Eggnudler'),
+            ('milk', 'Milk chocolate'),
+            ('peanuts', 'Peanut butter'),
+            ('peanut', 'Peanut butter'),
+            ('egg', 'Egg noodles'),
+            ('mjölk', 'Mjölkchoklad'),
+            ('jordnötter', 'Jordnötssmör'),
+            ('ägg', 'Äggnudlar'),
+            ('ägg', 'Ägg nudlar'),
+            ('peanøtter', 'Jordnötssmör'),
+            ('jordnötter', 'Peanøttsmør'),
+            ('peanuts', 'Jordnötssmör'),
+            ('peanøtter', 'Peanøttsaus'),
+            ('jordnötter', 'Jordnötssås'),
+            ('peanuts', 'Peanøttkake'),
+            ('egg', 'Eggerøre'),
+            ('ägg', 'Äggsallad'),
+            ('milk', 'Melkedrikk'),
+            ('melk', 'Mjölkglass'),
+        )
+        for term, name in positives:
+            finding = assess(
+                {'diet': {'rules': [{'kind': 'allergy', 'term': term}]}},
+                {'product_ref': 10, 'name': name},
+            )[0]
+            self.assertEqual(finding['condition'], 'conflict')
+            self.assertTrue(finding['blocked'])
+        negatives = (
+            ('melk', 'Melkesyre'),
+            ('melk', 'Melkefri sjokolade'),
+            ('peanøtter', 'Peanøttfri pålegg'),
+            ('egg', 'Eggefri nudler'),
+            ('mjölk', 'Mjölksyra'),
+            ('mjölk', 'Mjölkfri choklad'),
+            ('jordnötter', 'Jordnötsfri pålägg'),
+            ('ägg', 'Äggfri pasta'),
+            ('milk', 'Oat milk chocolate'),
+            ('melk', 'Melkesjokolade uten melk'),
+            ('peanøtter', 'Uten peanøttsmør'),
+            ('egg', 'Eggnudler uten egg'),
+            ('mjölk', 'Utan mjölk'),
+            ('milk', 'Fri från mjölk'),
+            ('peanøtter', 'Utan jordnötter'),
+            ('melk', 'Uten tilsatt melk'),
+            ('milk', 'Utan spår av mjölk'),
+            ('milk', 'Oat-based milk chocolate'),
+            ('melk', 'Havrebasert melk'),
+            ('mjölk', 'Havrebaserad mjölk'),
+            ('milk', 'Milk chocolate without milk'),
+            ('egg', 'Egg noodles without egg'),
+            ('ägg', 'Ägg nudlar utan ägg'),
+            ('peanut', 'Peanut butter without peanut'),
+        )
+        for term, name in negatives:
+            finding = assess(
+                {'diet': {'rules': [{'kind': 'allergy', 'term': term}]}},
+                {'product_ref': 10, 'name': name},
+            )[0]
+            self.assertEqual(finding['condition'], 'unknown')
+            self.assertFalse(finding['blocked'])
+
     def test_manual_affected_item_review_under_standing_policy(self):
         self.profile(diet={'rules': [{'kind': 'allergy', 'term': 'milk'}]})
         self.app.confirmation_policy = 'standing'

@@ -164,7 +164,19 @@ async def wait_file(path):
 
 async def sdk_checks(root, process):
     from core import cart_summary
+    from mcp_server import _compact_product_selection
     from test_meal_concierge_recipes import full_recipe, menu
+
+    compact_shared = _compact_product_selection({
+        "products": [], "counts_toward_cart_and_totals": False,
+        "shared_package_allocation": {
+            "requirement_ids": ["req:a", "req:b"], "candidate_ref": 10,
+            "owner_requirement_id": "req:a", "package_count": 1,
+            "quantity_basis": "one shared package", "authorized_by": "current_user",
+        },
+    })
+    assert compact_shared["counts_toward_cart_and_totals"] is False
+    assert compact_shared["shared_package_allocation"]["requirement_ids"] == ["req:a", "req:b"]
 
     async with session(root) as (client, initialized):
         discovered = await client.list_tools()
@@ -187,6 +199,13 @@ async def sdk_checks(root, process):
         assert schemas["meal_concierge_catalog"]["required"] == ["action"]
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
         assert "mathem" in json.dumps(schemas["meal_concierge_email"]["properties"]["provider"])
+        product_schema = schemas["meal_concierge_products"]
+        approval_schema = product_schema["$defs"]["CandidateApproval"]
+        assert approval_schema["required"] == ["requirement_id", "candidate_refs"]
+        assert approval_schema["properties"]["semantic_authorization"]["$ref"].endswith("SemanticAuthorization")
+        assert approval_schema["properties"]["shared_package"]["$ref"].endswith("SharedPackageAuthorization")
+        assert product_schema["$defs"]["SemanticAuthorization"]["properties"]["authorized_by"]["const"] == "current_user"
+        assert product_schema["$defs"]["SharedPackageAuthorization"]["properties"]["authorized_by"]["const"] == "current_user"
         status = await call(client, "status")
         marker = json.loads((root / "config.json").read_text())["household"]
         assert status["household"] == marker
