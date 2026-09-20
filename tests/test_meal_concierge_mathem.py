@@ -1131,7 +1131,9 @@ class MathemShop(existing.FakeOda):
     def call(self, tool, arguments, **kwargs):
         self.calls.append((tool, deepcopy(arguments)))
         if tool == 'product_search':
-            return normalize_retail_product_search(PRODUCTS, provider='mathem')
+            response = deepcopy(PRODUCTS)
+            response['result'][0]['query'] = arguments['queries'][0]
+            return normalize_retail_product_search(response, provider='mathem')
         if tool == 'recipe_search':
             return {'recipes': [{'id': '42', 'name': 'Soppa', 'url': 'https://www.mathem.se/se/recipes/42-soppa/'}]}
         if tool == 'get_delivery_slots':
@@ -1629,7 +1631,15 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.shop.cart = deepcopy(self.cart)
         self.shop.slots['slots'][0]['isSelected'] = True
         self.shop.slots['slots'][0]['price'] = '0,00 kr'
-        self.store = StateStore(self.root / 'state', {**existing.CONFIG, 'provider': 'mathem', 'confirmation_policy': 'standing'})
+        config = deepcopy(existing.CONFIG)
+        config.update(provider='mathem', confirmation_policy='standing')
+        config['profile_overrides'] = {'diet': {
+            'minimum_fish_portions': 0,
+            'minimum_legume_dinners': 0,
+            'minimum_vegetable_types': 0,
+            'minimum_wholegrain_or_potato_dinners': 0,
+        }}
+        self.store = StateStore(self.root / 'state', config)
         self.browser = existing.FakeBrowser()
         self.browser.receipt_address = 'Exempelvägen 1'
         self.browser.oda = self.shop
@@ -1671,7 +1681,14 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
                     product_id = '4694'
                 shop.cart['items'] = []
                 shop.cart['subtotal'] = 0
-                config = {**existing.CONFIG, 'provider': provider_name, 'confirmation_policy': 'standing'}
+                config = deepcopy(existing.CONFIG)
+                config.update(provider=provider_name, confirmation_policy='standing')
+                config['profile_overrides'] = {'diet': {
+                    'minimum_fish_portions': 0,
+                    'minimum_legume_dinners': 0,
+                    'minimum_vegetable_types': 0,
+                    'minimum_wholegrain_or_potato_dinners': 0,
+                }}
                 store = StateStore(Path(directory), config)
                 app = Application(store, shop, browser)
                 from test_meal_concierge_planner import recipe
@@ -2487,7 +2504,7 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertFalse(changed['applied'])
         self.assertEqual(cart_summary(self.shop.cart)['items'], [])
         applied = self.app.handle({'operation': 'products', **arguments, 'cart_change_requested': True})
-        self.assertTrue(applied['applied'])
+        self.assertTrue(applied['applied'], applied)
         self.shop.cart['items'][0]['quantity'] = 2  # Synthetic external removal of one six-egg package.
         self.shop.cart['subtotal'] = 59.8
         stopped = self.app.handle({'operation': 'checkout', 'action': 'prepare'})

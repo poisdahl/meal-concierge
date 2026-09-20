@@ -46,6 +46,11 @@ _VARIABLE = re.compile(
     r"(?<!\w)(?:ca\.?|cirka)(?=\s*\d)|\bpr\.?\s*(?:kg|hg|g|l|dl|ml)\b",
     re.IGNORECASE,
 )
+_VARIABLE_PACKAGE = re.compile(
+    rf"(?P<kind>ca\.?|cirka|omtrent|minst|minimum)\s*"
+    rf"(?P<amount>{_NUMBER})\s*(?P<unit>kg|g|l|ml)(?!\w)",
+    re.IGNORECASE,
+)
 _ODA_PERCENT_PREFIX = re.compile(r"^(?:0|[1-9]\d{0,2})%$")
 _ODA_RANGED_COUNT_PREFIX = re.compile(
     r"^[1-9]\d{0,2}\s*[-–]\s*[1-9]\d{0,2}\s*stk\.\s*"
@@ -291,6 +296,28 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
     return result
 
 
+def parse_variable_package(value: Any, *, provider: str | None = None) -> dict[str, Any] | None:
+    """Read one explicitly approximate/minimum Oda package without making it exact."""
+    text = _display_text(value, maximum=300)
+    if text is None or provider not in {"oda", "mathem"}:
+        return None
+    segment = text.split(", ")[-1]
+    match = _VARIABLE_PACKAGE.fullmatch(segment)
+    if match is None:
+        return None
+    parsed = _canonical_quantity(match["amount"], match["unit"])
+    if parsed is None:
+        return None
+    quantity, unit, item_count = parsed
+    kind = match["kind"].casefold().rstrip(".")
+    return {
+        "quantity": {"numerator": quantity.numerator, "denominator": quantity.denominator},
+        "unit": unit,
+        "item_count": item_count,
+        "quantity_kind": "minimum" if kind in {"minst", "minimum"} else "expected",
+    }
+
+
 def _unit_price(merchandise_ore: int, package: Mapping[str, Any], packages: int) -> dict[str, Any]:
     quantity = package["quantity"]
     amount = Fraction(quantity["numerator"], quantity["denominator"]) * packages
@@ -328,6 +355,8 @@ def _purchase_option(
     }
     if price_kind == "exact" and merchandise_ore is not None:
         option["merchandise_ore"] = merchandise_ore
+    elif price_kind == "estimate" and merchandise_ore is not None:
+        option["estimated_merchandise_ore"] = merchandise_ore
     elif price_kind == "from" and from_ore is not None:
         option["from_ore"] = from_ore
     if deposit_known and deposit_ore is not None:
@@ -370,9 +399,10 @@ def _normalize_meny_product(raw: Any, observed_at: str) -> dict[str, Any]:
     package = parse_package(package_text, provider="meny")
     exact_ore = _meny_ore(price_text)
     from_ore = _meny_pattern_ore(price_text, _MENY_FROM_MONEY)
-    variable_price = bool(package_text and _VARIABLE.search(package_text)) and not (
-        package is not None and package["unit"] == "count"
-    )
+    variable_price = bool(
+        package is not None and package.get("quantity_kind") in {"minimum", "expected"}
+        or package_text and _VARIABLE.search(package_text)
+    ) and not (package is not None and package["unit"] == "count")
     if exact_ore is not None and not variable_price:
         price_kind = "exact"
     elif from_ore is not None:
@@ -499,6 +529,8 @@ def _normalize_retail_product(raw: Any, observed_at: str, *, provider: str = "od
     name = _bounded_text(raw.get("name"), required=True, maximum=300)
     package_text = _display_text(raw.get("description"), maximum=300)
     package = parse_package(package_text, provider=provider)
+    if package is None:
+        package = parse_variable_package(package_text, provider=provider)
     availability_value = raw.get("availability")
     if isinstance(availability_value, Mapping):
         is_available = availability_value.get("isAvailable")
@@ -507,11 +539,14 @@ def _normalize_retail_product(raw: Any, observed_at: str, *, provider: str = "od
     availability = "available" if is_available is True else "unavailable" if is_available is False else "unknown"
     price_value = raw.get("price")
     exact_ore = _mathem_ore(price_value) if provider == "mathem" else _oda_ore(price_value)
-    variable_price = bool(package_text and _VARIABLE.search(package_text)) and not (
-        package is not None and package["unit"] == "count"
-    )
+    variable_price = bool(
+        package is not None and package.get("quantity_kind") in {"minimum", "expected"}
+        or package_text and _VARIABLE.search(package_text)
+    ) and not (package is not None and package["unit"] == "count")
     if exact_ore is not None and not variable_price:
         price_kind = "exact"
+    elif exact_ore is not None and package is not None and package.get("quantity_kind") in {"minimum", "expected"}:
+        price_kind = "estimate"
     else:
         price_kind = "unavailable"
     option = _purchase_option(

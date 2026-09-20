@@ -50,7 +50,14 @@ class RecurringDietaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mc55-')
         self.addCleanup(self.temp.cleanup)
-        self.store = StateStore(Path(self.temp.name), CONFIG)
+        config = deepcopy(CONFIG)
+        config['profile_overrides'] = {'diet': {
+            'minimum_fish_portions': 0,
+            'minimum_legume_dinners': 0,
+            'minimum_vegetable_types': 0,
+            'minimum_wholegrain_or_potato_dinners': 0,
+        }}
+        self.store = StateStore(Path(self.temp.name), config)
         self.provider = Retailer()
         self.browser = Browser(); self.browser.oda = self.provider
         self.app = Application(self.store, self.provider, self.browser)

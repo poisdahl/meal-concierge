@@ -34,12 +34,19 @@ SUPPORTED_STRICT_TARGETS = {
     "minimum_wholegrain_or_potato_dinners",
     "minimum_vegetable_types",
 }
+SAVED_MINIMUM_TARGETS = {
+    "minimum_fish_portions",
+    "minimum_legume_dinners",
+    "minimum_wholegrain_or_potato_dinners",
+    "minimum_vegetable_types",
+}
 DIETARY_FACETS = {"fish", "legume", "wholegrain_or_potato", "vegetable"}
 PERISHABILITY = {"fresh", "shelf_stable", "unknown"}
 
 FISH_TERMS = {
     "ansjos", "fisk", "hyse", "kveite", "laks", "makrell", "ørret", "sardiner",
-    "sei", "sild", "torsk", "tunfisk",
+    "sei", "sild", "torsk", "tunfisk", "fiskefilet", "hysefilet", "laksefilet",
+    "seifilet", "torskefilet", "torskeloin", "ørretfilet",
     "fish", "salmon", "cod", "haddock", "herring", "trout", "tuna", "sardines",
 }
 LEGUME_TERMS = {
@@ -53,8 +60,25 @@ WHOLEGRAIN_OR_POTATO_TERMS = {
 }
 VEGETABLE_TERMS = {
     "agurk", "aubergine", "blomkål", "brokkoli", "gulrot", "grønnkål", "kål",
-    "løk", "paprika", "pastinakk", "purre", "selleri", "spinat", "squash", "tomat",
+    "løk", "rødløk", "vårløk", "paprika", "pastinakk", "purre", "selleri", "spinat", "squash", "tomat",
     "carrot", "carrots", "onion", "onions", "tomato", "tomatoes", "broccoli", "spinach", "kale", "cabbage",
+}
+VEGETABLE_TYPE_TERMS = {
+    "agurk": {"agurk", "cucumber"},
+    "aubergine": {"aubergine", "eggplant"},
+    "blomkål": {"blomkål", "cauliflower"},
+    "brokkoli": {"brokkoli", "broccoli"},
+    "gulrot": {"gulrot", "carrot", "carrots"},
+    "grønnkål": {"grønnkål", "kale"},
+    "kål": {"kål", "cabbage"},
+    "løk": {"løk", "rødløk", "vårløk", "onion", "onions", "red onion", "spring onion", "scallion"},
+    "paprika": {"paprika", "bell pepper"},
+    "pastinakk": {"pastinakk", "parsnip"},
+    "purre": {"purre", "leek"},
+    "selleri": {"selleri", "celery"},
+    "spinat": {"spinat", "spinach"},
+    "squash": {"squash", "courgette", "zucchini"},
+    "tomat": {"tomat", "tomato", "tomatoes"},
 }
 
 PRIORITY_FACETS = {
@@ -146,11 +170,11 @@ def normalize_candidate_facts(value: Any) -> dict[str, Any]:
                 raw.get("values"), "facts.dietary_facets.values", allowed=DIETARY_FACETS
             ),
             "complete": raw["complete"],
-            "vegetable_types": _normalize_token_list(
+            "vegetable_types": _vegetable_types(_normalize_token_list(
                 raw.get("vegetable_types", []),
                 "facts.dietary_facets.vegetable_types",
                 maximum=50,
-            ),
+            )),
         }
     if "variety_facets" in value:
         raw = value["variety_facets"]
@@ -196,6 +220,19 @@ def _contains_term(identity: str, terms: set[str]) -> bool:
     )
 
 
+def _vegetable_types(values: list[str] | tuple[str, ...]) -> list[str]:
+    """Collapse spelling and fresh-label variants into semantic vegetable types."""
+    result: set[str] = set()
+    for raw in values:
+        identity = _text(raw)
+        matches = {
+            canonical_type for canonical_type, terms in VEGETABLE_TYPE_TERMS.items()
+            if _contains_term(identity, terms)
+        }
+        result.update(matches or {identity})
+    return sorted(item for item in result if item)
+
+
 def _derived_dietary(recipe: Mapping[str, Any]) -> dict[str, Any]:
     facets: set[str] = set()
     vegetables: set[str] = set()
@@ -211,7 +248,7 @@ def _derived_dietary(recipe: Mapping[str, Any]) -> dict[str, Any]:
             facets.add("wholegrain_or_potato")
         if _contains_term(identity, VEGETABLE_TERMS):
             facets.add("vegetable")
-            vegetables.add(identity)
+            vegetables.update(_vegetable_types([identity]))
     return {
         "source": f"derived:{PLANNER_VERSION}:ingredient-facets",
         "values": sorted(facets),
@@ -573,6 +610,57 @@ def _strict_evaluation(
     return {"status": overall, "results": results}
 
 
+def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict[str, Any]:
+    """Evaluate every saved weekly minimum from frozen menu recipe facts."""
+    diet = profile.get("diet") if isinstance(profile, Mapping) else None
+    meals = profile.get("meals") if isinstance(profile, Mapping) else None
+    targets = sorted(
+        target for target in SAVED_MINIMUM_TARGETS
+        if isinstance(diet, Mapping) and type(diet.get(target)) is int and diet[target] > 0
+    )
+    if not targets:
+        return {"status": "pass", "complete_menu": True, "results": []}
+    if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
+        return {"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]}
+    recipes = {
+        recipe.get("recipe_key"): recipe
+        for recipe in menu["dishes"]
+        if isinstance(recipe, Mapping) and isinstance(recipe.get("recipe_key"), str)
+    }
+    dinner_slots = [
+        slot for slot in menu.get("slots", [])
+        if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
+    ] if isinstance(menu.get("slots"), list) else []
+    selected_recipes = [recipes.get(slot.get("recipe_key")) for slot in dinner_slots] if dinner_slots else list(recipes.values())
+    expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
+    if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
+        return {"status": "unknown", "complete_menu": False, "results": [{
+            "target": target, "status": "unknown",
+            "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
+        } for target in targets]}
+    planned_facts = {}
+    for field in ("planner_selection", "replan_selection"):
+        planner_selection = menu.get(field)
+        selection = planner_selection.get("selection") if isinstance(planner_selection, Mapping) else None
+        slots = selection.get("source_slots", selection.get("slots")) if isinstance(selection, Mapping) else None
+        if not isinstance(slots, list):
+            continue
+        for slot in slots:
+            facets = slot.get("dietary_facets") if isinstance(slot, Mapping) else None
+            recipe_key = slot.get("recipe_key") if isinstance(slot, Mapping) else None
+            if (
+                isinstance(recipe_key, str) and isinstance(facets, Mapping)
+                and isinstance(facets.get("values"), list)
+                and isinstance(facets.get("vegetable_types"), list)
+                and isinstance(facets.get("complete"), bool)
+            ):
+                planned_facts[recipe_key] = deepcopy(dict(facets))
+    selected = tuple({"facts": {"dietary_facets": deepcopy(
+        planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)
+    )}} for recipe in selected_recipes)
+    return {"complete_menu": True, **_strict_evaluation(selected, targets, profile)}
+
+
 def _reason(code: str, weight: int, detail: Any) -> dict[str, Any]:
     return {"code": code, "weight": int(weight), "detail": detail}
 
@@ -733,6 +821,7 @@ def _selection(
             "name": str(candidate["recipe"].get("name") or "")[:300],
             "portions": portions,
             "hard_constraints": deepcopy(candidate["hard_constraints"]),
+            "dietary_facets": deepcopy(candidate["facts"]["dietary_facets"]),
             "reason_contributions": reasons,
             "score": sum(reason["weight"] for reason in reasons),
         })
@@ -877,6 +966,15 @@ def plan_week(
 ) -> dict[str, Any]:
     """Return a byte-stable ranking for already-resolved exact candidates."""
     checked = _validate_request(request)
+    meals = profile.get("meals") if isinstance(profile, Mapping) else None
+    dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
+    diet = profile.get("diet") if isinstance(profile, Mapping) else None
+    if type(dinner_days) is int and len(checked["dates"]) == dinner_days and isinstance(diet, Mapping):
+        saved_minima = {
+            target for target in SAVED_MINIMUM_TARGETS
+            if type(diet.get(target)) is int and diet[target] > 0
+        }
+        checked["strict_targets"] = sorted(set(checked["strict_targets"]) | saved_minima)
     if not isinstance(history, Mapping) or len(history) > MAX_HISTORY_RECORDS:
         raise PlannerError(f"planner history exceeds {MAX_HISTORY_RECORDS} records")
     if len(candidates) != len(checked["candidates"]):

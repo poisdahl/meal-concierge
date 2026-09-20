@@ -387,11 +387,12 @@ class RecipeContractTests(unittest.TestCase):
             normalize_source_url("http://host.example:9000/r")
 
     def test_themealdb_preserves_upstream_original_measure_and_unknown_servings(self):
-        meal = {"idMeal": "123", "strMeal": "Synthetic", "strInstructions": "Cook at 180 C for 30 minutes.", "strIngredient1": "salt", "strMeasure1": "3 ts", "strSource": "http://example.org/recipe?id=7&oldid=9&utm_medium=test"}
+        meal = {"idMeal": "123", "strMeal": "Synthetic", "strInstructions": "Cook at 180 C for 30 minutes.", "strIngredient1": "cornflour", "strMeasure1": "3 ts", "strSource": "http://example.org/recipe?id=7&oldid=9&utm_medium=test"}
         source = TheMealDBSource(transport=lambda *a, **k: {"meals": [meal]})
         recipe = source.search("Synthetic", 1)[0]
         self.assertEqual(recipe["source"]["original"]["url"], "http://example.org/recipe?id=7&oldid=9")
-        self.assertEqual(recipe["ingredients"][0]["original_text"], "3 ts salt")
+        self.assertEqual(recipe["ingredients"][0]["original_text"], "3 ts cornflour")
+        self.assertEqual(recipe["ingredients"][0]["item"], "maisstivelse")
         self.assertIsNone(recipe["portions"])
         rendered = menu_email_html({"week": "2026-W40", "dishes": [scale_recipe(recipe)], "salads": []})
         self.assertIn("Opprinnelig kilde", rendered)
@@ -437,6 +438,112 @@ class RecipeContractTests(unittest.TestCase):
         ingredient = source_ingredient("1½ tsp salt")
         self.assertEqual(ingredient["evidence"]["unit"]["basis"], "estimate")
         self.assertIn("locale", ingredient["evidence"]["unit"]["assumptions"])
+
+    def test_source_language_maps_only_reviewed_whole_ingredient_identities(self):
+        english = {
+            "cornflour": "maisstivelse", "corn flour": "maismel",
+            "coriander leaves": "korianderblader", "coriander seeds": "korianderfrø",
+            "caster sugar": "finkornet sukker", "icing sugar": "melis",
+            "self-raising flour": "selvhevende hvetemel",
+            "double cream": "kremfløte, minst 48 % fett", "swede": "kålrot",
+            "mincemeat": "britisk fruktfyll til bakst",
+            "beef and pork mince": "kjøttfarse av storfe og svin",
+            "olive oil": "olivenolje", "chicken breast": "kyllingbryst",
+            "plain flour": "hvetemel", "kefir grains": "kefirkorn",
+        }
+        for source, expected in english.items():
+            with self.subTest(source=source):
+                row = source_ingredient(f"200 g {source}", language="en-GB")
+                self.assertEqual(row["item"], expected)
+                self.assertEqual(row["original_text"], f"200 g {source}")
+                self.assertTrue(row["scalable"])
+        danish = source_ingredient("200 g hakket okse- og svinekød", language="da-DK")
+        self.assertEqual(danish["item"], "kjøttfarse av storfe og svin")
+        ambiguous = source_ingredient("200 g fars", language="da-DK")
+        self.assertEqual(ambiguous["item"], "fars")
+        self.assertFalse(ambiguous["scalable"])
+        unchanged = source_ingredient("200 g gochujang", language="en")
+        self.assertEqual(unchanged["item"], "gochujang")
+        unknown = source_ingredient("200 g unfamiliar ingredient", language="en")
+        self.assertEqual(unknown["item"], "unfamiliar ingredient")
+        self.assertFalse(unknown["scalable"])
+        swedish = source_ingredient("100 g vispgrädde, 38 % fett", language="sv-SE")
+        self.assertEqual(swedish["item"], "kremfløte, 38 % fett")
+        oil = source_ingredient("0,5 ss olja", language="sv-SE")
+        self.assertEqual(oil["item"], "matolje")
+        self.assertTrue(oil["scalable"])
+
+    def test_retail_cloves_stalks_and_packages_are_exact_scalable_dimensions(self):
+        cases = [
+            ("2 fedd Hvitløk", "clove", "Hvitløk"),
+            ("3 stilk Vårløk", "stalk", "Vårløk"),
+            ("1 pk Fiskesuppe, pose", "package", "Fiskesuppe, pose"),
+        ]
+        source_units = {"clove": "fedd", "stalk": "stilk", "package": "pk"}
+        for text, unit, item in cases:
+            with self.subTest(text=text):
+                ingredient = source_ingredient(text)
+                self.assertEqual(ingredient["quantity"], {"numerator": int(text.split()[0]), "denominator": 1})
+                self.assertEqual(ingredient["unit"], source_units[unit])
+                self.assertEqual(ingredient["item"], item)
+                self.assertTrue(ingredient["scalable"])
+        for text, item, unit in (
+            ("2 cloves garlic", "hvitløk", "cloves"),
+            ("3 stalks spring onion", "vårløk", "stalks"),
+            ("2 packages rice", "ris", "packages"),
+        ):
+            with self.subTest(text=text):
+                ingredient = source_ingredient(text, language="en")
+                self.assertEqual(ingredient["item"], item)
+                self.assertEqual(ingredient["unit"], unit)
+                self.assertTrue(ingredient["scalable"])
+        recipe = authored_recipe()
+        recipe["portions"] = 4
+        recipe["ingredients"] = [source_ingredient("4 fedd Hvitløk"), source_ingredient("6 stilk Vårløk"), source_ingredient("2 pk Fiskesuppe")]
+        scaled = scale_recipe(normalize_recipe(recipe), 2)
+        self.assertEqual([row["quantity"] for row in scaled["ingredients"]],
+            [
+                {"numerator": 2, "denominator": 1},
+                {"numerator": 3, "denominator": 1},
+                {"numerator": 1, "denominator": 1},
+            ],
+        )
+        requirements, unresolved = menu_requirements({"dishes": [scaled], "salads": []})
+        self.assertEqual(unresolved, [])
+        self.assertEqual(
+            [(row["quantity"], row["unit"]) for row in requirements],
+            [
+                ({"numerator": 1, "denominator": 1}, "package"),
+                ({"numerator": 2, "denominator": 1}, "clove"),
+                ({"numerator": 3, "denominator": 1}, "stalk"),
+            ],
+        )
+
+    def test_source_language_and_text_survive_norwegian_semantic_identity(self):
+        cases = (
+            ("en-GB", "double cream", "kremfløte, minst 48 % fett"),
+            ("da-DK", "piskefløde 38 %", "kremfløte, 38 % fett"),
+            ("nb-NO", "kremfløte 38 %", "kremfløte, 38 % fett"),
+        )
+        for language, source_text, item in cases:
+            with self.subTest(language=language):
+                recipe = authored_recipe()
+                recipe["language"] = language
+                recipe["ingredients"] = [{
+                    "item": item, "raw": f"100 g {item}", "original_text": f"100 g {source_text}",
+                    "quantity": {"numerator": 100, "denominator": 1}, "unit": "g",
+                    "scalable": True, "optional": False, "pantry": False,
+                    "evidence": {
+                        "quantity": {"basis": "source", "input": f"100 g {source_text}"},
+                        "unit": {"basis": "source", "input": f"100 g {source_text}"},
+                    },
+                }]
+                scaled = scale_recipe(normalize_recipe(recipe), 2)
+                self.assertTrue(scaled["readiness"]["scaling_ready"])
+                self.assertEqual(scaled["ingredients"][0]["item"], item)
+                self.assertEqual(scaled["ingredients"][0]["original_text"], f"100 g {source_text}")
+                self.assertEqual(scaled["language"], language)
+                self.assertNotIn("product_ref", scaled["ingredients"][0])
 
     def test_new_generated_input_preserves_original_wording_before_version_upgrade(self):
         for relationship in ("generated", "GENERATED", "Generated"):

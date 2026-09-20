@@ -276,27 +276,173 @@ def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str,
     return result
 
 
-def source_ingredient(text: str, *, item: str | None = None, measure: str | None = None) -> dict[str, Any]:
-    """Normalize observed source text only; residual interpretation stays unresolved."""
+_SOURCE_INGREDIENT_IDENTITIES = {
+    "en": {
+        "cornflour": "maisstivelse",
+        "corn flour": "maismel",
+        "coriander leaves": "korianderblader",
+        "coriander leaf": "korianderblader",
+        "fresh coriander leaves": "ferske korianderblader",
+        "coriander seeds": "korianderfrø",
+        "coriander seed": "korianderfrø",
+        "chili powder": "chilipulver",
+        "chilli powder": "chilipulver",
+        "caster sugar": "finkornet sukker",
+        "icing sugar": "melis",
+        "self-raising flour": "selvhevende hvetemel",
+        "self raising flour": "selvhevende hvetemel",
+        "self-rising flour": "selvhevende hvetemel",
+        "double cream": "kremfløte, minst 48 % fett",
+        "swede": "kålrot",
+        "rutabaga": "kålrot",
+        "mincemeat": "britisk fruktfyll til bakst",
+        "garlic": "hvitløk",
+        "garlic cloves": "hvitløk",
+        "spring onion": "vårløk",
+        "spring onions": "vårløk",
+        "broccoli": "brokkoli",
+        "cod fillet": "torskefilet",
+        "salmon fillet": "laksefilet",
+        "salted butter": "saltet smør",
+        "unsalted butter": "usaltet smør",
+        "whole milk": "helmelk",
+        "skimmed milk": "skummet melk",
+        "beef mince": "kjøttdeig av storfe",
+        "pork mince": "kjøttdeig av svin",
+        "chicken mince": "kjøttdeig av kylling",
+        "beef and pork mince": "kjøttfarse av storfe og svin",
+        "olive oil": "olivenolje",
+        "vegetable oil": "matolje",
+        "kefir grains": "kefirkorn",
+        "chicken breast": "kyllingbryst",
+        "chicken breasts": "kyllingbryst",
+        "chicken thigh": "kyllinglår",
+        "chicken thighs": "kyllinglår",
+        "small potatoes": "små poteter",
+        "lamb sausage": "lammepølse",
+        "lamb sausages": "lammepølser",
+        "cherry tomato": "cherrytomat",
+        "cherry tomatoes": "cherrytomater",
+        "salmon fillets": "laksefilet",
+        "acorn": "eikenøtt",
+        "acorns": "eikenøtter",
+        "egg white": "eggehvite",
+        "egg whites": "eggehviter",
+        "cloves": "nellikspiker",
+        "canned palm-nut extract": "hermetisk palmenøttekstrakt",
+        "plain flour": "hvetemel",
+        "flour": "hvetemel",
+        "sugar": "sukker",
+        "butter": "smør",
+        "cream": "fløte",
+        "milk": "melk",
+        "egg": "egg",
+        "eggs": "egg",
+        "rice": "ris",
+        "water": "vann",
+        "salt": "salt",
+        "black pepper": "svart pepper",
+        "tomato": "tomat",
+        "tomatoes": "tomat",
+        "onion": "gul løk",
+        "onions": "gul løk",
+        "potato": "potet",
+        "potatoes": "potet",
+        "carrot": "gulrot",
+        "carrots": "gulrot",
+        "chicken": "kylling",
+        "beef": "storfe",
+        "pork": "svin",
+        "salmon": "laks",
+        "cod": "torsk",
+    },
+    "da": {
+        "hvidløg": "hvitløk",
+        "forårsløg": "vårløk",
+        "broccoli": "brokkoli",
+        "piskefløde 38 %": "kremfløte, 38 % fett",
+        "hakket okse- og svinekød": "kjøttfarse av storfe og svin",
+        "okse- og svinefars": "kjøttfarse av storfe og svin",
+    },
+    "sv": {
+        "vitlök": "hvitløk", "salladslök": "vårløk", "broccoli": "brokkoli",
+        "majsstärkelse": "maisstivelse", "majsmjöl": "maismel",
+        "korianderblad": "korianderblader", "färska korianderblad": "ferske korianderblader",
+        "korianderfrön": "korianderfrø", "chilipulver": "chilipulver",
+        "finkornigt strösocker": "finkornet sukker", "florsocker": "melis",
+        "självjäsande vetemjöl": "selvhevende hvetemel",
+        "vispgrädde, minst 48 % fett": "kremfløte, minst 48 % fett",
+        "vispgrädde, 38 % fett": "kremfløte, 38 % fett",
+        "kålrot": "kålrot", "saltat smör": "saltet smør", "osaltat smör": "usaltet smør",
+        "standardmjölk": "helmelk", "skummjölk": "skummet melk",
+        "nötfärs": "kjøttdeig av storfe", "fläskfärs": "kjøttdeig av svin",
+        "kycklingfärs": "kjøttdeig av kylling",
+        "köttfärs av nöt och fläsk": "kjøttfarse av storfe og svin",
+        "olivolja": "olivenolje", "olja": "matolje", "kycklingbröst": "kyllingbryst",
+        "vetemjöl": "hvetemel", "ris": "ris", "vatten": "vann", "salt": "salt",
+    },
+}
+_AMBIGUOUS_SOURCE_IDENTITIES = {"da": {"fars"}}
+
+
+def _source_ingredient_identity(
+    value: str, language: str | None, *, require_reviewed: bool = False,
+) -> tuple[str, bool]:
+    """Apply only reviewed whole-identity source mappings; never word-by-word translation."""
+    normalized = " ".join(unicodedata.normalize("NFC", value).split()).casefold()
+    family = str(language or "").split("-", 1)[0].casefold()
+    mapped = _SOURCE_INGREDIENT_IDENTITIES.get(family, {}).get(normalized)
+    if mapped is not None:
+        return mapped, False
+    trusted_identities = {
+        mapped_identity.casefold()
+        for identities in _SOURCE_INGREDIENT_IDENTITIES.values()
+        for mapped_identity in identities.values()
+    } | {
+        "gochujang", "paneer", "tahini", "panko", "masa harina", "tofu", "pasta",
+        "mel", "olje", "parmesan",
+    }
+    unresolved = normalized in _AMBIGUOUS_SOURCE_IDENTITIES.get(family, set())
+    if require_reviewed and family and family not in {"nb", "no", "nn"} and normalized not in trusted_identities:
+        unresolved = True
+    return value, unresolved
+
+
+def source_ingredient_identity(value: str, language: str | None) -> tuple[str, bool]:
+    """Return the reviewed shopping identity and whether human review remains."""
+    return _source_ingredient_identity(value, language, require_reviewed=True)
+
+
+def source_ingredient(
+    text: str, *, item: str | None = None, measure: str | None = None,
+    language: str | None = None, preserve_source_item: bool = False,
+) -> dict[str, Any]:
+    """Parse source quantity and use reviewed language-aware semantic identities."""
     quantity = unit = None
     if measure is not None:
         quantity, unit = parse_measure(measure)
     elif item is None:
         for candidate in sorted(UNITS, key=len, reverse=True):
-            suffix = r"\.?" if candidate in {"stk", "ss", "ts"} else ""
+            suffix = r"\.?" if candidate in {"stk", "ss", "ts", "pk"} else ""
             matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", text, re.IGNORECASE)
             if matched:
                 quantity, unit = parse_measure(f"{matched[1]} {candidate}")
                 if quantity is not None:
                     item = matched[2]
                     break
+    source_item = item or text
+    normalized_item, identity_review_required = _source_ingredient_identity(
+        source_item, language, require_reviewed=True,
+    )
     evidence = {"basis": "source", "input": text}
     unit_evidence = deepcopy(evidence)
     if unit in {"tsp", "teaspoon", "teaspoons", "tbsp", "tablespoon", "tablespoons"}:
         unit_evidence = {"basis": "estimate", "input": text, "assumptions": "Use the metric culinary measure: teaspoon=5 ml and tablespoon=15 ml; source locale is unverified."}
-    return {"item": item or text, "raw": text, "original_text": text,
+    return {"item": source_item if preserve_source_item else normalized_item,
+            "raw": text, "original_text": text,
             "amount": measure,
-            "quantity": quantity, "unit": unit, "scalable": quantity is not None and unit in UNITS,
+            "quantity": quantity, "unit": unit,
+            "scalable": not identity_review_required and quantity is not None and unit in UNITS,
             "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
 
 

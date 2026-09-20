@@ -279,7 +279,14 @@ class SelectionTests(unittest.TestCase):
 
     def test_real_snapshot_details_feed_application_week_without_personal_saves(self):
         with tempfile.TemporaryDirectory() as temp:
-            store = StateStore(Path(temp), CONFIG)
+            config = deepcopy(CONFIG)
+            config["profile_overrides"] = {"diet": {
+                "minimum_fish_portions": 0,
+                "minimum_legume_dinners": 0,
+                "minimum_vegetable_types": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+            }}
+            store = StateStore(Path(temp), config)
             provider = NoProviderCalls()
             app = Application(store, provider, object())
             with store.locked() as state:

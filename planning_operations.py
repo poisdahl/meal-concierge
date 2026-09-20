@@ -21,9 +21,9 @@ from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validat
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
 from recipe_selection import history_source_index, family_history_usage, compact_candidate
 from planner import _validate_request
-from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week
+from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week, saved_menu_minimum_evaluation
 from product_planner import normalize_available_ingredients
-from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, ingredient_search, build_product_plan, cart_requirements as prepared_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
+from product_planner import MAX_ALTERNATIVE_REQUIREMENTS, MAX_CANDIDATES_PER_REQUIREMENT, MAX_REQUIREMENTS, normalize_approvals, ingredient_search, build_product_plan, cart_requirements as prepared_cart_requirements, partial_cart_requirements, menu_requirements as exact_menu_requirements, validate_product_plan, product_plan_digest
 from product_observations import MAX_PRODUCTS
 import menu_planning as mp
 import planning_feedback as pf
@@ -511,6 +511,12 @@ class PlanningOperations:
         current = state["menu"]
         successor = deepcopy(supplied["successor"])
         self._require_menu_provider(successor)
+        minimums = saved_menu_minimum_evaluation(successor, state.get("profile") or {})
+        if minimums.get("complete_menu") and minimums.get("status") != "pass":
+            raise PlannerError(
+                "complete weekly successor does not satisfy saved dietary minimums: "
+                + canonical(minimums)
+            )
         successor.update({"menu_id": "menu_" + secrets.token_hex(12), "revision": 1, "phase": "draft"})
         successor["digest"] = menu_digest(successor)
         if current is not None:
@@ -1262,6 +1268,18 @@ class PlanningOperations:
             if duplicate_key:
                 raise HouseholdError("the same recipe cannot appear twice in one menu")
             with self.product_plan_lock, self.store.locked() as state:
+                meals = (state.get("profile") or {}).get("meals") or {}
+                expected_dinners = meals.get("dinner_days")
+                dinner_slots = [
+                    slot for slot in menu.get("slots", [])
+                    if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
+                ] if isinstance(menu.get("slots"), list) else []
+                observed_dinners = len(dinner_slots) if dinner_slots else len(menu.get("dishes", []))
+                menu["weekly_plan_complete"] = (
+                    type(expected_dinners) is int and expected_dinners > 0
+                    and observed_dinners == expected_dinners
+                )
+                digest = menu_digest(menu)
                 current = state.get("menu")
                 if isinstance(current, Mapping) and current.get("digest") == digest:
                     return {"menu": deepcopy(current), "idempotent": True}
@@ -1284,6 +1302,12 @@ class PlanningOperations:
                         raise PlannerError(
                             "planner_handoff became stale before save; generate it again"
                         )
+                minimums = saved_menu_minimum_evaluation(menu, state.get("profile") or {})
+                if minimums.get("complete_menu") and minimums.get("status") != "pass":
+                    raise PlannerError(
+                        "complete weekly menu does not satisfy saved dietary minimums: "
+                        + canonical(minimums)
+                    )
                 if supplied_menu_id:
                     if not isinstance(current, Mapping) or current.get("menu_id") != supplied_menu_id:
                         raise HouseholdError("menu_id does not match the current menu")
@@ -1700,10 +1724,11 @@ class PlanningOperations:
 
     def _product_binding(
         self, *, menu_ref: Any = None, planner_handoff: Any = None,
+        planner_selection_ref: Any = None,
         require_saved_planner: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-        if (menu_ref is None) == (planner_handoff is None):
-            raise HouseholdError("product preparation needs exactly one menu_ref or planner_handoff")
+        if sum(value is not None for value in (menu_ref, planner_handoff, planner_selection_ref)) != 1:
+            raise HouseholdError("product preparation needs exactly one menu_ref, planner_handoff or planner_selection_ref")
         if menu_ref is not None:
             if not isinstance(menu_ref, Mapping) or set(menu_ref) != {"menu_id", "revision", "digest"}:
                 raise HouseholdError("menu_ref must be the exact current menu identity")
@@ -1715,6 +1740,25 @@ class PlanningOperations:
             return (
                 {"kind": "saved_menu", "menu_ref": deepcopy(dict(menu_ref))},
                 deepcopy(dict(menu)), deepcopy(dict(menu_ref)),
+            )
+        if planner_selection_ref is not None:
+            if not isinstance(planner_selection_ref, Mapping) or set(planner_selection_ref) != {
+                "planner_version", "input_digest", "selection_digest"
+            }:
+                raise HouseholdError("planner_selection_ref must be one exact returned selection identity")
+            current = self.store.read().get("menu")
+            selection = current.get("planner_selection") if isinstance(current, Mapping) else None
+            actual = {
+                key: selection.get(key) for key in (
+                    "planner_version", "input_digest", "selection_digest"
+                )
+            } if isinstance(selection, Mapping) else None
+            if canonical(actual) != canonical(planner_selection_ref):
+                raise HouseholdError("planner_selection_ref is stale or not the active saved menu")
+            self._require_menu_provider(current)
+            return (
+                {"kind": "planner_selection", "planner_handoff": deepcopy(dict(selection))},
+                deepcopy(dict(current)), self._cart_menu_ref(current),
             )
         current = self.store.read().get("menu")
         if (isinstance(current, Mapping) and planner_handoff is not None
@@ -1740,6 +1784,7 @@ class PlanningOperations:
         self, menu: Mapping[str, Any], *, deadline: float | None,
         search_cache: dict[str, dict[str, Any]] | None = None,
         ingredient_decisions: Any = None, candidate_approvals: Any = None,
+        approved_only: bool = False,
     ) -> dict[str, dict[str, Any]]:
         requirements, _unresolved = exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=ingredient_decisions)
         from product_planner import normalize_approvals, ingredient_search
@@ -1747,6 +1792,8 @@ class PlanningOperations:
         observations = {}
         cache = search_cache if search_cache is not None else {}
         for requirement in requirements:
+            if approved_only and requirement["requirement_id"] not in approvals:
+                continue
             query = approvals.get(requirement["requirement_id"], {}).get("search_query") or ingredient_search(requirement["identity"], self.provider)
             if query in cache:
                 observations[requirement["requirement_id"]] = deepcopy(cache[query])
@@ -1801,9 +1848,13 @@ class PlanningOperations:
         return observations
 
     @staticmethod
-    def _plan_approvals(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _plan_approvals(plan: Mapping[str, Any], *, selected_only: bool = False) -> list[dict[str, Any]]:
         values = []
         for requirement in plan.get("requirements", []):
+            if selected_only and (
+                not isinstance(requirement, Mapping) or requirement.get("status") != "selected"
+            ):
+                continue
             approval = requirement.get("candidate_approval") if isinstance(requirement, Mapping) else None
             if isinstance(approval, Mapping):
                 values.append({
@@ -1812,6 +1863,32 @@ class PlanningOperations:
                     if key in approval
                 })
         return values
+
+    @staticmethod
+    def _partial_plan_authority(plan: Mapping[str, Any]) -> dict[str, Any]:
+        """Facts whose composition is authorized by reviewed partial digests."""
+        selected = []
+        for requirement in plan.get("requirements", []):
+            if not isinstance(requirement, Mapping) or requirement.get("status") != "selected":
+                continue
+            selected.append({
+                key: deepcopy(requirement[key])
+                for key in (
+                    "requirement_id", "identity", "item", "quantity", "unit",
+                    "candidate_approval", "selection",
+                )
+                if key in requirement
+            })
+        return {
+            "context": {
+                key: deepcopy(plan.get(key))
+                for key in (
+                    "product_plan_version", "provider", "binding", "hard_product_constraints",
+                    "ingredient_decisions", "budget_ore", "price_mode",
+                )
+            },
+            "selected_requirements": selected,
+        }
 
     @staticmethod
     def _cart_amount_ore(value: Any) -> int | None:
@@ -1892,8 +1969,22 @@ class PlanningOperations:
         self, *, binding: Mapping[str, Any], menu: Mapping[str, Any],
         candidate_approvals: Any, deadline: float | None,
         ingredient_decisions: Any = None, budget_ore: int | None = None, price_mode: str = "exact",
+        observe_selected_only: bool = False,
     ) -> dict[str, Any]:
         snapshot = self.store.read()
+        minimums = saved_menu_minimum_evaluation(menu, snapshot.get("profile") or {})
+        if (
+            minimums.get("status") != "pass"
+            and (
+                minimums.get("complete_menu")
+                or menu.get("weekly_plan_complete") is True
+                or isinstance(menu.get("planner_selection"), Mapping)
+            )
+        ):
+            raise HouseholdError(
+                "product preparation requires a complete weekly menu that satisfies saved dietary minimums: "
+                + canonical(minimums)
+            )
         saved = snapshot.get("menu_ingredient_decisions") or {}
         reference = binding.get("menu_ref")
         if (binding.get("kind") == "planner_selection" and snapshot.get("menu")
@@ -1908,7 +1999,24 @@ class PlanningOperations:
             # also win when returning a newly refreshed plan after stale apply.
             merged.update({canonical(d["source"]): deepcopy(d) for d in saved["decisions"]})
             ingredient_decisions = list(merged.values())
-        observations = self._product_observations(menu, deadline=deadline, ingredient_decisions=ingredient_decisions, candidate_approvals=candidate_approvals)
+        observations = self._product_observations(
+            menu, deadline=deadline, ingredient_decisions=ingredient_decisions,
+            candidate_approvals=candidate_approvals, approved_only=observe_selected_only,
+        )
+        requirement_ids = set(observations)
+        approvals = normalize_approvals(candidate_approvals, requirement_ids)
+        stable_approvals = []
+        for requirement_id, approval in approvals.items():
+            value = {key: deepcopy(item) for key, item in approval.items() if key != "source"}
+            if "search_query" not in value and len(value["candidate_refs"]) == 1:
+                products = observations.get(requirement_id, {}).get("products", [])
+                chosen = next((
+                    product for product in products
+                    if product.get("product_ref") in value["candidate_refs"]
+                ), None)
+                if isinstance(chosen, Mapping) and isinstance(chosen.get("name"), str):
+                    value["search_query"] = chosen["name"][:150]
+            stable_approvals.append(value)
         profile = self.store.read().get("profile")
         diet = profile.get("diet") if isinstance(profile, Mapping) else None
         hard_constraints = {
@@ -1918,8 +2026,8 @@ class PlanningOperations:
         }
         from dietary_assessment import rules
         reader = getattr(self.provider_client, 'product_dietary_evidence', None)
-        if reader is not None and rules(profile) and isinstance(candidate_approvals, list):
-            approved_refs = {str(ref) for approval in candidate_approvals if isinstance(approval, Mapping) for ref in approval.get('candidate_refs', [])}
+        if reader is not None and rules(profile) and stable_approvals:
+            approved_refs = {str(ref) for approval in stable_approvals for ref in approval.get('candidate_refs', [])}
             for observation in observations.values():
                 for product in observation.get('products', []):
                     if str(product['product_ref']) in approved_refs:
@@ -1929,7 +2037,7 @@ class PlanningOperations:
             binding=binding,
             menu=mp.shopping_menu(menu),
             observations=observations,
-            candidate_approvals=candidate_approvals,
+            candidate_approvals=stable_approvals,
             hard_product_constraints=hard_constraints,
             dietary_profile=profile,
             ingredient_decisions=ingredient_decisions, budget_ore=budget_ore, price_mode=price_mode, deadline=deadline,
@@ -2082,6 +2190,7 @@ class PlanningOperations:
             binding, menu, _saved_ref = self._product_binding(
                 menu_ref=request.get("menu_ref"),
                 planner_handoff=request.get("planner_handoff"),
+                planner_selection_ref=request.get("planner_selection_ref"),
             )
             plan = self._prepare_products(
                 binding=binding,
@@ -2090,14 +2199,33 @@ class PlanningOperations:
                 ingredient_decisions=request.get("ingredient_decisions"), budget_ore=request.get("budget_ore"), price_mode=request.get("price_mode") or "exact",
                 deadline=deadline,
             )
-            result = {"apply_arguments": {
-                "action": "apply", "menu_ref": deepcopy(request.get("menu_ref")),
-                "planner_handoff": deepcopy(request.get("planner_handoff")),
+            selection_ref = None
+            if binding.get("kind") == "planner_selection":
+                handoff = binding["planner_handoff"]
+                selection_ref = {key: deepcopy(handoff[key]) for key in (
+                    "planner_version", "input_digest", "selection_digest"
+                )}
+            binding_arguments = (
+                {"menu_ref": deepcopy(binding["menu_ref"])}
+                if binding.get("kind") == "saved_menu"
+                else {"planner_selection_ref": selection_ref}
+            )
+            common_arguments = {
+                **binding_arguments,
                 "candidate_approvals": self._plan_approvals(plan),
                 "ingredient_decisions": deepcopy(plan.get("ingredient_decisions")),
                 "budget_ore": plan.get("budget_ore"), "price_mode": plan.get("price_mode") or "exact",
+            }
+            result = {"apply_arguments": {
+                "action": "apply", **common_arguments,
                 "product_plan_digest": plan["product_plan_digest"],
-            } if plan.get("status") == "prepared" else None, "product_plan": plan}
+            } if plan.get("status") == "prepared" else None,
+                "partial_apply_arguments": {
+                    "action": "apply", "partial_apply": True,
+                    **{**common_arguments, "candidate_approvals": self._plan_approvals(plan, selected_only=True)},
+                    "partial_product_plan_digest": plan["partial_product_plan_digest"],
+                } if plan.get("partial_product_plan_digest") else None,
+                "product_plan": plan}
             previous = request.get("previous_product_plan")
             if previous is not None:
                 previous = validate_product_plan(previous, previous.get("product_plan_digest") if isinstance(previous, Mapping) else None)
@@ -2123,6 +2251,194 @@ class PlanningOperations:
                     "applied": False,
                     "reason": "a clear current user request to change the cart is required",
                 }
+            if request.get("partial_apply") is True:
+                if request.get("product_plan") is not None:
+                    raise HouseholdError("partial apply uses only the compact selected-line arguments")
+                expected_digest = request.get("partial_product_plan_digest")
+                if not isinstance(expected_digest, str) or re.fullmatch(r"[a-f0-9]{64}", expected_digest) is None:
+                    raise HouseholdError("partial apply needs the exact reviewed partial_product_plan_digest")
+                existing_cart_plan = self.store.read().get("cart_plan") or {}
+                if existing_cart_plan.get("product_plan_digest"):
+                    raise HouseholdError("a complete product plan is already applied; do not replace it with a partial selection")
+                self._start_managed_product_apply_fence()
+                fresh_binding, menu, expected_menu_ref = self._product_binding(
+                    menu_ref=request.get("menu_ref"),
+                    planner_handoff=request.get("planner_handoff"),
+                    planner_selection_ref=request.get("planner_selection_ref"),
+                    require_saved_planner=True,
+                )
+                fresh = self._prepare_products(
+                    binding=fresh_binding,
+                    menu=menu,
+                    candidate_approvals=request.get("candidate_approvals"),
+                    ingredient_decisions=request.get("ingredient_decisions"),
+                    budget_ore=request.get("budget_ore"),
+                    price_mode=request.get("price_mode") or "exact",
+                    observe_selected_only=True,
+                    deadline=deadline,
+                )
+                if fresh.get("partial_product_plan_digest") != expected_digest:
+                    return {
+                        "applied": False, "status": "needs_input",
+                        "reason": "selected product, quantity, availability, eligibility, offer or price facts changed",
+                        "fresh_product_plan": fresh,
+                    }
+                current_approvals = self._plan_approvals(fresh, selected_only=True)
+                current_ids = {approval["requirement_id"] for approval in current_approvals}
+                existing_plan = self.store.read().get("cart_plan") or {}
+                prior_approvals = existing_plan.get("partial_product_plan_approvals", [])
+                if existing_plan.get("partial_product_plan_digest") and not prior_approvals:
+                    return {
+                        "applied": False, "status": "needs_input",
+                        "reason": "previous partial selections lack refreshable authority; prepare the menu products again",
+                    }
+                combined_approvals = {
+                    approval["requirement_id"]: deepcopy(approval)
+                    for approval in prior_approvals
+                    if isinstance(approval, Mapping) and isinstance(approval.get("requirement_id"), str)
+                }
+                combined_approvals.update({
+                    approval["requirement_id"]: deepcopy(approval)
+                    for approval in current_approvals
+                })
+                revalidated = self._prepare_products(
+                    binding=fresh_binding,
+                    menu=menu,
+                    candidate_approvals=list(combined_approvals.values()),
+                    ingredient_decisions=fresh.get("ingredient_decisions"),
+                    budget_ore=fresh.get("budget_ore"),
+                    price_mode=fresh.get("price_mode") or "exact",
+                    observe_selected_only=True,
+                    deadline=deadline,
+                )
+                selected_ids = {
+                    row.get("requirement_id") for row in revalidated.get("requirements", [])
+                    if row.get("status") == "selected"
+                }
+                if selected_ids != set(combined_approvals):
+                    return {
+                        "applied": False, "status": "needs_input",
+                        "reason": "a previously or newly selected product is no longer current and eligible",
+                        "fresh_product_plan": revalidated,
+                    }
+                revalidated_authority = self._partial_plan_authority(revalidated)
+                prior_authority = existing_plan.get("partial_product_plan_authority")
+                if prior_approvals:
+                    if not isinstance(prior_authority, Mapping):
+                        return {
+                            "applied": False, "status": "needs_input",
+                            "reason": "previous partial selections lack digest-bound facts; prepare the menu products again",
+                        }
+                    prior_rows = {
+                        row.get("requirement_id"): row
+                        for row in prior_authority.get("selected_requirements", [])
+                        if isinstance(row, Mapping) and isinstance(row.get("requirement_id"), str)
+                    }
+                    current_rows = {
+                        row.get("requirement_id"): row
+                        for row in revalidated_authority["selected_requirements"]
+                    }
+                    unreviewed_prior_ids = set(prior_rows) - current_ids
+                    context_changed = canonical(prior_authority.get("context")) != canonical(revalidated_authority["context"])
+                    facts_changed = any(
+                        requirement_id not in current_rows
+                        or canonical(prior_rows[requirement_id]) != canonical(current_rows[requirement_id])
+                        for requirement_id in unreviewed_prior_ids
+                    )
+                    if (context_changed and unreviewed_prior_ids) or facts_changed:
+                        return {
+                            "applied": False, "status": "needs_input",
+                            "reason": "a previously selected product or its authority context changed; review a fresh partial plan",
+                            "fresh_product_plan": revalidated,
+                        }
+                combined_digest = revalidated.get("partial_product_plan_digest")
+                requirements = partial_cart_requirements(revalidated, combined_digest)
+                selected_lines = [{
+                    "requirement_id": row["requirement_id"],
+                    "products": prepared_cart_requirements({"requirements": [row]}),
+                } for row in revalidated["requirements"] if row.get("status") == "selected"]
+                combined_lines = {line["requirement_id"]: line["products"] for line in selected_lines}
+                remaining_issue_count = sum(
+                    row.get("requirement_id") not in combined_lines
+                    for row in revalidated.get("unresolved_requirements", [])
+                )
+                product_owners = {}
+                requirements = []
+                for requirement_id in sorted(combined_lines):
+                    for product in combined_lines[requirement_id]:
+                        product_id = self._product_id(product.get("product_id"))
+                        owner = product_owners.setdefault(product_id, requirement_id)
+                        if owner != requirement_id:
+                            raise HouseholdError(
+                                "one product cannot satisfy different requirements across partial applies"
+                            )
+                        requirements.append(deepcopy(product))
+
+                def final_partial_prewrite_check() -> dict[str, Any]:
+                    try:
+                        final = self._prepare_products(
+                            binding=fresh_binding,
+                            menu=menu,
+                            candidate_approvals=list(combined_approvals.values()),
+                            ingredient_decisions=fresh.get("ingredient_decisions"),
+                            budget_ore=fresh.get("budget_ore"),
+                            price_mode=fresh.get("price_mode") or "exact",
+                            observe_selected_only=True,
+                            deadline=deadline,
+                        )
+                    except HouseholdError:
+                        return {"ok": False, "reason": "selected product facts became unavailable immediately before cart sync", "fresh_product_plan": None}
+                    final_selected_ids = {
+                        row.get("requirement_id") for row in final.get("requirements", [])
+                        if row.get("status") == "selected"
+                    }
+                    return {
+                        "ok": final.get("partial_product_plan_digest") == combined_digest
+                        and final_selected_ids == set(combined_approvals),
+                        "reason": "selected product facts changed immediately before cart sync",
+                        "fresh_product_plan": final,
+                    }
+
+                cart_result = self._cart_sync({
+                    "requirements": requirements,
+                    "_expected_menu_ref": expected_menu_ref,
+                    "_before_cart_write": final_partial_prewrite_check,
+                    "_include_recurring": False,
+                }, deadline)
+                if cart_result.get("synced") is not True:
+                    return {"applied": False, "status": "needs_input", "reason": "cart reconciliation required", **cart_result}
+                with self.store.locked() as state:
+                    if canonical(self._cart_menu_ref(state.get("menu"))) != canonical(expected_menu_ref):
+                        raise HouseholdError("menu changed before recording the partial product selection")
+                    state.pop("product_plan_completion", None)
+                    state.pop("managed_product_apply_fence", None)
+                    cart_plan = state["cart_plan"]
+                    cart_plan.pop("product_plan_digest", None)
+                    cart_plan.pop("product_plan_summary", None)
+                    cart_plan["partial_product_plan_digest"] = combined_digest
+                    digests = cart_plan.setdefault("partial_product_plan_digests", [])
+                    for digest in (expected_digest, combined_digest):
+                        if digest not in digests:
+                            digests.append(digest)
+                    cart_plan["partial_product_plan_lines"] = [
+                        {"requirement_id": requirement_id, "products": deepcopy(combined_lines[requirement_id])}
+                        for requirement_id in sorted(combined_lines)
+                    ]
+                    cart_plan["partial_product_plan_approvals"] = [
+                        deepcopy(combined_approvals[requirement_id])
+                        for requirement_id in sorted(combined_approvals)
+                    ]
+                    cart_plan["partial_product_plan_authority"] = deepcopy(revalidated_authority)
+                    cart_plan["partial_product_plan_summary"] = {
+                        "selected_requirement_ids": sorted(combined_lines),
+                        "remaining_issue_count": remaining_issue_count,
+                    }
+                return {
+                    "applied": True, "partial_applied": True, "cart": cart_result,
+                    "partial_product_plan_digest": combined_digest,
+                    "remaining_issue_count": remaining_issue_count,
+                    "next": "Continue product preparation for the remaining requirements; checkout stays blocked until one complete product plan is applied.",
+                }
             supplied = request.get("product_plan")
             if supplied is None:
                 expected_digest = request.get("product_plan_digest")
@@ -2131,6 +2447,7 @@ class PlanningOperations:
                 self._start_managed_product_apply_fence()
                 fresh_binding, menu, expected_menu_ref = self._product_binding(
                     menu_ref=request.get("menu_ref"), planner_handoff=request.get("planner_handoff"),
+                    planner_selection_ref=request.get("planner_selection_ref"),
                     require_saved_planner=True,
                 )
                 supplied = {"binding": fresh_binding, "product_plan_digest": expected_digest,
@@ -2210,6 +2527,12 @@ class PlanningOperations:
                         raise HouseholdError("menu changed before recording pantry coverage")
                     state["product_plan_completion"] = {"menu_ref": deepcopy(expected_menu_ref), "nothing_to_buy": True, "product_plan_digest": supplied["product_plan_digest"]}
                     state.pop("managed_product_apply_fence", None)
+                    for key in (
+                        "partial_product_plan_digest", "partial_product_plan_digests",
+                        "partial_product_plan_lines", "partial_product_plan_approvals",
+                        "partial_product_plan_authority", "partial_product_plan_summary",
+                    ):
+                        state["cart_plan"].pop(key, None)
                 return {"applied": True, "cart_changed": bool(cart_result.get("applied_operations")), "nothing_to_buy": True, "product_plan": supplied}
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
@@ -2229,10 +2552,31 @@ class PlanningOperations:
                     raise HouseholdError("menu changed before recording the applied product plan")
                 state.pop("product_plan_completion", None)
                 state.pop("managed_product_apply_fence", None)
+                state["cart_plan"].pop("partial_product_plan_digest", None)
+                state["cart_plan"].pop("partial_product_plan_digests", None)
+                state["cart_plan"].pop("partial_product_plan_lines", None)
+                state["cart_plan"].pop("partial_product_plan_approvals", None)
+                state["cart_plan"].pop("partial_product_plan_authority", None)
+                state["cart_plan"].pop("partial_product_plan_summary", None)
                 state["cart_plan"]["product_plan_digest"] = supplied["product_plan_digest"]
                 state["cart_plan"]["product_plan_summary"] = {
                     key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions", "coverage_status")
                 }
+                meals = (state.get("profile") or {}).get("meals") or {}
+                expected_dinners = meals.get("dinner_days")
+                dinner_slots = [
+                    slot for slot in menu.get("slots", [])
+                    if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
+                ] if isinstance(menu.get("slots"), list) else []
+                observed_dinners = len(dinner_slots) if dinner_slots else len(menu.get("dishes", []))
+                state["cart_plan"]["weekly_minimums_enforced"] = (
+                    menu.get("weekly_plan_complete") is True
+                    or isinstance(menu.get("planner_selection"), Mapping)
+                    or (
+                    type(expected_dinners) is int and expected_dinners > 0
+                    and observed_dinners == expected_dinners
+                    )
+                )
                 state["cart_plan"]["product_plan_summary"]["quantity_estimates"] = [
                     {"item": row["item"], "quantity": deepcopy(row["quantity"]), "unit": row["unit"],
                      "quantity_basis": row["selection"]["quantity_basis"],
@@ -2528,7 +2872,7 @@ class PlanningOperations:
         snapshot = self.store.read()
         menu = snapshot.get('menu') or {}
         recurring = []
-        if snapshot['recurring_items']:
+        if request.get("_include_recurring", True) and snapshot['recurring_items']:
             year, week = map(int, menu['week'].split('-W'))
             recurring = self._due_recurring(snapshot, date.fromisocalendar(year, week, 1))
         for item in recurring:
@@ -2889,7 +3233,29 @@ class PlanningOperations:
         digest = self._cart_digest(live)
         menu_ref = self._cart_menu_ref(menu)
         with self.store.locked() as state:
+            if state.get("managed_product_apply_fence"):
+                return {
+                    "confirmed": False,
+                    "status": "needs_input",
+                    "reason": "managed_product_apply_incomplete",
+                    "next": "Reconcile the cart and complete a fresh saved-menu product apply before checkout.",
+                }
+            minimums = saved_menu_minimum_evaluation(menu, state.get("profile") or {})
             plan = state.get("cart_plan")
+            if (
+                minimums.get("status") != "pass"
+                and (
+                    minimums.get("complete_menu")
+                    or isinstance(plan, Mapping) and plan.get("weekly_minimums_enforced") is True
+                )
+            ):
+                return {
+                    "confirmed": False,
+                    "status": "needs_input",
+                    "reason": "weekly_menu_minimums_unsatisfied",
+                    "minimum_evaluation": minimums,
+                    "next": "Replan and save a complete weekly menu that satisfies the current profile minimums.",
+                }
             bound = (
                 isinstance(plan, dict)
                 and plan.get("provider") == self.provider
@@ -2902,6 +3268,14 @@ class PlanningOperations:
                 state["cart_plan"] = plan
                 result = deepcopy(plan)
                 reason = "missing_or_stale_cart_plan"
+            elif plan.get("partial_product_plan_digest"):
+                return {
+                    "confirmed": False,
+                    "status": "needs_input",
+                    "reason": "weekly_menu_products_incomplete",
+                    "remaining_issue_count": (plan.get("partial_product_plan_summary") or {}).get("remaining_issue_count"),
+                    "next": "Complete and apply one full saved-menu product plan before checkout.",
+                }
             elif plan.get("approved_cart_digest") == digest:
                 plan["status"] = "active"
                 plan["pending_cart_digest"] = None

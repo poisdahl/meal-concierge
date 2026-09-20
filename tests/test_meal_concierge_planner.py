@@ -107,6 +107,8 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.app = Application(self.store, self.provider, object())
         with self.store.locked() as state:
             state["setup"]["status"] = "complete"
+            for target in planner.SAVED_MINIMUM_TARGETS:
+                state["profile"]["diet"][target] = 0
 
     def tearDown(self):
         self.temp.cleanup()
@@ -217,6 +219,75 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(len(result["selections"]), 3)
         self.assertEqual(materializations, 3)
 
+    def test_full_week_saved_minimums_are_automatic_hard_constraints(self):
+        candidates = self.save_candidates(7)
+        with self.store.locked() as state:
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 1,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        request = self.request(candidates, dates=[f"2026-09-{day:02}" for day in range(7, 14)])
+        result = self.plan(request)
+        self.assertEqual(result["status"], "needs_input")
+        self.assertIn("minimum_fish_portions", result["request"]["strict_targets"])
+        fish = deepcopy(request)
+        fish["candidates"][0]["facts"] = explicit_facts(dietary=["fish"], complete=False)
+        planned = self.plan(fish)
+        self.assertEqual(planned["status"], "planned")
+        self.assertEqual(planned["selection"]["strict_targets"]["status"], "pass")
+        saved = self.app.handle({
+            "operation": "menu", "action": "save", "planner_ref": planned["save_ref"],
+        })["menu"]
+        menu_ref = {key: saved[key] for key in ("menu_id", "revision", "digest")}
+        decisions = [{
+            "source": {"collection": "dishes", "recipe_index": index, "ingredient_index": 0},
+            "action": "have_all",
+        } for index in range(7)]
+        products = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": menu_ref,
+            "ingredient_decisions": decisions,
+        })["product_plan"]
+        self.assertEqual(products["status"], "prepared")
+        self.assertEqual(products["requirements"], [])
+
+    def test_vegetable_minimum_collapses_spelling_and_fresh_variants(self):
+        candidates = []
+        for index, ingredient in enumerate((
+            "brokkoli", "fersk brokkoli", "gulrot", "carrots",
+            "rødløk", "fersk rødløk", "vårløk",
+        )):
+            saved = self.app.handle({
+                "operation": "recipes", "action": "save",
+                "recipe": recipe(f"Recipe {index}", f"vegetable-{index}", ingredient=ingredient),
+                "idempotency_key": f"vegetable-{index}",
+            })["recipe"]
+            candidates.append({"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}})
+        with self.store.locked() as state:
+            state["profile"]["diet"]["minimum_vegetable_types"] = 5
+        result = self.plan(self.request(
+            candidates, dates=[f"2026-09-{day:02}" for day in range(7, 14)],
+        ))
+        self.assertEqual(result["status"], "needs_input")
+        issue = next(item for item in result["issues"] if item["target"] == "minimum_vegetable_types")
+        self.assertEqual(issue["detail"]["observed"], ["brokkoli", "gulrot", "løk"])
+
+    def test_complete_legacy_week_that_misses_saved_minimum_is_rejected(self):
+        candidates = self.save_candidates(7)
+        with self.store.locked() as state:
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 1,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        with self.assertRaisesRegex(PlannerError, "minimum_fish_portions"):
+            self.app.handle({
+                "operation": "menu", "action": "save",
+                "menu": {"week": "2026-W37", "dishes": candidates, "salads": []},
+            })
+
     def test_plan_score_preserves_selected_order(self):
         candidates = self.save_candidates(2)
         request = self.request(
@@ -285,6 +356,8 @@ class WeeklyPlannerTests(unittest.TestCase):
     def test_strict_dietary_unknown_infeasible_and_satisfied_are_distinct(self):
         candidate = self.save_candidates(1)[0]
         target = ["minimum_legume_dinners"]
+        with self.store.locked() as state:
+            state["profile"]["diet"]["minimum_legume_dinners"] = 1
         incomplete = {
             **candidate, "facts": explicit_facts(dietary=[], complete=False),
         }

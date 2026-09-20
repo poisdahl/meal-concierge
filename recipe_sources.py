@@ -141,7 +141,7 @@ class TheMealDBSource:
             if not item:
                 continue
             raw = " ".join(part for part in (measure, item) if part)
-            ingredients.append(source_ingredient(raw or item, item=item, measure=measure))
+            ingredients.append(source_ingredient(raw or item, item=item, measure=measure, language="en"))
         steps = [_text(line, maximum=4_000) for line in re.split(r"[\r\n]+", instructions)]
         steps = [line for line in steps if line]
         if not ingredients or not steps:
@@ -343,7 +343,7 @@ class WikibooksSource:
             "name": name,
             "language": "en",
             "portions": None,
-            "ingredients": [source_ingredient(item) for item in ingredients[:200]],
+            "ingredients": [source_ingredient(item, language="en") for item in ingredients[:200]],
             "steps": steps[:100],
             "tags": ["Wikibooks Cookbook"],
             "source": {

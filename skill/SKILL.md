@@ -452,9 +452,14 @@ import preview and correct it through the ordinary recipe edit/conversion path.
 
 Use `schema_version=2` for new typed culinary documents. Preserve source wording
 in `ingredients[].original_text`, separate `yield` from person `portions`, and
-use exact `{numerator,denominator}` quantities. Keep `item` in the household's
-consistent ingredient matching language while retaining the original wording;
-do not merge similar names or silently translate unknown source quantities.
+use exact `{numerator,denominator}` quantities. Keep every `item`, including
+pantry and optional lines, as a semantically precise Norwegian generic ingredient
+identity while retaining exact source wording in `original_text`. Preserve
+variant, form/state, cut, processing, fat/salt state and dietary/allergen meaning.
+Keep `recipe.language` as the language of the title, steps and notes. Reviewed
+Norwegian-use names such as gochujang, paneer, tahini, panko and masa harina are
+valid. Do not merge similar names, use free translation as evidence, or silently
+translate unknown source quantities; ambiguous source meaning remains unresolved.
 The service performs arithmetic, not another LLM conversion when saving a ref.
 
 Preserve source attribution, `source.original`, evidence and known
@@ -693,6 +698,12 @@ returned complete `planner_handoff` unchanged to feedback/products; do not
 reconstruct it from display fields. Resolution does not save a menu.
 Stale facts require a fresh plan.
 
+For a complete weekly plan, the household's positive saved fish, legume,
+wholegrain/potato and vegetable-type minimums are automatic hard targets even
+when the caller omits `strict_targets`. Show the returned precise unknown or
+infeasible result and improve the candidates; never save or shop a complete week
+that misses those minima. Active-time strictness remains explicit.
+
 Before presenting a weekly menu as ready, inspect its actual ingredients and
 methods against the household preferences and the selected store. Resolve the
 selected handoff and use read-only products prepare/search to check specialty
@@ -896,9 +907,12 @@ Products `prepare` is read-only and requires the exact menu reference or complet
 planner handoff. Select observed exact interchangeable `candidate_refs` using the
 user's meal and grocery request; routine equivalent package choices do not need
 separate user approval. Show the useful product/quantity/cost overview before
-ordering. A search hit is not proof of ingredient equivalence. Searches use the
-retailer's language. If returned hits are irrelevant, pass a concise localized
-`search_query` with that requirement's candidate selection and prepare again;
+ordering. A search hit is not proof of ingredient equivalence. Oda and MENY
+search the complete Norwegian item identity. Mathem uses only reviewed exact
+Swedish whole-identity mappings; never translate isolated words or erase
+meaningful properties. A missing or uncertain localization remains a product-plan
+review, not a recipe SKU or guessed rewrite. If returned hits are irrelevant,
+pass a concise localized `search_query` with that requirement's candidate selection and prepare again;
 only references returned by that exact search can be selected. Exclude pet food
 and other nonfood hits. Canned/cooked versus dry ingredients require compatible
 quantities and cooking instructions; never replace dry beans with canned beans
@@ -923,6 +937,10 @@ rechecks observed price/availability and includes recurring goods. Explain the
 estimate briefly; never invent gram/ml equality, stock, or dry/cooked equivalence.
 Missing numeric package metadata does not block a deliberate count of observed
 retailer units; keep its size and exact coverage unknown.
+For Oda/Mathem products explicitly labelled with an expected or minimum variable
+weight, `price_mode=estimate` may use the declared weight to calculate a package
+count. Keep `coverage_status` and merchandise price visibly estimated, leave the
+payable total unknown, and let checkout remain the final price authority.
 Observed package limits bound this selection; they do not establish remaining customer eligibility
 after prior purchases or account for separate cart extras.
 
@@ -973,6 +991,15 @@ unchanged product plan/digest also remains supported. The compact route
 regenerates the exact plan and requires the reviewed digest. Drift requires a new review;
 never silently substitute another plan. All-at-home completion retains explicit extras and removes earlier menu purchases.
 Unattributed existing cart contents still require reconciliation.
+
+When preparation is incomplete but has reviewed selected lines, it can also
+return `partial_apply_arguments`. For the same authorized cart update, send those
+arguments unchanged with `cart_change_requested=true` to sync only the selected
+lines. This path rereads those selections and every earlier accumulated partial
+selection, is idempotent, does not add
+recurring goods, and records no complete product-plan digest. Continue preparing
+the remaining lines and finish with one full apply. Checkout stays blocked while
+the partial marker exists; never use raw cart changes to bypass it.
 
 If products apply stops for cart or menu drift, reconcile that exact state and
 then rerun products prepare/apply. Never work around the stop with raw cart

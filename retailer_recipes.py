@@ -142,7 +142,10 @@ def meny_recipe_input(observation: Any, recipe_id: str, *, fetched_at: str | Non
         "portions": portions,
         "portions_evidence": evidence,
         "yield": yield_value,
-        "ingredients": [source_ingredient(text) for text in source["recipeIngredient"]],
+        "ingredients": [
+            source_ingredient(text, language=source["inLanguage"])
+            for text in source["recipeIngredient"]
+        ],
         "steps": source["recipeInstructions"],
         "notes": source.get("description"),
         "source_provider": "meny",
@@ -214,7 +217,10 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
             raw = ingredient.get("original_text", "")
             found = re.fullmatch(r"(.+?)\s+(st|tsk|msk|krm)\s+(.+)", raw)
             if found:
-                candidate["ingredients"][index] = source_ingredient(raw, item=found[3], measure=found[1] + " " + aliases[found[2]])
+                candidate["ingredients"][index] = source_ingredient(
+                    raw, item=found[3], measure=found[1] + " " + aliases[found[2]],
+                    language="sv-SE",
+                )
     candidate["source"].update(kind=provider, publisher=provider.upper(),
         title=candidate["name"], external_id=source["external_id"], relationship="original")
     candidate["source_provider"] = provider
