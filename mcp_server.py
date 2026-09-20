@@ -364,7 +364,7 @@ def meal_concierge_catalog(action: Literal["products", "recipes", "usuals"], que
     return rpc("catalog", action=action, query=query, limit=limit)
 
 
-@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries. An incomplete plan cannot be fully applied, but reviewed selected lines may return partial_apply_arguments for an idempotent selected-only sync while checkout stays blocked. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit or an explicitly declared expected/minimum variable weight; it labels coverage and merchandise cost as estimates, never claims cheapest or final payable total, and leaves checkout as price authority. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant; returned apply arguments automatically bind selected refs to their observed product-name query. A semantic_authorization may bind one exact selected ref, authorized_by=current_user and a reason only for a nearby dairy-fat variant or a frozen/canned property omitted from the product title; it cannot override identity, form, species or dietary checks. A shared_package must be repeated unchanged for every listed requirement, select one common ref, and include authorized_by=current_user, one package_count and quantity_basis; the group is atomic and contributes its SKU, quantity and cost exactly once. Both authorities are transient, preserved in compact apply arguments and bound by the reviewed digest. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare returns compact apply_arguments for a complete plan and partial_apply_arguments when at least one line is selected in an incomplete plan. If details cannot fit the MCP response, a compact arguments-only projection preserves the actionable continuation while omitting diagnostics. Apply accepts those unchanged arguments (exact compact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; returned arguments never grant authority themselves. Full compact apply regenerates the plan and requires the identical reviewed digest. Partial compact apply rereads only selected facts, syncs only selected lines without recurring goods, records no complete digest and keeps checkout blocked until later full apply. Both stop on selected drift and reuse guarded idempotent cart sync; neither orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
+@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries. An incomplete plan cannot be fully applied, but reviewed selected lines may return partial_apply_arguments for an idempotent selected-only sync while checkout stays blocked. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode=estimate permits a single explicitly approved regular-price package with unknown deposit or an explicitly declared expected/minimum variable weight; it labels coverage and merchandise cost as estimates, never claims cheapest or final payable total, and leaves checkout as price authority. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant; returned apply arguments automatically bind selected refs to their observed product-name query. A semantic_authorization may bind one exact selected ref, authorized_by=current_user and a reason only for a nearby dairy-fat variant or a frozen/canned property omitted from the product title; it cannot override identity, form, species or dietary checks. A shared_package must be repeated unchanged for every listed requirement, select one common ref, and include authorized_by=current_user, one package_count and quantity_basis; the group is atomic and contributes its SKU, quantity and cost exactly once. Both authorities are transient, preserved in compact apply arguments and bound by the reviewed digest. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare returns compact apply_arguments for a complete plan and partial_apply_arguments when at least one line is selected in an incomplete plan. If full details cannot fit the MCP response, compact full or partial apply arguments remain unchanged when present. For a larger incomplete plan without such a continuation, an issues_only projection preserves every requirement and blocker plus bounded exact candidate refs and diagnostic codes; correct candidate_approvals or price_mode and prepare the entire same menu again. Apply accepts those unchanged arguments (exact compact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; returned arguments never grant authority themselves. Full compact apply regenerates the plan and requires the identical reviewed digest. Partial compact apply rereads only selected facts, syncs only selected lines without recurring goods, records no complete digest and keeps checkout blocked until later full apply. Both stop on selected drift and reuse guarded idempotent cart sync; neither orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
 def meal_concierge_products(
     action: Literal["prepare", "apply", "lowest_cost", "record_ingredients"] = "prepare",
     planner_input: dict[str, Any] | None = None,
@@ -1244,6 +1244,183 @@ def _minimal_product_result_projection(result: dict[str, Any], *, candidate_limi
     return projected
 
 
+def _compact_product_issue(
+    issue: Any, *, candidate_refs: list[Any] | None = None,
+    candidate_limit: int,
+) -> dict[str, Any]:
+    """Keep only the bounded facts needed to correct one product-plan issue."""
+    if not isinstance(issue, dict):
+        return {"reason": "invalid_product_plan_issue"}
+    compact = {
+        key: issue[key]
+        for key in ("requirement_id", "reason")
+        if key in issue
+    }
+    requirement_ids = issue.get("requirement_ids")
+    if isinstance(requirement_ids, list):
+        compact["requirement_ids"] = requirement_ids[:64]
+    refs = issue.get("candidate_refs")
+    if not isinstance(refs, list):
+        refs = candidate_refs
+    if not isinstance(refs, list) and issue.get("candidate_ref") is not None:
+        refs = [issue["candidate_ref"]]
+    if isinstance(refs, list) and candidate_limit:
+        compact["candidate_refs"] = refs[:candidate_limit]
+    diagnostics = issue.get("candidate_diagnostics")
+    if candidate_limit and isinstance(diagnostics, list):
+        rows = []
+        for diagnostic in diagnostics[:5]:
+            if not isinstance(diagnostic, dict):
+                continue
+            row = {
+                **({"product_ref": diagnostic["product_ref"]}
+                   if "product_ref" in diagnostic else {}),
+                **({"code": diagnostic["reason"]}
+                   if isinstance(diagnostic.get("reason"), str) else {}),
+                **({key: _bounded_detail(diagnostic[key])
+                   for key in ("required_unit", "observed_unit", "package_limit")
+                   if key in diagnostic}),
+            }
+            if row:
+                rows.append(row)
+        if rows:
+            compact["candidate_diagnostics"] = rows
+    return compact
+
+
+def _validated_partial_apply_arguments(
+    result: dict[str, Any],
+) -> tuple[dict[str, Any], str] | None:
+    plan = result.get("product_plan")
+    arguments = result.get("partial_apply_arguments")
+    if (
+        not isinstance(plan, dict) or plan.get("status") != "needs_input"
+        or not isinstance(arguments, dict) or arguments.get("action") != "apply"
+        or arguments.get("partial_apply") is not True
+        or "cart_change_requested" in arguments
+    ):
+        return None
+    digest = plan.get("partial_product_plan_digest")
+    if (
+        not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or arguments.get("partial_product_plan_digest") != digest
+    ):
+        return None
+    return arguments, digest
+
+
+def _issues_only_product_plan(
+    plan: Any, *, candidate_limit: int, unresolved_only: bool = False,
+) -> Any:
+    """Project every requirement and blocker without verbose retail evidence."""
+    if not isinstance(plan, dict) or plan.get("status") != "needs_input":
+        return None
+    requirements = plan.get("requirements")
+    unresolved = plan.get("unresolved_requirements")
+    if not isinstance(requirements, list) or not isinstance(unresolved, list):
+        return None
+    by_id = {
+        row.get("requirement_id"): row
+        for row in requirements
+        if isinstance(row, dict) and isinstance(row.get("requirement_id"), str)
+    }
+    issues_by_id: dict[str, list[dict[str, Any]]] = {}
+    standalone = []
+    for issue in unresolved:
+        requirement_id = issue.get("requirement_id") if isinstance(issue, dict) else None
+        if isinstance(requirement_id, str) and requirement_id in by_id:
+            issues_by_id.setdefault(requirement_id, []).append(issue)
+        else:
+            standalone.append(_compact_product_issue(
+                issue, candidate_limit=candidate_limit,
+            ))
+
+    compact = {
+        key: plan[key]
+        for key in (
+            "product_plan_version", "provider", "status", "coverage_status",
+            "cost_status", "budget_status", "budget_ore", "price_mode",
+            "product_plan_digest", "partial_product_plan_digest",
+        )
+        if key in plan
+    }
+    binding = plan.get("binding")
+    if isinstance(binding, dict):
+        compact["binding"] = {
+            key: binding[key] for key in ("kind", "menu_ref") if key in binding
+        }
+        handoff = binding.get("planner_handoff")
+        if isinstance(handoff, dict):
+            compact["binding"]["planner_selection"] = {
+                key: handoff[key]
+                for key in ("planner_version", "input_digest", "selection_digest")
+                if key in handoff
+            }
+    compact_requirements = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        requirement_id = requirement.get("requirement_id")
+        if unresolved_only and requirement_id not in issues_by_id:
+            continue
+        row = {
+            key: requirement[key]
+            for key in ("requirement_id", "item", "quantity", "unit", "status")
+            if key in requirement
+        }
+        issues = issues_by_id.get(requirement_id, [])
+        observation = requirement.get("observation")
+        products = observation.get("products") if isinstance(observation, dict) else None
+        discovered_refs = [
+            product["product_ref"] for product in products or []
+            if isinstance(product, dict) and "product_ref" in product
+        ]
+        projected_issues = [
+            _compact_product_issue(
+                issue,
+                candidate_refs=(discovered_refs
+                                if issue.get("reason") == "exact_candidate_scope_needs_selection"
+                                else None),
+                candidate_limit=candidate_limit,
+            )
+            for issue in issues
+        ]
+        if len(projected_issues) == 1:
+            row["issue"] = projected_issues[0]
+        elif projected_issues:
+            row["issues"] = projected_issues
+        compact_requirements.append(row)
+    compact["requirements"] = compact_requirements
+    if standalone:
+        compact["unresolved_requirements"] = standalone
+    compact["projection"] = "issues_only"
+    return compact
+
+
+def _issues_only_product_result_projection(
+    result: dict[str, Any], *, candidate_limit: int,
+) -> dict[str, Any] | None:
+    """Keep a maximum-size incomplete plan actionable before the generic fallback."""
+    plan = _issues_only_product_plan(
+        result.get("product_plan"), candidate_limit=candidate_limit,
+    )
+    if not isinstance(plan, dict):
+        return None
+    projected = {
+        "status": plan.get("status"),
+        "projection": "issues_only",
+        "details_omitted": True,
+        "product_plan": plan,
+        "next": (
+            "Correct or add candidate_approvals and price_mode for the listed reasons, "
+            "then prepare the entire same menu again with the unchanged binding. Do not "
+            "bypass product apply with raw cart changes."
+        ),
+    }
+    text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    return projected if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET else None
+
+
 def _prepared_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any] | None:
     """Keep a completed prepare actionable when its diagnostic plan cannot fit."""
     plan = result.get("product_plan")
@@ -1297,33 +1474,65 @@ def _prepared_apply_arguments_projection(result: dict[str, Any]) -> dict[str, An
 
 
 def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any] | None:
-    """Preserve a selected-line continuation when incomplete diagnostics cannot fit."""
-    plan = result.get("product_plan")
-    arguments = result.get("partial_apply_arguments")
-    if (
-        not isinstance(plan, dict) or plan.get("status") != "needs_input"
-        or not isinstance(arguments, dict) or arguments.get("action") != "apply"
-        or arguments.get("partial_apply") is not True
-        or "cart_change_requested" in arguments
-    ):
+    """Preserve the continuation and every unresolved issue when full rows cannot fit."""
+    partial = _validated_partial_apply_arguments(result)
+    if partial is None:
         return None
-    digest = plan.get("partial_product_plan_digest")
-    if (
-        not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-        or arguments.get("partial_product_plan_digest") != digest
-    ):
-        return None
+    arguments, digest = partial
+    for candidate_limit in (5, 3, 1, 0):
+        plan = _issues_only_product_plan(
+            result.get("product_plan"), candidate_limit=candidate_limit,
+            unresolved_only=True,
+        )
+        if not isinstance(plan, dict):
+            break
+        remaining_issues = []
+        for requirement in plan.get("requirements", []):
+            base = {
+                key: requirement[key]
+                for key in ("requirement_id", "item", "quantity", "unit")
+                if key in requirement
+            }
+            if isinstance(requirement.get("issue"), dict):
+                remaining_issues.append({**base, **requirement["issue"]})
+            for issue in requirement.get("issues", []):
+                if isinstance(issue, dict):
+                    remaining_issues.append({**base, **issue})
+        remaining_issues.extend(plan.get("unresolved_requirements", []))
+        projected = {
+            "status": "needs_input",
+            "projection": "partial_apply_arguments_with_issues",
+            "details_omitted": True,
+            **({key: result["product_plan"][key]
+                for key in ("product_plan_digest", "coverage_status", "cost_status")
+                if key in result["product_plan"]}),
+            "partial_product_plan_digest": digest,
+            "partial_apply_arguments": arguments,
+            "remaining_issue_count": len(remaining_issues),
+            "remaining_issues": remaining_issues,
+            "next": (
+                "Continue resolving the listed requirements and prepare the entire same menu "
+                "again. For a clear current cart-change request, apply only the reviewed "
+                "selected lines with these unchanged partial_apply_arguments and "
+                "cart_change_requested=true. Checkout remains blocked until full apply."
+            ),
+        }
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET:
+            return projected
+    unresolved = result["product_plan"].get("unresolved_requirements")
     projected = {
         "status": "needs_input",
         "projection": "partial_apply_arguments_only",
         "details_omitted": True,
         "partial_product_plan_digest": digest,
         "partial_apply_arguments": arguments,
-        "remaining_issue_count": len(plan.get("unresolved_requirements", [])),
+        **({"remaining_issue_count": len(unresolved)}
+           if isinstance(unresolved, list) else {}),
         "next": (
-            "Continue resolving the remaining requirements, or for a clear current cart-change "
-            "request apply only these selected lines with the unchanged partial_apply_arguments "
-            "and cart_change_requested=true. Checkout remains blocked until full apply."
+            "The exact partial continuation fits, but its remaining issue details exceed "
+            "the MCP wire budget. Keep these partial_apply_arguments unchanged and inspect "
+            "the local service/CLI result before continuing; checkout remains blocked."
         ),
     }
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
@@ -1346,6 +1555,12 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
     projected = _partial_apply_arguments_projection(result)
     if projected is not None:
         return projected
+    for candidate_limit in (5, 3, 1, 0):
+        projected = _issues_only_product_result_projection(
+            result, candidate_limit=candidate_limit,
+        )
+        if projected is not None:
+            return projected
     original_status = result.get("status")
     original_reason = result.get("reason")
     return {
@@ -1354,7 +1569,7 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
         **({"original_status": _bounded_detail(original_status)} if original_status is not None else {}),
         **({"original_reason": _bounded_detail(original_reason)} if original_reason is not None else {}),
         "maximum_wire_chars": MCP_PRODUCT_WIRE_BUDGET,
-        "next": "Reduce the menu requirement or comparison scope, then prepare again; do not bypass product apply with raw cart changes.",
+        "next": "Correct candidate_approvals or price_mode, then prepare the entire same menu again; do not bypass product apply with raw cart changes.",
     }
 
 

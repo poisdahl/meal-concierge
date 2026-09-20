@@ -439,13 +439,30 @@ def _authorized_semantic_difference(
         }
         return [token for token in tokens if token not in metadata and not token[0].isdigit()]
 
+    def product_title_tokens() -> list[str]:
+        tokens = title_tokens(offered)
+        display = product.get("display")
+        brand = display.get("brand") if isinstance(display, Mapping) else None
+        brand_tokens = title_tokens(brand.casefold()) if isinstance(brand, str) else []
+        # Brand metadata is presentation data, so only the exact audited
+        # prefixes needed by observed safe candidates may be ignored here.
+        # An arbitrary "brand" such as Chili or Hvitløk must remain part of
+        # the semantic title and fail the whole-title comparison below.
+        allowed_brand_prefixes = {("r",), ("kolonihagen",), ("tine",)}
+        if (
+            tuple(brand_tokens) in allowed_brand_prefixes
+            and tokens[:len(brand_tokens)] == brand_tokens
+        ):
+            return tokens[len(brand_tokens):]
+        return tokens
+
     # Fail closed on every residual title token. This makes the authority about
     # exactly one omitted qualifier or nearby fat value, never a prepared,
     # flavoured, compound or allergen-bearing addition.
     if any(name in differences for name in (
         "frozen_not_in_product_title", "canned_not_in_product_title",
     )):
-        if title_tokens(offered) != title_tokens(stripped):
+        if product_title_tokens() != title_tokens(stripped):
             return None
     if "nearby_dairy_fat_percentage" in differences:
         allowed_dairy_titles = {
@@ -455,7 +472,7 @@ def _authorized_semantic_difference(
             "yogurt": {("yoghurt",), ("yogurt",)},
         }
         dairy_class = wanted_dairy
-        offered_title = title_tokens(offered)
+        offered_title = product_title_tokens()
         if offered_title and offered_title[0] == "tine":
             offered_title = offered_title[1:]
         if tuple(offered_title) not in allowed_dairy_titles[dairy_class]:
@@ -1332,17 +1349,20 @@ def build_product_plan(
             planned.append(item)
             continue
         approval = approvals.get(requirement_id)
+        authority = approval.get("semantic_authorization") if approval else None
+        authority_ref = authority.get("candidate_ref") if isinstance(authority, Mapping) else None
         semantic_mismatches = {}
         for product in observation.get("products", []):
             if isinstance(product, Mapping) and semantic_product_conflict(requirement, product):
-                semantic_mismatches[product.get("product_ref")] = _authorized_semantic_difference(
-                    requirement, product
+                product_ref = product.get("product_ref")
+                semantic_mismatches[product_ref] = (
+                    _authorized_semantic_difference(requirement, product)
+                    if product_ref == authority_ref else None
                 )
-        authority = approval.get("semantic_authorization") if approval else None
         authorized_semantic_ref = (
-            authority.get("candidate_ref")
+            authority_ref
             if isinstance(authority, Mapping)
-            and semantic_mismatches.get(authority.get("candidate_ref"))
+            and semantic_mismatches.get(authority_ref)
             else None
         )
         excluded_semantic_refs = set(semantic_mismatches) - {authorized_semantic_ref}

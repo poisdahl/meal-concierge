@@ -1007,6 +1007,126 @@ class ProductPlannerTests(unittest.TestCase):
                 with self.assertRaisesRegex(HouseholdError, "changed"):
                     validate_product_plan(changed, authorized["product_plan_digest"])
 
+    def test_semantic_authorization_checks_exact_selected_ref_before_broad_scope_filter(self):
+        cases = (
+            (
+                "fryst rosenkål", 8416, "R Rosenkål", "R",
+                "frozen title omission",
+            ),
+            (
+                "hermetiske sorte bønner", 63255,
+                "Kolonihagen økologiske sorte bønner", "Kolonihagen",
+                "canned title omission",
+            ),
+        )
+        for item, selected_ref, name, brand, reason in cases:
+            with self.subTest(item=item):
+                value = menu({"item": item, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                selected = product(selected_ref, name, 600, "g", [option(1200)])
+                selected["display"]["brand"] = brand
+                distractors = [
+                    product(70_000 + index, distractor, 600, "g", [option(1200)])
+                    for index, distractor in enumerate((
+                        "Torskeburger", "Rosenkål med hvitløk",
+                        "Sorte bønner med mais", "Kikerter",
+                    ))
+                ]
+                observed = observation(item.split()[-1], [selected, *distractors])
+                base = {
+                    "requirement_id": requirement["requirement_id"],
+                    "candidate_refs": [selected_ref],
+                    "search_query": item.split()[-1],
+                }
+
+                blocked = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observed},
+                    candidate_approvals=[base],
+                )
+                self.assertEqual(blocked["status"], "needs_input")
+                self.assertEqual(
+                    blocked["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+                self.assertEqual(
+                    blocked["requirements"][0]["observation"]["products"], [],
+                )
+
+                authorized = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observed},
+                    candidate_approvals=[{**base, "semantic_authorization": {
+                        "candidate_ref": selected_ref,
+                        "authorized_by": "current_user", "reason": reason,
+                    }}],
+                )
+                self.assertEqual(authorized["status"], "prepared")
+                requirement_plan = authorized["requirements"][0]
+                self.assertEqual(
+                    requirement_plan["selection"]["products"][0]["product_ref"],
+                    selected_ref,
+                )
+                self.assertEqual(
+                    [row["product_ref"] for row in requirement_plan["observation"]["products"]],
+                    [selected_ref],
+                )
+
+        value = menu({"item": "hermetiske sorte bønner", "quantity": 200, "unit": "g"})
+        requirement = menu_requirements(value)[0][0]
+        compound = product(
+            63255, "Kolonihagen økologiske sorte bønner med mais",
+            600, "g", [option(1200)],
+        )
+        compound["display"]["brand"] = "Kolonihagen"
+        invalid = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={requirement["requirement_id"]: observation("sorte bønner", [compound])},
+            candidate_approvals=[{
+                "requirement_id": requirement["requirement_id"],
+                "candidate_refs": [63255], "search_query": "sorte bønner",
+                "semantic_authorization": {
+                    "candidate_ref": 63255, "authorized_by": "current_user",
+                    "reason": "canned title omission",
+                },
+            }],
+        )
+        self.assertEqual(invalid["status"], "needs_input")
+        self.assertEqual(
+            invalid["unresolved_requirements"][0]["reason"],
+            "semantic_authorization_not_applicable",
+        )
+        self.assertEqual(invalid["requirements"][0]["observation"]["products"], [])
+
+        unsafe_brand_cases = (
+            ("fryst rosenkål", "Chili Rosenkål", "Chili"),
+            ("hermetiske sorte bønner", "Chili Sorte bønner", "Chili"),
+            ("rømme 9 % fett", "Hvitløk Lettrømme 10%", "Hvitløk"),
+        )
+        for item, name, brand in unsafe_brand_cases:
+            with self.subTest(unsafe_brand=brand, item=item):
+                value = menu({"item": item, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(10, name, 600, "g", [option(1200)])
+                candidate["display"]["brand"] = brand
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(item, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [10],
+                        "semantic_authorization": {
+                            "candidate_ref": 10, "authorized_by": "current_user",
+                            "reason": "title omission",
+                        },
+                    }],
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(
+                    plan["unresolved_requirements"][0]["reason"],
+                    "semantic_authorization_not_applicable",
+                )
+
     def test_semantic_authorization_cannot_bypass_identity_or_allergy_safety(self):
         cases = (
             ("fryst torsk", "Laks", "fish species"),

@@ -540,6 +540,174 @@ class ProductProjectionTests(unittest.TestCase):
             self.assertNotIn("display", products[0])
         self.assertEqual(result, before)
 
+    def test_forty_eight_requirement_failure_returns_every_issue_under_wire_budget(self):
+        module = self.module()
+        reason_ranges = (
+            (15, "exact_candidate_scope_needs_selection"),
+            (18, "candidate_package_incompatible"),
+            (8, "candidate_price_or_eligibility_unresolved"),
+            (7, "practical_package_choice_unavailable"),
+        )
+        reasons = [reason for count, reason in reason_ranges for _ in range(count)]
+        requirements = []
+        unresolved = []
+        approvals = []
+        for index, reason in enumerate(reasons):
+            requirement_id = f"req:{index:024d}"
+            product_ref = 10_000 + index
+            product = {
+                "product_ref": product_ref,
+                "name": f"Candidate {index} " + '\\"' * 2_000,
+                "availability": "available",
+                "package": {
+                    "quantity": {"numerator": 500, "denominator": 1},
+                    "unit": "g",
+                },
+                "purchase_options": [{
+                    "package_count": 1, "price_kind": "exact",
+                    "eligibility": "confirmed", "offer_kind": "regular",
+                    "merchandise_ore": 1_000, "mandatory_deposit_ore": 0,
+                    "total_payable_ore": 1_000,
+                }],
+            }
+            requirement = {
+                "requirement_id": requirement_id,
+                "item": f"Ingredient {index}",
+                "quantity": {"numerator": 900, "denominator": 1},
+                "unit": "g", "status": "needs_input",
+                "sources": [{"collection": "dishes", "recipe_index": index // 8,
+                             "ingredient_index": index % 8}],
+                "observation": {"products": [product]},
+            }
+            if index >= 15:
+                approval = {
+                    "requirement_id": requirement_id,
+                    "candidate_refs": [product_ref],
+                }
+                requirement["candidate_approval"] = deepcopy(approval)
+                approvals.append(approval)
+            issue = {
+                "requirement_id": requirement_id,
+                "item": requirement["item"],
+                "reason": reason,
+            }
+            if reason != "exact_candidate_scope_needs_selection":
+                issue["candidate_diagnostics"] = [{
+                    "product_ref": product_ref,
+                    "reason": "unit_conversion_required",
+                    "required_unit": "g", "observed_unit": "ml",
+                    "irrelevant_verbose_detail": "x" * 10_000,
+                }]
+            requirements.append(requirement)
+            unresolved.append(issue)
+        shared_groups = ((0, 1), (2, 3), (4, 5))
+        for first, second in shared_groups:
+            unresolved.append({
+                "reason": "shared_package_group_unavailable",
+                "requirement_ids": [
+                    requirements[first]["requirement_id"],
+                    requirements[second]["requirement_id"],
+                ],
+                "candidate_ref": 20_000 + first,
+            })
+        result = {
+            "apply_arguments": None,
+            "partial_apply_arguments": None,
+            "product_plan": {
+                "product_plan_version": "product-plan-v3", "provider": "oda",
+                "binding": {"kind": "saved_menu", "menu_ref": {
+                    "menu_id": "menu_fixture", "revision": 1, "digest": "b" * 64,
+                }},
+                "status": "needs_input", "coverage_status": "unresolved",
+                "cost_status": "unresolved", "budget_status": "not_set",
+                "price_mode": "exact", "product_plan_digest": "a" * 64,
+                "requirements": requirements,
+                "unresolved_requirements": unresolved,
+            },
+        }
+        self.assertEqual(len(approvals), 33)
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["projection"], "issues_only")
+        self.assertNotEqual(projected.get("reason"), "mcp_action_response_too_large")
+        plan = projected["product_plan"]
+        self.assertEqual(plan["projection"], "issues_only")
+        self.assertEqual(plan["binding"], result["product_plan"]["binding"])
+        self.assertEqual(plan["product_plan_digest"], "a" * 64)
+        self.assertEqual(len(plan["requirements"]), 48)
+        self.assertEqual(
+            {row["requirement_id"] for row in plan["requirements"]},
+            {row["requirement_id"] for row in requirements},
+        )
+        all_issues = [row["issue"] for row in plan["requirements"]]
+        all_issues += plan["unresolved_requirements"]
+        self.assertEqual(len(all_issues), 51)
+        observed_counts = {}
+        for issue in all_issues:
+            observed_counts[issue["reason"]] = observed_counts.get(issue["reason"], 0) + 1
+        self.assertEqual(observed_counts, {
+            **{reason: count for count, reason in reason_ranges},
+            "shared_package_group_unavailable": 3,
+        })
+        for row in plan["requirements"][:15]:
+            self.assertEqual(len(row["issue"]["candidate_refs"]), 1)
+        self.assertTrue(all(
+            set(row) >= {"requirement_id", "item", "quantity", "unit", "status", "issue"}
+            for row in plan["requirements"]
+        ))
+        self.assertTrue(all(
+            not ({"observation", "selection", "sources"} & set(row))
+            for row in plan["requirements"]
+        ))
+        self.assertNotIn("reduce menu scope", projected["next"])
+        self.assertIn("candidate_approvals", projected["next"])
+        self.assertIn("price_mode", projected["next"])
+        self.assertIn("entire same menu", projected["next"])
+        self.assertEqual(result, before)
+
+    def test_ids_and_reasons_survive_when_even_one_candidate_ref_cannot_fit(self):
+        module = self.module()
+        requirements = []
+        unresolved = []
+        for index in range(64):
+            requirement_id = f"req:{index:024d}"
+            requirements.append({
+                "requirement_id": requirement_id,
+                "item": f"Ingredient {index} " + "i" * 180,
+                "quantity": {"numerator": 1, "denominator": 1},
+                "unit": "piece", "status": "needs_input",
+                "observation": {"products": [{
+                    "product_ref": f"{index:02d}" + "r" * 498,
+                    "name": "n" * 2_000,
+                }]},
+            })
+            unresolved.append({
+                "requirement_id": requirement_id,
+                "reason": "exact_candidate_scope_needs_selection",
+                "candidate_diagnostics": [{
+                    "product_ref": index, "reason": "package_size_unresolved",
+                    "package_limit": {"count": 1, "detail": "x" * 5_000},
+                } for _ in range(5)],
+            })
+        result = {"product_plan": {
+            "status": "needs_input", "product_plan_digest": "a" * 64,
+            "requirements": requirements, "unresolved_requirements": unresolved,
+        }}
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["projection"], "issues_only")
+        rows = projected["product_plan"]["requirements"]
+        self.assertEqual(len(rows), 64)
+        self.assertTrue(all(
+            row["issue"]["reason"] == "exact_candidate_scope_needs_selection"
+            and "candidate_refs" not in row["issue"]
+            and "candidate_diagnostics" not in row["issue"]
+            for row in rows
+        ))
+
     def test_oversized_apply_binding_returns_bounded_non_actionable_result(self):
         module = self.module()
         projected = module._bounded_product_result({
@@ -600,6 +768,191 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertNotIn("cart_change_requested", projected["apply_arguments"])
         self.assertNotIn("product_plan", projected)
         self.assertEqual(result, before)
+
+    def test_oversized_partial_plan_keeps_exact_partial_apply_arguments(self):
+        module = self.module()
+        arguments = {
+            "action": "apply", "partial_apply": True,
+            "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+            "candidate_approvals": [{
+                "requirement_id": f"req:{index}", "candidate_refs": [10_000 + index],
+            } for index in range(33)],
+            "ingredient_decisions": [], "budget_ore": None, "price_mode": "estimate",
+            "partial_product_plan_digest": "c" * 64,
+        }
+        result = {
+            "apply_arguments": None,
+            "partial_apply_arguments": arguments,
+            "product_plan": {
+                "status": "needs_input", "product_plan_digest": "a" * 64,
+                "partial_product_plan_digest": "c" * 64,
+                "requirements": [{
+                    "requirement_id": "req:0", "item": "x" * 60_000,
+                    "quantity": {"numerator": 1, "denominator": 1},
+                    "unit": "piece", "status": "selected",
+                }],
+                "unresolved_requirements": [{
+                    "requirement_id": "req:unresolved", "item": "Remaining",
+                    "reason": "exact_candidate_scope_needs_selection",
+                }],
+            },
+        }
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["projection"], "partial_apply_arguments_with_issues")
+        self.assertEqual(projected["partial_apply_arguments"], arguments)
+        self.assertNotIn("cart_change_requested", projected["partial_apply_arguments"])
+        self.assertEqual(
+            projected["remaining_issues"][0]["reason"],
+            "exact_candidate_scope_needs_selection",
+        )
+        self.assertEqual(result, before)
+
+    def test_forty_four_selected_partial_keeps_all_four_unresolved_issues(self):
+        module = self.module()
+        requirements = []
+        unresolved = []
+        approvals = []
+        for index in range(48):
+            requirement_id = f"req:{index:024d}"
+            product_ref = 30_000 + index
+            requirement = {
+                "requirement_id": requirement_id,
+                "item": f"Ingredient {index}",
+                "quantity": {"numerator": 500, "denominator": 1},
+                "unit": "g",
+                "status": "selected" if index < 44 else "needs_input",
+                "observation": {"products": [{
+                    "product_ref": product_ref,
+                    "name": f"Candidate {index} " + "x" * 2_000,
+                }]},
+            }
+            if index < 44:
+                approvals.append({
+                    "requirement_id": requirement_id,
+                    "candidate_refs": [product_ref],
+                })
+                requirement["selection"] = {
+                    "products": [{
+                        "product_ref": product_ref,
+                        "name": f"Selected {index} " + "y" * 2_000,
+                        "quantity": 1,
+                    }],
+                }
+            else:
+                unresolved.append({
+                    "requirement_id": requirement_id,
+                    "item": requirement["item"],
+                    "reason": "exact_candidate_scope_needs_selection",
+                })
+            requirements.append(requirement)
+        arguments = {
+            "action": "apply", "partial_apply": True,
+            "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+            "candidate_approvals": approvals,
+            "ingredient_decisions": [], "budget_ore": None, "price_mode": "estimate",
+            "partial_product_plan_digest": "f" * 64,
+        }
+        result = {
+            "apply_arguments": None,
+            "partial_apply_arguments": arguments,
+            "product_plan": {
+                "product_plan_version": "product-plan-v3", "provider": "oda",
+                "binding": {"kind": "saved_menu", "menu_ref": arguments["menu_ref"]},
+                "status": "needs_input", "coverage_status": "unresolved",
+                "cost_status": "unresolved", "price_mode": "estimate",
+                "product_plan_digest": "a" * 64,
+                "partial_product_plan_digest": "f" * 64,
+                "requirements": requirements,
+                "unresolved_requirements": unresolved,
+            },
+        }
+        before = deepcopy(result)
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["projection"], "partial_apply_arguments_with_issues")
+        self.assertEqual(projected["partial_apply_arguments"], arguments)
+        self.assertEqual(projected["partial_product_plan_digest"], "f" * 64)
+        self.assertEqual(projected["remaining_issue_count"], 4)
+        issue_rows = projected["remaining_issues"]
+        self.assertEqual(len(issue_rows), 4)
+        self.assertEqual(
+            {row["requirement_id"] for row in issue_rows},
+            {row["requirement_id"] for row in requirements[44:]},
+        )
+        self.assertTrue(all(
+            row["reason"] == "exact_candidate_scope_needs_selection"
+            and len(row["candidate_refs"]) == 1
+            for row in issue_rows
+        ))
+        self.assertEqual(result, before)
+
+    def test_partial_arguments_only_is_last_resort_when_issue_text_cannot_fit(self):
+        module = self.module()
+        arguments = {
+            "action": "apply", "partial_apply": True,
+            "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+            "candidate_approvals": [{
+                "requirement_id": "req:selected", "candidate_refs": [10],
+            }],
+            "ingredient_decisions": [], "budget_ore": None, "price_mode": "exact",
+            "partial_product_plan_digest": "c" * 64,
+        }
+        result = {
+            "partial_apply_arguments": arguments,
+            "product_plan": {
+                "status": "needs_input", "product_plan_digest": "a" * 64,
+                "partial_product_plan_digest": "c" * 64,
+                "requirements": [{
+                    "requirement_id": "req:selected", "item": "Selected",
+                    "quantity": {"numerator": 1, "denominator": 1},
+                    "unit": "piece", "status": "selected",
+                }, {
+                    "requirement_id": "req:remaining", "item": "z" * 60_000,
+                    "quantity": {"numerator": 1, "denominator": 1},
+                    "unit": "piece", "status": "needs_input",
+                }],
+                "unresolved_requirements": [{
+                    "requirement_id": "req:remaining", "item": "z" * 60_000,
+                    "reason": "exact_candidate_scope_needs_selection",
+                }],
+            },
+        }
+        projected = module._bounded_product_result(result)
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+        self.assertEqual(projected["projection"], "partial_apply_arguments_only")
+        self.assertEqual(projected["partial_apply_arguments"], arguments)
+        self.assertNotIn("remaining_issues", projected)
+
+    def test_malformed_partial_issue_list_does_not_crash_projection(self):
+        module = self.module()
+        arguments = {
+            "action": "apply", "partial_apply": True,
+            "menu_ref": {"menu_id": "menu", "revision": 1, "digest": "b" * 64},
+            "candidate_approvals": [{
+                "requirement_id": "req:selected", "candidate_refs": [10],
+            }],
+            "partial_product_plan_digest": "c" * 64,
+        }
+        projected = module._bounded_product_result({
+            "partial_apply_arguments": arguments,
+            "product_plan": {
+                "status": "needs_input", "product_plan_digest": "a" * 64,
+                "partial_product_plan_digest": "c" * 64,
+                "requirements": [{
+                    "requirement_id": "req:selected", "item": "x" * 60_000,
+                    "status": "selected",
+                }],
+                "unresolved_requirements": None,
+            },
+        })
+        self.assertEqual(projected["projection"], "partial_apply_arguments_only")
+        self.assertEqual(projected["partial_apply_arguments"], arguments)
+        self.assertNotIn("remaining_issue_count", projected)
 
     def test_apply_only_projection_rejects_inconsistent_or_authorizing_arguments(self):
         module = self.module()
@@ -684,9 +1037,12 @@ class ProductProjectionTests(unittest.TestCase):
         projected = module._bounded_product_result(result)
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
-        self.assertEqual(projected["reason"], "mcp_action_response_too_large")
+        self.assertEqual(projected["projection"], "issues_only")
         self.assertNotIn("apply_arguments", projected)
-        self.assertNotIn("product_plan", projected)
+        issue = projected["product_plan"]["requirements"][0]["issue"]
+        self.assertEqual(issue["reason"], "exact_candidate_scope_needs_selection")
+        self.assertEqual(issue["candidate_refs"], [1])
+        self.assertNotIn('\\"', json.dumps(projected, ensure_ascii=False))
         self.assertEqual(result, before)
 
 
