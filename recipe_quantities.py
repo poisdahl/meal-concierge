@@ -29,8 +29,8 @@ UNITS = {
     **{unit: ("package", Fraction(1)) for unit in ("pk", "pakke", "pakker", "package", "packages")},
     "oz": ("g", Fraction(45359237, 1600000)),
     "lb": ("g", Fraction(45359237, 100000)),
-    "metric cup": ("ml", Fraction(250)),
-    "us cup": ("ml", Fraction(473176473, 2000000)),
+    **{unit: ("ml", Fraction(250)) for unit in ("metric cup", "metrisk kopp")},
+    **{unit: ("ml", Fraction(473176473, 2000000)) for unit in ("us cup", "amerikansk kopp")},
 }
 
 

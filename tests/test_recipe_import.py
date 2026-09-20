@@ -980,6 +980,50 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
         self.assertEqual(store.get(after["id"]), edited)
 
+    def test_norwegian_cup_aliases_survive_ready_pack_install_and_replay(self):
+        from recipe_portable import preflight_archive
+        from product_planner import menu_requirements
+        from recipes import RecipeStore, scale_recipe
+
+        self.manifest["recipe_schema_version"] = 2
+        self.record.update(status="ready", recipe=normalize_recipe({
+            "schema_version": 2,
+            "name": "Norske kopper",
+            "language": "nb-NO",
+            "portions": 2,
+            "ingredients": [
+                {"item": "mel", "quantity": 1, "unit": "amerikansk kopp"},
+                {"item": "melk", "quantity": 1, "unit": "metrisk kopp"},
+            ],
+            "steps": ["Bland."],
+            "source": {"kind": "user", "relationship": "user_supplied"},
+            "rights": {"storage": "full"},
+        }))
+        path = self.package()
+        self.assertEqual(preflight_archive(path, self.descriptor(path))["records_count"], 1)
+
+        first = self.apply(path)
+        self.assertEqual((first["created"], first["unchanged"]), (1, 0))
+        again = self.apply(path)
+        self.assertEqual((again["created"], again["unchanged"]), (0, 1))
+
+        reference = first["results"][0]["bank_recipe_ref"]
+        stored = RecipeStore(
+            self.root / "state/recipes.sqlite3", "synthetic-household"
+        ).get(reference["recipe_id"])
+        self.assertEqual(
+            [(row["unit"], row["amount"], row["raw"])
+             for row in stored["ingredients"]],
+            [
+                ("amerikansk kopp", "1 amerikansk kopp", "1 amerikansk kopp mel"),
+                ("metrisk kopp", "1 metrisk kopp", "1 metrisk kopp melk"),
+            ],
+        )
+        scaled = scale_recipe(stored, 4)
+        requirements, unresolved = menu_requirements({"dishes": [scaled], "salads": []})
+        self.assertEqual(unresolved, [])
+        self.assertEqual([row["unit"] for row in requirements], ["ml", "ml"])
+
     def test_unchanged_pack_import_repairs_source_title_search_index(self):
         import sqlite3
         from recipes import RecipeStore, source_ingredient
