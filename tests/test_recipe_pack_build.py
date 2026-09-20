@@ -9,7 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, verify_reviewed_source, write_file
+from build_recipe_pack import NORMALIZER_VERSION, Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, verify_reviewed_source, write_file
 from recipe_curation import canonical_recipe_hash
 from recipe_pack_sources import SourceParseError, SourceHTML, mealdb_recipe, readiness, wikibooks_recipe
 
@@ -382,6 +382,7 @@ class BuildRoundtripTests(unittest.TestCase):
                 self.assertEqual(archive.verify()['records_count'], 2)
                 self.assertEqual(archive.manifest['display_name'], 'Optional Recipe Collection')
                 self.assertEqual(archive.manifest['membership_mode'], 'authoritative')
+                self.assertEqual(archive.manifest['normalizer_version'], NORMALIZER_VERSION)
                 self.assertEqual(first['expanded_bytes'], sum(info.file_size for info in archive.entries.values()))
                 records = list(archive.records())
                 self.assertEqual([r['recipe_id'] for r in records], ['wikibooks:123', 'wikibooks:124'])

@@ -76,8 +76,11 @@ English spoon convention as an estimate when its locale is unverified; it
 requires explicit acceptance. US customary and metric culinary spoon measures
 differ, as shown by [NIST's conversion table](https://www.nist.gov/pml/owm/metric-si/unit-conversion/approximate-conversions-us-customary-measures-metric).
 
-Explicit `metric cup` = 250 ml and `us cup` = 236.5882365 ml are distinct;
-unqualified cup/fluid-ounce/pinch/free-text quantities stay unresolved.
+Explicit `metric cup`/`metrisk kopp` = 250 ml and `us cup`/`amerikansk kopp`
+= 236.5882365 ml are distinct. Explicit `us liquid quart`/`amerikansk
+væskekvart` = 946.352946 ml. Unqualified cup, quart, fluid-ounce, pinch and
+free-text quantities stay unresolved; source approximation remains explicit in
+quantity evidence even when its selected unit has an exact conversion factor.
 Mass oz = 28.349523125 g and lb = 453.59237 g use the international avoirdupois
 definition ([NIST weight conversion factors](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=200329)).
 There is no automatic volume-to-mass conversion. A reader may convert only when

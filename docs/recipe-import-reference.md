@@ -542,7 +542,7 @@ an independently selected release descriptor: exact compressed bytes and SHA256,
 format/version, recipe schema, pack identity/version and normalizer version.
 It validates every normalized document and managed raster, rejects local estimate
 acceptance and effective store bindings, and checks that ready records have
-resolved scaling and shopping quantities. It makes no state writes. The read-only
+resolved scaling plus units supported by the shared shopping registry. It makes no state writes. The read-only
 CLI is `recipe_portable.py preflight --archive PATH --expected-json JSON`.
 The shared provider resolver includes known-store source and upstream attribution
 even when an explicit binding is null. This exclusion does not establish public

@@ -17,7 +17,7 @@ from recipes import (ESTIMATE_CONFIRMATION, RecipeError, RecipeStore, normalize_
                      prepare_recipe_input, recipe_digest, scale_recipe, source_ingredient,
                      source_ingredient_identity, source_yield,
                      normalize_source_url, normalize_attribution_url)
-from recipe_quantities import read_quantity, parse_measure
+from recipe_quantities import UNITS, read_quantity, parse_measure
 from product_planner import menu_requirements
 from recipe_library_mealie import MealieAdapter
 from recipe_library_recipesage import RecipeSageAdapter
@@ -520,6 +520,134 @@ class RecipeContractTests(unittest.TestCase):
                 ({"numerator": 3, "denominator": 1}, "stalk"),
             ],
         )
+
+    def test_norwegian_explicit_cup_aliases_preserve_exact_recipe_and_shopping_units(self):
+        from recipes import _canonical, _stored_recipe_document
+
+        self.assertEqual(UNITS["amerikansk kopp"], UNITS["us cup"])
+        self.assertEqual(UNITS["metrisk kopp"], UNITS["metric cup"])
+        self.assertEqual(UNITS["amerikansk væskekvart"], UNITS["us liquid quart"])
+        self.assertEqual(UNITS["amerikansk væskekvart"][1], 4 * UNITS["amerikansk kopp"][1])
+        self.assertNotIn("kopp", UNITS)
+        self.assertEqual(
+            parse_measure("1/2 amerikansk kopp"),
+            ({"numerator": 1, "denominator": 2}, "amerikansk kopp"),
+        )
+        self.assertEqual(
+            parse_measure("1 metrisk kopp"),
+            ({"numerator": 1, "denominator": 1}, "metrisk kopp"),
+        )
+
+        recipe = authored_recipe()
+        recipe.update({"language": "nb-NO", "portions": 4})
+        recipe["ingredients"] = [
+            {"item": "mel", "quantity": 1, "unit": "amerikansk kopp"},
+            {"item": "melk", "quantity": 1, "unit": "metrisk kopp"},
+        ]
+        normalized = normalize_recipe(recipe)
+        self.assertEqual(
+            [(row["quantity"], row["unit"], row["amount"], row["raw"])
+             for row in normalized["ingredients"]],
+            [
+                ({"numerator": 1, "denominator": 1}, "amerikansk kopp",
+                 "1 amerikansk kopp", "1 amerikansk kopp mel"),
+                ({"numerator": 1, "denominator": 1}, "metrisk kopp",
+                 "1 metrisk kopp", "1 metrisk kopp melk"),
+            ],
+        )
+        self.assertEqual(normalize_recipe(normalized), normalized)
+
+        scaled = scale_recipe(normalized, 8)
+        self.assertEqual(
+            [(row["unit"], row["amount"], row["raw"])
+             for row in scaled["ingredients"]],
+            [
+                ("amerikansk kopp", "2 amerikansk kopp", "2 amerikansk kopp mel"),
+                ("metrisk kopp", "2 metrisk kopp", "2 metrisk kopp melk"),
+            ],
+        )
+        requirements, unresolved = menu_requirements({"dishes": [scaled], "salads": []})
+        self.assertEqual(unresolved, [])
+        self.assertEqual(
+            [(row["item"], row["quantity"], row["unit"]) for row in requirements],
+            [
+                ("mel", {"numerator": 473176473, "denominator": 1000000}, "ml"),
+                ("melk", {"numerator": 500, "denominator": 1}, "ml"),
+            ],
+        )
+        rendered = menu_email_html({"week": "2026-W40", "dishes": [scaled], "salads": []})
+        self.assertIn("2 amerikansk kopp mel", rendered)
+        self.assertIn("2 metrisk kopp melk", rendered)
+        self.assertNotIn("us cup", rendered)
+        self.assertNotIn("metric cup", rendered)
+
+        english = deepcopy(recipe)
+        english["language"] = "en"
+        english["ingredients"][0]["unit"] = "us cup"
+        english["ingredients"][1]["unit"] = "metric cup"
+        normalized_english = normalize_recipe(english)
+        self.assertEqual([row["amount"] for row in normalized_english["ingredients"]],
+                         ["1 us cup", "1 metric cup"])
+        frozen_english = _canonical(normalized_english)
+        self.assertEqual(_canonical(_stored_recipe_document(frozen_english)), frozen_english)
+        self.assertEqual(parse_measure("1 kopp"), (None, "kopp"))
+
+    def test_norwegian_us_liquid_quart_preserves_approximation_and_exact_conversion(self):
+        review = {
+            "publisher": "Meal Concierge",
+            "pack_id": "synthetic-pack",
+            "pack_version": "1",
+        }
+        evidence = {
+            "basis": "estimate",
+            "input": "about 2 quarts stock",
+            "assumptions": (
+                "The source context establishes US liquid quarts; two is the nominal "
+                "scalable amount for the source wording 'about 2 quarts'."
+            ),
+            "project_review": review,
+        }
+        recipe = authored_recipe()
+        recipe.update({"language": "nb-NO", "portions": 4})
+        recipe["ingredients"] = [{
+            "item": "kraft",
+            "raw": "about 2 quarts stock",
+            "original_text": "about 2 quarts stock",
+            "quantity": 2,
+            "unit": "amerikansk væskekvart",
+            "notes": "Kilden oppgir omtrent to amerikanske væskekvarter.",
+            "evidence": {"quantity": evidence, "unit": evidence},
+        }]
+        normalized = normalize_recipe(recipe)
+        ingredient = normalized["ingredients"][0]
+        self.assertEqual((ingredient["amount"], ingredient["raw"]),
+                         ("2 amerikansk væskekvart", "2 amerikansk væskekvart kraft"))
+        self.assertEqual(ingredient["original_text"], "about 2 quarts stock")
+        self.assertEqual(ingredient["evidence"]["quantity"]["basis"], "estimate")
+        self.assertIn("nominal", ingredient["evidence"]["quantity"]["assumptions"])
+        self.assertEqual(normalize_recipe(normalized), normalized)
+
+        scaled = scale_recipe(normalized)
+        requirements, unresolved = menu_requirements({"dishes": [scaled], "salads": []})
+        self.assertEqual(unresolved, [])
+        self.assertEqual(
+            [(row["quantity"], row["unit"]) for row in requirements],
+            [({"numerator": 473176473, "denominator": 250000}, "ml")],
+        )
+        doubled = scale_recipe(normalized, 8)
+        self.assertEqual(doubled["ingredients"][0]["amount"], "4 amerikansk væskekvart")
+        self.assertEqual(doubled["ingredients"][0]["evidence"]["quantity"]["basis"], "estimate")
+        rendered = menu_email_html({"week": "2026-W40", "dishes": [doubled], "salads": []})
+        self.assertIn("4 amerikansk væskekvart kraft (anslag fra Meal Concierge)", rendered)
+
+        english = deepcopy(recipe)
+        english["language"] = "en"
+        english["ingredients"][0]["unit"] = "us liquid quart"
+        self.assertEqual(normalize_recipe(english)["ingredients"][0]["amount"],
+                         "2 us liquid quart")
+        for unsupported in ("quart", "quarts", "qt"):
+            self.assertNotIn(unsupported, UNITS)
+            self.assertEqual(parse_measure(f"2 {unsupported}"), (None, unsupported))
 
     def test_source_language_and_text_survive_norwegian_semantic_identity(self):
         cases = (

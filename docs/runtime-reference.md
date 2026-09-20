@@ -457,7 +457,7 @@ The minimum collection manifest fields are:
   "pack_id": "family-recipes",
   "pack_version": "2026.1",
   "pack_revision": 1,
-  "normalizer_version": "2",
+  "normalizer_version": "3",
   "recipe_schema_version": 2,
   "records_count": 1,
   "display_name": "Family recipes",

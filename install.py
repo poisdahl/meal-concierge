@@ -34,7 +34,7 @@ RECIPE_PACK = {
     'format_version': 1,
     'kind': 'bundled',
     'recipe_schema_version': 2,
-    'normalizer_version': '2',
+    'normalizer_version': '3',
     'pack_id': PUBLISHER_RECIPE_PACK_IDS[0],
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
@@ -126,12 +126,28 @@ def recipe_pack_command(
             raise RuntimeError(f'recipe pack inspection failed ({result.returncode}): {detail}')
         return json.loads(result.stdout)
     expected = latest_recipe_pack() if expected is None else expected
-    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import preflight_archive; print(json.dumps(preflight_archive(sys.argv[2],json.loads(sys.argv[3]))))"
+    code = """import sys,json
+sys.path.insert(0,sys.argv[1])
+from install import RECIPE_PACK
+from recipe_portable import preflight_archive
+expected=json.loads(sys.argv[3])
+if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
+    raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
+print(json.dumps(preflight_archive(sys.argv[2],expected)))
+"""
     args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected)]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
-        code = "import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from install import apply_recipe_pack; apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),json.loads(sys.argv[4]),allow_removals=json.loads(sys.argv[5]))"
+        code = """import sys,json
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+from install import RECIPE_PACK,apply_recipe_pack
+expected=json.loads(sys.argv[4])
+if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
+    raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
+apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),expected,allow_removals=json.loads(sys.argv[5]))
+"""
         args = [release / 'venv/bin/python', '-I', '-c', code, release, archive,
                 json.dumps(meta), json.dumps(expected), json.dumps(allow_removals)]
     result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
