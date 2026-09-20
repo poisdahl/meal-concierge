@@ -513,6 +513,10 @@ class InstallerTests(unittest.TestCase):
                 publish.assert_called_once()
 
     def test_recipe_artifact_requires_release_digest_and_exact_bounded_size(self):
+        from build_recipe_pack import NORMALIZER_VERSION
+
+        self.assertEqual(NORMALIZER_VERSION, '3')
+        self.assertEqual(install.RECIPE_PACK['normalizer_version'], NORMALIZER_VERSION)
         source = self.root / 'offline.zip'
         payload = b'synthetic artifact' * 70000
         source.write_bytes(payload)
@@ -613,7 +617,8 @@ class InstallerTests(unittest.TestCase):
         from recipes import normalize_recipe
         recipe = normalize_recipe(RECIPE)
         manifest = {'format': FORMAT, 'format_version': 1, 'kind': 'bundled',
-                    'pack_id': install.RECIPE_PACK['pack_id'], 'pack_version': '1', 'normalizer_version': 'test1',
+                    'pack_id': install.RECIPE_PACK['pack_id'], 'pack_version': '1',
+                    'normalizer_version': install.RECIPE_PACK['normalizer_version'],
                     'recipe_schema_version': 1, 'records_count': 1}
         records = self.root / 'records.jsonl'
         records.write_bytes(canonical_bytes({'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe}) + b'\n')
@@ -658,6 +663,49 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'complete the stopped runtime update'):
                 install.main()
             resolve.assert_not_called()
+
+    def test_official_pack_rejects_newer_normalizer_than_installed_runtime(self):
+        from recipe_portable import FORMAT, canonical_bytes, write_archive
+        from recipes import normalize_recipe
+
+        recipe = normalize_recipe(RECIPE)
+        manifest = {
+            'format': FORMAT,
+            'format_version': 1,
+            'kind': 'bundled',
+            'pack_id': install.RECIPE_PACK['pack_id'],
+            'pack_version': 'newer-normalizer',
+            'normalizer_version': '3',
+            'recipe_schema_version': 1,
+            'records_count': 1,
+        }
+        records = self.root / 'newer-normalizer-records.jsonl'
+        records.write_bytes(canonical_bytes({
+            'recipe_id': 'sample', 'status': 'draft', 'recipe': recipe,
+        }) + b'\n')
+        archive = self.root / 'newer-normalizer-pack.zip'
+        write_archive(archive, manifest, {'records.jsonl': records})
+        expected = {key: value for key, value in manifest.items() if key != 'records_count'}
+        expected.update(
+            url=archive.as_uri(),
+            bytes=archive.stat().st_size,
+            sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+        )
+
+        release = self.root / 'old-release'
+        (release / 'venv/bin').mkdir(parents=True)
+        (release / 'venv/bin/python').symlink_to(sys.executable)
+        for path in CORE.glob('*.py'):
+            if path.name != 'install.py':
+                (release / path.name).symlink_to(path)
+        (release / 'install.py').write_text("RECIPE_PACK={'normalizer_version':'2'}\n")
+
+        with self.assertRaisesRegex(
+            RuntimeError, 'different installed runtime normalizer'
+        ):
+            install.recipe_pack_command(
+                release, 'preflight', archive, expected=expected,
+            )
 
     def test_local_collection_inspect_and_digest_pinned_lifecycle(self):
         from recipe_portable import FORMAT, canonical_bytes, write_archive

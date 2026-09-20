@@ -961,6 +961,7 @@ def preflight_archive(path: Path | str, expected_descriptor: Mapping) -> dict:
 
 def _preflight(archive: PortableArchive, *, trust: str) -> dict:
     from recipe_assets import validate_managed
+    from recipe_quantities import UNITS, normalized_unit
     from recipes import evidence_inputs, normalize_recipe, recipe_evidence_fields, recipe_source_provider, scale_recipe
     result = archive.verify()
     for field in ("pack_id", "pack_version"):
@@ -991,6 +992,12 @@ def _preflight(archive: PortableArchive, *, trust: str) -> dict:
                 }:
                     raise RecipeError("project review does not match the verified release")
         if record["status"] == "ready":
+            if any(
+                item.get("scalable") is True
+                and normalized_unit(item.get("unit")) not in UNITS
+                for item in recipe["ingredients"]
+            ):
+                raise RecipeError("a ready pack recipe has unsupported shopping units")
             scaled = scale_recipe(recipe)
             if not scaled["readiness"]["scaling_ready"] or not all(item["scalable"] for item in scaled["shopping_requirements"]):
                 raise RecipeError("a ready pack recipe has unresolved quantities or servings")

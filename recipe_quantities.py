@@ -31,6 +31,7 @@ UNITS = {
     "lb": ("g", Fraction(45359237, 100000)),
     **{unit: ("ml", Fraction(250)) for unit in ("metric cup", "metrisk kopp")},
     **{unit: ("ml", Fraction(473176473, 2000000)) for unit in ("us cup", "amerikansk kopp")},
+    **{unit: ("ml", Fraction(473176473, 500000)) for unit in ("us liquid quart", "amerikansk væskekvart")},
 }
 
 

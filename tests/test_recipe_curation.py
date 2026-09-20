@@ -15,6 +15,7 @@ from recipe_quantities import read_quantity
 from product_planner import menu_requirements
 from recipe_delivery import render_email, render_menu, render_pdf
 from recipes import RecipeError, RecipeStore, normalize_recipe, prepare_recipe_input, scale_recipe, source_ingredient
+from build_recipe_pack import NORMALIZER_VERSION
 
 
 def source_recipe():
@@ -265,7 +266,7 @@ class PublisherUpgradeTests(unittest.TestCase):
         records.write_bytes(canonical_bytes(record)+b'\n')
         manifest = {'format': FORMAT, 'format_version': 1, 'kind': 'bundled',
             'pack_id': 'wikibooks-themealdb-en', 'pack_version': version,
-            'normalizer_version': '2', 'recipe_schema_version': 2, 'records_count': 1}
+            'normalizer_version': NORMALIZER_VERSION, 'recipe_schema_version': 2, 'records_count': 1}
         path = self.root/('pack-'+version+'.zip')
         write_archive(path, manifest, {'records.jsonl': records})
         descriptor = {key: manifest[key] for key in ('format','format_version','kind','pack_id','pack_version','normalizer_version','recipe_schema_version')}

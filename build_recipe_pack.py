@@ -22,7 +22,7 @@ from recipe_curation import SourceMethodExcluded
 from recipe_pack_sources import THEMEALDB_POLICY, THEMEALDB_TERMS, SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
 
 FORMAT = 'meal-concierge-recipes'
-NORMALIZER_VERSION = '2'
+NORMALIZER_VERSION = '3'
 RIGHTS_POLICY = 'wikibooks-cc-themealdb-attribution-v3'
 MAX_RECORD_BYTES = 512 * 1024
 MAX_SOURCE_BODY = 32 * 1024 * 1024

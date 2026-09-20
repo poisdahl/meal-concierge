@@ -994,6 +994,30 @@ class PackInstallationTests(unittest.TestCase):
             "ingredients": [
                 {"item": "mel", "quantity": 1, "unit": "amerikansk kopp"},
                 {"item": "melk", "quantity": 1, "unit": "metrisk kopp"},
+                {
+                    "item": "kraft",
+                    "raw": "about 2 quarts stock",
+                    "original_text": "about 2 quarts stock",
+                    "quantity": 2,
+                    "unit": "amerikansk væskekvart",
+                    "notes": "Kilden oppgir omtrent to amerikanske væskekvarter.",
+                    "evidence": {
+                        field: {
+                            "basis": "estimate",
+                            "input": "about 2 quarts stock",
+                            "assumptions": (
+                                "The source context establishes US liquid quarts; two is "
+                                "the nominal scalable amount for 'about 2 quarts'."
+                            ),
+                            "project_review": {
+                                "publisher": "Meal Concierge",
+                                "pack_id": "test",
+                                "pack_version": "1",
+                            },
+                        }
+                        for field in ("quantity", "unit")
+                    },
+                },
             ],
             "steps": ["Bland."],
             "source": {"kind": "user", "relationship": "user_supplied"},
@@ -1017,12 +1041,38 @@ class PackInstallationTests(unittest.TestCase):
             [
                 ("amerikansk kopp", "1 amerikansk kopp", "1 amerikansk kopp mel"),
                 ("metrisk kopp", "1 metrisk kopp", "1 metrisk kopp melk"),
+                ("amerikansk væskekvart", "2 amerikansk væskekvart",
+                 "2 amerikansk væskekvart kraft"),
             ],
         )
         scaled = scale_recipe(stored, 4)
         requirements, unresolved = menu_requirements({"dishes": [scaled], "salads": []})
         self.assertEqual(unresolved, [])
-        self.assertEqual([row["unit"] for row in requirements], ["ml", "ml"])
+        self.assertEqual(
+            [(row["item"], row["quantity"], row["unit"]) for row in requirements],
+            [
+                ("kraft", {"numerator": 473176473, "denominator": 125000}, "ml"),
+                ("mel", {"numerator": 473176473, "denominator": 1000000}, "ml"),
+                ("melk", {"numerator": 500, "denominator": 1}, "ml"),
+            ],
+        )
+
+    def test_ready_pack_rejects_unknown_scalable_shopping_unit(self):
+        from recipe_portable import preflight_archive
+
+        self.manifest["recipe_schema_version"] = 2
+        self.record.update(status="ready", recipe=normalize_recipe({
+            "schema_version": 2,
+            "name": "Unsupported unit",
+            "portions": 2,
+            "ingredients": [{"item": "mel", "quantity": 1, "unit": "scoops"}],
+            "steps": ["Bland."],
+            "source": {"kind": "user", "relationship": "user_supplied"},
+            "rights": {"storage": "full"},
+        }))
+        path = self.package()
+        with self.assertRaisesRegex(RecipeError, "unsupported shopping units"):
+            preflight_archive(path, self.descriptor(path))
 
     def test_unchanged_pack_import_repairs_source_title_search_index(self):
         import sqlite3
