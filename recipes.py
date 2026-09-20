@@ -4383,9 +4383,21 @@ class RecipeStore:
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
                     if content_hash == existing["baseline_hash"]:
+                        next_status = (existing["status"] if existing["status"] == "archived"
+                                       else "active" if status == "ready" else "draft")
+                        if existing["status"] != next_status:
+                            revision, updated_at = existing["revision"] + 1, _now()
+                            connection.execute(
+                                "UPDATE recipes SET revision=?,status=?,updated_at=? WHERE id=?",
+                                (revision, next_status, updated_at, existing["id"]),
+                            )
+                            connection.execute(
+                                "INSERT INTO revisions VALUES(?,?,?,?,?)",
+                                (existing["id"], revision, next_status, existing["document"], updated_at),
+                            )
                         connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?", (version, existing["id"]))
-                        result.update(self._entry_metadata(connection, existing["id"]))
-                        return {"outcome": "unchanged", "recipe": result}
+                        result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (existing["id"],)).fetchone(), created=False)
+                        return {"outcome": "updated" if existing["status"] != next_status else "unchanged", "recipe": result}
                     # Publisher updates always change content. A same-content
                     # status transition in history is a durable local decision,
                     # including after any number of intervening pack upgrades.

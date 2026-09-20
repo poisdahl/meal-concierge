@@ -943,6 +943,43 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
         self.assertEqual(store.get(saved["id"]), edited)
 
+    def test_status_only_pack_update_applies_without_overwriting_local_content(self):
+        from recipes import RecipeStore, source_ingredient
+        self.recipe = normalize_recipe({
+            "schema_version": 2, "name": "Lentils", "portions": 2,
+            "portions_evidence": {"basis": "source", "input": "2 servings"},
+            "ingredients": [source_ingredient("200 g lentils")], "steps": ["Simmer."],
+            "source": {"kind": "wikibooks", "external_id": "123", "relationship": "adapted"},
+            "rights": {"storage": "full"},
+            "external_snapshot": {"content_hash": "a" * 64,
+                                  "fetched_at": "2026-09-06T00:00:00+00:00",
+                                  "changes": "Structured source recipe"},
+        })
+        self.record["recipe"] = self.recipe
+        self.manifest["recipe_schema_version"] = 2
+        self.record["status"] = "ready"
+        first = self.apply(self.package())
+        reference = first["results"][0]["bank_recipe_ref"]
+        store = RecipeStore(self.root / "state/recipes.sqlite3", "synthetic-household")
+        before = store.get(reference["recipe_id"])
+
+        downgraded = self.apply(self.versioned_package(
+            "status-only", [{**self.record, "status": "draft"}], pack_version="2"))
+        self.assertEqual((downgraded["status"], downgraded["updated"], downgraded["conflicts"]),
+                         ("complete", 1, 0))
+        after = store.get(reference["recipe_id"])
+        self.assertEqual((after["status"], after["revision"], after["pack"]["version"]),
+                         ("draft", before["revision"] + 1, "2"))
+        self.assertEqual(normalize_recipe(after), normalize_recipe(before))
+
+        store.update(after["id"], after["revision"], {**self.recipe, "notes": "My local change"})
+        edited = store.get(after["id"])
+        conflict = self.apply(self.versioned_package(
+            "status-only-conflict", [{**self.record, "status": "ready"}], pack_version="3"))
+        self.assertEqual((conflict["status"], conflict["conflicts"]), ("partial", 1))
+        self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
+        self.assertEqual(store.get(after["id"]), edited)
+
     def test_new_version_updates_unmodified_record_with_history(self):
         from recipes import RecipeStore
         path = self.package()
