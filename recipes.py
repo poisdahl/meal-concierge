@@ -1842,7 +1842,7 @@ class RecipeStore:
     @staticmethod
     def _search_text(recipe: Mapping[str, Any]) -> str:
         source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
-        return " ".join(_normalized_text(value) for value in [recipe.get("name"), *(recipe.get("tags") or []), *(recipe.get("categories") or []), source.get("publisher"), source.get("author")] if value)
+        return " ".join(_normalized_text(value) for value in [recipe.get("name"), source.get("title"), *(recipe.get("tags") or []), *(recipe.get("categories") or []), source.get("publisher"), source.get("author")] if value)
 
     @staticmethod
     def _favorite_state(connection: sqlite3.Connection, recipe_id: str) -> dict[str, Any]:

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+from urllib.parse import parse_qs, urlsplit
 
 from recipe_curation import SourceMethodExcluded
 from recipe_pack_sources import THEMEALDB_POLICY, THEMEALDB_TERMS, SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
@@ -323,6 +324,27 @@ def write_file(root, relative, data):
     return {'path': relative, 'bytes': len(data), 'sha256': digest(data)}
 
 
+def verify_reviewed_source(entry, payloads):
+    """Verify the complete revision chain required by reviewed active revisions."""
+    if entry['source'] != 'wikibooks':
+        return
+    rendered = payloads.get('rendered')
+    raw = payloads.get('raw')
+    parsed = rendered.get('parse', {}) if isinstance(rendered, dict) else {}
+    pages = raw.get('query', {}).get('pages', []) if isinstance(raw, dict) else []
+    page = next((value for value in pages if str(value.get('pageid')) == entry['source_id']), None)
+    revisions = page.get('revisions', []) if isinstance(page, dict) else []
+    revision = revisions[0] if len(revisions) == 1 and isinstance(revisions[0], dict) else {}
+    content = revision.get('slots', {}).get('main', {}).get('content')
+    oldids = parse_qs(urlsplit(entry.get('rendered', {}).get('url', '')).query).get('oldid', [])
+    if (str(parsed.get('pageid')) != entry['source_id'] or parsed.get('revid') != entry.get('revision')
+            or revision.get('revid') != entry.get('revision') or content != parsed.get('wikitext')
+            or revision.get('timestamp') != entry.get('revision_timestamp')
+            or not isinstance(content, str) or hashlib.sha1(content.encode()).hexdigest() != revision.get('sha1')
+            or oldids != [str(entry.get('revision'))]):
+        raise PackBuildError('reviewed amendment source revision chain mismatch for '+entry['source']+':'+entry['source_id'])
+
+
 def fingerprint():
     modules = ['recipes', 'recipe_quantities', 'recipe_assets', 'recipe_pack_sources', 'recipe_portable', 'recipe_curation']
     values = {name: digest(Path(importlib.import_module(name).__file__).read_bytes()) for name in modules}
@@ -457,7 +479,7 @@ class Covers:
         return data
 
 
-def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None):
+def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None, reviewed_amendments=None, reviewed_amendments_sha256=None):
     from recipe_assets import RecipeAssetError
     from recipe_portable import AUTHORITATIVE_MEMBERSHIP, DEFAULT_COLLECTION_DISPLAY_NAME, canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe, categories_from_tags
@@ -473,11 +495,17 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         raise PackBuildError('expected snapshot SHA-256 is required')
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', pack_version):
         raise PackBuildError('invalid pack version')
-    read_file(snapshot, 'SEALED', 4096)
+    sealed = load_json(read_file(snapshot, 'SEALED', 4096))
+    if (not isinstance(sealed, dict) or set(sealed) != {'sealed_at', 'snapshot_sha256', 'status'}
+            or sealed.get('snapshot_sha256') != snapshot_sha256
+            or not isinstance(sealed.get('sealed_at'), str) or not isinstance(sealed.get('status'), str)):
+        raise PackBuildError('SEALED does not bind the expected snapshot')
     source_bytes = read_file(snapshot, 'snapshot.json', MAX_SOURCE_BODY)
     if digest(source_bytes) != snapshot_sha256:
         raise PackBuildError('sealed snapshot digest mismatch')
     source = load_json(source_bytes)
+    if sealed.get('status') != source.get('status') or sealed.get('sealed_at') != source.get('sealed_at'):
+        raise PackBuildError('SEALED metadata differs from snapshot')
     entries = []
     for name in ('wikibooks', 'themealdb'):
         filename = name + '-manifest.json'
@@ -510,9 +538,31 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             raise PackBuildError('curation contains unknown source identities')
     elif curation_sha256:
         raise PackBuildError('curation checksum requires its file')
+    reviewed = None
+    if reviewed_amendments is not None:
+        reviewed_amendments = Path(reviewed_amendments)
+        if not reviewed_amendments.is_absolute() or not re.fullmatch(r'[a-f0-9]{64}', reviewed_amendments_sha256 or ''):
+            raise PackBuildError('reviewed amendments require an absolute file and pinned SHA-256')
+        data = read_file(reviewed_amendments.parent, reviewed_amendments.name, 16 * 1024 * 1024)
+        if digest(data) != reviewed_amendments_sha256:
+            raise PackBuildError('reviewed amendments digest mismatch')
+        document = load_json(data)
+        if not isinstance(document, dict) or set(document) != {'schema', 'records'} or document['schema'] != 1 or not isinstance(document['records'], dict):
+            raise PackBuildError('unsupported reviewed amendments input')
+        reviewed = document['records']
+        binding = {'source_hash', 'source_identity', 'source_payload_hash', 'curated_recipe_hash'}
+        if any(not isinstance(value, dict) or not binding <= set(value) for value in reviewed.values()):
+            raise PackBuildError('reviewed amendments require complete source and curated recipe binding')
+        recipe_identities = {f'{entry["source"]}:{entry["source_id"]}' for entry in entries if entry['classification'] == 'recipe'}
+        if set(reviewed) - recipe_identities:
+            raise PackBuildError('reviewed amendments contain unknown recipe identities')
+    elif reviewed_amendments_sha256:
+        raise PackBuildError('reviewed amendments checksum requires its file')
     versions = fingerprint()
     if amendments is not None:
         versions['curation_input_sha256'] = curation_sha256
+    if reviewed is not None:
+        versions['reviewed_amendments_input_sha256'] = reviewed_amendments_sha256
     if covers:
         versions['covers_manifest_sha256'] = covers.manifest_sha256
     run_key = digest(encoded({'snapshot': snapshot_sha256, 'versions': versions, 'policy': RIGHTS_POLICY, 'pack_version': pack_version}))
@@ -523,6 +573,7 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
     counts = Counter()
     asset_ids = set()
     reused = 0
+    reviewed_applied = set()
     for index, entry in enumerate(sorted(entries, key=lambda e: (e['source'], int(e['source_id'])))):
         identity = entry['source'] + ':' + entry['source_id']
         base = {'source': entry['source'], 'source_id': entry['source_id'], 'url': entry['url'], 'classification': entry['classification']}
@@ -535,7 +586,11 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             counts[(entry['source'], base['status'])] += 1
             continue
         # Verify every consumed original each run, even when normalized output is cached.
-        payloads = {kind: load_json(read_file(snapshot, entry[kind]['path'], MAX_SOURCE_BODY, entry[kind])) for kind in ('raw', 'rendered') if kind in entry}
+        payload_bytes = {kind: read_file(snapshot, entry[kind]['path'], MAX_SOURCE_BODY, entry[kind]) for kind in ('raw', 'rendered') if kind in entry}
+        payloads = {kind: load_json(data) for kind, data in payload_bytes.items()}
+        source_payload_hash = digest(payload_bytes.get('rendered', payload_bytes['raw']))
+        if reviewed is not None and identity in reviewed:
+            verify_reviewed_source(entry, payloads)
         key = digest(encoded({'entry': entry, 'run': run_key}))
         filename = f'{cache}/{entry["source"]}-{entry["source_id"]}.json'
         cached = None
@@ -566,14 +621,11 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 if amendments is not None:
                     from recipe_curation import curate
                     try:
-                        recipe, credit = curate(recipe, credit, pack_version=pack_version, amendments=amendments)
+                        recipe, credit = curate(recipe, credit, pack_version=pack_version, amendments=amendments,
+                                                source_payload_hash=source_payload_hash)
                     except (RecipeError, KeyError, TypeError, ValueError) as exc:
                         raise PackBuildError('curation failed for '+entry['source']+':'+entry['source_id']+': '+str(exc)) from exc
                 recipe = normalize_recipe({**recipe, "categories": categories_from_tags(recipe.get("tags", []))})
-                status, reasons = readiness(recipe)
-                reasons.extend(credit.get('normalization_issues', []))
-                if reasons:
-                    status = 'draft'
                 image_status = entry.get('image_status') or 'no_candidate'
                 if entry.get('image'):
                     image_reader = _mealdb_image_credit if entry['source'] == 'themealdb' else _image_credit
@@ -601,6 +653,17 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                                 recipe['image'] = None
                                 image_status = 'invalid_derivative'
                                 credit['image_error'] = 'managed_cover_unavailable_or_invalid'
+                if reviewed is not None:
+                    from recipe_curation import apply_amendment
+                    try:
+                        recipe, credit = apply_amendment(recipe, credit, reviewed,
+                                                         source_payload_hash=source_payload_hash)
+                    except (RecipeError, KeyError, TypeError, ValueError) as exc:
+                        raise PackBuildError('reviewed amendment failed for '+entry['source']+':'+entry['source_id']+': '+str(exc)) from exc
+                status, reasons = readiness(recipe)
+                reasons.extend(credit.get('normalization_issues', []))
+                if reasons:
+                    status = 'draft'
                 cached = {'recipe': recipe, 'status': status, 'reasons': reasons, 'credit': credit, 'image_status': image_status}
             except SourceMethodExcluded as exc:
                 cached = {'status': 'excluded_missing_source_method', 'reason': str(exc)}
@@ -613,6 +676,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 raise PackBuildError('normalized source entry exceeds cache bound')
             write_file(output, filename, cached_bytes)
         status = cached['status']
+        if reviewed is not None and identity in reviewed and 'recipe' in cached:
+            reviewed_applied.add(identity)
         counts[(entry['source'], status)] += 1
         base.update({k: v for k, v in cached.items() if k not in {'recipe', 'credit'}})
         if 'recipe' in cached:
@@ -646,6 +711,9 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         coverage.append(base)
         if stop_after is not None and index + 1 >= stop_after:
             return {'complete': False, 'processed': len(coverage), 'cache_reused': reused}
+    if reviewed is not None and reviewed_applied != set(reviewed):
+        missing = ', '.join(sorted(set(reviewed) - reviewed_applied))
+        raise PackBuildError('reviewed amendments were not applied: '+missing)
     release = f'{cache}/release'
     files = []
     def put(name, data):
@@ -754,10 +822,14 @@ def main():
     parser.add_argument('--covers-manifest-sha256')
     parser.add_argument('--curation', type=Path)
     parser.add_argument('--curation-sha256')
+    parser.add_argument('--reviewed-amendments', type=Path)
+    parser.add_argument('--reviewed-amendments-sha256')
     args = parser.parse_args()
     print(json.dumps(build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
                            covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256,
-                           curation=args.curation, curation_sha256=args.curation_sha256), indent=2))
+                           curation=args.curation, curation_sha256=args.curation_sha256,
+                           reviewed_amendments=args.reviewed_amendments,
+                           reviewed_amendments_sha256=args.reviewed_amendments_sha256), indent=2))
 
 
 if __name__ == '__main__':

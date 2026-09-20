@@ -8,10 +8,12 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from recipe_curation import batch_mass, curate, recovered, serving_estimate
+from recipe_curation import apply_amendment, batch_mass, canonical_recipe_hash, curate, recovered, serving_estimate
 from recipe_pack_sources import _ingredient
 from recipe_portable import FORMAT, apply_archive, canonical_bytes, preflight_archive, write_archive
 from recipe_quantities import read_quantity
+from product_planner import menu_requirements
+from recipe_delivery import render_email, render_menu, render_pdf
 from recipes import RecipeError, RecipeStore, normalize_recipe, prepare_recipe_input, scale_recipe, source_ingredient
 
 
@@ -159,6 +161,92 @@ class CurationTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 curate(recipe, {'normalization_issues': ['missing_steps']}, pack_version='1',
                        amendments={'wikibooks:123': {**patch, **changes}})
+
+    def test_reviewed_translation_is_dual_bound_and_keeps_runtime_notes(self):
+        recipe = source_recipe()
+        recipe.update(language='en-GB', portions=4,
+                      portions_evidence={'basis':'source','input':'Serves 4','conversion':None},
+                      notes='Keep refrigerated for 2 days.',
+                      storage='Keep refrigerated for 2 days.', reheating='Reheat for 5 minutes.',
+                      steps=['Bake at 180C/350F/Gas 4 for 15-20 minutes; do not add water.'])
+        recipe = normalize_recipe(recipe)
+        before = deepcopy(recipe)
+        payload_hash = 'b' * 64
+        amendment = {
+            'source_hash': 'a' * 64,
+            'source_identity': 'wikibooks:123',
+            'source_payload_hash': payload_hash,
+            'curated_recipe_hash': canonical_recipe_hash(recipe),
+            'note': 'Independently reviewed Norwegian active fields.',
+            'resolved_issues': [],
+            'set': {
+                'name': 'Brød', 'language': 'nb-NO',
+                'steps': ['Stek ved 180C/350F/Gas 4 i 15-20 minutter; ikke tilsett vann.'],
+                'notes': 'Oppbevares kjølig i 2 dager.',
+                'storage': 'Oppbevares kjølig i 2 dager.',
+                'reheating': 'Varm opp i 5 minutter.',
+            },
+        }
+        result, credit = apply_amendment(recipe, {}, {'wikibooks:123': amendment},
+                                         source_payload_hash=payload_hash)
+        self.assertEqual(result['notes'], 'Oppbevares kjølig i 2 dager.')
+        self.assertEqual(result['language'], 'nb-NO')
+        self.assertEqual(result['storage'], 'Oppbevares kjølig i 2 dager.')
+        self.assertEqual(result['reheating'], 'Varm opp i 5 minutter.')
+        self.assertEqual(result['steps'][0], 'Stek ved 180C/350F/Gas 4 i 15-20 minutter; ikke tilsett vann.')
+        for field in ('ingredients', 'source', 'rights', 'external_snapshot', 'portions', 'yield'):
+            self.assertEqual(result[field], before[field])
+        self.assertEqual(credit['editorial_adaptation'], amendment['note'])
+        baseline_scaled = scale_recipe(before, 4)
+        translated_scaled = scale_recipe(result, 4)
+        self.assertEqual(translated_scaled['shopping_requirements'], baseline_scaled['shopping_requirements'])
+        menu = {'week': '2026-W39', 'dishes': [translated_scaled], 'salads': []}
+        requirements, unresolved = menu_requirements(menu)
+        self.assertEqual((requirements, unresolved), menu_requirements(
+            {'week': '2026-W39', 'dishes': [baseline_scaled], 'salads': []}))
+        rendered = render_menu(menu, None, images=False)
+        self.assertIn('Brød', rendered['text'])
+        self.assertIn('180C/350F/Gas 4', rendered['text'])
+        self.assertIn('Oppbevares kjølig i 2 dager.', rendered['text'])
+        pdf = render_pdf(rendered)
+        self.assertTrue(pdf.startswith(b'%PDF'))
+        message = render_email(rendered, recipient='owner@example.test', sender='sender@example.test',
+                               subject='Ukesmeny 2026-W39', pdf=pdf)
+        self.assertIn(b'application/pdf', message)
+
+        for changed in (
+                {'source_payload_hash': 'c' * 64},
+                {'curated_recipe_hash': 'd' * 64},
+                {'source_identity': 'wikibooks:999'},
+                {'source_payload_hash': None}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                apply_amendment(deepcopy(before), {}, {'wikibooks:123': {**amendment, **changed}},
+                                source_payload_hash=payload_hash)
+        without_notes = deepcopy(amendment)
+        without_notes['set'].pop('notes')
+        without_notes['curated_recipe_hash'] = canonical_recipe_hash(before)
+        preserved, _ = apply_amendment(deepcopy(before), {}, {'wikibooks:123': without_notes},
+                                       source_payload_hash=payload_hash)
+        self.assertEqual(preserved['notes'], before['notes'])
+        protected = deepcopy(amendment)
+        protected['set'] = {'ingredients': [{**before['ingredients'][0], 'quantity': 999, 'unit': 'kg'}]}
+        for value in (protected, {**amendment, 'omit_cover': True}):
+            with self.subTest(protected=value), self.assertRaisesRegex(ValueError, 'protected recipe fields'):
+                apply_amendment(deepcopy(before), {}, {'wikibooks:123': value},
+                                source_payload_hash=payload_hash)
+        with self.assertRaisesRegex(ValueError, 'complete source and curated recipe binding'):
+            apply_amendment(deepcopy(before), {}, {'wikibooks:123': {
+                'source_hash': 'a' * 64, 'note': 'Unbound language change.',
+                'resolved_issues': [], 'set': {'language': 'nb-NO'},
+            }})
+
+    def test_legacy_amendment_still_puts_review_explanation_in_notes(self):
+        result, credit = apply_amendment(source_recipe(), {}, {'wikibooks:123': {
+            'source_hash': 'a' * 64, 'note': 'Legacy explanation.',
+            'resolved_issues': [], 'set': {'name': 'Legacy bread'},
+        }})
+        self.assertEqual(result['notes'], 'Meal Concierge editorial adaptation: Legacy explanation.')
+        self.assertEqual(credit['editorial_adaptation'], 'Legacy explanation.')
 
 
 class PublisherUpgradeTests(unittest.TestCase):

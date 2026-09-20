@@ -9,7 +9,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, write_file
+from build_recipe_pack import Covers, PackBuildError, REVIEWED_IMAGE_CREDITS, _image_credit, build, confined, digest, encoded, read_file, verify_reviewed_source, write_file
+from recipe_curation import canonical_recipe_hash
 from recipe_pack_sources import SourceParseError, SourceHTML, mealdb_recipe, readiness, wikibooks_recipe
 
 
@@ -331,21 +332,33 @@ class BuildRoundtripTests(unittest.TestCase):
         for number in (123, 124):
             row = entry()
             row.update(source_id=str(number), classification='recipe', status='downloaded')
-            payload = {'parse': {'pageid': number, 'revid': 456, 'text':
-                       '<table class="infobox"><tr><th>Servings</th><td>2</td></tr></table>'
-                       '<h2>Ingredients</h2><p>100 g rice</p><h2>Procedure</h2><p>Boil.</p>'}}
-            info = write_file(source, f'responses/{number}.json', encoded(payload))
-            row['raw'] = info
-            row['rendered'] = {**info, 'fetched_at': row['fetched_at']}
+            wikitext = 'Synthetic source '+str(number)
+            text = ('<table class="infobox"><tr><th>Servings</th><td>2</td></tr></table>'
+                    '<h2>Ingredients</h2><p>100 g rice</p><h2>Procedure</h2><p>Boil.</p>')
+            rendered = {'parse': {'pageid': number, 'revid': 456, 'text': text, 'wikitext': wikitext}}
+            raw = {'query': {'pages': [{'pageid': number, 'revisions': [{
+                'revid': 456, 'timestamp': '2026-09-05T00:00:00Z',
+                'sha1': hashlib.sha1(wikitext.encode()).hexdigest(),
+                'slots': {'main': {'content': wikitext}},
+            }]}]}}
+            row['raw'] = write_file(source, f'responses/{number}-raw.json', encoded(raw))
+            row['rendered'] = {**write_file(source, f'responses/{number}-rendered.json', encoded(rendered)),
+                               'fetched_at': row['fetched_at'],
+                               'url': f'https://en.wikibooks.org/w/api.php?action=parse&oldid=456'}
+            row['revision_timestamp'] = '2026-09-05T00:00:00Z'
             rows.append(row)
         files = {}
         for name, data in [('wikibooks-manifest.json', rows), ('themealdb-manifest.json', [])]:
             files[name] = write_file(source, name, encoded(data))
-        snapshot = {'snapshot_id': 'synthetic', 'scope': 'Two synthetic recipes', 'source_limitations': [], 'files': files}
+        snapshot = {'snapshot_id': 'synthetic', 'status': 'synthetic_complete',
+                    'sealed_at': '2026-09-06T00:00:00+00:00',
+                    'scope': 'Two synthetic recipes', 'source_limitations': [], 'files': files}
         raw = encoded(snapshot)
         write_file(source, 'snapshot.json', raw)
-        write_file(source, 'SEALED', b'synthetic fixture\n')
-        return source, digest(raw)
+        sha = digest(raw)
+        write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                              'snapshot_sha256': sha, 'status': 'synthetic_complete'}))
+        return source, sha
 
     def test_clean_repeat_and_resume_use_real_shared_codec(self):
         from recipe_portable import open_archive
@@ -419,6 +432,57 @@ class BuildRoundtripTests(unittest.TestCase):
                 build(source,root/'bad',**options)
             self.assertFalse(list((root/'bad').glob('*.zip')))
 
+    def test_reviewed_amendments_apply_after_curation_with_exact_source_and_recipe_hashes(self):
+        from recipe_portable import open_archive
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);source,sha=self.fixture(root)
+            baseline=build(source,root/'baseline',snapshot_sha256=sha,pack_version='test.1')
+            with open_archive(root/'baseline'/baseline['archive']) as archive:
+                first=next(archive.records())
+            recipe=first['recipe']
+            identity=first['recipe_id']
+            manifest=next(row for row in json.loads((source/'wikibooks-manifest.json').read_bytes())
+                          if row['source_id']==identity.split(':',1)[1])
+            payloads={kind:json.loads((source/manifest[kind]['path']).read_bytes()) for kind in ('raw','rendered')}
+            verify_reviewed_source(manifest,payloads)
+            broken=json.loads(json.dumps(manifest));broken['rendered']['url']='https://en.wikibooks.org/w/api.php?action=parse&oldid=999999'
+            with self.assertRaisesRegex(PackBuildError,'source revision chain'):
+                verify_reviewed_source(broken,payloads)
+            broken_payloads=json.loads(json.dumps(payloads));broken_payloads['raw']['query']['pages'][0]['revisions'][0]['slots']['main']['content']='changed'
+            with self.assertRaisesRegex(PackBuildError,'source revision chain'):
+                verify_reviewed_source(manifest,broken_payloads)
+            amendment={'source_hash':recipe['external_snapshot']['content_hash'],
+                'source_identity':identity,'source_payload_hash':manifest['rendered']['sha256'],
+                'curated_recipe_hash':canonical_recipe_hash(recipe),
+                'note':'Reviewed Norwegian active revision.','resolved_issues':[],
+                'set':{'name':'Norsk ris','language':'nb-NO','steps':['Kok i 10 minutter; ikke skyll.'],
+                       'notes':None,'storage':'Oppbevares kjølig i 2 dager.','reheating':'Varm i 5 minutter.'}}
+            document={'schema':1,'records':{identity:amendment}}
+            path=root/'reviewed.json';path.write_bytes(encoded(document))
+            options={'snapshot_sha256':sha,'pack_version':'test.2','reviewed_amendments':path,
+                     'reviewed_amendments_sha256':digest(path.read_bytes())}
+            result=build(source,root/'reviewed',**options)
+            with open_archive(root/'reviewed'/result['archive']) as archive:
+                translated=next(row for row in archive.records() if row['recipe_id']==identity)['recipe']
+            self.assertEqual(translated['name'],'Norsk ris')
+            self.assertEqual(translated['language'],'nb-NO')
+            self.assertIsNone(translated['notes'])
+            self.assertEqual(translated['ingredients'],recipe['ingredients'])
+            self.assertEqual(translated['source'],recipe['source'])
+            self.assertEqual(translated['rights'],recipe['rights'])
+            for field in ('source_payload_hash','curated_recipe_hash'):
+                broken={**document,'records':{identity:{**amendment,field:'0'*64}}}
+                path.write_bytes(encoded(broken));options['reviewed_amendments_sha256']=digest(path.read_bytes())
+                with self.subTest(field=field), self.assertRaisesRegex(PackBuildError,'reviewed amendment'):
+                    build(source,root/('bad-'+field),**options)
+            exclusion={'schema':1,'records':{identity:{'source_hash':recipe['external_snapshot']['content_hash'],
+                                                       'exclude_reason':'missing_source_method'}}}
+            curation=root/'curation.json';curation.write_bytes(encoded(exclusion))
+            path.write_bytes(encoded(document));options.update(curation=curation,
+                curation_sha256=digest(curation.read_bytes()),reviewed_amendments_sha256=digest(path.read_bytes()))
+            with self.assertRaisesRegex(PackBuildError,'reviewed amendments were not applied'):
+                build(source,root/'excluded-reviewed',**options)
+
     def test_mealdb_text_and_cover_survive_build_resume_and_policy_cache_change(self):
         from unittest.mock import patch
         import build_recipe_pack
@@ -443,6 +507,8 @@ class BuildRoundtripTests(unittest.TestCase):
             snapshot_bytes = encoded(snapshot)
             write_file(source, 'snapshot.json', snapshot_bytes)
             sha = digest(snapshot_bytes)
+            write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                                  'snapshot_sha256': sha, 'status': 'synthetic_complete'}))
             manifest['source_snapshot_sha256'] = sha
             association = manifest['recipes'][0]
             association.update(source='themealdb', revision=None,
@@ -497,6 +563,14 @@ class BuildRoundtripTests(unittest.TestCase):
                 build(source, source / 'output', snapshot_sha256=sha, pack_version='test.1')
             with self.assertRaises(PackBuildError):
                 build(source, root / 'output', snapshot_sha256='0' * 64, pack_version='test.1')
+            write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                                  'snapshot_sha256': '0' * 64, 'status': 'synthetic_complete'}))
+            with self.assertRaisesRegex(PackBuildError, 'SEALED'):
+                build(source, root / 'wrong-pointer', snapshot_sha256=sha, pack_version='test.1')
+            write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                                  'snapshot_sha256': sha, 'status': 'wrong'}))
+            with self.assertRaisesRegex(PackBuildError, 'metadata'):
+                build(source, root / 'wrong-metadata', snapshot_sha256=sha, pack_version='test.1')
 
     def test_corrupt_cover_repair_resumes_to_clean_exact_archive(self):
         from recipe_portable import open_archive
@@ -515,6 +589,8 @@ class BuildRoundtripTests(unittest.TestCase):
             snapshot_bytes = encoded(snapshot)
             write_file(source, 'snapshot.json', snapshot_bytes)
             sha = digest(snapshot_bytes)
+            write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                                  'snapshot_sha256': sha, 'status': 'synthetic_complete'}))
             cover_manifest['source_snapshot_sha256'] = sha
             association = cover_manifest['recipes'][0]
             association.update(source_raw_sha256=rows[0]['raw']['sha256'], source_rendered_sha256=rows[0]['rendered']['sha256'])

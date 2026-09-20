@@ -119,11 +119,15 @@ class SealedSourceRecoveryTests(unittest.TestCase):
                    'rendered': {**raw, 'fetched_at': '2026-09-06T00:00:00+00:00'}}
             files = {name: write_file(source, name, encoded(value)) for name, value in
                      [('wikibooks-manifest.json', [row]), ('themealdb-manifest.json', [])]}
-            snapshot = encoded({'snapshot_id': 'synthetic-kefir', 'scope': 'One synthetic regression',
+            snapshot = encoded({'snapshot_id': 'synthetic-kefir', 'status': 'synthetic_complete',
+                                'sealed_at': '2026-09-06T00:00:00+00:00', 'scope': 'One synthetic regression',
                                 'source_limitations': [], 'files': files})
             write_file(source, 'snapshot.json', snapshot)
-            write_file(source, 'SEALED', b'synthetic fixture\n')
-            result = build(source, output, snapshot_sha256=digest(snapshot), pack_version='test.1', stop_after=1)
+            snapshot_sha256 = digest(snapshot)
+            write_file(source, 'SEALED', encoded({'sealed_at': '2026-09-06T00:00:00+00:00',
+                                                  'snapshot_sha256': snapshot_sha256,
+                                                  'status': 'synthetic_complete'}))
+            result = build(source, output, snapshot_sha256=snapshot_sha256, pack_version='test.1', stop_after=1)
             self.assertFalse(result['complete'])
             self.assertEqual(list(output.rglob('*.zip')), [])
             cached = json.loads(next(output.glob('cache/*/wikibooks-461702.json')).read_text())['result']
