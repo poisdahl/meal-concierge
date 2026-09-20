@@ -30,7 +30,7 @@ class CancellationPreconditionError(HouseholdError):
     """Cancellation stopped before the final provider control was dispatched."""
 
 
-STATE_VERSION = 12
+STATE_VERSION = 13
 
 RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
@@ -199,7 +199,7 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "occurrences": {},
         "batch_outcomes": {"sources": {}, "leftovers": {}},
         "planning_feedback": [],
-        "menu_planning": {"locks": {}, "history": {}, "retired": {}, "applied": {}, "outcomes": {}},
+        "menu_planning": {"locks": {}, "history": {}, "retired": {}, "applied": {}, "outcomes": {}, "prepared": {}},
         "recipe_usage": {},
         "recipe_usage_requests": {},
         "order_snapshots": {},
@@ -669,11 +669,12 @@ def _migrate_state(
     before_v10: Callable[[Mapping[str, Any]], None] | None = None,
     before_v11: Callable[[Mapping[str, Any]], None] | None = None,
     before_v12: Callable[[Mapping[str, Any]], None] | None = None,
+    before_v13: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     version = state.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HouseholdError("household state version is invalid")
-    if version > 12:
+    if version > 13:
         raise HouseholdError("household state is newer than this meal concierge")
     if version >= 6 and "favorites" in state:
         raise HouseholdError("household state contains the retired favorites key")
@@ -843,6 +844,14 @@ def _migrate_state(
         if isinstance(pending, dict) and pending.get("status") == "awaiting_confirmation" and pending.get("occurrence") and "automatic_checkout" not in pending and state.get("schedule", {}).get("mode") == "cart_ready":
             pending["automatic_checkout"] = False
         state["version"] = 12
+    if state["version"] == 12:
+        planning = state.get("menu_planning")
+        if not isinstance(planning, dict) or set(planning) != {"locks", "history", "retired", "applied", "outcomes"}:
+            raise HouseholdError("household v12 planning metadata conflicts with migration")
+        if before_v13 is not None:
+            before_v13(state)
+        planning["prepared"] = {}
+        state["version"] = 13
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
     state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
@@ -862,7 +871,7 @@ def _migrate_state(
     if not isinstance(state.get("planning_feedback"), list) or len(state["planning_feedback"]) > 500:
         raise HouseholdError("household planning feedback is invalid")
     planning = state.get("menu_planning")
-    if not isinstance(planning, dict) or set(planning) != {"locks", "history", "retired", "applied", "outcomes"} or any(not isinstance(v, dict) or len(v) > 2000 for v in planning.values()):
+    if not isinstance(planning, dict) or set(planning) != {"locks", "history", "retired", "applied", "outcomes", "prepared"} or any(not isinstance(v, dict) or len(v) > 2000 for v in planning.values()):
         raise HouseholdError("household planning metadata is invalid")
     _validate_product_items(state.get("product_favorites"), "product_favorites")
     state.setdefault("recipe_usage", {})
@@ -1052,6 +1061,12 @@ class StateStore:
                     if not backup.exists():
                         _atomic_json(backup, value)
 
+            def backup_v12(value: Mapping[str, Any]) -> None:
+                if source_version == 12:
+                    backup = self.directory / "state-v12.backup.json"
+                    if not backup.exists():
+                        _atomic_json(backup, value)
+
             _migrate_state(
                 state,
                 self.config,
@@ -1062,6 +1077,7 @@ class StateStore:
                 before_v10=backup_v9,
                 before_v11=backup_v10,
                 before_v12=backup_v11,
+                before_v13=backup_v12,
             )
             state_household = state.get("household")
             configured_household = str(self.config["household"])

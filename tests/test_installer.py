@@ -1056,7 +1056,7 @@ class InstallerTests(unittest.TestCase):
         old = RecipeStore(state / 'recipes.sqlite3', CONFIG['household']).get('rec_v1', 1)
         self.assertEqual(old['name'], RECIPE['name'])
         self.assertEqual(old['library_recipe_ref']['version'], '1')
-        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 12)
+        self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 13)
         with sqlite3.connect(state / 'recipes.sqlite3') as db:
             self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '6')
             self.assertEqual(db.execute('select response_json from idempotency where key=?', ('v1-key',)).fetchone()[0], '{"id":"rec_v1"}')

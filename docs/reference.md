@@ -314,7 +314,7 @@ recovery. Installation does not perform provider login or prompt for payment
 configuration. Oda and MENY require the private `vipps_phone_number` in their
 config before a Vipps checkout can dispatch.
 
-JSON and SQLite migrations run offline. Clean state is v12; existing v6
+JSON and SQLite migrations run offline. Clean state is v13; existing v6
 households gain `delivery.strategy="keep_selected"`, while new installations
 use `"cheapest"`. Preserve original operation identities and latest outcome
 journals. Do not restore old journals over possible external effects.
@@ -1447,9 +1447,15 @@ planner; strict targets are evaluated for that replacement scope, and hard or
 unknown constraints are never relaxed. Impossible replacements return
 `needs_input`, without a partial successor.
 
-Pass the complete unchanged `replan` to `menu.replan_apply`. A stale date, menu,
-profile, usage, lock or recipe selection requires fresh preparation; pending
-checkout/cancellation/order-change state blocks apply. Apply is idempotent and
+Pass the exact `apply_arguments` from `replan_prepare` unchanged to
+`menu.replan_apply`. Its opaque `replan_ref` resolves the durable prepared inputs;
+the service regenerates the full replan and requires the same digest before saving.
+Large MCP results may omit those full details while retaining these exact apply
+arguments. A missing reference or stale date, menu, profile, usage, lock or recipe
+selection requires fresh preparation; pending checkout/cancellation/order-change
+state blocks apply. An oversized apply result returns the committed `menu_ref` and
+compact slot summary for exact follow-up operations. The complete unchanged legacy
+`replan` remains accepted. Apply is idempotent and
 creates an exact `supersedes` successor. Predecessor menu/order/email and usage
 snapshots remain unchanged. Carried past/cooked slots are historical display,
 not remaining shopping. Future locked/new slots contribute once; slot ownership
@@ -1463,6 +1469,8 @@ Slot metadata uses the additive v8→v9 migration, with
 one private atomic `state-v8.backup.json` before upgrading an existing v8 file.
 Direct v7 upgrades retain their own `state-v7.backup.json`. Backups are 0600,
 never overwritten; migration is atomic/idempotent and newer versions fail closed.
+V12→v13 atomically backs up `state-v12.backup.json` before adding the durable
+prepared-replan store, so restoring that backup supports rollback to v12 code.
 Planning metadata is bounded to 2,000 menus; reaching the bound stops new
 successors without deleting historical or unresolved state. The default remains
 one different dinner per day with no inferred leftovers or batch capability.

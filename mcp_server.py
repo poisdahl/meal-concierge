@@ -1356,12 +1356,123 @@ def _bounded_menu_plan_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@server.tool(structured_output=False, description="Accepted recurring batch settings produce complete linked eating slots and per-source quantities/guidance before save, with no fresh weekly batch confirmation. Shortfalls name the needed adjustment once. For automatic weekly selection, pass planner_input with week and optional dates/portions, omitting candidates. Explicit dates preserve accepted batch mode. A user-approved one-plan prepared_portion_range override leaves the permanent profile unchanged. Unknown required specialist equipment excludes a recipe; prefer ordinary-tool alternatives. Optional available_ingredients is at most 32 distinct exact item names with quantity/unit when known and use_first=true when explicitly requested. Pass only the user's current stock assertions: names influence ranking through loaded ingredients; unknown quantities/units never establish coverage. Quantified compatible stock is allocated once over the whole menu. This is request context, not persistent inventory. The server searches bounded local and selected retailer sources and returns discovery statuses; save only the complete unchanged save_ref as planner_ref. " + "Get, deterministically plan, save, add a dated meal or clear the current menu. For an explicit request such as dessert for two on Thursday, brunch for four on Sunday, or sauce and side dishes with dinner, search the requested recipe category, resolve a suitable exact reference, then use add_slot with slot_input={date:ISO-date,meal_type,portions:integer,reference:{recipe_ref:{id,revision}} or {discovery_ref}} plus a stable idempotency_key and the current exact menu_ref. Omit menu_ref only when there is no current menu. meal_type accepts every recipe category: breakfast/brunch/lunch/dinner/starter/side/dessert/snack/baking/bread/drink/sauce/dressing/condiment/preserve. It appends to the same week, preserves other dishes and their portions, and supports multiple courses on a date. It saves local planning only; returned shopping_comparison describes ingredient changes. The normal plan/replan operations select dinners; replan remaining_dates preserves non-dinner slots.  Plan accepts a bounded candidate list containing only exact built-in recipe_ref values or still-valid discovery_ref values. It returns one ranked winner by default: pass the small four-field save_ref unchanged as planner_ref to save; never copy or reconstruct selection. selection contains every dated meal, exact reference, portions, concise reasons and material warnings for display; verbose planner evidence remains available through CLI/service diagnostics. Requested alternatives contain their own save_ref and selection in rank order. The reference binds the exact resolved request, planner_version, input_digest and selection_digest; save recomputes the full selection and rejects stale or changed references. For pre-save feedback or product preparation, resolve_handoff with the unchanged planner_ref returns the current validated full planner_handoff without saving; pass that returned object unchanged to those tools. Existing complete five-field planner_handoff saves remain supported and strict; never mix planner_ref with planner_handoff or menu. Menu returns one compact JSON text block. Discovery retains source/unknown state and summarized rejection counts; candidate_summary retains counts, non-pass blockers and selected-candidate advisories, and work_summary retains explored-state limits. Candidate facts may contain only structured non-safety facts explicitly supplied by the user or an authoritative source—never model inference or recipe prose. Caller facts.safety assertions remain unsupported. Missing generic safety metadata is advisory during planning; known allergy/never-buy conflicts require alternatives and actual products are reassessed before checkout. Unknown default time, nutrition and perishability facts are named and unscored. On a complete weekly request, positive saved fish, legume, wholegrain/potato and vegetable-type minima are automatic hard targets; other explicit strict_targets make supported unknowns blocking. Highest-ranked means only within the returned planner version and exact candidate scope, not objectively best. Planner save re-resolves locally, revalidates profile/history/hard constraints/digests, freezes the selected snapshots and changes no provider cart. A complete legacy menu that misses a saved weekly minimum is rejected; partial drafts remain supported. Structured menus expose stable slot IDs. Lock is explicit desired state for exact menu_ref and slot_id. replan_prepare accepts exact remaining_dates and planner_input, optionally locked_slot_ids, and returns one complete replan for unchanged replan_apply. Past/cooked/locked slots are carried and history remains immutable through a linked successor; any cart/order change requires a separate explicit action. Legacy schedules are never guessed into slots. Explicit batch_prepare links dinner slots only and takes exact menu_ref and batch_spec with source slot/snapshot, exact portions, structured current-user suitability/storage/interval and target leftover slots. Show the unchanged batch_plan and get a clear current-user confirmation before batch_apply with its digest and confirmation statement; never invent consent or safety facts, and a bare boolean is insufficient. Batch source cooking requires actual_batch prepared/consumed portions; leftovers require a confirmed matching source. These facts never establish food-safety compliance.")
-def meal_concierge_menu(action: Literal["get", "assess", "plan", "save", "add_slot", "resolve_handoff", "clear", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"] = "get", menu: dict[str, Any] | None = None, planner_input: dict[str, Any] | None = None, planner_handoff: dict[str, Any] | None = None, planner_ref: dict[str, Any] | None = None, menu_id: str | None = None, expected_revision: int | None = None, allow_repeat_keys: list[str] | None = None, override_reason: str | None = None, interactive: bool = True, menu_ref: dict[str, Any] | None = None, slot_id: str | None = None, locked: bool | None = None, remaining_dates: list[str] | None = None, locked_slot_ids: list[str] | None = None, as_of_date: str | None = None, replan: dict[str, Any] | None = None, batch_spec: dict[str, Any] | None = None, batch_plan: dict[str, Any] | None = None, batch_confirmation: dict[str, Any] | None = None, slot_input: dict[str, Any] | None = None, idempotency_key: str | None = None) -> Any:
+def _menu_successor_summary(successor: Any) -> dict[str, Any]:
+    if not isinstance(successor, dict):
+        return {"week": None, "slots": []}
+    dishes = {
+        dish.get("recipe_key"): dish for dish in successor.get("dishes", [])
+        if isinstance(dish, dict) and isinstance(dish.get("recipe_key"), str)
+    }
+    slots = [{
+        **{key: slot[key] for key in (
+            "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
+        ) if key in slot},
+        **({"name": dishes[slot.get("recipe_key")].get("name")}
+           if isinstance(dishes.get(slot.get("recipe_key")), dict) else {}),
+    } for slot in successor.get("slots", []) if isinstance(slot, dict)]
+    return {"week": successor.get("week"), "slots": slots}
+
+
+def _bounded_menu_replan_result(result: dict[str, Any]) -> dict[str, Any]:
+    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    wire_chars = _mcp_text_wire_chars(text)
+    if wire_chars < MCP_MENU_WIRE_BUDGET:
+        return result
+    prepared = result.get("replan")
+    arguments = result.get("apply_arguments")
+    if (
+        not isinstance(prepared, dict) or prepared.get("status") != "prepared"
+        or not isinstance(arguments, dict) or set(arguments) != {"action", "replan_ref"}
+        or arguments.get("action") != "replan_apply"
+        or not isinstance(arguments.get("replan_ref"), str)
+        or re.fullmatch(r"replan_[a-f0-9]{64}", arguments["replan_ref"]) is None
+        or prepared.get("replan_digest") != arguments["replan_ref"].removeprefix("replan_")
+    ):
+        return {
+            "replan": {
+                "status": "needs_input", "reason": "mcp_action_response_too_large",
+                "projected_wire_chars": wire_chars,
+                "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+            },
+            "next": "Reduce the replan candidate scope and prepare again.",
+        }
+    successor = prepared.get("successor")
+    comparison = prepared.get("shopping_comparison")
+    projected = {
+        "replan": {
+            "status": "prepared", "projection": "apply_arguments_only",
+            "details_omitted": True, "replan_digest": prepared["replan_digest"],
+            "source": prepared.get("source"),
+            "remaining_dates": prepared.get("remaining_dates"),
+            "successor_summary": _menu_successor_summary(successor),
+            **({"shopping_comparison_counts": {
+                key: len(value) for key, value in comparison.items() if isinstance(value, list)
+            }} if isinstance(comparison, dict) else {}),
+            "projected_wire_chars": wire_chars,
+            "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+        },
+        "apply_arguments": arguments,
+        "next": (
+            "Call meal_concierge_menu with these unchanged apply_arguments. The service will "
+            "resolve the durable handoff, regenerate the full replan, and require the same "
+            "menu state and digest before saving the successor."
+        ),
+    }
+    projected_text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    if _mcp_text_wire_chars(projected_text) < MCP_MENU_WIRE_BUDGET:
+        return projected
+    return {
+        "replan": {
+            "status": "prepared", "projection": "apply_arguments_only",
+            "details_omitted": True, "replan_digest": prepared["replan_digest"],
+            "projected_wire_chars": wire_chars,
+            "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+        },
+        "apply_arguments": arguments,
+        "next": "Call meal_concierge_menu with these unchanged apply_arguments.",
+    }
+
+
+def _bounded_menu_replan_apply_result(result: dict[str, Any]) -> dict[str, Any]:
+    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    wire_chars = _mcp_text_wire_chars(text)
+    if wire_chars < MCP_MENU_WIRE_BUDGET:
+        return result
+    menu = result.get("menu")
+    if not isinstance(menu, dict) or any(key not in menu for key in ("menu_id", "revision", "digest")):
+        return {
+            "status": "applied_response_too_large",
+            "details_omitted": True,
+            "projected_wire_chars": wire_chars,
+            "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+        }
+    comparison = result.get("shopping_comparison")
+    return {
+        "status": "applied",
+        "projection": "committed_menu_ref",
+        "details_omitted": True,
+        "menu_ref": {key: menu[key] for key in ("menu_id", "revision", "digest")},
+        "menu_summary": _menu_successor_summary(menu),
+        **({"supersedes": menu["supersedes"]} if "supersedes" in menu else {}),
+        **({"shopping_comparison_counts": {
+            key: len(value) for key, value in comparison.items() if isinstance(value, list)
+        }} if isinstance(comparison, dict) else {}),
+        "projected_wire_chars": wire_chars,
+        "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+        "next": "Use menu_ref for product preparation or other exact follow-up operations.",
+    }
+
+
+@server.tool(structured_output=False, description="Accepted recurring batch settings produce complete linked eating slots and per-source quantities/guidance before save, with no fresh weekly batch confirmation. Shortfalls name the needed adjustment once. For automatic weekly selection, pass planner_input with week and optional dates/portions, omitting candidates. Explicit dates preserve accepted batch mode. A user-approved one-plan prepared_portion_range override leaves the permanent profile unchanged. Unknown required specialist equipment excludes a recipe; prefer ordinary-tool alternatives. Optional available_ingredients is at most 32 distinct exact item names with quantity/unit when known and use_first=true when explicitly requested. Pass only the user's current stock assertions: names influence ranking through loaded ingredients; unknown quantities/units never establish coverage. Quantified compatible stock is allocated once over the whole menu. This is request context, not persistent inventory. The server searches bounded local and selected retailer sources and returns discovery statuses; save only the complete unchanged save_ref as planner_ref. " + "Get, deterministically plan, save, add a dated meal or clear the current menu. For an explicit request such as dessert for two on Thursday, brunch for four on Sunday, or sauce and side dishes with dinner, search the requested recipe category, resolve a suitable exact reference, then use add_slot with slot_input={date:ISO-date,meal_type,portions:integer,reference:{recipe_ref:{id,revision}} or {discovery_ref}} plus a stable idempotency_key and the current exact menu_ref. Omit menu_ref only when there is no current menu. meal_type accepts every recipe category: breakfast/brunch/lunch/dinner/starter/side/dessert/snack/baking/bread/drink/sauce/dressing/condiment/preserve. It appends to the same week, preserves other dishes and their portions, and supports multiple courses on a date. It saves local planning only; returned shopping_comparison describes ingredient changes. The normal plan/replan operations select dinners; replan remaining_dates preserves non-dinner slots.  Plan accepts a bounded candidate list containing only exact built-in recipe_ref values or still-valid discovery_ref values. It returns one ranked winner by default: pass the small four-field save_ref unchanged as planner_ref to save; never copy or reconstruct selection. selection contains every dated meal, exact reference, portions, concise reasons and material warnings for display; verbose planner evidence remains available through CLI/service diagnostics. Requested alternatives contain their own save_ref and selection in rank order. The reference binds the exact resolved request, planner_version, input_digest and selection_digest; save recomputes the full selection and rejects stale or changed references. For pre-save feedback or product preparation, resolve_handoff with the unchanged planner_ref returns the current validated full planner_handoff without saving; pass that returned object unchanged to those tools. Existing complete five-field planner_handoff saves remain supported and strict; never mix planner_ref with planner_handoff or menu. Menu returns one compact JSON text block. Discovery retains source/unknown state and summarized rejection counts; candidate_summary retains counts, non-pass blockers and selected-candidate advisories, and work_summary retains explored-state limits. Candidate facts may contain only structured non-safety facts explicitly supplied by the user or an authoritative source—never model inference or recipe prose. Caller facts.safety assertions remain unsupported. Missing generic safety metadata is advisory during planning; known allergy/never-buy conflicts require alternatives and actual products are reassessed before checkout. Unknown default time, nutrition and perishability facts are named and unscored. On a complete weekly request, positive saved fish, legume, wholegrain/potato and vegetable-type minima are automatic hard targets; other explicit strict_targets make supported unknowns blocking. Highest-ranked means only within the returned planner version and exact candidate scope, not objectively best. Planner save re-resolves locally, revalidates profile/history/hard constraints/digests, freezes the selected snapshots and changes no provider cart. A complete legacy menu that misses a saved weekly minimum is rejected; partial drafts remain supported. Structured menus expose stable slot IDs. Lock is explicit desired state for exact menu_ref and slot_id. replan_prepare accepts exact remaining_dates and planner_input, optionally locked_slot_ids, and returns exact apply_arguments with a durable opaque replan_ref. Pass apply_arguments unchanged to replan_apply; never reconstruct the omitted replan. The service regenerates the full replan and rejects a missing, stale, altered, or wrong-menu reference. Past/cooked/locked slots are carried and history remains immutable through a linked successor; any cart/order change requires a separate explicit action. Legacy schedules are never guessed into slots. Explicit batch_prepare links dinner slots only and takes exact menu_ref and batch_spec with source slot/snapshot, exact portions, structured current-user suitability/storage/interval and target leftover slots. Show the unchanged batch_plan and get a clear current-user confirmation before batch_apply with its digest and confirmation statement; never invent consent or safety facts, and a bare boolean is insufficient. Batch source cooking requires actual_batch prepared/consumed portions; leftovers require a confirmed matching source. These facts never establish food-safety compliance.")
+def meal_concierge_menu(action: Literal["get", "assess", "plan", "save", "add_slot", "resolve_handoff", "clear", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"] = "get", menu: dict[str, Any] | None = None, planner_input: dict[str, Any] | None = None, planner_handoff: dict[str, Any] | None = None, planner_ref: dict[str, Any] | None = None, menu_id: str | None = None, expected_revision: int | None = None, allow_repeat_keys: list[str] | None = None, override_reason: str | None = None, interactive: bool = True, menu_ref: dict[str, Any] | None = None, slot_id: str | None = None, locked: bool | None = None, remaining_dates: list[str] | None = None, locked_slot_ids: list[str] | None = None, as_of_date: str | None = None, replan: dict[str, Any] | None = None, replan_ref: str | None = None, batch_spec: dict[str, Any] | None = None, batch_plan: dict[str, Any] | None = None, batch_confirmation: dict[str, Any] | None = None, slot_input: dict[str, Any] | None = None, idempotency_key: str | None = None) -> Any:
     from mcp.types import CallToolResult, TextContent
-    result = rpc("menu", slot_input=slot_input, idempotency_key=idempotency_key, batch_spec=batch_spec, batch_plan=batch_plan, batch_confirmation=batch_confirmation, menu_ref=menu_ref, slot_id=slot_id, locked=locked, remaining_dates=remaining_dates, locked_slot_ids=locked_slot_ids, as_of_date=as_of_date, replan=replan, action=action, menu=menu, planner_input=planner_input, planner_handoff=planner_handoff, planner_ref=planner_ref, menu_id=menu_id, expected_revision=expected_revision, allow_repeat_keys=allow_repeat_keys or [], override_reason=override_reason, interactive=interactive)
+    result = rpc("menu", slot_input=slot_input, idempotency_key=idempotency_key, batch_spec=batch_spec, batch_plan=batch_plan, batch_confirmation=batch_confirmation, menu_ref=menu_ref, slot_id=slot_id, locked=locked, remaining_dates=remaining_dates, locked_slot_ids=locked_slot_ids, as_of_date=as_of_date, replan=replan, replan_ref=replan_ref, action=action, menu=menu, planner_input=planner_input, planner_handoff=planner_handoff, planner_ref=planner_ref, menu_id=menu_id, expected_revision=expected_revision, allow_repeat_keys=allow_repeat_keys or [], override_reason=override_reason, interactive=interactive)
     if action == "plan" and "plan" in result:
         result = _bounded_menu_plan_result(result)
+    elif action == "replan_prepare" and "replan" in result:
+        result = _bounded_menu_replan_result(result)
+    elif action == "replan_apply":
+        result = _bounded_menu_replan_apply_result(result)
     return CallToolResult(content=[TextContent(
         type="text", text=json.dumps(result, ensure_ascii=False, separators=(",", ":")))])
 

@@ -156,7 +156,7 @@ class BatchTests(unittest.TestCase):
 class BatchMigrationTests(unittest.TestCase):
     def test_private_atomic_v10_backup_defaults_and_newer_rejection(self):
         with tempfile.TemporaryDirectory() as directory:
-            store=StateStore(directory,fixtures.CONFIG); old=store.read(); old['version']=10; old.pop('batch_outcomes')
+            store=StateStore(directory,fixtures.CONFIG); old=store.read(); old['version']=10; old.pop('batch_outcomes'); old['menu_planning'].pop('prepared')
             store.path.write_text(json.dumps(old)); before=store.path.read_bytes()
             with mock.patch('core._atomic_json',side_effect=OSError('fixture')):
                 with self.assertRaises(OSError): StateStore(directory,fixtures.CONFIG)
@@ -164,7 +164,7 @@ class BatchMigrationTests(unittest.TestCase):
             current=StateStore(directory,fixtures.CONFIG)
             backup=Path(directory)/'state-v10.backup.json'
             self.assertEqual(json.loads(backup.read_text()),old); self.assertEqual(backup.stat().st_mode&0o777,0o600)
-            self.assertEqual(current.read()['version'],12); self.assertEqual(current.read()['profile']['meals']['batch_dishes'],0)
+            self.assertEqual(current.read()['version'],13); self.assertEqual(current.read()['profile']['meals']['batch_dishes'],0)
             raw=backup.read_bytes(); StateStore(directory,fixtures.CONFIG); self.assertEqual(raw,backup.read_bytes())
             old['version']=99; store.path.write_text(json.dumps(old))
             with self.assertRaisesRegex(HouseholdError,'newer'): StateStore(directory,fixtures.CONFIG)

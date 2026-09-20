@@ -47,6 +47,8 @@ from service_common import (
 
 
 PRODUCT_OPERATION_TIMEOUT = 240
+REPLAN_REF_PATTERN = re.compile(r"replan_[a-f0-9]{64}\Z")
+MAX_PREPARED_REPLANS = 32
 
 
 class PlanningOperations:
@@ -247,7 +249,65 @@ class PlanningOperations:
 
     @staticmethod
     def _replan_state_digest(state: Mapping[str, Any]) -> str:
-        return mp.digest({key: state.get(key) for key in ("menu", "profile", "recipe_usage", "menu_planning", "planning_feedback", "batch_outcomes")})
+        planning = deepcopy(state.get("menu_planning"))
+        if isinstance(planning, dict):
+            # Prepared handoffs are durable transport state, not planning input.
+            planning.pop("prepared", None)
+        return mp.digest({
+            "menu": state.get("menu"), "profile": state.get("profile"),
+            "recipe_usage": state.get("recipe_usage"), "menu_planning": planning,
+            "planning_feedback": state.get("planning_feedback"),
+            "batch_outcomes": state.get("batch_outcomes"),
+        })
+
+    @staticmethod
+    def _replan_ref(replan_digest: str) -> str:
+        return "replan_" + replan_digest
+
+    def _store_prepared_replan(self, prepared: Mapping[str, Any]) -> str:
+        replan_digest = str(prepared.get("replan_digest") or "")
+        replan_ref = self._replan_ref(replan_digest)
+        if REPLAN_REF_PATTERN.fullmatch(replan_ref) is None:
+            raise HouseholdError("prepared replan digest is invalid")
+        record = {key: deepcopy(prepared[key]) for key in (
+            "source", "as_of_date", "remaining_dates", "locked_slot_ids",
+            "planner_input", "state_digest", "replan_digest",
+        )}
+        with self.store.locked() as state:
+            current = state.get("menu")
+            if (
+                not isinstance(current, Mapping)
+                or self._household_today(state).isoformat() != record["as_of_date"]
+                or self._replan_state_digest(state) != record["state_digest"]
+                or canonical(mp.menu_ref(current)) != canonical(record["source"])
+            ):
+                raise HouseholdError("replan state changed while preparing; prepare again")
+            records = state["menu_planning"]["prepared"]
+            for key, value in list(records.items()):
+                if (
+                    not isinstance(value, Mapping)
+                    or value.get("state_digest") != record["state_digest"]
+                    or canonical(value.get("source")) != canonical(record["source"])
+                    or value.get("as_of_date") != record["as_of_date"]
+                ):
+                    records.pop(key, None)
+            if replan_ref not in records and len(records) >= MAX_PREPARED_REPLANS:
+                raise HouseholdError("too many prepared replans; apply one or change the menu before preparing another")
+            records[replan_ref] = record
+        return replan_ref
+
+    @staticmethod
+    def _prepared_replan_record(state: Mapping[str, Any], replan_ref: Any) -> tuple[str, dict[str, Any]]:
+        if not isinstance(replan_ref, str) or REPLAN_REF_PATTERN.fullmatch(replan_ref) is None:
+            raise HouseholdError("replan_ref must be one exact server-returned replan reference")
+        replan_digest = replan_ref.removeprefix("replan_")
+        record = state.get("menu_planning", {}).get("prepared", {}).get(replan_ref)
+        if not isinstance(record, Mapping) or set(record) != {
+            "source", "as_of_date", "remaining_dates", "locked_slot_ids",
+            "planner_input", "state_digest", "replan_digest",
+        } or record.get("replan_digest") != replan_digest:
+            raise HouseholdError("replan_ref is stale, missing or belongs to another menu")
+        return replan_digest, deepcopy(dict(record))
 
     def _prepare_replan(self, request: Mapping[str, Any]) -> dict[str, Any]:
         state = self.store.read()
@@ -412,25 +472,61 @@ class PlanningOperations:
                     values.remove(slot["slot_id"])
                 return {"menu_ref": mp.menu_ref(current), "slot_id": slot["slot_id"], "locked": desired}
         if action == "replan_prepare":
-            return {"replan": self._prepare_replan(request)}
+            prepared = self._prepare_replan(request)
+            result = {"replan": prepared}
+            if prepared.get("status") == "prepared":
+                result["apply_arguments"] = {
+                    "action": "replan_apply",
+                    "replan_ref": self._store_prepared_replan(prepared),
+                }
+            return result
         supplied = request.get("replan")
-        if not isinstance(supplied, Mapping) or supplied.get("status") != "prepared" or supplied.get("replan_digest") != mp.digest({k: v for k, v in supplied.items() if k != "replan_digest"}):
-            raise HouseholdError("replan_apply requires the complete unchanged prepared replan")
+        replan_ref = request.get("replan_ref")
+        if supplied is not None and replan_ref is not None:
+            raise HouseholdError("replan_apply accepts replan_ref or legacy replan, not both")
         state = self.store.read()
+        if replan_ref is not None:
+            if not isinstance(replan_ref, str) or REPLAN_REF_PATTERN.fullmatch(replan_ref) is None:
+                raise HouseholdError("replan_ref must be one exact server-returned replan reference")
+            replan_digest = replan_ref.removeprefix("replan_")
+            applied = state["menu_planning"]["applied"].get(replan_digest)
+            if applied is not None:
+                return {"menu_ref": deepcopy(applied), "idempotent": True}
+            replan_digest, record = self._prepared_replan_record(state, replan_ref)
+            fresh = self._prepare_replan({
+                "menu_ref": record["source"], "as_of_date": record["as_of_date"],
+                "remaining_dates": record["remaining_dates"],
+                "locked_slot_ids": record["locked_slot_ids"],
+                "planner_input": record["planner_input"],
+            })
+            if fresh.get("replan_digest") != replan_digest or fresh.get("state_digest") != record["state_digest"]:
+                raise HouseholdError("replan_ref is stale or its prepared plan changed; prepare again")
+            supplied = fresh
+        elif not isinstance(supplied, Mapping) or supplied.get("status") != "prepared" or supplied.get("replan_digest") != mp.digest({k: v for k, v in supplied.items() if k != "replan_digest"}):
+            raise HouseholdError("replan_apply requires one exact server-returned replan_ref or the complete legacy replan")
         applied = state["menu_planning"]["applied"].get(supplied["replan_digest"])
         if applied is not None:
             return {"menu_ref": deepcopy(applied), "idempotent": True}
-        fresh = self._prepare_replan({"menu_ref": supplied["source"], "as_of_date": supplied["as_of_date"],
-            "remaining_dates": supplied["remaining_dates"], "locked_slot_ids": supplied["locked_slot_ids"], "planner_input": supplied["planner_input"]})
-        if canonical(fresh) != canonical(supplied):
-            raise HouseholdError("replan is stale or altered; prepare again")
+        if replan_ref is None:
+            fresh = self._prepare_replan({"menu_ref": supplied["source"], "as_of_date": supplied["as_of_date"],
+                "remaining_dates": supplied["remaining_dates"], "locked_slot_ids": supplied["locked_slot_ids"], "planner_input": supplied["planner_input"]})
+            if canonical(fresh) != canonical(supplied):
+                raise HouseholdError("replan is stale or altered; prepare again")
         with self.store.locked() as state:
             if any(state.get(k) for k in ("pending_cancellation", "order_change")):
                 raise HouseholdError("reconcile pending protected operations before replan apply")
             if self._household_today(state).isoformat() != supplied["as_of_date"] or self._replan_state_digest(state) != supplied["state_digest"]:
                 raise HouseholdError("replan date or state changed; prepare again")
+            if replan_ref is not None:
+                _digest, current_record = self._prepared_replan_record(state, replan_ref)
+                if canonical(current_record) != canonical(record):
+                    raise HouseholdError("replan_ref changed before apply; prepare again")
             self._abandon_predispatch(state, reason="menu replanned before checkout")
-            return self._commit_successor(state, supplied)
+            result = self._commit_successor(state, supplied)
+            state["menu_planning"]["prepared"].pop(
+                self._replan_ref(supplied["replan_digest"]), None
+            )
+            return result
 
     def _prepare_batch(self, request):
         state = self.store.read()
