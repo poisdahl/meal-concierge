@@ -14,7 +14,8 @@ sys.path.insert(0, str(ROOT))
 
 from core import StateStore
 from recipes import (ESTIMATE_CONFIRMATION, RecipeError, RecipeStore, normalize_recipe,
-                     prepare_recipe_input, recipe_digest, scale_recipe, source_ingredient, source_yield,
+                     prepare_recipe_input, recipe_digest, scale_recipe, source_ingredient,
+                     source_ingredient_identity, source_yield,
                      normalize_source_url, normalize_attribution_url)
 from recipe_quantities import read_quantity, parse_measure
 from product_planner import menu_requirements
@@ -466,7 +467,8 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(unchanged["item"], "gochujang")
         unknown = source_ingredient("200 g unfamiliar ingredient", language="en")
         self.assertEqual(unknown["item"], "unfamiliar ingredient")
-        self.assertFalse(unknown["scalable"])
+        self.assertTrue(unknown["scalable"])
+        self.assertTrue(source_ingredient_identity(unknown["item"], "en")[1])
         swedish = source_ingredient("100 g vispgrädde, 38 % fett", language="sv-SE")
         self.assertEqual(swedish["item"], "kremfløte, 38 % fett")
         oil = source_ingredient("0,5 ss olja", language="sv-SE")

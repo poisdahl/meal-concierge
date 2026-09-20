@@ -628,7 +628,9 @@ def read_transcript(value: Any) -> dict[str, Any]:
             evidence["input"] = evidence_input
         if "estimated_amount" in item:
             quantity, unit, assumptions = estimate(item["estimated_amount"], unit=True)
-            _, identity_review_required = source_ingredient_identity(ingredient["item"], language)
+            _, identity_review_required = source_ingredient_identity(
+                ingredient["item"], language, require_reviewed=False,
+            )
             ingredient.update(
                 quantity=quantity,
                 unit=unit,

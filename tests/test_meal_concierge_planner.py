@@ -252,6 +252,30 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(products["status"], "prepared")
         self.assertEqual(products["requirements"], [])
 
+    def test_explicit_lunch_slots_never_count_as_legacy_dinners(self):
+        facts = {
+            "values": ["legume"], "vegetable_types": [], "complete": True,
+        }
+        menu = {
+            "dishes": [{"recipe_key": "recipe:lunch"}], "salads": [],
+            "slots": [{"recipe_key": "recipe:lunch", "meal_type": "lunch"}],
+            "planner_selection": {"selection": {"slots": [{
+                "recipe_key": "recipe:lunch", "dietary_facets": facts,
+            }]}},
+        }
+        profile = {
+            "meals": {"dinner_days": 1},
+            "diet": {"minimum_legume_dinners": 1},
+        }
+        evaluation = planner.saved_menu_minimum_evaluation(menu, profile)
+        self.assertFalse(evaluation["complete_menu"])
+        self.assertEqual(evaluation["status"], "unknown")
+        legacy = deepcopy(menu)
+        legacy.pop("slots")
+        self.assertEqual(
+            planner.saved_menu_minimum_evaluation(legacy, profile)["status"], "pass",
+        )
+
     def test_vegetable_minimum_collapses_spelling_and_fresh_variants(self):
         candidates = []
         for index, ingredient in enumerate((

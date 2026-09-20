@@ -2588,8 +2588,7 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(recipe['portions_evidence']['basis'], 'estimate')
         self.assertEqual(recipe['ingredients'][2]['evidence']['quantity']['basis'], 'estimate')
         self.assertNotIn('acceptance', json.dumps(recipe))
-        self.assertFalse(recipe['ingredients'][2]['scalable'])
-        self.assertFalse(scale_recipe(recipe)['readiness']['scaling_ready'])
+        self.assertTrue(scale_recipe(recipe)['readiness']['scaling_ready'])
         value['interpretation']['language'] = 'en'
         declared = read_transcript(value)['candidate']
         self.assertEqual(declared['ingredients'][2]['item'], 'tomat')
@@ -2707,7 +2706,7 @@ class ImportApplicationTests(unittest.TestCase):
                     self.assertFalse(preview['readiness']['scaling_ready'])
                     self.assertNotIn('portions', preview['readiness']['missing_decisions'])
                     self.assertIn('ingredients.2.quantity', preview['readiness']['missing_decisions'])
-                    self.assertFalse(preview['shopping_requirements'][0]['scalable'])
+                    self.assertTrue(preview['shopping_requirements'][0]['scalable'])
                     self.assertFalse(preview['shopping_requirements'][2]['scalable'])
                     self.assertEqual(preview['suggested_status'], 'draft')
                     self.assertFalse(preview['personal_entry_created'])
@@ -2738,7 +2737,7 @@ class ImportApplicationTests(unittest.TestCase):
     def test_estimate_acceptance_preserves_source_and_no_personal_entry(self):
         self.source['interpretation']['ingredients'][2]['estimated_amount'] = {'quantity': 1, 'unit': 'stk', 'assumptions': 'One medium tomato.'}
         preview = self.preview()
-        self.assertEqual(preview['suggested_status'], 'draft')
+        self.assertEqual(preview['suggested_status'], 'active')
         accepted = self.call('accept_estimates', discovery_ref=preview['discovery_ref'], recipe_digest=preview['recipe_digest'],
             estimate_fields=['ingredients.2.quantity', 'ingredients.2.unit'], confirmation_statement='I accept these exact recipe estimates and their stated assumptions.')
         self.assertEqual(accepted['source_identity'], preview['source_identity'])

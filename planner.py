@@ -627,11 +627,15 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         for recipe in menu["dishes"]
         if isinstance(recipe, Mapping) and isinstance(recipe.get("recipe_key"), str)
     }
+    has_explicit_slots = isinstance(menu.get("slots"), list)
     dinner_slots = [
         slot for slot in menu.get("slots", [])
         if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
-    ] if isinstance(menu.get("slots"), list) else []
-    selected_recipes = [recipes.get(slot.get("recipe_key")) for slot in dinner_slots] if dinner_slots else list(recipes.values())
+    ] if has_explicit_slots else []
+    selected_recipes = (
+        [recipes.get(slot.get("recipe_key")) for slot in dinner_slots]
+        if has_explicit_slots else list(recipes.values())
+    )
     expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
         return {"status": "unknown", "complete_menu": False, "results": [{

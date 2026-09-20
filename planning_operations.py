@@ -1270,11 +1270,12 @@ class PlanningOperations:
             with self.product_plan_lock, self.store.locked() as state:
                 meals = (state.get("profile") or {}).get("meals") or {}
                 expected_dinners = meals.get("dinner_days")
+                has_explicit_slots = isinstance(menu.get("slots"), list)
                 dinner_slots = [
                     slot for slot in menu.get("slots", [])
                     if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
-                ] if isinstance(menu.get("slots"), list) else []
-                observed_dinners = len(dinner_slots) if dinner_slots else len(menu.get("dishes", []))
+                ] if has_explicit_slots else []
+                observed_dinners = len(dinner_slots) if has_explicit_slots else len(menu.get("dishes", []))
                 menu["weekly_plan_complete"] = (
                     type(expected_dinners) is int and expected_dinners > 0
                     and observed_dinners == expected_dinners
@@ -1978,7 +1979,6 @@ class PlanningOperations:
             and (
                 minimums.get("complete_menu")
                 or menu.get("weekly_plan_complete") is True
-                or isinstance(menu.get("planner_selection"), Mapping)
             )
         ):
             raise HouseholdError(
@@ -2564,14 +2564,14 @@ class PlanningOperations:
                 }
                 meals = (state.get("profile") or {}).get("meals") or {}
                 expected_dinners = meals.get("dinner_days")
+                has_explicit_slots = isinstance(menu.get("slots"), list)
                 dinner_slots = [
                     slot for slot in menu.get("slots", [])
                     if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
-                ] if isinstance(menu.get("slots"), list) else []
-                observed_dinners = len(dinner_slots) if dinner_slots else len(menu.get("dishes", []))
+                ] if has_explicit_slots else []
+                observed_dinners = len(dinner_slots) if has_explicit_slots else len(menu.get("dishes", []))
                 state["cart_plan"]["weekly_minimums_enforced"] = (
                     menu.get("weekly_plan_complete") is True
-                    or isinstance(menu.get("planner_selection"), Mapping)
                     or (
                     type(expected_dinners) is int and expected_dinners > 0
                     and observed_dinners == expected_dinners

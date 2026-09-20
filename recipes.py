@@ -408,9 +408,11 @@ def _source_ingredient_identity(
     return value, unresolved
 
 
-def source_ingredient_identity(value: str, language: str | None) -> tuple[str, bool]:
+def source_ingredient_identity(
+    value: str, language: str | None, *, require_reviewed: bool = True,
+) -> tuple[str, bool]:
     """Return the reviewed shopping identity and whether human review remains."""
-    return _source_ingredient_identity(value, language, require_reviewed=True)
+    return _source_ingredient_identity(value, language, require_reviewed=require_reviewed)
 
 
 def source_ingredient(
@@ -432,7 +434,7 @@ def source_ingredient(
                     break
     source_item = item or text
     normalized_item, identity_review_required = _source_ingredient_identity(
-        source_item, language, require_reviewed=True,
+        source_item, language,
     )
     evidence = {"basis": "source", "input": text}
     unit_evidence = deepcopy(evidence)
