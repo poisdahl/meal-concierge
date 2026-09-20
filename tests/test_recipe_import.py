@@ -980,6 +980,84 @@ class PackInstallationTests(unittest.TestCase):
         self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
         self.assertEqual(store.get(after["id"]), edited)
 
+    def test_unchanged_pack_import_repairs_source_title_search_index(self):
+        import sqlite3
+        from recipes import RecipeStore, source_ingredient
+
+        self.manifest["recipe_schema_version"] = 2
+        self.record.update(status="ready", recipe=normalize_recipe({
+            "schema_version": 2,
+            "name": "Franske linser med hvitløk og timian",
+            "language": "nb-NO",
+            "portions": 2,
+            "portions_evidence": {"basis": "source", "input": "Serves 2"},
+            "ingredients": [source_ingredient("200 g lentils")],
+            "steps": ["Kok linsene."],
+            "source": {
+                "kind": "themealdb", "publisher": "TheMealDB",
+                "title": "French Lentils With Garlic and Thyme",
+                "url": "https://www.themealdb.com/meal/52815",
+                "external_id": "52815", "relationship": "adapted",
+            },
+            "rights": {
+                "storage": "full", "license": "TheMealDB Terms of Use",
+                "license_url": "https://www.themealdb.com/terms_of_use.php",
+                "credit": "Synthetic fixture",
+            },
+            "external_snapshot": {
+                "fetched_at": "2026-09-20T12:00:00+00:00",
+                "content_hash": "a" * 64,
+                "changes": "Synthetic translated external recipe.",
+            },
+        }))
+        path = self.package()
+        first = self.apply(path)
+        reference = first["results"][0]["bank_recipe_ref"]
+        bank = self.root / "state/recipes.sqlite3"
+        with sqlite3.connect(bank) as connection:
+            connection.execute(
+                "UPDATE recipes SET search_text=lower(name) WHERE id=?",
+                (reference["recipe_id"],),
+            )
+
+        store = RecipeStore(bank, "synthetic-household")
+        before = store.get(reference["recipe_id"])
+        self.assertEqual(
+            [row["id"] for row in store.search("Franske linser")],
+            [reference["recipe_id"]],
+        )
+        self.assertEqual(store.search("French Lentils With Garlic and Thyme"), [])
+
+        repeated = self.apply(path)
+        repaired = store.get(reference["recipe_id"])
+        self.assertEqual((repeated["unchanged"], repeated["updated"]), (1, 0))
+        self.assertEqual(repaired, before)
+        self.assertEqual(
+            [row["id"] for row in store.search("French Lentils With Garlic and Thyme")],
+            [reference["recipe_id"]],
+        )
+        self.assertEqual(repaired["name"], "Franske linser med hvitløk og timian")
+        self.assertEqual(repaired["source"]["title"], "French Lentils With Garlic and Thyme")
+
+        updated = store.update(
+            repaired["id"], repaired["revision"],
+            {**self.record["recipe"], "notes": "Lokal merknad."},
+        )
+        edited = store.get(updated["id"])
+        with sqlite3.connect(bank) as connection:
+            connection.execute(
+                "UPDATE recipes SET search_text=lower(name) WHERE id=?",
+                (reference["recipe_id"],),
+            )
+        conflict = self.apply(path)
+        self.assertEqual((conflict["status"], conflict["conflicts"]), ("partial", 1))
+        self.assertEqual(conflict["results"][0]["reason"], "locally_modified")
+        self.assertEqual(store.get(reference["recipe_id"]), edited)
+        self.assertEqual(
+            [row["id"] for row in store.search("French Lentils With Garlic and Thyme")],
+            [reference["recipe_id"]],
+        )
+
     def test_new_version_updates_unmodified_record_with_history(self):
         from recipes import RecipeStore
         path = self.package()

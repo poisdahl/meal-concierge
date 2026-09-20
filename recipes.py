@@ -4528,6 +4528,12 @@ class RecipeStore:
                     if existing["pack_entry_origin"] != entry_origin:
                         raise RecipeError("pack identity belongs to a different origin")
                     result = self._record(connection, existing, created=False)
+                    search_text = self._search_text(_stored_recipe_document(existing["document"]))
+                    if existing["search_text"] != search_text:
+                        connection.execute(
+                            "UPDATE recipes SET search_text=? WHERE id=?",
+                            (search_text, existing["id"]),
+                        )
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
                     # A same-content status transition in history is a durable
