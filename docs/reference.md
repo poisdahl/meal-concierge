@@ -1869,6 +1869,21 @@ this and earlier partial applies before syncing them, excludes recurring goods,
 and is idempotent across repeated or incremental partial applications. It never records full shopping completion;
 checkout remains blocked until a later complete apply reconciles the whole menu.
 
+When a maximum incomplete product plan cannot fit the 45,000-character MCP
+wire budget, MCP returns an `issues_only` projection before falling back to a
+generic size error. It retains the exact plan and menu/planner binding digests,
+plan coverage and cost status, every requirement ID/item/quantity/unit/status,
+and every blocker reason. Exact candidate refs and package diagnostic codes are
+bounded to the facts needed to correct an approval; sources, complete product
+observations, selections and dietary evidence remain available through the
+local service/CLI result. Valid full and partial apply arguments are returned
+byte-for-byte unchanged. A `partial_apply_arguments_with_issues` continuation
+carries every unresolved blocker in `remaining_issues` beside the exact partial
+arguments instead of hiding the remaining work. Resolve the listed
+`candidate_approvals` or `price_mode` issues and prepare the entire same menu
+again with its unchanged binding; product preparation has no supported menu
+requirement-scope reduction.
+
 Cart sync and reconcile require the current `menu_ref` (menu_id, revision, digest),
 and product approval is invalidated by changed requirements even during external
 cart drift. A manual continuation of cart_ready preserves its occurrence without

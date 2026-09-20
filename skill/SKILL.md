@@ -1017,6 +1017,17 @@ recurring goods, and records no complete product-plan digest. Continue preparing
 the remaining lines and finish with one full apply. Checkout stays blocked while
 the partial marker exists; never use raw cart changes to bypass it.
 
+For a large incomplete plan, an MCP `issues_only` projection preserves every
+requirement and blocker while omitting verbose sources, product observations and
+selections. Use its bounded exact candidate refs and diagnostic codes to correct
+or accumulate `candidate_approvals`, choose `price_mode=estimate` only where the
+returned package/price facts support it, and then prepare the entire same menu
+again with the unchanged binding. Do not reduce the menu scope: products prepare
+has no requirement-subset control. Full and partial apply arguments, when
+returned, remain unchanged. A partial continuation includes every unresolved
+issue in `remaining_issues` beside the exact arguments under the
+`partial_apply_arguments_with_issues` projection; do not discard either part.
+
 If products apply stops for cart or menu drift, reconcile that exact state and
 then rerun products prepare/apply. Never work around the stop with raw cart
 ensure/change, a scratch script, or a hand-copied product list. In particular,
