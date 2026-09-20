@@ -6,6 +6,8 @@ visible to the editor and cannot acquire project review by default.
 """
 from copy import deepcopy
 from fractions import Fraction
+import hashlib
+import json
 import re
 import unicodedata
 
@@ -513,7 +515,13 @@ def editorial_rows(recipe):
     return recipe
 
 
-def apply_amendment(recipe, credit, amendments):
+def canonical_recipe_hash(recipe):
+    """Hash the complete curated recipe using the portable JSON encoding."""
+    value=json.dumps(recipe,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()
+    return hashlib.sha256(value).hexdigest()
+
+
+def apply_amendment(recipe, credit, amendments, *, source_payload_hash=None):
     from recipes import normalize_recipe
     identity=recipe['source']['kind']+':'+recipe['source']['external_id']
     amendment=(amendments or {}).get(identity)
@@ -523,15 +531,31 @@ def apply_amendment(recipe, credit, amendments):
         raise ValueError('editorial amendment does not match the sealed recipe source')
     if set(amendment)=={'source_hash','exclude_reason'} and amendment['exclude_reason']=='missing_source_method':
         raise SourceMethodExcluded('Source has no actionable preparation method; omitted by publisher policy.')
-    if set(amendment)-{'source_hash','note','set','resolved_issues','omit_cover'} or ('omit_cover' in amendment and amendment['omit_cover'] is not True):
+    binding={'source_identity','source_payload_hash','curated_recipe_hash'}
+    reviewed = binding <= set(amendment)
+    if binding & set(amendment):
+        if not reviewed:
+            raise ValueError('reviewed amendment requires complete source and curated recipe binding')
+        if amendment['source_identity'] != identity:
+            raise ValueError('reviewed amendment does not match the source identity')
+        if not re.fullmatch(r'[a-f0-9]{64}', amendment['source_payload_hash'] or '') or amendment['source_payload_hash'] != source_payload_hash:
+            raise ValueError('reviewed amendment does not match the complete sealed source payload')
+        if not re.fullmatch(r'[a-f0-9]{64}', amendment['curated_recipe_hash'] or '') or amendment['curated_recipe_hash'] != canonical_recipe_hash(recipe):
+            raise ValueError('reviewed amendment does not match the curated recipe')
+    if set(amendment)-{'source_hash','source_identity','source_payload_hash','curated_recipe_hash','note','set','resolved_issues','omit_cover'} or ('omit_cover' in amendment and amendment['omit_cover'] is not True):
         raise ValueError('editorial amendment does not match the sealed recipe source')
     changes=amendment.get('set',{})
-    if set(changes)-{'name','ingredients','steps','portions','portions_evidence','yield','notes'}:
+    if set(changes)-{'name','ingredients','steps','portions','portions_evidence','yield','notes','language','storage','reheating'}:
         raise ValueError('editorial amendment cannot replace source identity, attribution or cover')
+    if reviewed and (set(changes)-{'name','steps','notes','language','storage','reheating'} or amendment.get('omit_cover')):
+        raise ValueError('reviewed active revision cannot replace protected recipe fields')
+    if {'language','storage','reheating'} & set(changes) and not reviewed:
+        raise ValueError('reviewed active fields require complete source and curated recipe binding')
     if 'yield' in changes and recipe.get('yield'):
         credit['original_yield']=deepcopy(recipe['yield'])
     recipe.update(deepcopy(changes))
-    recipe['notes']='Meal Concierge editorial adaptation: '+amendment['note']
+    if 'notes' not in changes and not reviewed:
+        recipe['notes']='Meal Concierge editorial adaptation: '+amendment['note']
     if set(amendment.get('resolved_issues',[]))!=set(credit.get('normalization_issues',[])):
         raise ValueError('editorial resolution must account for every current source issue')
     credit['resolved_normalization_issues']=credit.pop('normalization_issues',[])
@@ -540,7 +564,7 @@ def apply_amendment(recipe, credit, amendments):
         credit['image_omission']='Original cover no longer represents the adapted recipe.'
     return normalize_recipe(recipe),credit
 
-def curate(recipe, credit, *, pack_version, amendments=None):
+def curate(recipe, credit, *, pack_version, amendments=None, source_payload_hash=None):
     from recipes import normalize_recipe, recipe_evidence_fields
     recipe=deepcopy(recipe);credit=deepcopy(credit)
     from recipe_pack_sources import readiness
@@ -552,7 +576,7 @@ def curate(recipe, credit, *, pack_version, amendments=None):
             if review_required:
                 ingredient['scalable'] = False
         return normalize_recipe(recipe),credit
-    recipe,credit=apply_amendment(recipe,credit,amendments)
+    recipe,credit=apply_amendment(recipe,credit,amendments,source_payload_hash=source_payload_hash)
     recipe=editorial_rows(recipe)
     recipe['ingredients']=[_recovered(i) for i in recipe['ingredients']]
     for index,i in enumerate(recipe['ingredients']):

@@ -28,7 +28,9 @@ when publishing more than one collection on the same date. The display name does
 not change between versions.
 
 The expected digest must come from the reviewed snapshot handoff. The builder
-checks the seal, manifest checksums and every source body it consumes. Input and
+requires `SEALED` to name that exact `snapshot.json` digest, then checks the
+seal status/time against the snapshot, the snapshot's manifest checksums and
+every source body it consumes. Input and
 output directories cannot overlap. One process owns an output directory at a
 time. Each completed normalized record is cached with its source/build identity
 and checksum. Rerunning validates cached records; interrupted builds resume
@@ -76,6 +78,22 @@ builder uses runtime scaling readiness, including every shopping requirement,
 and never creates personal acceptance. Only the reviewed release introduces
 publisher estimate markers through the verified bundled-import path. Culinary
 review is required in addition to numeric completeness before publication.
+
+An optional second pass accepts `--reviewed-amendments` with its exact
+`--reviewed-amendments-sha256`. It uses the same schema-1, source-identity-keyed
+record shape after ordinary curation. Every record in this pass must bind the
+stable source identity, complete consumed source-payload SHA-256, existing raw
+source hash, and canonical SHA-256 of the entire curated recipe. The builder
+checks all four before changing data. This permits reviewed active fields such
+as `name`, `steps`, `notes`, `language`, `storage`, and `reheating` without a
+parallel localization schema or any network or model call. Ingredient, source,
+rights and recipe identity fields remain outside that amendment allowlist.
+Review explanations are retained in attribution metadata; an explicit runtime
+`notes` value, including null, is not replaced by that explanation.
+For reviewed Wikibooks records, the raw revision ID, timestamp, content SHA-1
+and wikitext must match the rendered revision and its exact `oldid` URL. Every
+named reviewed record must be applied; parse failure, exclusion or other drift
+aborts the build instead of silently omitting an amendment.
 
 ## Rights, attribution and images
 

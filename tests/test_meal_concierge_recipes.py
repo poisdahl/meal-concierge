@@ -1739,6 +1739,13 @@ class RecipeStoreTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in self.store.search("%")], [literal["id"]])
         self.assertEqual([item["id"] for item in self.store.search("_")], [literal["id"]])
 
+    def test_search_finds_original_source_title_after_active_name_translation(self):
+        recipe = external_recipe("wikibooks", "Chicken Enchilada Casserole", "translated-title")
+        recipe["name"] = "Kylling-enchiladagrateng"
+        saved = self.store.save(recipe)
+        self.assertEqual(self.store.search("Chicken Enchilada Casserole")[0]["id"], saved["id"])
+        self.assertEqual(self.store.search("Kylling-enchiladagrateng")[0]["id"], saved["id"])
+
     def test_scaling_keeps_identity_and_provider_neutral_requirements(self):
         saved = self.store.save(full_recipe(external_id="scale"))
         self.assertEqual(saved["created_via"], "hermes")
