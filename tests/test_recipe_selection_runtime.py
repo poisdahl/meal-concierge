@@ -78,7 +78,10 @@ def serve(root, empty):
             raise HouseholdError("synthetic recipe source unavailable")
 
     config = {"household": "MC41 runtime synthetic", "instance": root.name, "provider": "oda",
-              "confirmation_policy": "fresh", "profile_overrides": {"recipes": {"sources": {
+              "confirmation_policy": "fresh", "profile_overrides": {"diet": {
+                  "minimum_fish_portions": 0, "minimum_legume_dinners": 0,
+                  "minimum_vegetable_types": 0, "minimum_wholegrain_or_potato_dinners": 0},
+                  "recipes": {"sources": {
                   "internal": True, "oda": True, "meny": False, "mathem": False,
                   "themealdb": False, "wikibooks": False}}}}
     app = Application(StateStore(root / "state", config), UnavailableProvider(), None)
@@ -1031,13 +1034,14 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(strict_no_plan["issues"][0]["code"], "strict_targets_infeasible")
             self.assertEqual(strict_no_plan["issues"][0]["targets"], ["minimum_fish_portions"])
             self.assertLess(len(self.last_menu_wire), 40000)
-
             stale = await client.call_tool("meal_concierge_menu", {"action": "save", "planner_ref": choices[1]["save_ref"]})
             self.assertFalse(stale.is_error, stale)
             self.assertEqual(json.loads(stale.content[0].text)["status"], "rejected")
             self.assertFalse(json.loads(stale.content[0].text)["ok"])
             self.assertIn("stale", stale.content[0].text.lower())
             self.assertIsNone((await self.call(client, "menu"))["menu"])
+            await self.call(client, "profile", action="update",
+                            changes={"diet": {"minimum_fish_portions": 0}})
             fresh = (await self.call(client, "menu", action="plan", planner_input=request))["plan"]
             alternative = fresh["alternatives"][1]["save_ref"]
             saved = (await self.call(client, "menu", action="save", planner_ref=alternative))["menu"]
@@ -1242,7 +1246,9 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                          for i in range(7)]
             prepared = await self.call(client, "products", action="prepare",
                                        planner_handoff=handoff, ingredient_decisions=decisions)
-            self.assertEqual(prepared["apply_arguments"]["planner_handoff"], handoff)
+            self.assertEqual(prepared["apply_arguments"]["planner_selection_ref"], {
+                key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest")
+            })
             self.assertEqual(prepared["product_plan"]["binding"]["planner_selection"], {
                 key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest")
             })

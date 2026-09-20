@@ -478,7 +478,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
     yield_value, portions = source_yield(raw["yield_text"])
-    ingredients = [source_ingredient(text) for text in raw["ingredients"]]
+    ingredients = [source_ingredient(text, language=raw["language"]) for text in raw["ingredients"]]
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.
@@ -490,7 +490,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
             if food and unit and quantity:
                 unit_text = (unit["abbreviation"] if unit["useAbbreviation"] else "") or unit["name"]
                 measure = f"{quantity} {unit_text}"
-                ingredient = source_ingredient(text, item=food["name"], measure=measure)
+                ingredient = source_ingredient(text, item=food["name"], measure=measure, language=raw["language"])
                 # The structured native values, rather than potentially stale
                 # originalText/display, are the actual input to this parse.
                 for evidence in ingredient["evidence"].values():
@@ -498,9 +498,9 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
             elif food or unit:
                 # An explicitly incomplete structured amount must not revive a
                 # stale quantity from originalText or Mealie's display cache.
-                ingredient = source_ingredient(text, item=food["name"] if food else text, measure="")
+                ingredient = source_ingredient(text, item=food["name"] if food else text, measure="", language=raw["language"])
             else:
-                ingredient = source_ingredient(text)
+                ingredient = source_ingredient(text, language=raw["language"])
             ingredient["notes"] = detail["note"] or None
             ingredients.append(ingredient)
     notes = "\n\n".join(part for part in (raw["description"], raw["notes"]) if part)
@@ -524,7 +524,14 @@ def read_transcript(value: Any) -> dict[str, Any]:
     that supplied text, not against original image pixels or document bytes.
     No file, network, bank or provider operation occurs here.
     """
-    from recipes import bind_recipe_source, normalize_recipe, source_ingredient, source_yield, categories_from_tags
+    from recipes import (
+        bind_recipe_source,
+        categories_from_tags,
+        normalize_recipe,
+        source_ingredient,
+        source_ingredient_identity,
+        source_yield,
+    )
     from recipe_quantities import UNITS, normalized_unit, quantity_json, read_quantity
     if not isinstance(value, dict) or set(value) - {"kind", "pages", "interpretation", "attribution"}:
         raise RecipeImportReaderError("transcript contains unsupported fields")
@@ -589,6 +596,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
             raise RecipeImportReaderError("estimate unit is unsupported")
         return quantity, normalized, assumptions
 
+    language = _text(interpretation.get("language"), "language", 20) or "und"
     ingredients = []
     ingredient_excerpts = selected("ingredients", 200)
     temporal = (r"(?:yesterday(?:'s)?|earlier(?:\s+(?:this|in\s+the))?\s+(?:meal|menu|week)|"
@@ -608,12 +616,26 @@ def read_transcript(value: Any) -> dict[str, Any]:
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
         if has_dependency(quote):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
-        ingredient = source_ingredient(quote)
+        estimated_item = None
+        if "estimated_amount" in item:
+            without_leading_amount = re.sub(
+                r"^\s*\d+(?:[.,]\d+)?\s+", "", quote, count=1,
+            ).strip()
+            if without_leading_amount != quote.strip():
+                estimated_item = without_leading_amount
+        ingredient = source_ingredient(quote, item=estimated_item, language=language)
         for evidence in ingredient["evidence"].values():
             evidence["input"] = evidence_input
         if "estimated_amount" in item:
             quantity, unit, assumptions = estimate(item["estimated_amount"], unit=True)
-            ingredient.update(quantity=quantity, unit=unit, scalable=True)
+            _, identity_review_required = source_ingredient_identity(
+                ingredient["item"], language, require_reviewed=False,
+            )
+            ingredient.update(
+                quantity=quantity,
+                unit=unit,
+                scalable=not identity_review_required,
+            )
             ingredient["evidence"] = {field: {"basis": "estimate", "input": evidence_input,
                 "assumptions": assumptions} for field in ("quantity", "unit")}
         ingredients.append(ingredient)
@@ -639,7 +661,6 @@ def read_transcript(value: Any) -> dict[str, Any]:
     tags = selected("tags", 50, optional=True)
     tags = [_text(tag, "tag", 80, required=True) for tag in tags]
     name = _text(interpretation.get("name"), "name", 300, required=True)
-    language = _text(interpretation.get("language"), "language", 20) or "und"
     categories = interpretation.get("categories")
     if categories is not None:
         if not isinstance(categories, list):

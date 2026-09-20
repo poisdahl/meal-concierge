@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 import batch_planning as bp
 import menu_planning as mp
-from core import HouseholdError, StateStore
+from core import HouseholdError, StateStore, cart_summary
 from product_planner import ingredient_search
 from service import Application
 from test_meal_concierge_products import observation, option, product
@@ -58,7 +58,7 @@ class Retailer:
     def entry(self, query):
         if query not in self.catalog:
             ref = str(len(self.catalog) * 10 + 1)
-            size = 50 if query == "garlic" else 200
+            size = 50 if query in {"garlic", "hvitløk"} else 200
             # Five candidates; the first strictly dominates equal-size others.
             self.catalog[query] = observation(query, [product(str(int(ref) + i), query, size, "g", [option(100 + i * 50)]) for i in range(5)])
         return self.catalog[query]
@@ -180,6 +180,195 @@ class ProductCapacityTests(unittest.TestCase):
             self.apply(plan)
         self.assertEqual(self.provider.calls, [])
 
+    def test_selected_line_partial_apply_is_idempotent_and_full_apply_completes(self):
+        self.save_week()
+        initial = self.prepare()
+        selected = next(row for row in initial["requirements"] if row["identity"] == "salmon")
+        candidate = self.provider.entry("salmon")["products"][0]
+        response = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": selected["requirement_id"],
+                "candidate_refs": [candidate["product_ref"]],
+            }],
+        })
+        self.assertIsNone(response["apply_arguments"])
+        arguments = response["partial_apply_arguments"]
+        self.assertTrue(arguments["partial_apply"])
+        self.assertNotIn("product_plan", arguments)
+        self.provider.calls.clear()
+        first = self.app.handle({
+            "operation": "products", **arguments, "cart_change_requested": True,
+        })
+        self.assertEqual(
+            sum(tool == "product_search" for tool, _arguments, _kwargs in self.provider.calls),
+            3,
+        )
+        second = self.app.handle({
+            "operation": "products", **arguments, "cart_change_requested": True,
+        })
+        self.assertTrue(first["partial_applied"])
+        self.assertTrue(second["partial_applied"])
+        self.assertTrue(second["cart"]["idempotent"])
+        partial_state = self.store.read()["cart_plan"]
+        self.assertNotIn("product_plan_digest", partial_state)
+        self.assertEqual(partial_state["partial_product_plan_digest"], arguments["partial_product_plan_digest"])
+        gate = self.app._cart_checkout_gate(cart_summary(self.provider.cart()), self.store.read()["menu"])
+        self.assertEqual(gate["reason"], "weekly_menu_products_incomplete")
+
+        # Search churn for an unresolved line does not invalidate the selected line.
+        self.provider.entry("ginger")["products"].reverse()
+        third = self.app.handle({
+            "operation": "products", **arguments, "cart_change_requested": True,
+        })
+        self.assertTrue(third["partial_applied"])
+
+        ginger = next(row for row in initial["requirements"] if row["identity"] == "ginger")
+        ginger_candidate = self.provider.entry("ginger")["products"][0]
+        next_response = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": ginger["requirement_id"],
+                "candidate_refs": [ginger_candidate["product_ref"]],
+            }],
+        })
+        next_partial = self.app.handle({
+            "operation": "products", **next_response["partial_apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertTrue(next_partial["partial_applied"])
+        self.assertEqual(next_partial["remaining_issue_count"], 35)
+        self.assertIn(candidate["product_ref"], self.provider.quantities)
+        self.assertIn(ginger_candidate["product_ref"], self.provider.quantities)
+
+        full = self.complete()
+        completed = self.apply(full)
+        self.assertTrue(completed["applied"])
+        final_state = self.store.read()["cart_plan"]
+        self.assertEqual(final_state["product_plan_digest"], full["product_plan_digest"])
+        self.assertNotIn("partial_product_plan_digest", final_state)
+        expected = self.assert_totals(full, DINNERS)
+        self.assertEqual(self.provider.quantities[candidate["product_ref"]], expected["salmon"])
+
+    def test_later_partial_revalidates_every_prior_selection(self):
+        self.save_week()
+        initial = self.prepare()
+        salmon = next(row for row in initial["requirements"] if row["identity"] == "salmon")
+        salmon_candidate = self.provider.entry("salmon")["products"][0]
+        first = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{"requirement_id": salmon["requirement_id"], "candidate_refs": [salmon_candidate["product_ref"]]}],
+        })
+        applied = self.app.handle({
+            "operation": "products", **first["partial_apply_arguments"], "cart_change_requested": True,
+        })
+        self.assertTrue(applied["partial_applied"])
+        ginger = next(row for row in initial["requirements"] if row["identity"] == "ginger")
+        ginger_candidate = self.provider.entry("ginger")["products"][0]
+        original_candidate = deepcopy(salmon_candidate)
+        mutations = {
+            "availability": lambda value: value.update(availability="unavailable"),
+            "package size": lambda value: value["package"].update(quantity={"numerator": 100, "denominator": 1}),
+            "price": lambda value: value["purchase_options"][0].update(
+                merchandise_ore=value["purchase_options"][0]["merchandise_ore"] + 100,
+                total_payable_ore=value["purchase_options"][0]["total_payable_ore"] + 100,
+            ),
+            "name": lambda value: value.update(name="Changed salmon package"),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(drift=label):
+                salmon_candidate.clear()
+                salmon_candidate.update(deepcopy(original_candidate))
+                mutate(salmon_candidate)
+                second = self.app.handle({
+                    "operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(self.menu),
+                    "candidate_approvals": [{"requirement_id": ginger["requirement_id"], "candidate_refs": [ginger_candidate["product_ref"]]}],
+                })
+                result = self.app.handle({
+                    "operation": "products", **second["partial_apply_arguments"], "cart_change_requested": True,
+                })
+                self.assertFalse(result["applied"])
+                self.assertEqual(result["status"], "needs_input")
+                self.assertNotIn(ginger_candidate["product_ref"], self.provider.quantities)
+        salmon_candidate.clear()
+        salmon_candidate.update(original_candidate)
+
+    def test_lost_partial_apply_response_leaves_checkout_fenced(self):
+        self.save_week()
+        initial = self.prepare()
+        selected = next(row for row in initial["requirements"] if row["identity"] == "salmon")
+        candidate = self.provider.entry("salmon")["products"][0]
+        response = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{"requirement_id": selected["requirement_id"], "candidate_refs": [candidate["product_ref"]]}],
+        })
+        original = self.app._cart_sync
+
+        def lost_response(request, deadline):
+            original(request, deadline)
+            raise HouseholdError("synthetic lost response")
+
+        with mock.patch.object(self.app, "_cart_sync", side_effect=lost_response):
+            with self.assertRaisesRegex(HouseholdError, "lost response"):
+                self.app.handle({
+                    "operation": "products", **response["partial_apply_arguments"], "cart_change_requested": True,
+                })
+        self.assertIn("managed_product_apply_fence", self.store.read())
+        gate = self.app._cart_checkout_gate(cart_summary(self.provider.cart()), self.store.read()["menu"])
+        self.assertEqual(gate["reason"], "managed_product_apply_incomplete")
+
+    def test_current_profile_minimums_block_checkout_after_product_apply(self):
+        self.save_week()
+        self.assertTrue(self.menu["weekly_plan_complete"])
+        plan = self.complete()
+        self.assertTrue(self.apply(plan)["applied"])
+        with self.store.locked() as state:
+            state["profile"]["meals"]["dinner_days"] = 6
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 3,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        gate = self.app._cart_checkout_gate(cart_summary(self.provider.cart()), self.store.read()["menu"])
+        self.assertEqual(gate["reason"], "weekly_menu_minimums_unsatisfied")
+        self.assertNotEqual(gate["minimum_evaluation"]["status"], "pass")
+
+    def test_saved_week_shape_change_blocks_product_preparation(self):
+        self.save_week()
+        self.assertTrue(self.menu["weekly_plan_complete"])
+        with self.store.locked() as state:
+            state["profile"]["meals"]["dinner_days"] = 6
+        with self.assertRaisesRegex(HouseholdError, "complete weekly menu"):
+            self.prepare()
+        self.assertFalse(any(name == "manipulate_cart" for name, _, _ in self.provider.calls))
+
+    def test_selected_line_price_drift_blocks_partial_apply_without_cart_write(self):
+        self.save_week()
+        initial = self.prepare()
+        selected = next(row for row in initial["requirements"] if row["identity"] == "salmon")
+        candidate = self.provider.entry("salmon")["products"][0]
+        response = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": selected["requirement_id"],
+                "candidate_refs": [candidate["product_ref"]],
+            }],
+        })
+        changed_option = self.provider.entry("salmon")["products"][0]["purchase_options"][0]
+        changed_option["merchandise_ore"] += 1
+        changed_option["total_payable_ore"] += 1
+        result = self.app.handle({
+            "operation": "products", **response["partial_apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertFalse(result["applied"])
+        self.assertEqual(result["status"], "needs_input")
+        self.assertFalse(self.provider.quantities)
+
     def test_deadline_stops_dispatch_and_preserves_all_needs(self):
         self.save_week()
         clock = [1000.0]
@@ -268,6 +457,9 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertEqual(self.provider.calls, [])
 
     def test_three_week_alternatives_reuse_observations_and_batch_shopping(self):
+        with self.store.locked() as state:
+            for target in ("minimum_fish_portions", "minimum_legume_dinners", "minimum_wholegrain_or_potato_dinners", "minimum_vegetable_types"):
+                state["profile"]["diet"][target] = 0
         refs = self.save_recipes([recipe(f"Dinner {i}", rows) for i, rows in enumerate(DINNERS)])
         planner_input = {"week": "2026-W37", "dates": [f"2026-09-{day:02}" for day in range(7, 14)],
                          "portions": 2, "candidates": [{"recipe_ref": r["recipe_ref"]} for r in refs], "alternatives": 3}
@@ -387,3 +579,26 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertTrue(all(row["reason"] == "product_planning_deadline" for row in plan["unresolved_requirements"]))
         self.assertEqual(plan["status"], "needs_input")
         self.assertNotIn("totals", plan)
+        try:
+            from mcp_server import MCP_PRODUCT_WIRE_BUDGET, _bounded_product_result, _mcp_text_wire_chars
+        except ModuleNotFoundError as exc:
+            if exc.name == "mcp":
+                self.skipTest("MCP test dependency is not installed")
+            raise
+        response = {
+            "apply_arguments": None,
+            "partial_apply_arguments": {
+                "action": "apply", "partial_apply": True,
+                "menu_ref": self.app._cart_menu_ref(self.menu),
+                "candidate_approvals": self.app._plan_approvals(plan, selected_only=True),
+                "ingredient_decisions": [], "budget_ore": None, "price_mode": "exact",
+                "partial_product_plan_digest": plan["partial_product_plan_digest"],
+            },
+            "product_plan": plan,
+        }
+        compact = _bounded_product_result(response)
+        self.assertIn("partial_apply_arguments", compact)
+        self.assertLess(
+            _mcp_text_wire_chars(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))),
+            MCP_PRODUCT_WIRE_BUDGET,
+        )

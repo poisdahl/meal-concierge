@@ -132,7 +132,9 @@ def _ingredient(text: str, *, item=None, measure=None):
             match = re.fullmatch(r'(\d+)\s+((?:(?:small|medium|large|fresh)\s+)?(?:egg whites?|egg yolks?|salmon fillets?|garlic cloves?|bell peppers?|zucchini|sweet potatoes|sweet potato|eggs?|onions?|carrots?|potatoes|potato|tomatoes|tomato|lemons?|limes?|apples?|bananas?))(,.*)?', punctuation_text, re.I)
             if match:
                 measure, item = f'{match[1]} count', match[2] + (match[3] or '')
-    result = source_ingredient(text, item=item, measure=measure)
+    result = source_ingredient(
+        text, item=item, measure=measure, language="en", preserve_source_item=True,
+    )
     if source_metric:
         for evidence in result['evidence'].values():
             evidence['conversion'] = 'Used the explicit metric amount printed in source parentheses; no density or general cup conversion inferred.'
@@ -273,7 +275,9 @@ def _reviewed_dinner_mapping(entry: dict, recipe: dict) -> bool:
         indexes = [i for i, value in enumerate(recipe['ingredients']) if value['original_text'] == original]
         if len(indexes) != 1:
             raise SourceParseError('reviewed dinner ingredient wording mismatch')
-        ingredient = source_ingredient(original, item=item, measure=measure)
+        ingredient = source_ingredient(
+            original, item=item, measure=measure, language="en", preserve_source_item=True,
+        )
         for evidence in ingredient['evidence'].values():
             evidence['conversion'] = change
         recipe['ingredients'][indexes[0]] = ingredient

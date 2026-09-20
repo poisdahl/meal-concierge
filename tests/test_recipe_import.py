@@ -2589,6 +2589,10 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(recipe['ingredients'][2]['evidence']['quantity']['basis'], 'estimate')
         self.assertNotIn('acceptance', json.dumps(recipe))
         self.assertTrue(scale_recipe(recipe)['readiness']['scaling_ready'])
+        value['interpretation']['language'] = 'en'
+        declared = read_transcript(value)['candidate']
+        self.assertEqual(declared['ingredients'][2]['item'], 'tomat')
+        self.assertTrue(declared['ingredients'][2]['scalable'])
         del value['interpretation']['yield']['estimated_portions']
         self.assertIsNone(read_transcript(value)['candidate']['portions'])
 

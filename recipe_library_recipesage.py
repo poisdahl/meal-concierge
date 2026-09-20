@@ -1356,7 +1356,7 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         if rights.get("storage") == "link_only":
             candidate: dict[str, Any] = {
                 "name": name,
-                "language": stored.get("language", "nb-NO") if stored else "nb-NO",
+                "language": stored.get("language", "nb-NO") if stored else "und",
                 "tags": deepcopy(stored["tags"]) if stored else self._tags(raw.get("recipeLabels")),
                 "source": source,
                 "rights": rights,
@@ -1364,7 +1364,7 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         else:
             candidate = {
                 "name": name,
-                "language": stored.get("language", "nb-NO") if stored else "nb-NO",
+                "language": stored.get("language", "nb-NO") if stored else "und",
                 "tags": deepcopy(stored["tags"]) if stored else self._tags(raw.get("recipeLabels")),
                 "source": source,
                 "rights": rights,
@@ -1383,7 +1383,10 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
                 candidate["schema_version"] = 2
                 candidate["source"]["original"] = {"url": raw.get("url") or None, "publisher": _body(raw.get("source"), "recipe source", 300) or None}
                 if rights["storage"] == "full":
-                    candidate["ingredients"] = [source_ingredient(text) for text in candidate["ingredients"]]
+                    candidate["ingredients"] = [
+                        source_ingredient(text, language=candidate["language"])
+                        for text in candidate["ingredients"]
+                    ]
                     yield_text = _body(raw.get("yield"), "recipe yield", 500)
                     candidate["yield"], candidate["portions"] = source_yield(yield_text)
                     candidate["portions_evidence"] = {"basis": "source" if candidate["portions"] is not None else "unknown", "input": yield_text or None}

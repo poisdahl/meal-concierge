@@ -745,7 +745,7 @@ class MealieAdapter(RecipeLibraryAdapter):
         if rights.get("storage") == "link_only":
             candidate = {
                 "name": name,
-                "language": document.get("language", "nb-NO") if isinstance(stored, Mapping) else "nb-NO",
+                "language": document.get("language", "nb-NO") if isinstance(stored, Mapping) else "und",
                 "tags": deepcopy(document["tags"]) if isinstance(stored, Mapping) else self._tags(raw.get("tags")),
                 "source": source, "rights": rights,
             }
@@ -778,7 +778,7 @@ class MealieAdapter(RecipeLibraryAdapter):
             } or None
             candidate = {
                 "name": name,
-                "language": document.get("language", "nb-NO") if isinstance(stored, Mapping) else "nb-NO",
+                "language": document.get("language", "nb-NO") if isinstance(stored, Mapping) else "und",
                 "tags": deepcopy(document["tags"]) if isinstance(stored, Mapping) else self._tags(raw.get("tags")),
                 "source": source,
                 "rights": rights,
@@ -800,7 +800,10 @@ class MealieAdapter(RecipeLibraryAdapter):
                 if raw.get("orgURL"):
                     candidate["source"]["original"] = {"url": raw["orgURL"]}
                 if rights["storage"] == "full":
-                    candidate["ingredients"] = [source_ingredient(text) for text in ingredients]
+                    candidate["ingredients"] = [
+                        source_ingredient(text, language=candidate["language"])
+                        for text in ingredients
+                    ]
                     yield_text = str(raw.get("recipeYield") or "")
                     yield_quantity = raw.get("recipeYieldQuantity")
                     if yield_quantity is not None and yield_quantity != 0:

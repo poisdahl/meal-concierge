@@ -24,10 +24,12 @@ from product_observations import (  # noqa: E402
     normalize_meny_product_search,
     normalize_retail_product_search,
     parse_package,
+    parse_variable_package,
 )
 from product_planner import (  # noqa: E402
     build_product_plan,
     cart_requirements,
+    ingredient_search,
     menu_requirements,
     validate_product_plan,
 )
@@ -195,8 +197,13 @@ class ProductObservationTests(unittest.TestCase):
         self.assertEqual(discounted_display["offer_kind"], "regular")
         self.assertEqual(discounted_display["merchandise_ore"], 8740)
         self.assertNotIn("total_payable_ore", discounted_display)
-        self.assertEqual(products[64592]["purchase_options"][0]["price_kind"], "unavailable")
-        self.assertNotIn("package", products[64592])
+        variable = products[64592]
+        self.assertEqual(variable["purchase_options"][0]["price_kind"], "estimate")
+        self.assertEqual(variable["purchase_options"][0]["estimated_merchandise_ore"], 11980)
+        self.assertEqual(variable["package"], {
+            "quantity": {"numerator": 1000, "denominator": 1},
+            "unit": "g", "item_count": 1, "quantity_kind": "expected",
+        })
 
     def test_multibuy_requires_the_complete_fixture_backed_campaign_evidence(self):
         fixture = json.loads(
@@ -314,6 +321,15 @@ class ProductObservationTests(unittest.TestCase):
             self.assertIsNone(parse_package(
                 f"3-5 Stk. {qualifier}, 700 g", provider="oda"
             ))
+        self.assertEqual(parse_variable_package("Uten skinn, ca. 250 g", provider="oda"), {
+            "quantity": {"numerator": 250, "denominator": 1},
+            "unit": "g", "item_count": 1, "quantity_kind": "expected",
+        })
+        self.assertEqual(parse_variable_package("minst 1 kg", provider="oda"), {
+            "quantity": {"numerator": 1000, "denominator": 1},
+            "unit": "g", "item_count": 1, "quantity_kind": "minimum",
+        })
+        self.assertIsNone(parse_variable_package("ca. 250 g", provider="meny"))
 
     def test_oda_changed_shapes_and_duplicate_ids_fail_closed(self):
         item = {
@@ -340,6 +356,22 @@ class ProductObservationTests(unittest.TestCase):
                 {"result": [{"query": "fixture", "hasMore": False, "products": []}, {"query": "other", "hasMore": False, "products": []}]},
                 observed_at=OBSERVED_AT,
             )
+
+    def test_oda_minimum_weight_is_variable_and_never_exactly_unit_priced(self):
+        item = {
+            "id": 700011, "name": "Minimum fixture", "description": "minimum 400 g",
+            "price": "100.00", "unitPrice": "250.00", "unitName": "kilogram",
+            "availability": {"isAvailable": True},
+        }
+        result = normalize_retail_product_search(
+            {"result": [{"query": "fixture", "hasMore": False, "products": [item]}]},
+            observed_at=OBSERVED_AT,
+        )
+        normalized = result["products"][0]
+        self.assertEqual(normalized["package"]["quantity_kind"], "minimum")
+        option_value = normalized["purchase_options"][0]
+        self.assertEqual(option_value["price_kind"], "estimate")
+        self.assertNotIn("comparable_merchandise_unit_price", option_value)
 
     def test_promotional_text_is_inert_and_search_size_is_bounded(self):
         malicious = {
@@ -388,6 +420,375 @@ class ProductObservationTests(unittest.TestCase):
 
 
 class ProductPlannerTests(unittest.TestCase):
+    def test_product_search_localizes_only_the_complete_semantic_identity(self):
+        norwegian = (
+            "hvitløk", "vårløk", "maisstivelse", "maismel", "korianderblader",
+            "korianderfrø", "chilipulver", "finkornet sukker", "melis",
+            "selvhevende hvetemel", "kremfløte, minst 48 % fett", "kålrot",
+            "kremfløte, 38 % fett", "britisk fruktfyll til bakst",
+            "kjøttfarse av storfe og svin",
+        )
+        for identity in norwegian:
+            with self.subTest(identity=identity):
+                self.assertEqual(ingredient_search(identity, "oda"), identity)
+                self.assertEqual(ingredient_search(identity, "meny"), identity)
+        mathem = {
+            "hvitløk": "vitlök", "vårløk": "salladslök",
+            "garlic": "vitlök", "spring onion": "salladslök",
+            "broccoli": "broccoli", "cod fillet": "torskfilé",
+            "maisstivelse": "majsstärkelse", "maismel": "majsmjöl",
+            "korianderblader": "färska korianderblad", "korianderfrø": "korianderfrön",
+            "finkornet sukker": "finkornigt strösocker", "melis": "florsocker",
+            "selvhevende hvetemel": "självjäsande vetemjöl",
+            "kremfløte, minst 48 % fett": "vispgrädde, minst 48 % fett",
+            "kremfløte, 38 % fett": "vispgrädde, 38 % fett",
+            "kålrot": "kålrot", "britisk fruktfyll til bakst": "brittisk mincemeat-fruktfyllning",
+            "kjøttfarse av storfe og svin": "köttfärs av nöt och fläsk",
+        }
+        for identity, expected in mathem.items():
+            with self.subTest(provider="mathem", identity=identity):
+                self.assertEqual(ingredient_search(identity, "mathem"), expected)
+        for ambiguous in (
+            "selleri", "koriander", "kraft", "fløte", "maismel eller maisstivelse",
+            "chilikrydder", "blandet kjøttfarse", "gochujang",
+        ):
+            with self.subTest(ambiguous=ambiguous):
+                self.assertEqual(ingredient_search(ambiguous, "oda"), ambiguous)
+                self.assertEqual(ingredient_search(ambiguous, "mathem"), ambiguous)
+
+    def test_semantic_mismatches_are_excluded_and_cannot_be_approved(self):
+        cases = [
+            ("brokkoli", "Brokkolispirer"),
+            ("brokkoli", "Spirer av brokkoli"),
+            ("broccoli", "Brokkolispirer"),
+            ("fersk torskefilet", "Laksefilet"),
+            ("fersk torskefilet", "Fryst torskefilet"),
+            ("torskefilet uten skinn", "Torskefilet med skinn"),
+            ("skinnfri torskefilet", "Torskefilet med skinn"),
+            ("torskefilet", "Fiskefilet"),
+            ("torsk og laks", "Laksefilet"),
+            ("hvite bønner", "Kikerter"),
+            ("hvite bønner", "Hvite bønner og kikerter"),
+            ("maisstivelse", "Majsmjöl"),
+            ("korianderblader", "Korianderfrön"),
+            ("korianderblader", "Koriander"),
+            ("malt koriander", "Korianderblader"),
+            ("malt koriander", "Koriander hel"),
+            ("ferske korianderblader", "Koriander malt"),
+            ("fersk koriander", "Tørket koriander"),
+            ("fersk gjær", "Tørrgjær"),
+            ("fersk gjær", "Instantgjær"),
+            ("fersk pasta", "Tørket pasta"),
+            ("fersk brokkoli", "Frossen brokkoli"),
+            ("brokkoli, fersk", "Tørket brokkoli"),
+            ("chilipulver", "Chiliflak"),
+            ("finkornet sukker", "Sukker"),
+            ("melis", "Sukker"),
+            ("finkornet sukker", "Florsocker"),
+            ("selvhevende hvetemel", "Vanlig hvetemel"),
+            ("selvhevende hvetemel", "Vetemjöl"),
+            ("kremfløte, minst 48 % fett", "Kremfløte 38 % fett"),
+            ("kremfløte, minst 48 % fett", "Vispgrädde"),
+            ("kremfløte, 38 % fett", "Matfløte 20 % fett"),
+            ("britisk fruktfyll til bakst", "Kjøttdeig"),
+            ("kjøttfarse av storfe og svin", "Kjøttdeig av storfe"),
+            ("kjøttfarse av storfe og svin", "Köttfärs"),
+            ("kjøttdeig av svin", "Svinepølse"),
+            ("kjøttdeig av storfe", "Karbonadedeig av storfe"),
+            ("usaltet smør", "Saltet smør"),
+            ("usaltet smør", "Lettsaltet smør"),
+            ("usaltet smør", "Smør"),
+            ("usaltet smør", "Smør med salt"),
+            ("glutenfri pasta", "Vanlig pasta"),
+            ("vegetarisk kjøttdeig", "Kjøttdeig av storfe"),
+            ("kålrot", "Turnips"),
+            ("britisk fruktfyll til bakst", "Fruktfyll"),
+            ("kyllingbryst", "Kyllinglår"),
+            ("chicken breast", "Chicken thighs"),
+            ("laksefilet", "Hel laks"),
+            ("torskefilet", "Torsk hel"),
+            ("svinefilet", "Svinekoteletter"),
+            ("hakket tomat", "Hele tomater"),
+            ("fullkornspasta", "Vanlig pasta"),
+            ("brun ris", "Hvit ris"),
+            ("fullkornsris", "Jasminris"),
+            ("fullkornstortilla", "Hvetetortilla"),
+            ("grovt brød", "Loff"),
+            ("smør", "Peanøttsmør"),
+            ("hvetemel", "Mandelmel"),
+            ("salt", "Hvitløkssalt"),
+            ("ris", "Blomkålris"),
+            ("melk", "Melkesjokolade"),
+            ("hvitløk", "Hvitløkspulver"),
+            ("tomat", "Tomatsaus"),
+            ("smør", "Cashewsmør"),
+            ("hvetemel", "Kokosmel"),
+            ("salt", "Sellerisalt"),
+            ("ris", "Brokkoliris"),
+            ("mel", "Mandelmel"),
+            ("smør", "Cashew-smør"),
+            ("hvetemel", "Kokos-mel"),
+            ("salt", "Selleri-salt"),
+            ("ris", "Brokkoli-ris"),
+            ("hvitløk", "Hvitløk-pulver"),
+            ("tomat", "Tomat-saus"),
+            ("smør", "Cocoa Butter"),
+            ("salt", "Salt Crackers"),
+            ("ris", "Rice Noodles"),
+            ("melk", "Oat Milk"),
+            ("hvitløk", "Garlic Paste"),
+            ("tomat", "Tomato Paste"),
+            ("smør", "Cookie Butter"),
+            ("salt", "Salt & Pepper Mix"),
+            ("ris", "Rice Flour"),
+            ("melk", "Chocolate Milk"),
+            ("hvitløk", "Garlic Bread"),
+            ("tomat", "Tomato Chutney"),
+            ("hvitløk", "Garlic, Powder"),
+            ("tomat", "Tomato, Paste"),
+            ("ris", "Byggris"),
+            ("ris", "Konjakris"),
+            ("ris", "Linseris"),
+            ("melk", "Hampmelk"),
+            ("melk", "Potetmelk"),
+            ("milk", "Hemp Milk"),
+            ("hvetemel", "Flour Tortillas"),
+        ]
+        for wanted, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
+                    candidate_approvals=[],
+                )
+                self.assertEqual(plan["requirements"][0]["observation"]["products"], [])
+                self.assertEqual(plan["requirements"][0]["observation"]["excluded_candidate_reason"], "candidate_semantic_mismatch")
+                rejected = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
+                    candidate_approvals=[{"requirement_id": requirement["requirement_id"], "candidate_refs": ["10"]}],
+                )
+                self.assertEqual(rejected["unresolved_requirements"][0]["reason"], "candidate_semantic_mismatch")
+
+    def test_semantically_exact_provider_names_remain_eligible(self):
+        for wanted, offered in (
+            ("britisk fruktfyll til bakst", "Mincemeat"),
+            ("britisk fruktfyll til bakst", "Brittisk Mincemeat"),
+            ("kremfløte, 38 % fett", "Vispgrädde 38 % fett"),
+            ("kjøttfarse av storfe og svin", "Köttfärs av nöt och fläsk"),
+            ("kjøttdeig av storfe", "Nötfärs"),
+            ("kjøttdeig av svin", "Fläskfärs"),
+            ("kjøttdeig av kylling", "Kycklingfärs"),
+            ("usaltet smør", "Osaltat smör"),
+            ("kyllingbryst", "Kyllingfilet"),
+            ("torskefilet", "Torskeloin"),
+            ("fullkornspasta", "Fullkornspasta"),
+            ("smør", "Meierismør"),
+            ("salt", "Havsalt"),
+            ("ris", "Jasminris"),
+            ("ris", "Basmatiris"),
+            ("ris", "Villris"),
+            ("ris", "Sushiris"),
+            ("tomat", "Cherrytomater"),
+            ("tomat", "Cherrytomat"),
+            ("tomat", "Plommetomat"),
+            ("tomat", "Cocktailtomat"),
+            ("tomat", "Klasetomater"),
+            ("melk", "Q Melk Lett 1%"),
+            ("melk", "Lettmelk 0,5%"),
+            ("melk", "TINE Helmelk 3,5%"),
+            ("hvetemel", "Siktet Hvetemel 1 kg"),
+            ("hvetemel", "Vår Laveste Pris Hvetemel Siktet"),
+            ("smør", "TINE Meierismør 500 g"),
+            ("salt", "Havsalt Fint"),
+            ("salt", "Havsalt 500 g"),
+            ("ris", "Jasminris 1 kg"),
+            ("hvitløk", "Hvitløk Kina"),
+            ("hvitløk", "Fersk Hvitløk 2 stk"),
+            ("tomat", "Norske Tomater løsvekt"),
+            ("tomat", "Cherrytomater 250 g"),
+        ):
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": ["10"],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared")
+
+    def test_fresh_suffix_aggregates_one_requirement_and_one_package_selection(self):
+        value = {
+            "dishes": [
+                {"shopping_requirements": [{"item": "Fersk brokkoli", "quantity": 14, "unit": "count", "scalable": True}]},
+                {"shopping_requirements": [{"item": "Brokkoli, fersk", "quantity": 15, "unit": "count", "scalable": True}]},
+            ],
+            "salads": [],
+        }
+        requirements, unresolved = menu_requirements(value)
+        self.assertEqual(unresolved, [])
+        self.assertEqual(len(requirements), 1)
+        self.assertEqual(requirements[0]["quantity"], {"numerator": 29, "denominator": 1})
+        self.assertEqual(len(requirements[0]["sources"]), 2)
+
+        distinct, unresolved = menu_requirements(menu(
+            {"item": "brokkoli", "quantity": 1, "unit": "count"},
+            {"item": "brokkoli, fersk", "quantity": 1, "unit": "count"},
+        ))
+        self.assertEqual(unresolved, [])
+        self.assertEqual({row["identity"] for row in distinct}, {"brokkoli", "fersk brokkoli"})
+
+    def test_reviewed_multilingual_aliases_aggregate_before_sku_selection(self):
+        for first, second in (
+            ("garlic", "hvitløk"), ("broccoli", "brokkoli"),
+            ("spring onion", "vårløk"), ("cod fillet", "torskefilet"),
+            ("tomatoes", "tomat"), ("potatoes", "potet"),
+            ("carrots", "gulrot"),
+        ):
+            with self.subTest(first=first, second=second):
+                value = menu(
+                    {"item": first, "quantity": 100, "unit": "g"},
+                    {"item": second, "quantity": 50, "unit": "g"},
+                )
+                requirements, unresolved = menu_requirements(value)
+                self.assertEqual(unresolved, [])
+                self.assertEqual(len(requirements), 1)
+                self.assertEqual(requirements[0]["quantity"], {"numerator": 150, "denominator": 1})
+                candidate = product("42", second, 100, "g", [option(100)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirements[0]["requirement_id"]: observation(second, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirements[0]["requirement_id"], "candidate_refs": ["42"],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared")
+                self.assertEqual(plan["requirements"][0]["selection"]["products"][0]["quantity"], 2)
+
+    def test_available_stock_sums_reviewed_alias_quantities_once(self):
+        value = menu({"item": "garlic", "quantity": 150, "unit": "g"})
+        value["available_ingredients"] = [
+            {"item": "garlic", "quantity": 100, "unit": "g"},
+            {"item": "hvitløk", "quantity": 40, "unit": "g"},
+        ]
+        requirements, unresolved = menu_requirements(value)
+        self.assertEqual(unresolved, [])
+        self.assertEqual(len(requirements), 1)
+        self.assertEqual(requirements[0]["quantity"], {"numerator": 10, "denominator": 1})
+        self.assertEqual(requirements[0]["confirmed_pantry_quantity"], {"numerator": 140, "denominator": 1})
+
+    def test_fresh_form_is_not_erased_for_yeast_pasta_or_herbs(self):
+        for fresh, plain in (("fersk gjær", "gjær"), ("fersk pasta", "pasta"), ("fersk koriander", "koriander")):
+            with self.subTest(fresh=fresh):
+                requirements, unresolved = menu_requirements(menu(
+                    {"item": fresh, "quantity": 50, "unit": "g"},
+                    {"item": plain, "quantity": 25, "unit": "g"},
+                ))
+                self.assertEqual(unresolved, [])
+                self.assertEqual(len(requirements), 2)
+                self.assertEqual({row["identity"] for row in requirements}, {fresh, plain})
+
+    def test_variable_weight_requires_estimate_mode_and_never_claims_final_total(self):
+        value = menu({"item": "torskefilet", "quantity": 300, "unit": "g"})
+        requirement = menu_requirements(value)[0][0]
+        candidate = product("10", "Torskeloin", 400, "g", [])
+        candidate["package"]["quantity_kind"] = "expected"
+        candidate["purchase_options"] = [{
+            "package_count": 1, "price_kind": "estimate",
+            "estimated_merchandise_ore": 17600, "offer_kind": "regular",
+            "eligibility": "confirmed",
+        }]
+        arguments = dict(
+            provider="oda", binding={}, menu=value,
+            observations={requirement["requirement_id"]: observation("torskefilet", [candidate])},
+            candidate_approvals=[{"requirement_id": requirement["requirement_id"], "candidate_refs": ["10"]}],
+        )
+        self.assertEqual(build_product_plan(**arguments)["status"], "needs_input")
+        plan = build_product_plan(**arguments, price_mode="estimate")
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual(plan["coverage_status"], "variable_weight_estimate")
+        self.assertEqual(plan["cost_status"], "merchandise_estimate_only")
+        self.assertEqual(plan["requirements"][0]["selection"]["coverage_status"], "variable_weight_expected")
+        self.assertIsNone(plan["requirements"][0]["selection"]["coverage"])
+        self.assertIsNone(plan["requirements"][0]["selection"]["surplus_quantity"])
+        self.assertEqual(plan["requirements"][0]["selection"]["expected_coverage"], {"numerator": 400, "denominator": 1})
+        self.assertEqual(plan["totals"]["merchandise_ore"], 17600)
+        self.assertIsNone(plan["totals"]["total_payable_ore"])
+        self.assertIsNone(plan["comparison_claim"])
+        budgeted = build_product_plan(**arguments, price_mode="estimate", budget_ore=10_000)
+        self.assertEqual(budgeted["status"], "prepared")
+        self.assertEqual(budgeted["budget_status"], "unverified")
+
+    def test_estimated_line_cannot_hide_exact_budget_floor_violation(self):
+        value = menu(
+            {"item": "hvetemel", "quantity": 500, "unit": "g"},
+            {"item": "torskefilet", "quantity": 300, "unit": "g"},
+        )
+        requirements, unresolved = menu_requirements(value)
+        self.assertEqual(unresolved, [])
+        by_item = {requirement["item"]: requirement for requirement in requirements}
+        flour = product("10", "Hvetemel", 500, "g", [option(20_000)])
+        fish = product("20", "Torskeloin", 400, "g", [])
+        fish["package"]["quantity_kind"] = "expected"
+        fish["purchase_options"] = [{
+            "package_count": 1, "price_kind": "estimate",
+            "estimated_merchandise_ore": 100, "offer_kind": "regular",
+            "eligibility": "confirmed",
+        }]
+        plan = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={
+                by_item["hvetemel"]["requirement_id"]: observation("hvetemel", [flour]),
+                by_item["torskefilet"]["requirement_id"]: observation("torskefilet", [fish]),
+            },
+            candidate_approvals=[
+                {"requirement_id": by_item["hvetemel"]["requirement_id"], "candidate_refs": ["10"]},
+                {"requirement_id": by_item["torskefilet"]["requirement_id"], "candidate_refs": ["20"]},
+            ],
+            price_mode="estimate", budget_ore=10_000,
+        )
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(plan["budget_status"], "exceeded")
+        self.assertEqual(plan["unresolved_requirements"], [{
+            "reason": "product_budget_exceeded", "budget_ore": 10_000,
+            "known_minimum_ore": 20_000, "total_payable_ore": None,
+        }])
+
+    def test_incomplete_over_budget_plan_cannot_issue_partial_apply_digest(self):
+        value = menu(
+            {"item": "hvetemel", "quantity": 500, "unit": "g"},
+            {"item": "torskefilet", "quantity": 300, "unit": "g"},
+        )
+        requirements, unresolved = menu_requirements(value)
+        self.assertEqual(unresolved, [])
+        by_item = {requirement["item"]: requirement for requirement in requirements}
+        flour = product("10", "Hvetemel", 500, "g", [option(20_000)])
+        plan = build_product_plan(
+            provider="oda", binding={}, menu=value,
+            observations={
+                by_item["hvetemel"]["requirement_id"]: observation("hvetemel", [flour]),
+            },
+            candidate_approvals=[{
+                "requirement_id": by_item["hvetemel"]["requirement_id"],
+                "candidate_refs": ["10"],
+            }],
+            budget_ore=10_000,
+        )
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(plan["budget_status"], "exceeded")
+        self.assertNotIn("partial_product_plan_digest", plan)
+        self.assertIn({
+            "reason": "product_budget_exceeded", "budget_ore": 10_000,
+            "known_minimum_ore": 20_000, "total_payable_ore": None,
+        }, plan["unresolved_requirements"])
     def test_plain_cooking_water_stays_in_recipe_but_is_not_default_shopping(self):
         value = menu({'item':'vann','quantity':600,'unit':'ml'}, {'item':'mineral water','quantity':500,'unit':'ml'})
         needs, unresolved = menu_requirements(value)
@@ -569,8 +970,8 @@ class ProductPlannerTests(unittest.TestCase):
 
     def test_unknown_candidate_blocks_cheapest_claim_instead_of_being_ignored(self):
         menu_value = menu({"item": "Mel", "quantity": 500, "unit": "g"})
-        exact = product("10", "Exact", 500, "g", [option(1000)])
-        unknown = product("20", "Member", 500, "g", [option(900, eligibility="unknown")])
+        exact = product("10", "Første hvetemel", 500, "g", [option(1000)])
+        unknown = product("20", "Andre hvetemel", 500, "g", [option(900, eligibility="unknown")])
         plan = prepared(menu_value, [exact, unknown])
         self.assertEqual(plan["status"], "needs_input")
         self.assertIsNone(plan["comparison_claim"])
@@ -639,12 +1040,12 @@ class ProductPlannerTests(unittest.TestCase):
 
     def test_nonconvertible_candidate_and_unknown_deposit_block_selection(self):
         menu_value = menu({"item": "Mel", "quantity": 500, "unit": "g"})
-        volume = product("10", "Volume", 500, "ml", [option(1000)])
+        volume = product("10", "Volum hvetemel", 500, "ml", [option(1000)])
         self.assertEqual(
             prepared(menu_value, [volume])["unresolved_requirements"][0]["reason"],
             "candidate_package_incompatible",
         )
-        unknown_deposit = product("11", "Unknown deposit", 500, "g", [{
+        unknown_deposit = product("11", "Ukjent hvetemel", 500, "g", [{
             "package_count": 1, "price_kind": "exact", "merchandise_ore": 900,
             "offer_kind": "regular", "eligibility": "confirmed",
         }])
@@ -655,8 +1056,8 @@ class ProductPlannerTests(unittest.TestCase):
 
     def test_equal_price_ties_and_candidate_order_are_deterministic(self):
         menu_value = menu({"item": "Mel", "quantity": 1000, "unit": "g"})
-        left = product("20", "Left", 500, "g", [option(1000)])
-        right = product("10", "Right", 500, "g", [option(1000)])
+        left = product("20", "Venstre hvetemel", 500, "g", [option(1000)])
+        right = product("10", "Høyre hvetemel", 500, "g", [option(1000)])
         first = prepared(menu_value, [left, right])
         second = prepared(menu_value, [right, left])
         self.assertEqual(first["requirements"][0]["selection"], second["requirements"][0]["selection"])
@@ -840,6 +1241,93 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(plan["unresolved_requirements"][0]["reason"], "exact_candidate_scope_needs_selection")
         self.assertEqual([name for name, _arguments in self.provider.calls], ["product_search"])
         self.assertEqual(self.provider.cart["items"], [])
+
+    def test_runtime_searches_norwegian_identity_without_rewriting_menu_or_binding_sku(self):
+        cases = (("hvitløk", "hvitløk"), ("vårløk", "vårløk"), ("korianderfrø", "korianderfrø"))
+        for index, (identity, expected_query) in enumerate(cases):
+            with self.subTest(identity=identity), tempfile.TemporaryDirectory() as directory:
+                store = StateStore(Path(directory), {
+                    "instance": f"language-{index}", "household": "Test", "provider": "oda",
+                    "profile_overrides": {},
+                })
+                menu_value = {
+                    "menu_id": f"menu-language-{index}", "revision": 1, "digest": chr(98 + index) * 64,
+                    "phase": "draft", "dishes": [{"shopping_requirements": [{
+                        "item": identity, "quantity": 2, "unit": "clove", "scalable": True,
+                    }]}], "salads": [],
+                }
+                with store.locked() as state:
+                    state["menu"] = deepcopy(menu_value)
+                provider = FakeProvider()
+                original = provider.call
+                candidate_name = {
+                    "hvitløk": "Hvitløk", "vårløk": "Vårløk",
+                    "korianderfrø": "Korianderfrø",
+                }[identity]
+                def localized(tool_name, arguments, **kwargs):
+                    if tool_name == "product_search":
+                        provider.calls.append((tool_name, deepcopy(arguments)))
+                        return observation(arguments["queries"][0], [
+                            product("10", candidate_name, 100, "g", [option(1000)])
+                        ])
+                    return original(tool_name, arguments, **kwargs)
+                provider.call = localized
+                app = Application(store, provider, object())
+                plan = app.handle({
+                    "operation": "products", "action": "prepare",
+                    "menu_ref": {key: menu_value[key] for key in ("menu_id", "revision", "digest")},
+                })["product_plan"]
+                self.assertEqual(provider.calls[0][1]["queries"], [expected_query])
+                self.assertEqual(plan["requirements"][0]["identity"], identity)
+                self.assertEqual(
+                    plan["requirements"][0]["observation"]["products"][0]["candidate_approval"]["search_query"],
+                    candidate_name,
+                )
+                self.assertEqual(store.read()["menu"]["dishes"][0]["shopping_requirements"][0]["item"], identity)
+                self.assertNotIn("product_ref", store.read()["menu"]["dishes"][0]["shopping_requirements"][0])
+
+    def test_compact_apply_reuses_selected_product_name_as_stable_search_binding(self):
+        calls = []
+
+        def scoped(tool_name, arguments, **_kwargs):
+            calls.append((tool_name, deepcopy(arguments)))
+            if tool_name == "product_search":
+                query = arguments["queries"][0]
+                if query == "fixture mel" and sum(name == "product_search" for name, _args in calls) > 1:
+                    return observation(query, [product("11", "Other Flour", 500, "g", [option(900)])])
+                if query in {"fixture mel", "Stable Flour 500 g"}:
+                    return observation(query, [product("10", "Stable Flour 500 g", 500, "g", [option(1000)])])
+                raise AssertionError(query)
+            return FakeProvider.call(self.provider, tool_name, arguments, **_kwargs)
+
+        self.provider.call = scoped
+        requirement = menu_requirements(self.menu)[0][0]
+        prepared_response = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+            }],
+        })
+        arguments = prepared_response["apply_arguments"]
+        self.assertEqual(arguments["candidate_approvals"][0]["search_query"], "Stable Flour 500 g")
+        result = self.app.handle({
+            "operation": "products", **arguments, "cart_change_requested": True,
+        })
+        self.assertTrue(result["applied"], result)
+        self.assertIn("Stable Flour 500 g", [args["queries"][0] for name, args in calls if name == "product_search"])
+
+    def test_multi_candidate_approval_keeps_requirement_query_scope(self):
+        self.provider.product_count = 2
+        requirement = menu_requirements(self.menu)[0][0]
+        response = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10", "11"],
+            }],
+        })
+        approval = response["apply_arguments"]["candidate_approvals"][0]
+        self.assertEqual(approval["candidate_refs"], ["10", "11"])
+        self.assertNotIn("search_query", approval)
 
     def test_real_meny_fixture_reaches_prepared_through_application(self):
         provider = MenyFixtureProvider()
@@ -1464,7 +1952,8 @@ class WholeWeekProductTests(unittest.TestCase):
                 self.calls.append((name,deepcopy(args)))
                 if name=='product_search':
                     query=args['queries'][0]
-                    candidate=product(self.ids[query],query,500,'g',[option(2000)])
+                    identity = {'broccoli': 'brokkoli'}.get(query, query)
+                    candidate=product(self.ids[identity],query,500,'g',[option(2000)])
                     candidate['provider']=self.provider
                     unavailable=deepcopy(candidate)
                     unavailable.update(product_ref=candidate['product_ref']+'0', product_id=candidate['product_id']+'0',availability='unavailable')
@@ -1493,6 +1982,8 @@ class WholeWeekProductTests(unittest.TestCase):
                 with store.locked() as state:
                     state['setup']['status']='complete'
                     state['profile']['recipes']['sources']={key:key=='internal' for key in state['profile']['recipes']['sources']}
+                    for target in ("minimum_fish_portions", "minimum_legume_dinners", "minimum_wholegrain_or_potato_dinners", "minimum_vegetable_types"):
+                        state['profile']['diet'][target] = 0
                 refs=[]
                 for index,rice in enumerate([200,250,50,50,50,50,50]):
                     value=recipe('Synthetic dinner '+str(index),'week-'+str(index))
@@ -1512,7 +2003,9 @@ class WholeWeekProductTests(unittest.TestCase):
                 self.assertEqual(rice['gross_quantity'],{'numerator':700,'denominator':1})
                 self.assertEqual(rice['quantity'],{'numerator':450,'denominator':1})
                 request={'operation':'products','action':'prepare','menu_ref':{k:menu[k] for k in ('menu_id','revision','digest')},
-                    'candidate_approvals':[{'requirement_id':x['requirement_id'],'candidate_refs':[shop.ids[x['identity']]]} for x in needs]}
+                    'candidate_approvals':[{'requirement_id':x['requirement_id'],'candidate_refs':[
+                        shop.ids[{'broccoli': 'brokkoli'}.get(x['identity'], x['identity'])]
+                    ]} for x in needs]}
                 purchase=app.handle(request)['product_plan']
                 self.assertEqual(purchase['status'],'prepared')
                 self.assertEqual(purchase['totals']['package_count'],9)

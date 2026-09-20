@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from recipe_curation import batch_mass, curate, recovered, serving_estimate
+from recipe_pack_sources import _ingredient
 from recipe_portable import FORMAT, apply_archive, canonical_bytes, preflight_archive, write_archive
 from recipe_quantities import read_quantity
 from recipes import RecipeError, RecipeStore, normalize_recipe, prepare_recipe_input, scale_recipe, source_ingredient
@@ -27,7 +28,9 @@ class CurationTests(unittest.TestCase):
         before = source_recipe()
         result, credit = curate(before, {}, pack_version='1')
         self.assertIsNone(before['portions'])
-        self.assertEqual(result['ingredients'][1], before['ingredients'][1])
+        self.assertEqual(result['ingredients'][1]['item'], 'vann')
+        self.assertEqual(result['ingredients'][1]['quantity'], before['ingredients'][1]['quantity'])
+        self.assertEqual(result['ingredients'][1]['original_text'], before['ingredients'][1]['original_text'])
         self.assertEqual(read_quantity(result['ingredients'][0]['quantity']), 240)
         self.assertEqual(result['ingredients'][0]['unit'], 'g')
         self.assertEqual(result['ingredients'][0]['original_text'], '2 cups flour')
@@ -51,6 +54,30 @@ class CurationTests(unittest.TestCase):
         self.assertFalse(result['ingredients'][0]['scalable'])
         self.assertTrue(credit['curation']['unresolved'])
         self.assertTrue(any(not row['scalable'] for row in scale_recipe(result)['shopping_requirements']))
+
+        before['ingredients'] = [source_ingredient('100 g palm oil', language='en')]
+        result, credit = curate(before, {}, pack_version='1')
+        self.assertEqual(result['ingredients'][0]['item'], 'palm oil')
+        self.assertEqual(result['ingredients'][0]['original_text'], '100 g palm oil')
+        self.assertFalse(result['ingredients'][0]['scalable'])
+        self.assertIn('ingredients.0.identity_review_required', credit['curation']['unresolved'])
+
+    def test_pack_source_identity_mapping_is_deferred_until_after_curation(self):
+        before = source_recipe()
+        before['ingredients'] = [_ingredient(text) for text in (
+            '2 cups flour', '1 cup olive oil', '160 ml water',
+            '6 garlic cloves', '2 chicken breasts (400 g)', '3 cloves',
+        )]
+        self.assertEqual([row['item'] for row in before['ingredients']], [
+            '2 cups flour', '1 cup olive oil', 'water', 'garlic cloves',
+            '2 chicken breasts (400 g)', '3 cloves',
+        ])
+        result, credit = curate(before, {}, pack_version='1')
+        self.assertEqual([row['item'] for row in result['ingredients']], [
+            'hvetemel', 'olivenolje', 'vann', 'hvitløk', 'kyllingbryst', 'nellikspiker',
+        ])
+        self.assertTrue(all(row['scalable'] for row in result['ingredients']))
+        self.assertEqual(credit['curation']['unresolved'], [])
 
     def test_recovery_preserves_metric_and_does_not_read_unicode_unit_as_grams(self):
         for text, quantity, unit in [('2 gō (300 g) sushi rice', 300, 'g'),
@@ -100,6 +127,18 @@ class CurationTests(unittest.TestCase):
         recipe['name']='Slagroomtaart';recipe['tags']=['Dessert'];recipe['ingredients']=[source_ingredient('100 g flour'),source_ingredient('750 ml cream'),source_ingredient('200 g sugar')]
         self.assertGreaterEqual(serving_estimate(recipe)[0],10)
 
+    def test_english_additive_recovery_uses_reviewed_norwegian_identity(self):
+        row = recovered(source_ingredient('20 g + 20 g olive oil'))
+        self.assertEqual(row['item'], 'olivenolje')
+        self.assertEqual(read_quantity(row['quantity']), 40)
+        self.assertEqual(row['unit'], 'g')
+        self.assertEqual(row['original_text'], '20 g + 20 g olive oil')
+        self.assertTrue(row['scalable'])
+        for text in ('200 g unfamiliar ingredient', '2 cups exotic powder'):
+            with self.subTest(text=text):
+                unresolved = recovered(source_ingredient(text, language='en'))
+                self.assertFalse(unresolved['scalable'])
+
     def test_editorial_choice_survives_preserved_original_alternatives(self):
         before = source_recipe()
         row = source_ingredient('4 cups raw palm nuts or 800 ml canned palm nut extract')
@@ -110,7 +149,7 @@ class CurationTests(unittest.TestCase):
             'source_hash':'a'*64,'note':'Prepared extract selected.','resolved_issues':[], 'set':{'ingredients':[row]}}})
         actual = result['ingredients'][0]
         self.assertEqual((actual['item'], read_quantity(actual['quantity']), actual['unit']),
-                         ('canned palm-nut extract',800,'ml'))
+                         ('hermetisk palmenøttekstrakt',800,'ml'))
         self.assertIn('raw palm nuts', actual['original_text'])
 
     def test_source_bound_amendments_cannot_change_identity_or_ignore_source_issues(self):

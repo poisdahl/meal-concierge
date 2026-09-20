@@ -1039,7 +1039,12 @@ exact currently blocked `recipe_key` in this request's `cooldown_overrides`,
 with a non-empty bounded reason. Unneeded, historical or other-recipe overrides
 are rejected.
 
-Time and dietary targets are soft by default. Structured recipe
+Time targets and unsupported dietary preferences are soft by default. On a
+complete weekly plan, the saved positive `minimum_fish_portions`,
+`minimum_legume_dinners`, `minimum_wholegrain_or_potato_dinners` and
+`minimum_vegetable_types` are automatic hard constraints; the planner returns
+`needs_input` for missing evidence or `no_plan` for known infeasibility instead
+of saving a noncompliant week. Structured recipe
 `times.active_minutes` is used when valid. The v1 deterministic ingredient
 facet table may contribute positive fish, legume, wholegrain/potato and
 vegetable evidence, but its absence is incomplete rather than proof that a
@@ -1063,12 +1068,13 @@ Explicit facts use objects with `source="explicit"`, for example:
 }
 ```
 
-Do not manufacture those facts from model inference. A caller may list any of
-the supported targets in `strict_targets`: `active_minutes`,
+Do not manufacture those facts from model inference. A caller may additionally
+list any supported target in `strict_targets`: `active_minutes`,
 `minimum_fish_portions`, `minimum_legume_dinners`,
 `minimum_wholegrain_or_potato_dinners` and `minimum_vegetable_types`. Missing
 strict evidence returns `needs_input`; complete known infeasibility returns
-`no_plan`. Default unknown or unsupported nutrition, cuisine/format and
+`no_plan`. The four saved weekly minimums are included automatically for a
+full-week request. Default unknown or unsupported nutrition, cuisine/format and
 perishability factors remain named in `soft_relaxations` and are never described
 as compliant.
 
@@ -1805,12 +1811,32 @@ show gross/allocated/net quantities and package surplus. Fully covered needs
 require no purchase; existing cart goods must still be reconciled. Exact plan
 references and digests bind pantry, product approvals, price mode and budget.
 
+Every recipe `ingredients[].item` is a stable, semantically precise Norwegian
+generic ingredient identity, including meaningful variant, form, processing,
+fat/salt state and dietary or allergen properties. Exact source wording remains
+in `original_text`, and `recipe.language` continues to describe the title,
+steps and notes; normalizing the item does not relabel the recipe language.
+Established Norwegian-use names such as gochujang, paneer and tahini remain
+valid. Ambiguous source meaning stays unresolved instead of being guessed.
+Oda and MENY search the Norwegian identity. Mathem uses only reviewed exact
+whole-identity Swedish mappings; a missing or ambiguous mapping remains visible
+for explicit candidate review. Retailer product references exist only in the
+transient, digest-bound product plan and cart state, never in a recipe.
+
 `price_mode=estimate` permits only one explicitly approved, available, regular
-price package when pant is unknown. Merchandise is an estimate and the complete
+price package when deposit is unknown. It may also use a retailer-declared
+expected or minimum variable package weight, while preserving that quantity
+basis and estimated coverage. Merchandise is an estimate and the complete
 payable amount remains null. Exact mode and lowest-cost comparison retain their
 strict complete-price requirements. `budget_ore` rejects a known minimum above
 the budget, including every known deposit; unknown totals stay unverified. It
 excludes delivery and cart fees. Checkout always reads the final provider total.
+
+An incomplete preparation with reviewed selected lines may return digest-bound
+`partial_apply_arguments`. Partial apply rereads every selection accumulated by
+this and earlier partial applies before syncing them, excludes recurring goods,
+and is idempotent across repeated or incremental partial applications. It never records full shopping completion;
+checkout remains blocked until a later complete apply reconciles the whole menu.
 
 Cart sync and reconcile require the current `menu_ref` (menu_id, revision, digest),
 and product approval is invalidated by changed requirements even during external

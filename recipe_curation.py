@@ -134,7 +134,7 @@ def cup_weight(item):
     return {'fat':220,'sugar':200,'herb':30,'aromatic':140,'dairy':240,'protein':150,'carb':170,'bread':100,'nuts':140,'fruit':160,'vegetable':150,'chocolate':170}.get(group(item))
 
 
-def recovered(ingredient):
+def _recovered(ingredient):
     """Recover source amounts and mark every interpretation/convention separately."""
     i = deepcopy(ingredient)
     original = i.get('original_text') or i['raw']
@@ -147,14 +147,16 @@ def recovered(ingredient):
     added=re.match(r'^('+NUMBER+r')\s*('+unit_words+r')\s*(?:\+|plus|and)\s*('+NUMBER+r')\s*('+unit_words+r')\s+(.+)$',clean(original),re.I)
     if added and not any(e.get('input')=='Meal Concierge editorial adaptation' for e in (i.get('evidence') or {}).values()):
         from recipes import source_ingredient
-        parts=[recovered(source_ingredient(added[a]+' '+added[a+1]+' '+added[5])) for a in (1,3)]
+        parts=[_recovered(source_ingredient(
+            added[a]+' '+added[a+1]+' '+added[5], language='en',
+        )) for a in (1,3)]
         if all(p.get('scalable') and p.get('unit') in UNITS for p in parts):
             measures=[(read_quantity(p['quantity'])*UNITS[p['unit']][1],UNITS[p['unit']][0]) for p in parts]
             density=cup_weight(added[5])
             if len({u for _,u in measures})>1 and density is not None and {u for _,u in measures}<={'g','ml'}:
                 measures=[(q*Fraction(str(density))/240 if u=='ml' else q,'g') for q,u in measures]
             if len({u for _,u in measures})==1:
-                i.update(item=added[5],quantity=quantity_json(sum(q for q,_ in measures)),unit=measures[0][1],scalable=True)
+                i.update(item=parts[0]['item'],quantity=quantity_json(sum(q for q,_ in measures)),unit=measures[0][1],scalable=True)
                 i['evidence']={k:estimate(original,'Added both stated quantities for the same ingredient, using the documented metric spoon/cup and ingredient-density conventions where necessary.') for k in ('quantity','unit')}
                 return i
     if i.get('scalable') and i.get('unit') in UNITS:
@@ -248,7 +250,12 @@ def recovered(ingredient):
             item = item or tail
             conversion = 'Used the metric equivalent printed for this source ingredient.'
         else:
-            units = sorted(set(UNITS)|set(ALIASES)|{'cups','cup','fl oz','fluid ounces','fluid ounce','pint','pints','quart','quarts','gallon','gallons'},key=len,reverse=True)
+            units = sorted(
+                {unit for unit in UNITS if UNITS[unit][0] not in {'clove', 'stalk', 'package'}}
+                | set(ALIASES)
+                | {'cups','cup','fl oz','fluid ounces','fluid ounce','pint','pints','quart','quarts','gallon','gallons'},
+                key=len, reverse=True,
+            )
             um = next((m for u in units if (m := re.match(re.escape(u)+r'(?![^\W\d_])\.?\s*(.*)',tail,re.I))),None)
             if um:
                 text_unit = tail[:len(tail)-len(um[1])].strip(' .').lower()
@@ -269,7 +276,8 @@ def recovered(ingredient):
                     noun,tail=cm[1].lower(),cm[2]
                     if noun=='dozen':n*=12
                     item=item or re.sub(r'^of\s+','',tail,flags=re.I)
-                    if noun not in {'dozen','ea','whole','piece','pieces'} and noun not in item.lower():item=f'{item} ({noun})'
+                    if noun not in {'dozen','ea','whole','piece','pieces'} and noun not in item.lower():
+                        item = noun if not item else f'{item} ({noun})'
                     unit='count'
                 elif re.search(r'\b(?:eggs?|yolks?|whites|onions?|shallots?|carrots?|potatoes|tomatoes|tomato|leeks?|lemons?|limes?|oranges?|apples?|pears?|bananas?|chillies|chiles|peppers?|jalape[ñn]os?|garlic|cucumbers?|aubergines?|eggplants?|zucchini|courgettes?|avocados?|tortillas?|fillets?|steaks?|breasts?|thighs?|wings?|drumsticks?|sausages?|frankfurters|cubes?|loaves|baguettes?|muffins?|sandwiches|bagels?|rolls?|buns?|crackers?|cookies?|biscuits?|sheets?|stalks?|sticks?|pods?|seeds|threads|grains|leaves|berries|dates|prunes|cherries|walnuts?|almonds?|cloves|nutmeg|spring onions?|chilli|scotch bonnet|leaf|bay leaf|celery|cabbage|lettuce|cardamom|star anise|bacon|chorizo|bread|pita|mushrooms?|scallions?|potato|chops|chicken|pork|lamb|veal|roast|slabs?|wingettes|prawns|oysters|scallops|squid|mackerel|apricots?|peaches?|plantain|coconut|breadfruit|fennel|squash|beetroot|turnips?|celeriac|bouquet garni|peppercorns|thyme|rosemary|mint|cashew|tamarind|brussels sprouts|galangal|lemongrass|mozzarella|nutmeg|wrappers?)\b', item or tail,re.I):
                     item=item or tail
@@ -285,6 +293,18 @@ def recovered(ingredient):
     return i
 
 
+def recovered(ingredient):
+    """Recover English source quantities without bypassing identity review."""
+    from recipes import source_ingredient_identity
+
+    result = _recovered(ingredient)
+    item, identity_review_required = source_ingredient_identity(result.get('item', ''), 'en')
+    result['item'] = item
+    if identity_review_required:
+        result['scalable'] = False
+    return result
+
+
 def batch_mass(ingredient):
     if not ingredient.get('quantity') or ingredient.get('unit') not in UNITS:return 0
     n= float(read_quantity(ingredient['quantity'])); unit,factor=UNITS[ingredient['unit']];n*=float(factor)
@@ -293,7 +313,7 @@ def batch_mass(ingredient):
     size=re.search(r'(\d+(?:\.\d+)?)\s*(kg|g|lb|pound|oz)\b', item)
     if size:
         return n*float(size[1])*{'kg':1000,'g':1,'lb':453.59237,'pound':453.59237,'oz':28.349523125}[size[2]]
-    for pattern, grams in [(r'(?:king |jumbo )?(?:prawns?|shrimps?)',20),(r'cherry tomatoes?|grape tomatoes?',15),(r'eggs? whites?|egg yolks?',25),(r'spring onions?|scallions?',15),(r'garlic.*head|head.*garlic',50),(r'stock cube|seasoning cube',10),(r'garlic',5),(r'cardamom|peppercorn|whole cloves?|^\(?cloves?\)?$',.2),(r'cinnamon stick',3),(r'chillies|chilli|chiles|chili|scotch bonnet',10),(r'asparagus',20),(r'falafel',25),(r'shallots?',30),(r'wingettes?|wings?',45),(r'drumsticks?|legs?',250),(r'boneless pork loin roast|slab|roast',1200),(r'strawberr',15),(r'grapes?|cherries',5),(r'pecan halves|almonds?|hazelnuts?|cashews?',2),(r'walnuts?|pecans?|chestnuts?',5),(r'cloves?|garlic',5),(r'eggs?|yolks?|whites',50),(r'leaf|leaves|sprigs?|thyme|rosemary|mint|basil|parsley|coriander|cilantro',1),(r'star anise',1),(r'slices?|strips?',25),(r'breasts?|fillets?|steaks?',175),(r'whole chicken',1500),(r'chicken',200),(r'lemon|lime',70),(r'potato|tomato|onion|apple|pear',150),(r'carrot|banana',100),(r'bell pepper',150),(r'tortilla|bread|bun|roll|muffin',60),(r'head.*cabbage',800)]:
+    for pattern, grams in [(r'(?:king |jumbo )?(?:prawns?|shrimps?)',20),(r'cherry tomatoes?|grape tomatoes?|cherrytomater?',15),(r'eggs? whites?|egg yolks?|eggehviter?',25),(r'spring onions?|scallions?',15),(r'garlic.*head|head.*garlic',50),(r'stock cube|seasoning cube',10),(r'garlic|hvitløk',5),(r'cardamom|peppercorn|whole cloves?|^\(?cloves?\)?$|nellikspiker',.2),(r'cinnamon stick',3),(r'chillies|chilli|chiles|chili|scotch bonnet',10),(r'asparagus',20),(r'falafel',25),(r'shallots?',30),(r'wingettes?|wings?',45),(r'drumsticks?|legs?',250),(r'boneless pork loin roast|slab|roast',1200),(r'strawberr',15),(r'grapes?|cherries',5),(r'pecan halves|almonds?|hazelnuts?|cashews?',2),(r'walnuts?|pecans?|chestnuts?',5),(r'cloves?|garlic|hvitløk',5),(r'eggs?|yolks?|whites|eggehviter?',50),(r'leaf|leaves|sprigs?|thyme|rosemary|mint|basil|parsley|coriander|cilantro',1),(r'star anise',1),(r'slices?|strips?',25),(r'breasts?|fillets?|steaks?',175),(r'whole chicken',1500),(r'chicken',200),(r'lemon|lime',70),(r'potato|tomato|onion|apple|pear',150),(r'carrot|banana',100),(r'bell pepper',150),(r'tortilla|bread|bun|roll|muffin',60),(r'head.*cabbage',800)]:
         if re.search(pattern,item):return n*grams
     return n*100
 
@@ -483,7 +503,7 @@ def editorial_rows(recipe):
         parts=split_outside(chosen,r'\s+(?:and|plus)\s+(?=\d)')
         if (len(parts)>1 or len(alternatives)>1) and all(group(part) for part in parts):
             for part in parts:
-                new=source_ingredient(part)
+                new=source_ingredient(part, language='en')
                 new['notes']='Meal Concierge selected the first numeric alternative and separated explicitly additive amounts. Original wording: '+text[:300]
                 rows.append(new)
             notes.append('Selected ingredient branch: '+chosen)
@@ -526,10 +546,15 @@ def curate(recipe, credit, *, pack_version, amendments=None):
     from recipe_pack_sources import readiness
     identity=recipe['source']['kind']+':'+recipe['source']['external_id']
     if identity not in (amendments or {}) and not credit.get('normalization_issues') and readiness(recipe)[0]=='ready':
-        return recipe,credit
+        from recipes import source_ingredient_identity
+        for ingredient in recipe['ingredients']:
+            ingredient['item'], review_required = source_ingredient_identity(ingredient['item'], 'en')
+            if review_required:
+                ingredient['scalable'] = False
+        return normalize_recipe(recipe),credit
     recipe,credit=apply_amendment(recipe,credit,amendments)
     recipe=editorial_rows(recipe)
-    recipe['ingredients']=[recovered(i) for i in recipe['ingredients']]
+    recipe['ingredients']=[_recovered(i) for i in recipe['ingredients']]
     for index,i in enumerate(recipe['ingredients']):
         if not i.get('scalable') and PREFIX.match(clean(i.get('original_text') or i['raw'])):
             recipe['ingredients'][index],_ = assumed_amount(i,1,recipe)
@@ -544,6 +569,15 @@ def curate(recipe, credit, *, pack_version, amendments=None):
             completed[index],done=assumed_amount(i,portions,recipe)
             if not done:unresolved.append(f'ingredients.{index}.unhandled_food')
     recipe['ingredients']=completed
+    from recipes import source_ingredient_identity
+    for index, ingredient in enumerate(recipe['ingredients']):
+        mapped, identity_review_required = source_ingredient_identity(ingredient['item'], 'en')
+        ingredient['item'] = mapped
+        if identity_review_required:
+            ingredient['scalable'] = False
+            issue = f'ingredients.{index}.identity_review_required'
+            if issue not in unresolved:
+                unresolved.append(issue)
     # Project review is introduced only by the offline publisher step. Runtime
     # external boundaries reject copied or forged markers.
     for evidence in recipe_evidence_fields(recipe).values():
