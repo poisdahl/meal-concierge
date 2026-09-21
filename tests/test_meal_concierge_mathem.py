@@ -495,7 +495,7 @@ class OdaFinalBindingTests(unittest.TestCase):
         import hashlib
         browser=OdaBrowser.__new__(OdaBrowser)
         review={'account_reference_digest':hashlib.sha256(b'123').hexdigest(),'surface':{}}
-        browser.review_checkout=lambda cart:dict(review)
+        browser.review_checkout=lambda cart,**kw:dict(review)
         browser._cart_expectation=lambda cart:{'delivery_address':'Eksempelveien 1','total_minor':100,'product_count':1}
         browser._account_reference=mock.Mock(return_value=789)
         browser._click_checkout_submit=mock.Mock()
@@ -555,7 +555,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     browser._invoke=mock.Mock();browser._account_reference=lambda address:123
                     browser._cart_expectation=lambda cart:expected;browser._order_cart=lambda *args:{}
                     browser._addition_expectation=lambda *args:{**expected,'checkout_url':url,'original_minor':10000,'original_count':1}
-                    browser.review_checkout=lambda cart:deepcopy(review)
+                    browser.review_checkout=lambda cart,**kw:deepcopy(review)
                     browser.review_order_change=lambda *a,**kw:deepcopy(review)
                     callback=[];observed=[]
                     def final_eval(script):
@@ -3103,7 +3103,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         review['amounts'] = self.amounts
         review['discount_breakdown'] = self.discount_breakdown
         review = json.loads(json.dumps(review, sort_keys=True))
-        browser.review_checkout = lambda cart: deepcopy(review)
+        browser.review_checkout = lambda cart, **kw: deepcopy(review)
         for change in (None, 'card', 'quantity', 'delivery', 'amount', 'spoof'):
             observed = []
             def final_eval(script):
