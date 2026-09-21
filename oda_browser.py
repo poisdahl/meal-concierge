@@ -271,6 +271,26 @@ def _oda_checkout_amount_script(
    const lines=(candidates[0].innerText||'').split(/\n+/).map(norm).filter(Boolean);
    return {state:'value',value:parseAmount(lines[1]),root:candidates[0]};
  };
+ const itemizedDiscountLabel=label=>ITEMIZED_DISCOUNTS&&label.length<=200&&/^[1-9]\d{0,5}kr:\s+\S(?:.*\S)?$/i.test(label);
+ const itemizedDiscountLabelRows=[...document.querySelectorAll('*')].filter(visible).map(node=>({node,labelLines:(node.innerText||'').split(/\n+/).map(norm).filter(Boolean)}))
+   .filter(row=>row.labelLines.length===1&&itemizedDiscountLabel(row.labelLines[0]))
+   .map(row=>({node:row.node,label:row.labelLines[0]}))
+   .filter(row=>![...row.node.children].some(child=>visible(child)&&norm(child.innerText||'')===row.label))
+   .map(({node,label})=>{
+     let root=node.matches('div')?node:node.closest('div'),selected=null,fallback=null;
+     while(root){
+       const lines=(root.innerText||'').split(/\n+/).map(norm).filter(Boolean);
+       if(lines[0]!==label)break;
+       if(lines.length===2){selected={root,lines,value:parseAmount(lines[1])};break;}
+       if(!fallback&&[...root.children].filter(visible).length>=2)fallback={root,lines,value:null};
+       root=root.parentElement?.closest('div')||null;
+     }
+     return selected||fallback||{root:node.closest('div')||node,lines:[label],value:null};
+   });
+ const itemizedCandidateTotal=itemizedDiscountLabelRows.reduce((total,row)=>total+(row.value||0),0);
+ const itemizedRowsValid=itemizedDiscountLabelRows.length<=100&&itemizedDiscountLabelRows.every(row=>
+   row.lines.length===2&&Number.isSafeInteger(row.value)&&row.value<0)&&Number.isSafeInteger(itemizedCandidateTotal);
+ const itemizedDiscountRows=itemizedRowsValid?itemizedDiscountLabelRows:[];
  const states={
    product_subtotal:rowState(productLabel),
    delivery_price:rowState(amountLabels.delivery_price),
@@ -289,8 +309,8 @@ def _oda_checkout_amount_script(
    summaryRoot=required[0].root;
    while(summaryRoot&&!required.every(row=>summaryRoot.contains(row.root)))summaryRoot=summaryRoot.parentElement;
  }
- const knownRoots=Object.values(states).filter(row=>row.root).map(row=>row.root);
- const contained=Boolean(summaryRoot)&&Object.values(states).every(row=>row.state!=='value'||summaryRoot.contains(row.root));
+ const knownRoots=[...Object.values(states).filter(row=>row.root).map(row=>row.root),...itemizedDiscountRows.map(row=>row.root)];
+ const contained=Boolean(summaryRoot)&&Object.values(states).every(row=>row.state!=='value'||summaryRoot.contains(row.root))&&itemizedDiscountRows.every(row=>summaryRoot.contains(row.root));
  const currencyLine=line=>/(?:^|\s)(?:kr|CURRENCY_CODE)$/i.test(line);
  const unknownRows=summaryRoot?[...summaryRoot.querySelectorAll('*')].filter(visible).filter(root=>{
    if(knownRoots.some(known=>known.contains(root)))return false;
@@ -298,10 +318,13 @@ def _oda_checkout_amount_script(
    if(!lines.some(currencyLine)||knownLabels.includes(lines[0]))return false;
    return ![...root.children].some(child=>visible(child)&&(child.innerText||'').split(/\n+/).map(norm).filter(Boolean).some(currencyLine));
  }):['missing-summary-root'];
+ const itemizedDiscount=itemizedDiscountRows.length?itemizedCandidateTotal:null;
+ const productDiscount=states.discounts.state==='value'?states.discounts.value:itemizedDiscount;
+ const discountsAgree=states.discounts.state!=='value'||itemizedDiscount===null||states.discounts.value===itemizedDiscount;
  const amounts={
    product_subtotal:states.product_subtotal.value,
    delivery_price:states.delivery_price.value,
-   discounts:states.discounts.state==='absent'&&states.delivery_discount.state==='absent'?null:(states.discounts.value||0)+(states.delivery_discount.value||0),
+   discounts:productDiscount===null&&states.delivery_discount.state==='absent'?null:(productDiscount||0)+(states.delivery_discount.value||0),
    deposits:null,
    bags:states.bags.value,
    other_fees:states.other_fee.state==='absent'?null:{[amountLabels.other_fee]:states.other_fee.value},
@@ -311,13 +334,13 @@ def _oda_checkout_amount_script(
  const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
  const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
- const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(states.discounts.value||0);
+ const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(productDiscount||0);
  // On addition retry the overview gross total and the payment calculation are
  // separate merchant values. The final button is the calculated amount due.
- const totalValid=ADDITION_RETRY
-   ? amounts.product_subtotal===TOTAL&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0)
-   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0);
- const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
+ const totalValid=discountsAgree&&(ADDITION_RETRY
+   ? amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0)
+   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0));
+ const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&itemizedRowsValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
    ...Object.entries(states).filter(([,row])=>row.state==='invalid').map(([key])=>'ambiguous_'+key),
    ...(!required.every(row=>row.state==='value')?['missing_required_row']:[]),
@@ -326,7 +349,7 @@ def _oda_checkout_amount_script(
    ...(!contained?['separate_summary_rows']:[]),
    ...(!discountedValid?['discounted_subtotal']:[]),
    ...(!totalValid?['row_arithmetic']:[]),
-   ...(unknownRows.length?['unrecognized_amount_row']:[]),
+   ...(!itemizedRowsValid||unknownRows.length?['unrecognized_amount_row']:[]),
    ...(!ADDITION_RETRY&&amounts.provider_total!==TOTAL?['original_total_changed']:[]),
  ];
  if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,amounts_valid:amountsValid,...(amountFailures.length?{amount_check_failures:amountFailures}:{})});
@@ -359,6 +382,7 @@ def _oda_checkout_amount_script(
         .replace("ADDITION_RETRY", "true" if addition_retry else "false")
         .replace("RETRY", "true" if retry else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
+        .replace("ITEMIZED_DISCOUNTS", "true" if provider == "oda" and retry else "false")
         .replace(
             "EXPECTED_AMOUNTS",
             json.dumps(expected_amounts, ensure_ascii=False, separators=(",", ":")),
