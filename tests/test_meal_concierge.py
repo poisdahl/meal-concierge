@@ -7988,7 +7988,7 @@ class CartPlanTests(unittest.TestCase):
 
             application.handle({
                 "operation": "menu", "action": "clear",
-                "menu_id": "menu_cart_plan_test", "expected_revision": 1,
+                "menu_ref": application._cart_menu_ref(store.read().get("menu")),
             })
             self.assertNotIn("managed_product_apply_fence", store.read())
             application.handle({"operation": "cart", "action": "change",

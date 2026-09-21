@@ -4656,7 +4656,7 @@ class RecipeFlowTests(unittest.TestCase):
         changed = menu("2026-W40", full_recipe("Ny fisk"))
         updated = self.app.handle({"operation": "menu", "action": "save", "menu": changed, "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})["menu"]
         self.assertEqual(updated["revision"], 2)
-        with self.assertRaisesRegex(HouseholdError, "current revision is 2"):
+        with self.assertRaisesRegex(HouseholdError, "menu_ref does not match the current menu"):
             self.app.handle({"operation": "menu", "action": "save", "menu": value, "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})
 
     def test_new_inline_menu_recipe_requires_explicit_provenance(self):
@@ -4718,7 +4718,7 @@ class RecipeFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "ordered menu is immutable"):
             self.app.handle({
                 "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
-                "menu_id": first["menu_id"], "expected_revision": 1,
+                "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
             })
         replacement = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
         state = self.store.read()
@@ -4732,7 +4732,7 @@ class RecipeFlowTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "usage history is immutable"):
             self.app.handle({
                 "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
-                "menu_id": first["menu_id"], "expected_revision": 1,
+                "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
             })
         self.assertIn(key, self.store.read()["recipe_usage"][first["menu_id"]]["cooked_keys"])
 
@@ -4746,7 +4746,7 @@ class RecipeFlowTests(unittest.TestCase):
     def test_stale_menu_clear_cannot_remove_a_newer_menu(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
-        with self.assertRaisesRegex(HouseholdError, "menu_id does not match"):
+        with self.assertRaisesRegex(HouseholdError, "menu_ref does not match the current menu"):
             self.app.handle({"operation": "menu", "action": "clear", "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})
         self.assertEqual(self.store.read()["menu"]["menu_id"], second["menu_id"])
 

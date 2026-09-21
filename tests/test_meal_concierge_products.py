@@ -2296,7 +2296,7 @@ class ProductRuntimeTests(unittest.TestCase):
             try:
                 results["clear"] = self.app.handle({
                     "operation": "menu", "action": "clear",
-                    "menu_id": "menu_fixture", "expected_revision": 1,
+                    "menu_ref": self.app._cart_menu_ref(self.store.read().get("menu")),
                 })
             except Exception as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
