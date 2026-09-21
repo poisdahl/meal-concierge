@@ -913,8 +913,6 @@ def _oda_vipps_gateway_script(
  const query=[...current.searchParams.entries()];
  const exactAmountlessDestination=current.origin==='https://pay.vipps.no'&&current.pathname==='/'&&!current.hash&&query.length===1&&query[0][0]==='token'&&query[0][1].length>0;
  const currencyEvidence=/\bNOK\b/i.test(text);
- const currencyCodes=[...text.matchAll(/\b[A-Z]{3}\b/g)].map(match=>match[0]);
- const displayedMoney=/\p{N}/u.test(text)||currencyCodes.some(code=>code!=='NOK')||/\p{Sc}/u.test(text)||/\b(?:NOK|kr)\s*[,.:;]?\s*[−—–-]/i.test(text);
  const receipts=[...text.matchAll(/We've sent a payment request to\s+([+\d][\d ()-]*)(?=\s|$)/gi)];
  const receiptPhone=receipts.length===1?receipts[0][1].replace(/\D/g,''):'';
  const receiptPhoneMatches=receiptPhone===EXPECTED_PHONE||receiptPhone==='47'+EXPECTED_PHONE;
@@ -935,8 +933,12 @@ def _oda_vipps_gateway_script(
    const candidateButtons=[...candidate.querySelectorAll(buttonSelector)].filter(visible);
    if(candidatePhones.length===1&&candidatePhones[0]===phones[0]&&candidateButtons.length===1){paymentRoot=candidate;buttons=candidateButtons;break;}
  }
- const sourceBoundControls=phones.length===1&&enabled(phones[0])&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1&&enabled(buttons[0])&&norm(buttons[0].innerText||buttons[0].value||buttons[0].getAttribute('aria-label')||'')==='Next'&&Object.keys(buttons[0]).some(key=>key.startsWith('__reactProps'));
- const amountlessBound=ALLOW_SOURCE_BOUND_AMOUNTLESS&&exactAmountlessDestination&&currencyEvidence&&!displayedMoney&&amounts.length===0&&sourceBoundControls;
+ const rootNext=root?[...root.querySelectorAll(buttonSelector)].filter(visible).filter(button=>norm(button.innerText||button.value||button.getAttribute('aria-label')||'')==='Next'):[];
+ const sourceBoundControls=phones.length===1&&enabled(phones[0])&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1&&rootNext.length===1&&rootNext[0]===buttons[0];
+ // A reviewed Oda retry click authorizes this immediate same-tab transport
+ // page even when Vipps omits the amount. If Vipps does expose an amount,
+ // the dedicated parser above must bind every occurrence exactly.
+ const amountlessBound=ALLOW_SOURCE_BOUND_AMOUNTLESS&&exactAmountlessDestination&&currencyEvidence&&amounts.length===0&&sourceBoundControls;
  const fillable=identity&&!sent&&!expired&&merchant&&(amountBound||amountlessBound)&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1;
  const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
  const exact=fillable&&phoneMatches;

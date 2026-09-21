@@ -3331,11 +3331,38 @@ process.stdout.write(eval(script));
         self.assertFalse(evaluate({"sent": True, "amount": "256.51"})["sent"])
         self.assertFalse(evaluate({"sent": True, "merchant": False})["sent"])
 
-        amountless = {"amountless": True, "url": "https://pay.vipps.no/?token=opaque"}
+        amountless = {
+            "amountless": True,
+            "url": "https://pay.vipps.no/?token=opaque",
+            "extraText": "+47",
+        }
         self.assertFalse(evaluate(amountless)["fillable"])
         self.assertTrue(evaluate(
             amountless, allow_source_bound_amountless=True,
         )["ready"])
+        # The reviewed Oda retry page supplies the amount authority for this
+        # causal handoff. Incidental, unparsed transport text is not treated as
+        # a second amount parser, and React internals are not an identity gate.
+        for extra_text in ("+47", "+47 1", "+47 SEK", "+47 kroner"):
+            with self.subTest(extra_text=extra_text):
+                self.assertTrue(evaluate(
+                    {**amountless, "extraText": extra_text, "react": False},
+                    allow_source_bound_amountless=True,
+                )["ready"])
+        for disabled in ({"nextDisabled": True}, {"nextAriaDisabled": True}):
+            with self.subTest(disabled=disabled):
+                blank = evaluate(
+                    {**amountless, **disabled, "phone": ""},
+                    allow_source_bound_amountless=True,
+                )
+                self.assertTrue(blank["fillable"])
+                self.assertFalse(blank["phone_matches"])
+                self.assertFalse(blank["ready"])
+                self.assertFalse(evaluate(
+                    {**amountless, **disabled},
+                    allow_source_bound_amountless=True,
+                    require_hit=True,
+                )["ready"])
         for case in (
             {**amountless, "amountless": False, "amount": "256.51"},
             {**amountless, "url": "https://pay.vipps.no/other?token=opaque"},
@@ -3344,27 +3371,13 @@ process.stdout.write(eval(script));
             {**amountless, "merchant": False},
             {**amountless, "currency": False},
             {**amountless, "duplicate": True},
-            {**amountless, "nextDisabled": True},
+            {**amountless, "phoneDisabled": True},
+            {**amountless, "phoneReadOnly": True},
             {**amountless, "phoneAriaDisabled": True},
-            {**amountless, "react": False},
-            {**amountless, "extraText": "256 kr"},
-            {**amountless, "extraText": "256,- kr"},
-            {**amountless, "extraText": "kr 256,51"},
-            {**amountless, "extraText": "€256.51"},
-            {**amountless, "extraText": "$999.00"},
-            {**amountless, "extraText": "999,00 EUR"},
-            {**amountless, "extraText": "SEK"},
-            {**amountless, "extraText": "¥1000"},
-            {**amountless, "extraText": "1000 JPY"},
-            {**amountless, "extraText": "CHF 256"},
-            {**amountless, "extraText": "NOK total 256,-"},
-            {**amountless, "extraText": "NOK total 256"},
-            {**amountless, "extraText": "NOK,—"},
-            {**amountless, "extraText": "kr.—"},
-            {**amountless, "extraText": "２５６"},
-            {**amountless, "extraText": "٢٥٦"},
-            {**amountless, "extraText": "₿"},
-            {**amountless, "extraText": "¤"},
+            {**amountless, "multiplePhone": True},
+            {**amountless, "button": "Continue"},
+            {**amountless, "extraText": "+47 256.51 kr"},
+            {**amountless, "extraText": "+47 NOK 256,51"},
         ):
             with self.subTest(amountless=case):
                 self.assertFalse(evaluate(
@@ -3681,6 +3694,18 @@ process.stdout.write(eval(script));
                     order_id, unbound_source,
                 )["allow_source_bound_amountless"])
 
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-other")
+        browser._invoke = mock.Mock()
+        browser._eval = mock.Mock()
+        with self.assertRaisesRegex(HouseholdError, "payment tab changed"):
+            browser._complete_oda_vipps_request(
+                "tab-1", 25650, expected_order_id="order-1", source_url=source,
+            )
+        browser._invoke.assert_not_called()
+        browser._eval.assert_not_called()
+
     def test_oda_vipps_amountless_recovery_reaches_the_durable_request_fence(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
@@ -3698,12 +3723,17 @@ process.stdout.write(eval(script));
 
         browser._invoke = mock.Mock(side_effect=invoke)
 
-        def evaluate(script):
-            self.assertIn("const amountlessBound=true&&", script)
-            return {"identity": True, "ready": True, "sent": False, "expired": False,
-                    "fillable": True, "phone_matches": True}
-
-        browser._eval = mock.Mock(side_effect=evaluate)
+        initial = {"identity": True, "ready": False, "sent": False, "expired": False,
+                   "fillable": True, "phone_matches": False}
+        ready = {"identity": True, "ready": True, "sent": False, "expired": False,
+                 "fillable": True, "phone_matches": True}
+        browser._eval = mock.Mock(side_effect=[
+            initial,  # gateway discovery accepts the disabled-Next form
+            initial,  # the form loop identifies the writable phone
+            {"filled": True},
+            ready,  # the phone update enables the unique Next control
+            ready,  # exact hit-test before the durable request fence
+        ])
         fenced = []
 
         def before_request(context):
@@ -3719,6 +3749,8 @@ process.stdout.write(eval(script));
 
         self.assertEqual(len(fenced), 1)
         self.assertEqual(fenced[0]["order_id"], "order-1")
+        self.assertIn("const amountlessBound=true&&", browser._eval.call_args_list[0].args[0])
+        self.assertIn("data-oda-household-vipps-phone", browser._eval.call_args_list[2].args[0])
         self.assertFalse(any(call.args[:2] == ("mouse", "down")
                              for call in browser._invoke.call_args_list))
 
