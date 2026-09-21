@@ -10689,6 +10689,144 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(result["summary"]["delivery"]["selection_origin"], "external")
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_ignores_unscoped_stale_delivery_observation_for_current_cart_slot(self):
+        stale_slot = deepcopy(self.oda.delivery_slots["slots"][0])
+        self.oda.delivery_slots["slots"][0]["selected"] = False
+        self.oda.delivery_slots["slots"][1]["selected"] = True
+        self.oda.cart["delivery"] = {
+            "slot_id": 77,
+            "display": "Hjemlevering mellom kl 09 og 12, 12. sep",
+        }
+        stale_observation = {
+            "provider": "oda",
+            "scope": {"cart_id": None, "order_id": None, "occurrence": None},
+            "origin": "explicit",
+            "slot": stale_slot,
+            "candidate_digest": None,
+            "observed_at": "2026-09-03T13:00:00+00:00",
+        }
+        with self.store.locked() as state:
+            state["delivery_selection"] = deepcopy(stale_observation)
+
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+
+        self.assertEqual(prepared["summary"]["delivery"]["selection_origin"], "external")
+        self.assertIn(
+            ("get_delivery_slots", {"delivery_date": "2026-09-12"}),
+            self.oda.calls,
+        )
+        self.assertFalse(any(tool == "select_delivery_slot" for tool, _arguments in self.oda.calls))
+        self.assertEqual(self.store.read()["delivery_selection"], stale_observation)
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.browser.submit_deadlines, [])
+
+    def test_scheduled_checkout_ignores_unscoped_stale_delivery_observation(self):
+        stale_slot = deepcopy(self.oda.delivery_slots["slots"][0])
+        self.oda.delivery_slots["slots"][0]["selected"] = False
+        self.oda.delivery_slots["slots"][1]["selected"] = True
+        self.oda.cart["delivery"] = {
+            "slot_id": 77,
+            "display": "Hjemlevering mellom kl 09 og 12, 12. sep",
+        }
+        with self.store.locked() as state:
+            state["delivery_selection"] = {
+                "provider": "oda",
+                "scope": {"cart_id": None, "order_id": None, "occurrence": None},
+                "origin": "explicit",
+                "slot": stale_slot,
+                "candidate_digest": None,
+                "observed_at": "2026-09-03T13:00:00+00:00",
+            }
+        self.app.handle({"operation": "schedule", "action": "update", "changes": {
+            "enabled": True,
+            "maximum_total": 100.0,
+            "auto_checkout": True,
+            "delivery": {"weekday": "Saturday", "strategy": "cheapest"},
+        }})
+        self.app.handle({
+            "operation": "schedule", "action": "set_cron_job", "cron_job_id": "test-cron",
+        })
+
+        with mock.patch("service.now", return_value=ODA_FIXTURE_NOW):
+            result = self.app.handle({
+                "operation": "checkout", "action": "auto", "occurrence": "2026-W36",
+            })
+
+        self.assertEqual(result["summary"]["delivery"]["selection_origin"], "external")
+        self.assertIn(
+            ("get_delivery_slots", {"delivery_date": "2026-09-12"}),
+            self.oda.calls,
+        )
+        self.assertFalse(any(tool == "select_delivery_slot" for tool, _arguments in self.oda.calls))
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.browser.submit_deadlines, [])
+
+    def test_delivery_observation_requires_exact_current_cart_slot(self):
+        state = self.store.read()
+        slot = deepcopy(self.oda.delivery_slots["slots"][0])
+
+        def observation(candidate):
+            return {
+                "provider": "oda",
+                "scope": {"cart_id": None, "order_id": None, "occurrence": None},
+                "slot": candidate,
+            }
+
+        self.assertTrue(self.app._delivery_observation_applies(
+            observation(slot), state, cart=self.oda.cart, occurrence=None,
+        ))
+        self.assertFalse(self.app._delivery_observation_applies(
+            observation(slot), state, cart=None, occurrence=None,
+        ))
+        wrong_id = {**slot, "provider_slot_id": 71}
+        wrong_date = {
+            **slot,
+            "start_at": "2026-09-06T09:00:00+02:00",
+            "end_at": "2026-09-06T12:00:00+02:00",
+        }
+        wrong_window = {
+            **slot,
+            "start_at": "2026-09-05T10:00:00+02:00",
+            "end_at": "2026-09-05T13:00:00+02:00",
+        }
+        for candidate in (wrong_id, wrong_date, wrong_window):
+            with self.subTest(candidate=candidate):
+                self.assertFalse(self.app._delivery_observation_applies(
+                    observation(candidate), state, cart=self.oda.cart, occurrence=None,
+                ))
+        self.assertFalse(self.app._delivery_observation_applies(
+            {"provider": "oda", "scope": observation(slot)["scope"]},
+            state,
+            cart=self.oda.cart,
+            occurrence=None,
+        ))
+        with self.assertRaisesRegex(HouseholdError, "normalized contract"):
+            self.app._delivery_observation_applies(
+                observation({"unexpected": True}),
+                state,
+                cart=self.oda.cart,
+                occurrence=None,
+            )
+        malformed_cart = deepcopy(self.oda.cart)
+        malformed_cart["delivery"]["display"] = "changed delivery"
+        with self.assertRaisesRegex(HouseholdError, "selected cart delivery changed"):
+            self.app._delivery_observation_applies(
+                observation(slot),
+                state,
+                cart=malformed_cart,
+                occurrence=None,
+            )
+        self.assertFalse(self.app._delivery_observation_applies(
+            {
+                **observation({"unexpected": True}),
+                "scope": {"cart_id": None, "order_id": None, "occurrence": "other"},
+            },
+            state,
+            cart=self.oda.cart,
+            occurrence="current",
+        ))
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_standing_submit_rebinds_idempotency_to_reprepared_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             store = StateStore(Path(temp), {**CONFIG, "confirmation_policy": "standing"})

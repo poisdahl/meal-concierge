@@ -1225,6 +1225,30 @@ class MathemFlowTests(unittest.TestCase):
         self.assertIsNone(self.store.read()['pending_checkout'])
         self.assertIsNone(self.app.browser)
 
+    def test_mathem_delivery_observation_requires_current_cart_slot_id(self):
+        self.shop.cart['delivery'] = {'slot_id': 77, 'display': 'Hemleverans 09–12, 12 sep'}
+        slot = normalize_retail_delivery_slots(self.shop.slots, provider='mathem')['slots'][0]
+        observation = {
+            'provider': 'mathem',
+            'scope': {'cart_id': None, 'order_id': None, 'occurrence': None},
+            'slot': slot,
+        }
+        state = self.store.read()
+
+        self.assertTrue(self.app._delivery_observation_applies(
+            observation, state, cart=self.shop.cart, occurrence=None,
+        ))
+        self.assertFalse(self.app._delivery_observation_applies(
+            {**observation, 'slot': {**slot, 'provider_slot_id': 78}},
+            state,
+            cart=self.shop.cart,
+            occurrence=None,
+        ))
+        self.shop.cart['delivery'] = None
+        self.assertFalse(self.app._delivery_observation_applies(
+            observation, state, cart=self.shop.cart, occurrence=None,
+        ))
+
     def test_weekly_cart_ready_selects_delivery_and_hands_off_manual_payment(self):
         self.app.handle({'operation': 'schedule', 'action': 'update', 'changes': {
             'enabled': True, 'mode': 'cart_ready', 'auto_checkout': False,

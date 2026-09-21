@@ -301,7 +301,20 @@ class OrderOperations:
         current = self._delivery_scope(state, cart)
         if scope.get("cart_id") != current["cart_id"] or scope.get("order_id") != current["order_id"]:
             return False
-        return scope.get("occurrence") in {None, occurrence}
+        if scope.get("occurrence") not in {None, occurrence}:
+            return False
+        if self.provider in {"oda", "mathem"}:
+            if cart is None:
+                return False
+            cart_delivery = cart_summary(cart).get("delivery")
+            observed_slot = observation.get("slot")
+            if cart_delivery is None or observed_slot is None:
+                return False
+            if not retail_cart_delivery_matches_slot(
+                cart_delivery, observed_slot, provider=self.provider,
+            ):
+                return False
+        return True
 
     @staticmethod
     def _same_delivery_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
