@@ -1752,6 +1752,40 @@ class ProductRuntimeTests(unittest.TestCase):
                 self.assertEqual(store.read()["menu"]["dishes"][0]["shopping_requirements"][0]["item"], identity)
                 self.assertNotIn("product_ref", store.read()["menu"]["dishes"][0]["shopping_requirements"][0])
 
+    def test_recipe_product_hint_is_searched_and_ranked_only_when_current(self):
+        hint = {
+            "provider": "oda", "product_ref": 10, "name": "Linked Flour 500 g",
+            "url": "https://oda.com/no/products/10-linked-flour/",
+            "relationship": "source_recipe_association",
+        }
+        with self.store.locked() as state:
+            state["menu"]["dishes"][0]["shopping_requirements"][0]["_store_product_hint"] = hint
+
+        def linked_search(tool_name, arguments, **_kwargs):
+            self.provider.calls.append((tool_name, deepcopy(arguments)))
+            if tool_name == "product_search":
+                return observation(arguments["queries"][0], [
+                    product(11, "Fixture Mel Alternate", 500, "g", [option(900)]),
+                    product(10, "Fixture Mel", 500, "g", [option(1000)]),
+                ])
+            raise AssertionError(tool_name)
+
+        self.provider.call = linked_search
+        plan = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+        })["product_plan"]
+        requirement = plan["requirements"][0]
+        self.assertEqual(self.provider.calls[0][1]["queries"], ["Linked Flour 500 g"])
+        self.assertEqual(
+            [row["product_ref"] for row in requirement["observation"]["products"]],
+            [10, 11],
+        )
+        self.assertEqual(requirement["observation"]["source_product_evidence"], {
+            "relationship": "source_recipe_association",
+            "candidate_refs": [10], "currently_observed_refs": [10],
+            "status": "currently_observed",
+        })
+
     def test_compact_apply_reuses_selected_product_name_as_stable_search_binding(self):
         calls = []
 

@@ -15,7 +15,7 @@ import unicodedata
 from core import HouseholdError
 
 
-PRODUCT_PLAN_VERSION = "product-plan-v3"
+PRODUCT_PLAN_VERSION = "product-plan-v4"
 MAX_REQUIREMENTS = 64
 MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
@@ -721,6 +721,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                     "gross_fraction": Fraction(0),
                     "pantry_fraction": Fraction(0),
                     "sources": [],
+                    "product_hints": [],
                 })
                 if requirement["identity"] != identity:
                     requirement["identity"] = aggregate_identity
@@ -729,6 +730,12 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 requirement["gross_fraction"] += gross_quantity
                 requirement["pantry_fraction"] += pantry_quantity
                 requirement["sources"].append(position)
+                hint = raw.get("_store_product_hint")
+                if isinstance(hint, Mapping) and not any(
+                    canonical(existing) == canonical(hint)
+                    for existing in requirement["product_hints"]
+                ):
+                    requirement["product_hints"].append(deepcopy(dict(hint)))
     requirements = []
     for (aggregate_identity, unit), value in sorted(aggregated.items(), key=lambda pair: (pair[0][0].encode("utf-8"), pair[0][1])):
         # Explicit source-position decisions replace this ingredient's request
@@ -754,6 +761,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
             "confirmed_pantry_quantity": _fraction_json(value["pantry_fraction"]),
             "unit": unit,
             "sources": value["sources"],
+            **({"product_hints": value["product_hints"]} if value["product_hints"] else {}),
         })
     if set(by_position) != used:
         raise HouseholdError("ingredient decision does not name a source in this exact menu")

@@ -524,6 +524,38 @@ def _format_number(value: float) -> str:
     return format(value, ".15g")
 
 
+def _store_product_hint(value: Any, field: str) -> dict[str, Any] | None:
+    """Validate advisory retailer evidence without treating it as a product fact."""
+    if value is None:
+        return None
+    required = {"provider", "product_ref", "name", "url", "relationship"}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise RecipeError(f"{field} has unsupported fields")
+    provider = value.get("provider")
+    product_ref = value.get("product_ref")
+    name = _bounded_text(value.get("name"), f"{field}.name", required=True, maximum=300)
+    url = value.get("url")
+    relationship = value.get("relationship")
+    parsed = urlsplit(url) if isinstance(url, str) else None
+    if (
+        provider != "oda"
+        or type(product_ref) is not int or product_ref <= 0
+        or relationship != "source_recipe_association"
+        or parsed is None or parsed.scheme != "https"
+        or parsed.hostname not in {"oda.com", "www.oda.com"}
+        or parsed.netloc != parsed.hostname or parsed.query or parsed.fragment
+        or re.fullmatch(rf"/no/products/{product_ref}-[A-Za-z0-9._~-]+/", parsed.path) is None
+    ):
+        raise RecipeError(f"{field} is not a valid Oda recipe-product association")
+    return {
+        "provider": provider,
+        "product_ref": product_ref,
+        "name": name,
+        "url": url,
+        "relationship": relationship,
+    }
+
+
 def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
     if isinstance(value, str):
         text = _bounded_text(value, f"ingredients[{index}]", required=True, maximum=500)
@@ -568,6 +600,9 @@ def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
         result["amount"] = f"{_format_number(quantity)} {unit}"
     elif supplied_amount:
         result["amount"] = supplied_amount
+    hint = _store_product_hint(value.get("_store_product_hint"), f"ingredients[{index}]._store_product_hint")
+    if hint is not None:
+        result["_store_product_hint"] = hint
     return result
 
 
@@ -656,13 +691,17 @@ def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
     if any(not isinstance(flag, bool) for flag in flags.values()):
         raise RecipeError(f"{field} optional and pantry must be true or false")
     amount = f"{quantity_text(quantity)} {unit}" if quantity is not None and unit else _bounded_text(value.get("amount"), f"{field}.amount", maximum=100)
-    return {
+    result = {
         "item": item, "quantity": quantity, "unit": unit, "scalable": scalable,
         "raw": f"{amount} {item}" if scalable else raw or " ".join(part for part in (amount, item) if part),
         "amount": amount, "original_text": original,
         "notes": _bounded_text(value.get("notes"), f"{field}.notes", maximum=500),
         **flags, "evidence": _amount_evidence(value.get("evidence"), f"{field}.evidence", original=original, basis=basis),
     }
+    hint = _store_product_hint(value.get("_store_product_hint"), f"{field}._store_product_hint")
+    if hint is not None:
+        result["_store_product_hint"] = hint
+    return result
 
 
 def _yield(value: Any, *, basis: str) -> dict[str, Any] | None:
@@ -1121,6 +1160,8 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
             "optional": item.get("optional", False), "pantry": item.get("pantry", False),
             "scalable": item.get("scalable") is True and reason is None,
         }
+        if item.get("_store_product_hint") is not None:
+            requirement["_store_product_hint"] = deepcopy(item["_store_product_hint"])
         if reason:
             requirement["unresolved_reason"] = reason
         requirements.append(requirement)

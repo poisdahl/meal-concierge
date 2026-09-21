@@ -1894,9 +1894,21 @@ class PlanningOperations:
         for requirement in requirements:
             if approved_only and requirement["requirement_id"] not in approvals:
                 continue
-            query = approvals.get(requirement["requirement_id"], {}).get("search_query") or ingredient_search(requirement["identity"], self.provider)
-            if query in cache:
-                observations[requirement["requirement_id"]] = deepcopy(cache[query])
+            hints = [
+                hint for hint in requirement.get("product_hints", [])
+                if isinstance(hint, Mapping) and hint.get("provider") == self.provider
+            ]
+            query = (
+                approvals.get(requirement["requirement_id"], {}).get("search_query")
+                or (hints[0].get("name") if hints else None)
+                or ingredient_search(requirement["identity"], self.provider)
+            )
+            cache_key = canonical({
+                "query": query,
+                "hinted_refs": [hint["product_ref"] for hint in hints],
+            })
+            if cache_key in cache:
+                observations[requirement["requirement_id"]] = deepcopy(cache[cache_key])
                 continue
             try:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -1938,12 +1950,23 @@ class PlanningOperations:
                     "page": 1,
                     "requested_size": MAX_CANDIDATES_PER_REQUIREMENT,
                 }
+                if hints:
+                    hinted_refs = [hint["product_ref"] for hint in hints]
+                    hinted = [product for product in products if product.get("product_ref") in hinted_refs]
+                    ordinary = [product for product in products if product.get("product_ref") not in hinted_refs]
+                    normalized["products"] = hinted + ordinary
+                    normalized["source_product_evidence"] = {
+                        "relationship": "source_recipe_association",
+                        "candidate_refs": hinted_refs,
+                        "currently_observed_refs": [product["product_ref"] for product in hinted],
+                        "status": "currently_observed" if hinted else "not_in_current_search_scope",
+                    }
             except HouseholdError:
                 normalized = {"unavailable_reason": (
                     "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline
                     else "provider_search_unavailable_or_scope_changed"
                 )}
-            cache[query] = normalized
+            cache[cache_key] = normalized
             observations[requirement["requirement_id"]] = deepcopy(normalized)
         return observations
 

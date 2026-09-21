@@ -926,8 +926,11 @@ Products `prepare` is read-only and requires the exact menu reference or complet
 planner handoff. Select observed exact interchangeable `candidate_refs` using the
 user's meal and grocery request; routine equivalent package choices do not need
 separate user approval. Show the useful product/quantity/cost overview before
-ordering. A search hit is not proof of ingredient equivalence. Oda and MENY
-search the complete Norwegian item identity. Mathem uses only reviewed exact
+ordering. A search hit is not proof of ingredient equivalence. When an Oda
+recipe exposes a direct ingredient-product association, treat that exact product
+ID as the strongest search evidence, but still verify its current availability,
+package, quantity and price; the source link alone proves none of those facts.
+Oda and MENY search the complete Norwegian item identity. Mathem uses only reviewed exact
 Swedish whole-identity mappings; never translate isolated words or erase
 meaningful properties. A missing or uncertain localization remains a product-plan
 review, not a recipe SKU or guessed rewrite. If returned hits are irrelevant,
@@ -944,10 +947,13 @@ basis; a product's declared piece count is such a basis, a guessed piece weight
 is not. Never mark ingredients as already at home to hide unresolved coverage. Plain
 cooking water stays in the recipe but is excluded from shopping by default;
 explicit `include` can request it, and named bottled/mineral water is distinct.
-If the current user explicitly accepts a nearby dairy-fat variant or confirms
-that a selected title omits its frozen/canned property, include that exact ref in
+When the selected title merely omits a compatible source qualifier such as
+fresh, frozen, canned, dried or preparation wording, the exact candidate may be
+used without a separate question only when the remaining base identity matches
+and there is no contradiction. If the current user explicitly accepts a nearby
+dairy-fat variant or wants to bind such an omission, include that exact ref in
 `semantic_authorization` with `authorized_by: current_user` and their concise
-reason. Never use it for another identity or species, an explicit form/state
+reason. Never use either path for another identity or species, an explicit form/state
 contradiction, extra title ingredients or flavors, or any allergy, sensitivity
 or never-buy conflict. Only ordinary package/organic metadata may remain around
 the exact base identity. A literal title allergen is positive evidence and must
@@ -1005,7 +1011,8 @@ fullkornsspaghettien du har hjemme og kjøper ikke mer denne gangen.” Do not l
 with “nothing to remove” or an unchanged total package count; those details do
 not explain the user's result.
 
-`price_mode=exact` requires known payable product totals. `estimate` can use one
+Product preparation defaults to `price_mode=estimate` for practical planning.
+Use `price_mode=exact` when a known payable product total is required. `estimate` can use one
 explicitly approved available regular-price package despite unknown pant; show
 its merchandise estimate and unknown total separately. Never claim it is the
 cheapest or a confirmed total. `budget_ore` limits known product costs; unknown
@@ -1046,6 +1053,10 @@ has no requirement-subset control. Full and partial apply arguments, when
 returned, remain unchanged. A partial continuation includes every unresolved
 issue in `remaining_issues` beside the exact arguments under the
 `partial_apply_arguments_with_issues` projection; do not discard either part.
+When a compact observation reports `omitted_products`, more provider-ranked
+options exist outside that projection. Use another returned candidate or rerun
+prepare with an exact localized `search_query`; never infer that the first shown
+candidate was the only or best option.
 
 If products apply stops for cart or menu drift, reconcile that exact state and
 then rerun products prepare/apply. Never work around the stop with raw cart

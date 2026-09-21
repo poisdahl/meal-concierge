@@ -368,6 +368,7 @@ class RetailerPublicDetailTests(unittest.TestCase):
 
     def test_oda_direct_ingredient_product_associations_are_advisory_hints(self):
         from retailer_recipes import retail_web_recipe_input
+        from recipes import bind_recipe_source, normalize_recipe, scale_recipe
         source = self.source("oda")
         rows = [{
             "ingredient": {"id": 7, "title": "Rosenkål, fryst"},
@@ -387,6 +388,12 @@ class RetailerPublicDetailTests(unittest.TestCase):
             "relationship": "source_recipe_association",
         })
         self.assertNotIn("price", candidate["ingredients"][0]["_store_product_hint"])
+        normalized = normalize_recipe(bind_recipe_source(candidate, provider="oda"))
+        scaled = scale_recipe(normalized, 2)
+        self.assertEqual(
+            scaled["shopping_requirements"][0]["_store_product_hint"],
+            candidate["ingredients"][0]["_store_product_hint"],
+        )
 
         ambiguous = self.fetched(
             source,
