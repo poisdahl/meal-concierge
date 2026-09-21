@@ -665,15 +665,26 @@ Manual user-supplied URL imports remain available when automatic web search is
 disabled. Use setup `apply` with `changes.web_search` to update `enabled`,
 `broad`, or the complete `sites` list; preserve unrelated source settings.
 
-Then call menu `plan` with `planner_input` containing
-the week and requested dates/portions; omit `candidates` so the server collects
-and resolves the local bank/packs and enabled selected retailer alongside the
-supplemental web references. Do not replace these with a manual shortlist.
+Build the week with culinary judgment from the complete household profile, not
+only its numeric minimums. Resolve enough active local, optional, private and
+retailer candidates to propose a coherent seven-dinner week, considering actual
+ingredients and methods, ordinary availability, variety, effort, leftovers and
+the household's advisory preferences. Pass those exact references as
+`planner_input.candidates`; the service validates hard restrictions, cooldowns,
+saved minimums, dates and deterministic evidence before anything can be saved.
+A missing source label or a few draft examples do not prove that a collection is
+unusable. If validation identifies a concrete shortfall, replace the affected
+candidate and validate again instead of abandoning ordinary planning or asking
+the owner to solve the shortlist.
+
+If a useful explicit candidate set cannot be assembled, menu `plan` may omit
+`candidates` so the server performs bounded discovery across enabled sources.
 Report returned source failures, shortfalls and unknowns;
 these never authorize automatic AI generation. Only a returned
 `ai_fallback_eligible=true` permits the separate clearly marked generation flow.
-For an explicit selected scope, up to 12 exact candidates remain supported; if
-the assignment budget is exceeded, narrow that scope and explain it. Use the ranked winner; request up to three alternatives only
+For an explicit selected scope, up to 12 exact candidates remain supported and
+ordinary seven-day planning uses bounded deterministic search when exhaustive
+assignment would exceed the work limit. Use the ranked winner; request up to three alternatives only
 when useful to the request. Ranking is only within those candidates and the
 returned policy. Pass the small returned `save_ref` unchanged as `planner_ref`
 for menu save. Show `selection` as the menu and reasons; do not copy or rebuild
@@ -747,12 +758,20 @@ prefers three/four. Report actual cooking amounts; do not repeat an old planner
 conflict when a fresh menu assessment is ready. An accepted
 one-week quantity adjustment belongs in planner_input.prepared_portion_range;
 never temporarily edit and restore the permanent profile to obtain a plan.
-A cooldown override needs the exact recipe key and the user's current reason.
+Replace dinners in an existing week with menu `replan_prepare` and
+`replan_apply`; this preserves actual cooked/ordered history while excluding the
+retired planned slots from their own cooldown. Use
+`planner_input.cooldown_overrides` only when the user explicitly requests a
+genuinely historical repeat, with the exact candidate recipe key and current
+reason. Do not pass legacy top-level repeat keys or override reasons.
 
 Menu get/assess shows coverage, explicit ingredient conflicts and unknowns.
 Legacy recipe lists do not establish exact dinner dates. Native recipe refs
 scale to household portions unless the request supplies an explicit portion
-count. Save/update uses exact menu ID and revision; never overwrite a conflict.
+count. Every existing-menu action uses the exact
+`menu_ref={menu_id,revision,digest}` returned by menu get/save/replan. New saves
+omit it; update, clear, lock and replan pass it unchanged. Never split it into
+top-level ID/revision fields or overwrite a conflict.
 Selected recipes and their source, rights, attribution and quantities are frozen
 in menu/order/email snapshots. Product IDs do not belong in recipe documents.
 
@@ -907,8 +926,11 @@ Products `prepare` is read-only and requires the exact menu reference or complet
 planner handoff. Select observed exact interchangeable `candidate_refs` using the
 user's meal and grocery request; routine equivalent package choices do not need
 separate user approval. Show the useful product/quantity/cost overview before
-ordering. A search hit is not proof of ingredient equivalence. Oda and MENY
-search the complete Norwegian item identity. Mathem uses only reviewed exact
+ordering. A search hit is not proof of ingredient equivalence. When an Oda
+recipe exposes a direct ingredient-product association, treat that exact product
+ID as the strongest search evidence, but still verify its current availability,
+package, quantity and price; the source link alone proves none of those facts.
+Oda and MENY search the complete Norwegian item identity. Mathem uses only reviewed exact
 Swedish whole-identity mappings; never translate isolated words or erase
 meaningful properties. A missing or uncertain localization remains a product-plan
 review, not a recipe SKU or guessed rewrite. If returned hits are irrelevant,
@@ -925,10 +947,13 @@ basis; a product's declared piece count is such a basis, a guessed piece weight
 is not. Never mark ingredients as already at home to hide unresolved coverage. Plain
 cooking water stays in the recipe but is excluded from shopping by default;
 explicit `include` can request it, and named bottled/mineral water is distinct.
-If the current user explicitly accepts a nearby dairy-fat variant or confirms
-that a selected title omits its frozen/canned property, include that exact ref in
+When the selected title merely omits a compatible source qualifier such as
+fresh, frozen, canned, dried or preparation wording, the exact candidate may be
+used without a separate question only when the remaining base identity matches
+and there is no contradiction. If the current user explicitly accepts a nearby
+dairy-fat variant or wants to bind such an omission, include that exact ref in
 `semantic_authorization` with `authorized_by: current_user` and their concise
-reason. Never use it for another identity or species, an explicit form/state
+reason. Never use either path for another identity or species, an explicit form/state
 contradiction, extra title ingredients or flavors, or any allergy, sensitivity
 or never-buy conflict. Only ordinary package/organic metadata may remain around
 the exact base identity. A literal title allergen is positive evidence and must
@@ -986,7 +1011,8 @@ fullkornsspaghettien du har hjemme og kjøper ikke mer denne gangen.” Do not l
 with “nothing to remove” or an unchanged total package count; those details do
 not explain the user's result.
 
-`price_mode=exact` requires known payable product totals. `estimate` can use one
+Product preparation defaults to `price_mode=estimate` for practical planning.
+Use `price_mode=exact` when a known payable product total is required. `estimate` can use one
 explicitly approved available regular-price package despite unknown pant; show
 its merchandise estimate and unknown total separately. Never claim it is the
 cheapest or a confirmed total. `budget_ore` limits known product costs; unknown
@@ -1027,6 +1053,10 @@ has no requirement-subset control. Full and partial apply arguments, when
 returned, remain unchanged. A partial continuation includes every unresolved
 issue in `remaining_issues` beside the exact arguments under the
 `partial_apply_arguments_with_issues` projection; do not discard either part.
+When a compact observation reports `omitted_products`, more provider-ranked
+options exist outside that projection. Use another returned candidate or rerun
+prepare with an exact localized `search_query`; never infer that the first shown
+candidate was the only or best option.
 
 If products apply stops for cart or menu drift, reconcile that exact state and
 then rerun products prepare/apply. Never work around the stop with raw cart

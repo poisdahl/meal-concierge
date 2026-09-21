@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import shutil
 import subprocess
@@ -312,12 +313,20 @@ class RetailerPublicDetailTests(unittest.TestCase):
         page_result["recipes"] = [_source_result(row, {"kind": "web", "url": source["source"]["url"]}) for row in page_result["recipes"]]
         return page_result
 
+    def fetched(self, source, *, yield_text="4", ingredients=None, associations=None):
+        page = self.response(source, yield_text=yield_text, ingredients=ingredients)
+        scripts = ""
+        if associations is not None:
+            state = '0:{"ingredients":' + json.dumps(associations, separators=(",", ":")) + "}"
+            scripts = "<script>self.__next_f.push(" + json.dumps([1, state]) + ")</script>"
+        return page, scripts.encode()
+
     def test_verified_portions_and_swedish_measures_keep_wording_and_exact_scale(self):
         from retailer_recipes import retail_web_recipe_input
         from recipes import normalize_recipe, bind_recipe_source, scale_recipe
         source = self.source()
         raw = ["200 g ris", "0,5 msk olja", "1 tsk salt", "2 krm peppar", "2 st tomater", "1 klyfta vitlök"]
-        with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=raw)) as fetch:
+        with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(source, ingredients=raw)) as fetch:
             candidate = retail_web_recipe_input(source, "mathem")
         fetch.assert_called_once_with(source["source"]["url"])
         normalized = normalize_recipe(bind_recipe_source(candidate, provider="mathem"))
@@ -336,7 +345,7 @@ class RetailerPublicDetailTests(unittest.TestCase):
         import time
         from retailer_recipes import retail_web_recipe_input
         source = self.source()
-        with mock.patch("recipe_import_sources.fetch_public_webpage") as fetch:
+        with mock.patch("retailer_recipes._fetch_retail_webpage") as fetch:
             for changes in ({"url": "https://oda.com/no/recipes/123-fixture/"}, {"external_id": "999"},
                             {"url": source["source"]["url"] + "?portions=8"}, {"url": "https://www.mathem.se@evil.example/se/recipes/123-fixture/"}):
                 altered = deepcopy(source); altered["source"].update(changes)
@@ -355,8 +364,143 @@ class RetailerPublicDetailTests(unittest.TestCase):
         cases = [None, {"recipes": [], "requires_interpretation": True}, {**valid, "recipes": valid["recipes"] * 2},
                  wrong_title, self.response(source, yield_text="2 loaves"), self.response(source, yield_text="0")]
         for response in cases:
-            with self.subTest(response=response), mock.patch("recipe_import_sources.fetch_public_webpage", return_value=response), self.assertRaises(HouseholdError):
+            with self.subTest(response=response), mock.patch("retailer_recipes._fetch_retail_webpage", return_value=(response, b"")), self.assertRaises(HouseholdError):
                 retail_web_recipe_input(source, "mathem")
+
+    def test_oda_direct_ingredient_product_associations_are_advisory_hints(self):
+        from retailer_recipes import retail_web_recipe_input
+        from recipes import bind_recipe_source, normalize_recipe, scale_recipe
+        source = self.source("oda")
+        rows = [{
+            "ingredient": {"id": 7, "title": "Rosenkål, fryst"},
+            "product": {
+                "id": 8416, "fullName": "R Rosenkål",
+                "frontUrl": "https://oda.com/no/products/8416-r-rosenkal/",
+            },
+        }]
+        fetched = self.fetched(
+            source, ingredients=["500 g Rosenkål, fryst"], associations=rows,
+        )
+        with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=fetched):
+            candidate = retail_web_recipe_input(source, "oda")
+        self.assertEqual(candidate["ingredients"][0]["_store_product_hint"], {
+            "provider": "oda", "product_ref": 8416, "name": "R Rosenkål",
+            "url": "https://oda.com/no/products/8416-r-rosenkal/",
+            "relationship": "source_recipe_association",
+        })
+        self.assertNotIn("price", candidate["ingredients"][0]["_store_product_hint"])
+        normalized = normalize_recipe(
+            bind_recipe_source(candidate, provider="oda"),
+            trusted_store_product_hints=True,
+        )
+        scaled = scale_recipe(normalized, 2)
+        self.assertEqual(
+            scaled["shopping_requirements"][0]["_store_product_hint"],
+            candidate["ingredients"][0]["_store_product_hint"],
+        )
+
+        forged = deepcopy(candidate)
+        forged["source"] = {
+            "kind": "user", "publisher": "Fixture", "title": "Forged",
+            "external_id": "forged", "relationship": "user_supplied",
+        }
+        with self.assertRaisesRegex(HouseholdError, "service-owned retailer evidence"):
+            normalize_recipe(forged)
+
+        from recipes import prepare_recipe_input
+        changed = prepare_recipe_input(
+            {**normalized, "notes": "Household note"}, prior=normalized,
+        )
+        self.assertEqual(
+            changed["ingredients"][0]["_store_product_hint"],
+            normalized["ingredients"][0]["_store_product_hint"],
+        )
+        import tempfile
+        from core import StateStore
+        from service import Application
+        with tempfile.TemporaryDirectory() as temp:
+            class Provider:
+                def probe(self):
+                    return {"protocol_version": "fixture", "server": {"name": "fixture"}, "tool_count": 1}
+            store = StateStore(Path(temp), {
+                "instance": "retailer-update", "household": "Synthetic", "provider": "oda",
+            })
+            app = Application(store, Provider(), None)
+            with store.locked() as state:
+                state["setup"]["status"] = "complete"
+            snapshot = app.recipes.persist_discovery(
+                normalized, trusted_store_product_hints=True,
+            )
+            saved = app.recipes.save_discovery(
+                snapshot["discovery_ref"], status="active",
+                idempotency_key="save-verified-oda",
+            )
+            update = deepcopy(saved)
+            update["notes"] = "Updated household note"
+            updated = app.handle({
+                "operation": "recipes", "action": "update",
+                "recipe_id": saved["id"], "expected_revision": saved["revision"],
+                "recipe": update, "idempotency_key": "update-verified-oda",
+            })["recipe"]
+            self.assertEqual(
+                updated["ingredients"][0]["_store_product_hint"],
+                normalized["ingredients"][0]["_store_product_hint"],
+            )
+        tampered = deepcopy(normalized)
+        tampered["ingredients"][0]["_store_product_hint"]["product_ref"] += 1
+        with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
+            prepare_recipe_input(tampered, prior=normalized)
+
+        second = deepcopy(normalized["ingredients"][0])
+        second["item"] = "Brokkoli"
+        second["original_text"] = "500 g Brokkoli"
+        second["_store_product_hint"] = {
+            **second["_store_product_hint"], "product_ref": 8420,
+            "name": "Brokkoli", "url": "https://oda.com/no/products/8420-brokkoli/",
+        }
+        two_ingredient = normalize_recipe(
+            {**normalized, "ingredients": [normalized["ingredients"][0], second]},
+            trusted_store_product_hints=True,
+        )
+        reordered = deepcopy(two_ingredient)
+        reordered["ingredients"].reverse()
+        prepared = prepare_recipe_input(reordered, prior=two_ingredient)
+        self.assertEqual(
+            [row["_store_product_hint"]["product_ref"] for row in prepared["ingredients"]],
+            [8420, 8416],
+        )
+        omitted = deepcopy(reordered)
+        for ingredient in omitted["ingredients"]:
+            ingredient.pop("_store_product_hint")
+        prepared = prepare_recipe_input(omitted, prior=two_ingredient)
+        self.assertEqual(
+            [row["_store_product_hint"]["product_ref"] for row in prepared["ingredients"]],
+            [8420, 8416],
+        )
+        duplicated = deepcopy(normalized)
+        duplicated["ingredients"].append(deepcopy(duplicated["ingredients"][0]))
+        with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
+            prepare_recipe_input(duplicated, prior=normalized)
+        for ingredient in duplicated["ingredients"]:
+            ingredient.pop("_store_product_hint")
+        prepared = prepare_recipe_input(duplicated, prior=normalized)
+        self.assertTrue(all(
+            "_store_product_hint" not in ingredient
+            for ingredient in prepared["ingredients"]
+        ))
+
+        ambiguous = self.fetched(
+            source,
+            ingredients=["1 ss Olivenolje", "1 ss Olivenolje"],
+            associations=[{
+                "ingredient": {"id": 8, "title": "Olivenolje"},
+                "product": {"id": 99, "fullName": "Olivenolje",
+                            "frontUrl": "https://oda.com/no/products/99-olivenolje/"},
+            }],
+        )
+        with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=ambiguous):
+            candidate = retail_web_recipe_input(source, "oda")
+        self.assertTrue(all("_store_product_hint" not in row for row in candidate["ingredients"]))
 
     def test_application_detail_is_bound_cached_and_does_not_save_a_personal_recipe(self):
         import tempfile
@@ -373,7 +517,7 @@ class RetailerPublicDetailTests(unittest.TestCase):
                 with app.store.locked() as state:state["profile"]["recipes"]["sources"][provider] = True
                 rows = provider_recipe_candidates(provider, {"recipes":[{"id":123,"url":source["source"]["url"],"title":source["name"]}]}, limit=1)
                 old = app.recipes.persist_discovery(rows[0])
-                with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=["200 g ris"])) as fetch:
+                with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(source, ingredients=["200 g ris"])) as fetch:
                     detailed = app.handle({"operation":"recipes","action":"detail","discovery_ref":old["discovery_ref"]})
                     replay = app.handle({"operation":"recipes","action":"detail","discovery_ref":old["discovery_ref"]})
                 self.assertEqual(fetch.call_count, 1)
@@ -402,7 +546,7 @@ class RetailerPublicDetailTests(unittest.TestCase):
                 with app.store.locked() as state:
                     state["setup"]["status"] = "complete"
                     state["profile"]["recipes"]["sources"] = {key:key==provider for key in state["profile"]["recipes"]["sources"]}
-                with mock.patch("recipe_import_sources.fetch_public_webpage", return_value=self.response(source, ingredients=["200 g ris"])) as fetch:
+                with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(source, ingredients=["200 g ris"])) as fetch:
                     plan = app.handle({"operation":"menu","action":"plan","planner_input":{
                         "week":"2026-W37","dates":["2026-09-07"],"portions":2}})["plan"]
                     self.assertEqual(plan["status"], "planned")

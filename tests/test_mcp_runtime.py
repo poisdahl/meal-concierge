@@ -200,6 +200,9 @@ async def sdk_checks(root, process):
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
         assert "mathem" in json.dumps(schemas["meal_concierge_email"]["properties"]["provider"])
         product_schema = schemas["meal_concierge_products"]
+        menu_properties = schemas["meal_concierge_menu"]["properties"]
+        assert "menu_ref" in menu_properties
+        assert {"menu_id", "expected_revision", "allow_repeat_keys", "override_reason"}.isdisjoint(menu_properties)
         approval_schema = product_schema["$defs"]["CandidateApproval"]
         assert approval_schema["required"] == ["requirement_id", "candidate_refs"]
         assert approval_schema["properties"]["semantic_authorization"]["$ref"].endswith("SemanticAuthorization")

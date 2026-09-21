@@ -15,7 +15,7 @@ import threading
 import unittest
 from unittest import mock
 
-from core import StateStore
+from core import HouseholdError, StateStore
 import planner
 from planner import MAX_EXPLORED_STATES, MAX_HISTORY_RECORDS, PlannerError
 from service import Application, Server
@@ -483,6 +483,27 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(repeated["menu"], saved)
         self.assertEqual(self.provider.calls, [])
 
+    def test_replacing_active_menu_requires_exact_current_reference(self):
+        candidates = self.save_candidates(2)
+        first_plan = self.plan(self.request([candidates[0]]))
+        first = self.app.handle({
+            "operation": "menu", "action": "save",
+            "planner_ref": first_plan["save_ref"],
+        })["menu"]
+        second_plan = self.plan(self.request([candidates[1]]))
+        with self.assertRaisesRegex(HouseholdError, "exact menu_ref"):
+            self.app.handle({
+                "operation": "menu", "action": "save",
+                "planner_ref": second_plan["save_ref"],
+            })
+        updated = self.app.handle({
+            "operation": "menu", "action": "save",
+            "planner_ref": second_plan["save_ref"],
+            "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
+        })["menu"]
+        self.assertEqual(updated["menu_id"], first["menu_id"])
+        self.assertEqual(updated["revision"], first["revision"] + 1)
+
     def test_compact_ref_saves_complete_alternative_and_retries_after_restart(self):
         plan = self.plan(self.request(self.save_candidates(3), alternatives=3))
         choice = plan["alternatives"][-1]
@@ -833,13 +854,120 @@ class WeeklyPlannerTests(unittest.TestCase):
             "2026-09-12",
         )
 
-    def test_work_budget_fails_clearly_without_truncation(self):
+    def test_large_ordinary_week_uses_bounded_deterministic_search(self):
         candidates = self.save_candidates(10)
         dates = [f"2026-09-{day:02d}" for day in range(7, 14)]
-        with self.assertRaisesRegex(
-            PlannerError, rf"states exceeds {MAX_EXPLORED_STATES}"
-        ):
-            self.plan(self.request(candidates, dates=dates))
+        first = self.plan(self.request(candidates, dates=dates))
+        repeated = self.plan(self.request(list(reversed(candidates)), dates=dates))
+        self.assertEqual(first["status"], "planned")
+        self.assertEqual(first["search_strategy"], "bounded_dynamic_programming")
+        self.assertLessEqual(first["explored_states"], MAX_EXPLORED_STATES)
+        self.assertEqual(first["selection_digest"], repeated["selection_digest"])
+        self.assertEqual(len(first["selection"]["slots"]), 7)
+
+    def test_bounded_search_retains_weekly_minimum_candidates(self):
+        candidates = self.save_candidates(10)
+        candidates[0]["facts"] = explicit_facts(dietary=["fish"])
+        candidates[1]["facts"] = explicit_facts(dietary=["fish"])
+        with self.store.locked() as state:
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 2,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        result = self.plan(self.request(
+            candidates,
+            dates=[f"2026-09-{day:02d}" for day in range(7, 14)],
+        ))
+        self.assertEqual(result["status"], "planned")
+        fish = sum(
+            "fish" in slot["dietary_facets"]["values"]
+            for slot in result["selection"]["slots"]
+        )
+        self.assertEqual(fish, 2)
+
+    def test_bounded_search_does_not_prune_penalized_strict_candidates(self):
+        candidates = self.save_candidates(12)
+        candidates[-2]["facts"] = explicit_facts(dietary=["fish"])
+        candidates[-1]["facts"] = explicit_facts(dietary=["fish"])
+        with self.store.locked() as state:
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 2,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        original = planner._slot_reasons
+
+        def penalize_fish(candidate, *args, **kwargs):
+            reasons = original(candidate, *args, **kwargs)
+            if "fish" in candidate["facts"]["dietary_facets"]["values"]:
+                reasons.append({
+                    "code": "test:advisory_penalty", "weight": -300,
+                    "detail": "strict candidates may still rank poorly",
+                })
+            return reasons
+
+        with mock.patch("planner._slot_reasons", side_effect=penalize_fish):
+            result = self.plan(self.request(
+                candidates,
+                dates=[f"2026-09-{day:02d}" for day in range(7, 14)],
+            ))
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["search_strategy"], "bounded_dynamic_programming")
+        self.assertEqual(sum(
+            "fish" in slot["dietary_facets"]["values"]
+            for slot in result["selection"]["slots"]
+        ), 2)
+
+    def test_bounded_batch_search_retains_strict_relevant_slot_assignment(self):
+        candidates = self.save_candidates(12)
+        candidates[0]["facts"] = explicit_facts(dietary=["fish"], complete=True)
+        for candidate in candidates[1:]:
+            candidate["facts"] = explicit_facts(dietary=[], complete=True)
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({
+                "dinner_days": 7,
+                "dishes": 6,
+                "batch_dishes": 1,
+                "meal_mode": "mixed",
+                "cook_days": [
+                    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+                ],
+                "recurring_batch_accepted": True,
+                "prepared_portion_range": [4, 8],
+            })
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 2,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        dates = [f"2026-09-{day:02d}" for day in range(7, 14)]
+        original = planner._slot_reasons
+
+        def prefer_fish_early(candidate, day, index, count, profile):
+            reasons = original(candidate, day, index, count, profile)
+            if "fish" in candidate["facts"]["dietary_facets"]["values"]:
+                reasons.append({
+                    "code": "test:prefer_fish_early",
+                    "weight": 300 if index == 0 else -300,
+                    "detail": index,
+                })
+            return reasons
+
+        with mock.patch("planner._slot_reasons", side_effect=prefer_fish_early):
+            result = self.plan(self.request(
+                candidates, dates=dates,
+            ))
+        self.assertEqual(result["status"], "planned")
+        source_slots = result["selection"]["source_slots"]
+        fish_slot = next(
+            slot for slot in source_slots
+            if "fish" in slot["dietary_facets"]["values"]
+        )
+        self.assertEqual(fish_slot["date"], dates[5])
 
     def test_candidate_day_alternative_and_date_bounds_are_exact(self):
         candidates = self.save_candidates(13)

@@ -1277,12 +1277,11 @@ class PlanningOperations:
             with self.product_plan_lock, self.store.locked() as state:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and (current.get("menu_id") or current.get("revision") is not None):
-                    supplied_menu_id = request.get("menu_id")
-                    expected_revision = request.get("expected_revision")
-                    if supplied_menu_id != current.get("menu_id"):
-                        raise HouseholdError("menu_id does not match the current menu")
-                    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision != current.get("revision"):
-                        raise HouseholdError(f"menu revision conflict; current revision is {current.get('revision')}")
+                    supplied_ref = request.get("menu_ref")
+                    if not isinstance(supplied_ref, Mapping) or set(supplied_ref) != {"menu_id", "revision", "digest"}:
+                        raise HouseholdError("menu clear requires the exact menu_ref from menu get")
+                    if canonical(supplied_ref) != canonical(mp.menu_ref(current)):
+                        raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
                 self._abandon_predispatch(state, reason="menu cleared")
                 if isinstance(current, Mapping):
                     mp.retire_planned_slots(state, current)
@@ -1342,8 +1341,14 @@ class PlanningOperations:
                 if len(override_reason) > 500:
                     raise HouseholdError("cooldown override reason is too long")
                 override_map = {key: override_reason for key in repeat_keys}
-            supplied_menu_id = str(request.get("menu_id") or "") or None
-            expected_revision = request.get("expected_revision")
+            supplied_ref = request.get("menu_ref")
+            if supplied_ref is not None and (
+                not isinstance(supplied_ref, Mapping)
+                or set(supplied_ref) != {"menu_id", "revision", "digest"}
+            ):
+                raise HouseholdError("menu update requires the exact menu_ref from menu get")
+            supplied_menu_id = str(supplied_ref.get("menu_id") or "") if supplied_ref else None
+            expected_revision = supplied_ref.get("revision") if supplied_ref else None
             def matched_override(key: str) -> str | None:
                 aliases = library_recipe_key_aliases(key)
                 return next((
@@ -1380,6 +1385,10 @@ class PlanningOperations:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and current.get("digest") == digest:
                     return {"menu": deepcopy(current), "idempotent": True}
+                if isinstance(current, Mapping) and supplied_ref is None:
+                    raise HouseholdError(
+                        "replacing the current menu requires its exact menu_ref from menu get"
+                    )
                 if planner_context is None:
                     for collection in ("dishes", "salads"):
                         for recipe in menu[collection]:
@@ -1406,23 +1415,25 @@ class PlanningOperations:
                         + canonical(minimums)
                     )
                 if supplied_menu_id:
-                    if not isinstance(current, Mapping) or current.get("menu_id") != supplied_menu_id:
-                        raise HouseholdError("menu_id does not match the current menu")
-                    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or current.get("revision") != expected_revision:
-                        raise HouseholdError(f"menu revision conflict; current revision is {current.get('revision')}")
-                    if current.get("supersedes"):
-                        raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
-                    current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
-                    if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
-                        raise HouseholdError("an ordered menu is immutable; save a new menu instead")
-                    if isinstance(current_usage, Mapping) and (
-                        current_usage.get("cooked_keys")
-                        or current_usage.get("not_cooked_keys")
-                        or current_usage.get("cooldown_overrides")
-                    ):
-                        raise HouseholdError("a menu with explicit usage history is immutable; save a new menu instead")
-                    menu_id = supplied_menu_id
-                    revision = expected_revision + 1
+                    if not isinstance(current, Mapping) or canonical(supplied_ref) != canonical(mp.menu_ref(current)):
+                        raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
+                    if current.get("week") != menu.get("week"):
+                        menu_id = f"menu_{secrets.token_hex(12)}"
+                        revision = 1
+                    else:
+                        if current.get("supersedes"):
+                            raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
+                        current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
+                        if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
+                            raise HouseholdError("an ordered menu is immutable; save a new menu instead")
+                        if isinstance(current_usage, Mapping) and (
+                            current_usage.get("cooked_keys")
+                            or current_usage.get("not_cooked_keys")
+                            or current_usage.get("cooldown_overrides")
+                        ):
+                            raise HouseholdError("a menu with explicit usage history is immutable; save a new menu instead")
+                        menu_id = supplied_menu_id
+                        revision = expected_revision + 1
                 else:
                     if canonical(current) != canonical(baseline_menu):
                         raise HouseholdError("menu changed while saving; read it and try again")
@@ -1891,9 +1902,21 @@ class PlanningOperations:
         for requirement in requirements:
             if approved_only and requirement["requirement_id"] not in approvals:
                 continue
-            query = approvals.get(requirement["requirement_id"], {}).get("search_query") or ingredient_search(requirement["identity"], self.provider)
-            if query in cache:
-                observations[requirement["requirement_id"]] = deepcopy(cache[query])
+            hints = [
+                hint for hint in requirement.get("product_hints", [])
+                if isinstance(hint, Mapping) and hint.get("provider") == self.provider
+            ]
+            query = (
+                approvals.get(requirement["requirement_id"], {}).get("search_query")
+                or (hints[0].get("name") if hints else None)
+                or ingredient_search(requirement["identity"], self.provider)
+            )
+            cache_key = canonical({
+                "query": query,
+                "hinted_refs": [hint["product_ref"] for hint in hints],
+            })
+            if cache_key in cache:
+                observations[requirement["requirement_id"]] = deepcopy(cache[cache_key])
                 continue
             try:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -1935,12 +1958,23 @@ class PlanningOperations:
                     "page": 1,
                     "requested_size": MAX_CANDIDATES_PER_REQUIREMENT,
                 }
+                if hints:
+                    hinted_refs = [hint["product_ref"] for hint in hints]
+                    hinted = [product for product in products if product.get("product_ref") in hinted_refs]
+                    ordinary = [product for product in products if product.get("product_ref") not in hinted_refs]
+                    normalized["products"] = hinted + ordinary
+                    normalized["source_product_evidence"] = {
+                        "relationship": "source_recipe_association",
+                        "candidate_refs": hinted_refs,
+                        "currently_observed_refs": [product["product_ref"] for product in hinted],
+                        "status": "currently_observed" if hinted else "not_in_current_search_scope",
+                    }
             except HouseholdError:
                 normalized = {"unavailable_reason": (
                     "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline
                     else "provider_search_unavailable_or_scope_changed"
                 )}
-            cache[query] = normalized
+            cache[cache_key] = normalized
             observations[requirement["requirement_id"]] = deepcopy(normalized)
         return observations
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import asyncio
+import base64
 from email import policy
 from email.parser import BytesParser
 import hashlib
@@ -103,6 +104,33 @@ class SMTPHandler(socketserver.StreamRequestHandler):
                 return
 
 
+class DeliveryTransportTests(unittest.TestCase):
+    def test_exported_pdf_is_shared_group_readable_without_false_delivery_success(self):
+        data = b"%PDF-synthetic-frozen-delivery"
+        checksum = hashlib.sha256(data).hexdigest()
+        calls = []
+
+        def rpc(operation, **request):
+            calls.append((operation, request))
+            return {"bytes": len(data), "sha256": checksum, "content_type": "application/pdf",
+                    "filename": "ukesmeny.pdf", "offset": 0,
+                    "data_base64": base64.b64encode(data).decode(), "next_offset": None}
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "sidecar.pdf"
+            previous_umask = os.umask(0o077)
+            try:
+                result = export_part(rpc, "job", "part", target)
+            finally:
+                os.umask(previous_umask)
+            self.assertEqual(0o640, target.stat().st_mode & 0o777)
+            self.assertFalse(target.stat().st_mode & 0o007)
+            self.assertEqual(data, target.read_bytes())
+            self.assertEqual(checksum, result["sha256"])
+            self.assertFalse(result["sent"])
+        self.assertEqual([("recipe_delivery", {"action": "read", "job_id": "job", "part_id": "part", "offset": 0})], calls)
+
+
 class DeliveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="mc53-")
@@ -148,7 +176,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(data.startswith(b"%PDF-"))
         self.assertIn(b"/Subtype /Image", data)
         original = deepcopy(self.app.store.read()["recipe_delivery"]["jobs"]["one"])
-        self.app.handle({"operation": "menu", "action": "clear", "menu_id": self.menu["menu_id"], "expected_revision": self.menu["revision"]})
+        self.app.handle({"operation": "menu", "action": "clear", "menu_ref": menu_ref(self.menu)})
         (self.app.store.directory / "recipe-assets" / asset_filename(self.asset)).unlink()
         self.assertEqual(job, self.request())
         export_part(rpc, "one", pdf["id"], self.root / "again.pdf")

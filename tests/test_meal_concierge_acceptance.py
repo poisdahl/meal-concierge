@@ -35,7 +35,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
     def test_old_menu_requirements_never_mutate_new_menu_cart(self):
         old = self.save_menu()
         old_ref = self.app._cart_menu_ref(old)
-        self.save_menu("Replacement", menu_id=old["menu_id"], expected_revision=old["revision"])
+        self.save_menu("Replacement", menu_ref=old_ref)
         before = deepcopy(self.provider.cart)
         with self.assertRaisesRegex(HouseholdError, "stale"):
             self.app.handle({"operation": "cart", "action": "sync", "menu_ref": old_ref,

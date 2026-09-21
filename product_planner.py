@@ -15,7 +15,7 @@ import unicodedata
 from core import HouseholdError
 
 
-PRODUCT_PLAN_VERSION = "product-plan-v3"
+PRODUCT_PLAN_VERSION = "product-plan-v4"
 MAX_REQUIREMENTS = 64
 MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
@@ -217,7 +217,7 @@ def _semantic_features(text: str) -> dict[str, Any]:
             "whole_fish": r"\b(?:(?:hel|whole)\s+(?:laks|salmon|torsk|cod)|(?:laks|salmon|torsk|cod)\s+(?:hel|whole))\b",
         }),
         "produce_form": one({
-            "minced": r"\b(?:hakket|minced)\b",
+            "minced": r"\b(?:hakket|finhakket|minced|chopped|finely\s+chopped)\b",
             "diced": r"\b(?:terninger|diced)\b",
             "whole_tomato": r"\b(?:hele?\s+tomater?|whole\s+tomatoes?)\b",
         }),
@@ -400,18 +400,30 @@ def _authorized_semantic_difference(
     """
     wanted = str(requirement.get("item") or "").casefold()
     offered = str(product.get("name") or "").casefold()
-    if not wanted or not offered or not semantic_product_conflict(requirement, product):
+    if not wanted or not offered:
         return None
     wanted_features = _semantic_features(wanted)
     offered_features = _semantic_features(offered)
     stripped = wanted
     differences: list[str] = []
-    if wanted_features["state"] == "frozen" and offered_features["state"] is None:
-        stripped = re.sub(r"\b(?:fryst|frossen|frysta|frozen)\b", " ", stripped)
-        differences.append("frozen_not_in_product_title")
+    state_qualifiers = {
+        "fresh": (r"\b(?:fersk(?:e)?|färsk(?:a)?|fresh)\b", "fresh_not_in_product_title"),
+        "frozen": (r"\b(?:fryst|frossen|frysta|frozen)\b", "frozen_not_in_product_title"),
+        "dried": (r"\b(?:tørr|tørket|torkad|dry|dried)\b", "dried_not_in_product_title"),
+    }
+    wanted_state = wanted_features["state"]
+    if wanted_state in state_qualifiers and offered_features["state"] is None:
+        pattern, difference = state_qualifiers[wanted_state]
+        stripped = re.sub(pattern, " ", stripped)
+        differences.append(difference)
     if wanted_features["treatment"] == "canned" and offered_features["treatment"] is None:
         stripped = re.sub(r"\b(?:hermetisk|hermetiske|canned|tinned)\b", " ", stripped)
         differences.append("canned_not_in_product_title")
+    if wanted_features["produce_form"] == "minced" and offered_features["produce_form"] is None:
+        stripped = re.sub(
+            r"\b(?:hakket|finhakket|minced|chopped|finely\s+chopped)\b", " ", stripped,
+        )
+        differences.append("preparation_not_in_product_title")
 
     wanted_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", wanted)
     offered_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", offered)
@@ -460,9 +472,17 @@ def _authorized_semantic_difference(
     # exactly one omitted qualifier or nearby fat value, never a prepared,
     # flavoured, compound or allergen-bearing addition.
     if any(name in differences for name in (
-        "frozen_not_in_product_title", "canned_not_in_product_title",
+        "fresh_not_in_product_title", "frozen_not_in_product_title",
+        "dried_not_in_product_title", "canned_not_in_product_title",
+        "preparation_not_in_product_title",
     )):
-        if product_title_tokens() != title_tokens(stripped):
+        offered_title = product_title_tokens()
+        wanted_title = title_tokens(stripped)
+        offered_identity = _aggregation_identity(" ".join(offered_title))
+        wanted_identity = _aggregation_identity(" ".join(wanted_title))
+        if offered_title != wanted_title and (
+            offered_identity is None or offered_identity != wanted_identity
+        ):
             return None
     if "nearby_dairy_fat_percentage" in differences:
         allowed_dairy_titles = {
@@ -487,6 +507,24 @@ def _authorized_semantic_difference(
             return None
     stripped_requirement = {**requirement, "item": " ".join(stripped.split())}
     return differences if not semantic_product_conflict(stripped_requirement, product) else None
+
+
+def _ordinary_qualifier_omission(
+    requirement: Mapping[str, Any], differences: list[str],
+) -> bool:
+    """Allow only reviewed, identity-specific title omissions without authority."""
+    wanted = str(requirement.get("item") or "").casefold()
+    reviewed = {
+        "fresh_not_in_product_title": r"\b(?:brokkoli|broccoli)\b",
+        "frozen_not_in_product_title": r"\b(?:rosenkål|brysselkål|brussels\s+sprouts?)\b",
+        "dried_not_in_product_title": r"\boregano\b",
+        "canned_not_in_product_title": r"\b(?:sorte\s+bønner|black\s+beans?)\b",
+        "preparation_not_in_product_title": r"\b(?:gul\s+løk|løk|onions?)\b",
+    }
+    return bool(differences) and all(
+        difference in reviewed and re.search(reviewed[difference], wanted)
+        for difference in differences
+    )
 
 
 def _positive_fraction(value: Any) -> Fraction | None:
@@ -701,6 +739,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                     "gross_fraction": Fraction(0),
                     "pantry_fraction": Fraction(0),
                     "sources": [],
+                    "product_hints": [],
                 })
                 if requirement["identity"] != identity:
                     requirement["identity"] = aggregate_identity
@@ -709,6 +748,12 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
                 requirement["gross_fraction"] += gross_quantity
                 requirement["pantry_fraction"] += pantry_quantity
                 requirement["sources"].append(position)
+                hint = raw.get("_store_product_hint")
+                if isinstance(hint, Mapping) and not any(
+                    canonical(existing) == canonical(hint)
+                    for existing in requirement["product_hints"]
+                ):
+                    requirement["product_hints"].append(deepcopy(dict(hint)))
     requirements = []
     for (aggregate_identity, unit), value in sorted(aggregated.items(), key=lambda pair: (pair[0][0].encode("utf-8"), pair[0][1])):
         # Explicit source-position decisions replace this ingredient's request
@@ -734,6 +779,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
             "confirmed_pantry_quantity": _fraction_json(value["pantry_fraction"]),
             "unit": unit,
             "sources": value["sources"],
+            **({"product_hints": value["product_hints"]} if value["product_hints"] else {}),
         })
     if set(by_position) != used:
         raise HouseholdError("ingredient decision does not name a source in this exact menu")
@@ -1093,16 +1139,9 @@ def _select_requirement(
 
 
 def _canonical_observation(value: Mapping[str, Any]) -> dict[str, Any]:
-    observation = deepcopy(dict(value))
-    products = observation.get("products")
-    if isinstance(products, list) and all(
-        isinstance(product, Mapping) and _valid_product_ref(product.get("product_ref"))
-        for product in products
-    ):
-        observation["products"] = sorted(
-            products, key=lambda product: _ref_sort_key(product["product_ref"])
-        )
-    return observation
+    # Provider order is useful relevance evidence for the caller. Canonical
+    # ordering belongs at the digest boundary, not in the returned observation.
+    return deepcopy(dict(value))
 
 
 def _without_presentation(value: Any) -> Any:
@@ -1132,10 +1171,13 @@ def product_plan_digest(value: Mapping[str, Any]) -> str:
                 }
                 observation = requirement.get("observation")
                 if isinstance(observation, dict):
-                    requirement["observation"] = {"products": [
+                    selected = [
                         product for product in observation.get("products", [])
                         if isinstance(product, Mapping) and product.get("product_ref") in selected_refs
-                    ]}
+                    ]
+                    requirement["observation"] = {"products": sorted(
+                        selected, key=lambda product: _ref_sort_key(product["product_ref"])
+                    )}
                 requirement.pop("eligible_candidate_count", None)
                 requirement.pop("dietary_assessments", None)
     return hashlib.sha256(canonical(_without_presentation(authoritative)).encode()).hexdigest()
@@ -1203,6 +1245,10 @@ def _estimated_single_product(requirement, observation, approval):
     observed_quantity = _fraction_json(count * size)
     return {"products": [{"product_ref": refs[0], "name": product["name"], "quantity": count,
                           "dietary_assessments": deepcopy(product.get("dietary_findings", [])),
+                          "purchase_options": [{
+                              "option_index": 0, "package_count": count,
+                              "offer_kind": "regular", "price_kind": price_kind,
+                          }],
                           "merchandise_ore": merchandise,
                           "price_status": "estimate" if price_kind == "estimate" else "exact",
                           "mandatory_deposit_ore": None, "total_payable_ore": None}],
@@ -1329,13 +1375,6 @@ def build_product_plan(
             continue
         members = tuple(shared["requirement_ids"])
         shared_groups[members] = deepcopy(dict(shared))
-    valid_shared_refs: set[str | int] = set()
-    for members in shared_groups:
-        refs = {approvals[member]["candidate_refs"][0] for member in members}
-        if len(refs) == 1:
-            reference = next(iter(refs))
-            if ref_owners.get(reference) == set(members):
-                valid_shared_refs.add(reference)
     planned = []
     unresolved = deepcopy(structural_unresolved)
     for requirement in requirements:
@@ -1352,20 +1391,35 @@ def build_product_plan(
         authority = approval.get("semantic_authorization") if approval else None
         authority_ref = authority.get("candidate_ref") if isinstance(authority, Mapping) else None
         semantic_mismatches = {}
+        authority_differences = None
         for product in observation.get("products", []):
-            if isinstance(product, Mapping) and semantic_product_conflict(requirement, product):
-                product_ref = product.get("product_ref")
-                semantic_mismatches[product_ref] = (
-                    _authorized_semantic_difference(requirement, product)
-                    if product_ref == authority_ref else None
+            if not isinstance(product, Mapping):
+                continue
+            product_ref = product.get("product_ref")
+            if product_ref == authority_ref:
+                authority_differences = _authorized_semantic_difference(requirement, product)
+            if semantic_product_conflict(requirement, product):
+                semantic_mismatches[product_ref] = _authorized_semantic_difference(
+                    requirement, product
                 )
         authorized_semantic_ref = (
             authority_ref
             if isinstance(authority, Mapping)
-            and semantic_mismatches.get(authority_ref)
+            and authority_differences
             else None
         )
-        excluded_semantic_refs = set(semantic_mismatches) - {authorized_semantic_ref}
+        ordinary_omissions = {
+            product_ref: differences
+            for product_ref, differences in semantic_mismatches.items()
+            if approval is not None
+            and product_ref in approval["candidate_refs"]
+            and differences
+            and _ordinary_qualifier_omission(requirement, differences)
+        }
+        allowed_semantic_refs = set(ordinary_omissions)
+        if authorized_semantic_ref is not None:
+            allowed_semantic_refs.add(authorized_semantic_ref)
+        excluded_semantic_refs = set(semantic_mismatches) - allowed_semantic_refs
         safe_observation = deepcopy(dict(observation))
         safe_observation["products"] = [
             product for product in safe_observation.get("products", [])
@@ -1396,6 +1450,13 @@ def build_product_plan(
             item["semantic_authorized_differences"] = deepcopy(
                 semantic_mismatches[authorized_semantic_ref]
             )
+        selected_ordinary = [
+            {"product_ref": product_ref, "differences": deepcopy(differences)}
+            for product_ref, differences in sorted(
+                ordinary_omissions.items(), key=lambda item: _ref_sort_key(item[0])
+            )
+            if product_ref in approval["candidate_refs"]
+        ]
         if authority is not None and authorized_semantic_ref is None:
             unresolved.append({
                 "requirement_id": requirement_id,
@@ -1415,15 +1476,6 @@ def build_product_plan(
                     excluded_semantic_refs.intersection(approval["candidate_refs"]),
                     key=_ref_sort_key,
                 ),
-            })
-            item["status"] = "needs_input"
-            planned.append(item)
-            continue
-        if (reused_refs - valid_shared_refs).intersection(approval["candidate_refs"]):
-            unresolved.append({
-                "requirement_id": requirement_id,
-                "item": requirement["item"],
-                "reason": "candidate_ref_reused_across_requirements",
             })
             item["status"] = "needs_input"
             planned.append(item)
@@ -1460,8 +1512,16 @@ def build_product_plan(
             item["status"] = "selected"
             item["selection"] = selection
             selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
+            selected_refs = {product["product_ref"] for product in selection.get("products", [])}
+            selected_differences = [
+                difference for difference in selected_ordinary
+                if difference["product_ref"] in selected_refs
+            ]
+            if selected_differences:
+                item["semantic_equivalent_differences"] = selected_differences
         planned.append(item)
     planned_by_id = {item.get("requirement_id"): item for item in planned}
+    allocated_refs: set[str | int] = set()
     for members, shared in shared_groups.items():
         rows = [planned_by_id.get(member) for member in members]
         selections = [row.get("selection") if isinstance(row, Mapping) else None for row in rows]
@@ -1475,6 +1535,7 @@ def build_product_plan(
             and selection["products"][0].get("quantity") == shared["package_count"]
             for row, selection in zip(rows, selections)
         )
+        valid_group = valid_group and ref_owners.get(reference) == set(members)
         if valid_group:
             selected_products = [selection["products"][0] for selection in selections]
             comparable_products = [
@@ -1523,6 +1584,110 @@ def build_product_plan(
         for row, selection in zip(rows, selections):
             selection["shared_package_allocation"] = deepcopy(allocation)
             selection["counts_toward_cart_and_totals"] = row["requirement_id"] == owner
+        allocated_refs.add(reference)
+
+    # An exact SKU selected for several compatible requirements is one stock
+    # allocation. Recalculate against their combined quantity so per-line
+    # rounding cannot overbuy it. Explicit cross-unit culinary allocations
+    # remain on the current-user shared_package path above.
+    selected_ref_owners: dict[str | int, list[dict[str, Any]]] = {}
+    for row in planned:
+        selection = row.get("selection") if isinstance(row, Mapping) else None
+        products = selection.get("products") if isinstance(selection, Mapping) else None
+        if row.get("status") == "selected" and isinstance(products, list) and len(products) == 1:
+            reference = products[0].get("product_ref")
+            if _valid_product_ref(reference):
+                selected_ref_owners.setdefault(reference, []).append(row)
+    for reference, rows in selected_ref_owners.items():
+        if len(rows) < 2 or reference in allocated_refs:
+            continue
+        members = tuple(sorted(row["requirement_id"] for row in rows))
+        group_approvals = [approvals[row["requirement_id"]] for row in rows]
+        if any(
+            approval.get("candidate_refs") != [reference]
+            or any(key in approval for key in ("package_count", "max_excess", "shared_package"))
+            for approval in group_approvals
+        ):
+            continue
+        units = {row.get("unit") for row in rows}
+        if len(units) != 1:
+            continue
+        unit = next(iter(units))
+        products = []
+        for row in rows:
+            observed = row.get("observation", {}).get("products", [])
+            matches = [product for product in observed if product.get("product_ref") == reference]
+            if len(matches) != 1:
+                products = []
+                break
+            product = deepcopy(matches[0])
+            product.pop("candidate_approval", None)
+            products.append(product)
+        if not products or len({canonical(_without_presentation(product)) for product in products}) != 1:
+            continue
+        required = sum(
+            (_read_fraction(row["quantity"], positive=True) for row in rows),
+            Fraction(0),
+        )
+        combined_requirement = {
+            "item": " + ".join(row["item"] for row in rows),
+            "quantity": _fraction_json(required),
+            "unit": unit,
+        }
+        combined_observation = {"products": [products[0]]}
+        combined_approval = {"candidate_refs": [reference]}
+        combined, reason, _eligible = _select_requirement(
+            combined_requirement, combined_observation, combined_approval,
+        )
+        if reason == "candidate_price_or_eligibility_unresolved" and price_mode == "estimate":
+            combined = _estimated_single_product(
+                combined_requirement, combined_observation, combined_approval,
+            )
+            reason = None if combined is not None else reason
+        if reason is not None or combined is None:
+            continue
+        combined["products"][0]["dietary_assessments"] = deepcopy(
+            rows[0]["selection"]["products"][0].get("dietary_assessments", [])
+        )
+        combined["surplus_quantity"] = (
+            None if combined["coverage"] is None
+            else _fraction_json(_read_fraction(combined["coverage"]) - required)
+        )
+        owner = min(members)
+        allocation = {
+            "source": "internal_shared_allocation",
+            "requirement_ids": list(members),
+            "candidate_ref": reference,
+            "package_count": combined["package_count"],
+            "quantity_basis": "combined_compatible_requirement_quantities",
+            "combined_required": _fraction_json(required),
+            "unit": unit,
+            "owner_requirement_id": owner,
+        }
+        for row in rows:
+            row["selection"] = deepcopy(combined)
+            row["selection"]["shared_package_allocation"] = deepcopy(allocation)
+            row["selection"]["counts_toward_cart_and_totals"] = row["requirement_id"] == owner
+        allocated_refs.add(reference)
+
+    # Complex reuse (mixed dimensions, different observed facts, multiple
+    # selected SKUs or explicit per-line counts) stays reviewable and unresolved.
+    for reference in reused_refs - allocated_refs:
+        rows = [
+            row for row in planned
+            if row.get("status") == "selected"
+            and any(product.get("product_ref") == reference for product in row.get("selection", {}).get("products", []))
+        ]
+        if len(rows) < 2:
+            continue
+        for row in rows:
+            row["status"] = "needs_input"
+            row.pop("selection", None)
+            unresolved.append({
+                "requirement_id": row["requirement_id"],
+                "item": row["item"],
+                "reason": "candidate_ref_reused_across_requirements",
+            })
 
     # Shared allocations expose the selection on every requirement for review,
     # while exactly one deterministic owner contributes packages and money.

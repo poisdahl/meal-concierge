@@ -187,7 +187,7 @@ class RecipeOperations:
         # Validate all metadata before persisting even an unreferenced asset.
         recipe = deepcopy(snapshot["recipe"])
         recipe["image"] = {**image, "asset_id": "sha256:" + "0" * 64}
-        normalize_recipe(recipe)
+        normalize_recipe(recipe, trusted_store_product_hints=True)
         self._require_recipe_provider(recipe)
         try:
             if data is not None:
@@ -223,7 +223,11 @@ class RecipeOperations:
                 raise RecipeError("prepared cover exceeds 1 MiB; reduce its dimensions on the client")
             recipe["image"]["asset_id"] = "sha256:" + hashlib.sha256(managed).hexdigest()
             self.recipes.assets.install_managed(recipe["image"]["asset_id"], managed)
-            result = self.recipes.persist_discovery(normalize_recipe(recipe), source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+            result = self.recipes.persist_discovery(
+                normalize_recipe(recipe, trusted_store_product_hints=True),
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                trusted_store_product_hints=True,
+            )
             return {**result, "personal_entry_created": False}
         except (RecipeAssetError, RecipeImportSourceError) as exc:
             raise RecipeError(str(exc)) from exc
@@ -303,11 +307,16 @@ class RecipeOperations:
                 response = self.provider_client.call("recipe_detail", {"recipe_id": source_recipe["source"]["external_id"]}, deadline=deadline)
         if not isinstance(response, Mapping) or response.get("provider") != provider or not isinstance(response.get("recipe"), Mapping):
             raise RecipeError("recipe detail provider response is invalid")
-        recipe = normalize_recipe(bind_recipe_source(response["recipe"], provider=provider))
+        recipe = normalize_recipe(
+            bind_recipe_source(response["recipe"], provider=provider),
+            trusted_store_product_hints=True,
+        )
         if any(recipe["source"].get(field) != source_recipe["source"].get(field) for field in ("url", "external_id")):
             raise RecipeError("recipe detail source identity changed")
         self._require_recipe_provider(recipe)
-        result = self.recipes.persist_discovery(recipe)
+        result = self.recipes.persist_discovery(
+            recipe, trusted_store_product_hints=True,
+        )
         self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "detail")
         return {**result, "capabilities": deepcopy(response.get("capabilities", {}))}
 
@@ -3138,12 +3147,20 @@ class RecipeOperations:
                 original = self.recipes.get(request["recipe_id"], request["expected_revision"])
             accepted = accept_recipe_estimates(original, request.get("recipe_digest"), request.get("estimate_fields"), request.get("confirmation_statement"))
             if has_discovery:
-                result = self.recipes.persist_discovery(accepted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+                result = self.recipes.persist_discovery(
+                    accepted,
+                    source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                    trusted_store_product_hints=True,
+                )
                 self.recipes.remember_discovery_transform(request["discovery_ref"], result["discovery_ref"], "conversion")
                 return {**result, "personal_entry_created": False}
             if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():
                 raise RecipeError("estimate acceptance requires an idempotency_key")
-            return {"recipe": self.recipes.update(request["recipe_id"], request["expected_revision"], accepted, idempotency_key=request["idempotency_key"])}
+            return {"recipe": self.recipes.update(
+                request["recipe_id"], request["expected_revision"], accepted,
+                idempotency_key=request["idempotency_key"],
+                trusted_store_product_hints=True,
+            )}
         if action == "discover":
             return self._discover_recipes(request)
         if action == "convert":
@@ -3164,7 +3181,11 @@ class RecipeOperations:
             if canonical(converted["source"]) != canonical(original["source"]):
                 raise RecipeError("conversion must preserve the exact source attribution")
             self._require_recipe_provider(converted)
-            result = self.recipes.persist_discovery(converted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+            result = self.recipes.persist_discovery(
+                converted,
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                trusted_store_product_hints=True,
+            )
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
             scaled = scale_recipe(converted)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
@@ -3652,7 +3673,10 @@ class RecipeOperations:
             prior = self.recipes.get(recipe_id, expected)
             value = self.recipes.prepare_input(request.get("recipe"), prior=prior)
             key = request.get("idempotency_key")
-            return {"recipe": self.recipes.update(recipe_id, expected, value, status=request.get("status"), idempotency_key=key)}
+            return {"recipe": self.recipes.update(
+                recipe_id, expected, value, status=request.get("status"),
+                idempotency_key=key, trusted_store_product_hints=True,
+            )}
         if action == "archive":
             if request.get("library_id") not in {None, "builtin"}:
                 raise RecipeLibraryError("external recipe lifecycle is not implemented")

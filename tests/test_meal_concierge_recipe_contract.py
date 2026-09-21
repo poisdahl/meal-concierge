@@ -71,7 +71,12 @@ class RecipeContractTests(unittest.TestCase):
         return self.app.handle({"operation": "recipes", "action": "save", "recipe": recipe, "idempotency_key": key})["recipe"]
 
     def save_menu(self, recipe):
-        return self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W40", "dishes": [recipe], "salads": []}})["menu"]
+        current = self.store.read().get("menu")
+        return self.app.handle({
+            "operation": "menu", "action": "save",
+            "menu": {"week": "2026-W40", "dishes": [recipe], "salads": []},
+            **({"menu_ref": self.app._cart_menu_ref(current)} if current else {}),
+        })["menu"]
 
     def test_native_source_twelve_to_two_all_five_reach_application_products(self):
         fixture = json.loads((ROOT / "tests/fixtures/mealie/v3.24.0.json").read_text())["recipe_get"]
@@ -323,6 +328,7 @@ class RecipeContractTests(unittest.TestCase):
         for fake_reference in (None, "not-a-bank-reference"):
             new = deepcopy(request)
             new["menu"]["week"] = "2026-W41"
+            new["menu_ref"] = self.app._cart_menu_ref(first["menu"])
             if fake_reference is not None:
                 new["menu"]["dishes"][0]["recipe_ref"] = fake_reference
             with self.assertRaisesRegex(RecipeError, "available managed asset"):
@@ -356,7 +362,11 @@ class RecipeContractTests(unittest.TestCase):
                 reference = ({"recipe_ref": {"id": bundled["id"], "revision": 1}} if kind == "recipe_ref"
                              else {"library_recipe_ref": bundled["library_recipe_ref"]})
                 request = {"operation": "menu", "action": "save", "menu": {"week": "2026-W40", "dishes": [{**reference, "portions": 2}], "salads": []}}
+                current = self.store.read().get("menu")
+                if current:
+                    request["menu_ref"] = self.app._cart_menu_ref(current)
                 first = self.app.handle(request)["menu"]
+                request["menu_ref"] = self.app._cart_menu_ref(first)
                 self.assertTrue({"entry_origin", "pack", "locally_modified"}.isdisjoint(first["dishes"][0]))
                 changed = deepcopy(bundled)
                 changed["name"] = "Edited current revision"

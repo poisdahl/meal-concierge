@@ -13,8 +13,12 @@ from pathlib import Path
 
 def export_part(rpc, job_id, part_id, output):
     output = Path(output)
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
     try:
+        # Attachment sidecars may run as another member of the shared transport
+        # group.  Make this exact, rather than inheriting a restrictive umask,
+        # but never grant world access to a frozen delivery.
+        os.fchmod(descriptor, 0o640)
         with os.fdopen(descriptor, "wb") as stream:
             offset, expected, checksum = 0, None, hashlib.sha256()
             while True:

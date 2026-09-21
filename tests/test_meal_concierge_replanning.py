@@ -161,7 +161,7 @@ class ReplanningTests(unittest.TestCase):
         self.assertEqual(len(self.app._usage_summary(self.store.read(), cooked, self.menu['week'])['blocked_by']), 1)
         self.assertEqual(len(mp.shopping_menu(second)['dishes']), 2)
         with self.assertRaisesRegex(HouseholdError, 'lineage'):
-            self.app.handle({'operation':'menu','action':'save','menu_id':second['menu_id'],'expected_revision':second['revision'],
+            self.app.handle({'operation':'menu','action':'save','menu_ref':mp.menu_ref(second),
                 'menu':{'week':second['week'],'dishes':[{'recipe_ref':self.candidates[1]['recipe_ref']} ]}})
 
     def test_clear_and_new_save_retire_carried_planned_owners(self):
@@ -169,15 +169,20 @@ class ReplanningTests(unittest.TestCase):
         successor = self.apply(prepared)['menu']
         carried = self.menu['slots'][1]['recipe_key']
         predecessor = deepcopy(self.store.read()['recipe_usage'][self.menu['menu_id']])
-        self.app.handle({'operation':'menu','action':'clear','menu_id':successor['menu_id'],'expected_revision':successor['revision']})
+        with self.assertRaisesRegex(HouseholdError, 'exact menu_ref'):
+            self.app.handle({'operation':'menu','action':'clear','menu_id':successor['menu_id'],'expected_revision':successor['revision']})
+        with self.assertRaisesRegex(HouseholdError, 'menu_ref does not match'):
+            self.app.handle({'operation':'menu','action':'clear','menu_ref':{**mp.menu_ref(successor), 'digest':'0' * 64}})
+        self.app.handle({'operation':'menu','action':'clear','menu_ref':mp.menu_ref(successor)})
         self.assertTrue(self.app._usage_summary(self.store.read(), carried, self.menu['week'])['eligible'])
         self.assertEqual(predecessor, self.store.read()['recipe_usage'][self.menu['menu_id']])
         # Recreate fixture state with the successor and exercise ordinary replacement.
         with self.store.locked() as state:
             state['menu'] = deepcopy(successor)
             state['menu_planning']['retired'] = {}
-        self.app.handle({'operation':'menu','action':'save', 'menu':{'week':self.menu['week'],
-            'dishes':[{'recipe_ref':self.menu['slots'][1]['reference']['recipe_ref']}]}})
+        self.app.handle({'operation':'menu','action':'save', 'menu':{'week':'2026-W38',
+            'dishes':[{'recipe_ref':self.menu['slots'][1]['reference']['recipe_ref']}]},
+            'menu_ref':mp.menu_ref(successor)})
         summary = self.app._usage_summary(self.store.read(), carried, self.menu['week'])
         self.assertEqual(len(summary['blocked_by']), 1)
         self.assertEqual(summary['blocked_by'][0]['menu_id'], self.store.read()['menu']['menu_id'])
@@ -191,7 +196,7 @@ class ReplanningTests(unittest.TestCase):
             self.app._record_order_snapshot(state, {'menu': successor, 'cart_plan': {
                 'provider': 'oda', 'menu_ref': self.app._cart_menu_ref(successor),
                 'required_quantities': {'10': 1}}}, '12345')
-        self.app.handle({'operation':'menu','action':'clear','menu_id':successor['menu_id'],'expected_revision':successor['revision']})
+        self.app.handle({'operation':'menu','action':'clear','menu_ref':mp.menu_ref(successor)})
         with self.store.locked() as state:
             state['email_jobs'] = [{'provider':'oda','order_id':'12345','status':'sent'}]
             self.app._prune_order_snapshots(state)
