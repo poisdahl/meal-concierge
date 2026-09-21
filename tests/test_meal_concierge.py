@@ -2916,6 +2916,28 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         self.assertEqual(result, {"status": "unknown"})
         browser._eval.assert_not_called()
 
+    def test_retained_vipps_observation_never_enables_amountless_gateway_mode(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        gateway = "https://pay.vipps.no/?token=opaque"
+        browser._invoke = mock.Mock(return_value={"url": gateway})
+        scripts = []
+        browser._eval = lambda script: scripts.append(script) or {
+            "identity": True, "ready": False, "sent": False, "expired": False,
+            "fillable": False, "phone_matches": False,
+        }
+
+        result = browser.checkout_vipps_request_state({
+            "tab_id": "tab-1", "expected_total": 25650, "order_id": "order-1",
+            "gateway_url_digest": hashlib.sha256(gateway.encode()).hexdigest(),
+        })
+
+        self.assertEqual(result, {"status": "unknown"})
+        self.assertEqual(len(scripts), 1)
+        self.assertIn("const amountlessBound=false&&", scripts[0])
+
     def test_checkout_deadline_caps_each_browser_command(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.binary = Path("/shared/agent-browser-native")
@@ -3200,11 +3222,13 @@ const node=(text='')=>({innerText:text,value:'',checked:false,disabled:false,rea
  getAttribute:()=>null,setAttribute:()=>{},removeAttribute:()=>{},contains:x=>x===this,getBoundingClientRect(){return {width:this.hidden?0:10,height:10}}});
 const phone=node();phone.value=c.phone===undefined?'90000000':c.phone;
 phone.disabled=!!c.phoneDisabled;phone.readOnly=!!c.phoneReadOnly;phone.hidden=!!c.phoneHidden;
+phone.getAttribute=name=>name==='aria-disabled'&&c.phoneAriaDisabled?'true':null;
 const otherPhone=node();otherPhone.value='90000000';
 const remember=node();remember.checked=!!c.remember;
 const next=node(c.button||'Next');
 next.disabled=!!c.nextDisabled;
 next.getAttribute=name=>name==='aria-disabled'&&c.nextAriaDisabled?'true':null;
+if(c.react!==false)next.__reactProps$synthetic={};
 const buttons=c.duplicate?[next,node(c.button||'Next')]:[next];
 const form=node(),component=node(),phoneOnly=node(),buttonOnly=node();
 phone.parentElement=c.unrelated?phoneOnly:(c.inForm?form:component);
@@ -3214,8 +3238,11 @@ form.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[aut
 component.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?(c.multiplePhone?[phone,otherPhone]:[phone]):s==='button[type="submit"],input[type="submit"],button:not([type])'?buttons:[];
 phoneOnly.querySelectorAll=s=>s==='input[type="tel"],input[inputmode="tel"],input[autocomplete="tel"]'?(c.multiplePhone?[phone,otherPhone]:[phone]):[];
 buttonOnly.querySelectorAll=s=>s==='button[type="submit"],input[type="submit"],button:not([type])'?buttons:[];
-const text=c.sent?`${c.merchant===false?'Other':'Oda'} NOK ${c.amount||'256.50'} We've sent a payment request to your phone Open Vipps`:
- c.expired?'Oh no, your payment timed out Go back and try again. Go back':`Continue to pay with Vipps ${c.merchant===false?'Other':'Oda'} NOK ${c.amount||'256.50'}`;
+const paymentText=c.amountless?'':` ${c.amount||'256.50'}`;
+const currency=c.currency===false?'':'NOK';
+const baseText=c.sent?`${c.merchant===false?'Other':'Oda'} ${currency}${paymentText} We've sent a payment request to your phone Open Vipps`:
+ c.expired?'Oh no, your payment timed out Go back and try again. Go back':`Continue to pay with Vipps ${c.merchant===false?'Other':'Oda'} ${currency}${paymentText}`;
+const text=baseText+(c.extraText?` ${c.extraText}`:'');
 global.location=new URL(c.url||'https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque');
 global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible',opacity:e===remember&&c.rememberOpacityZero?'0':'1'});
 const main=node(c.outside?'Continue to pay with Vipps Other':text);main.querySelectorAll=s=>
@@ -3227,13 +3254,14 @@ global.document={body:{innerText:text},elementFromPoint:()=>c.obscured?node('ove
 process.stdout.write(eval(script));
 """
 
-        def evaluate(case, *, require_hit=False):
+        def evaluate(case, *, require_hit=False, allow_source_bound_amountless=False):
             url = case.get("url", "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=opaque")
             result = subprocess.run(
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
                         25650, "90000000", expected_url=case.get("expectedUrl", url),
+                        allow_source_bound_amountless=allow_source_bound_amountless,
                         require_hit=require_hit, hit_x=5, hit_y=5,
                     ),
                     "c": case,
@@ -3302,6 +3330,46 @@ process.stdout.write(eval(script));
         self.assertFalse(evaluate({"obscured": True}, require_hit=True)["ready"])
         self.assertFalse(evaluate({"sent": True, "amount": "256.51"})["sent"])
         self.assertFalse(evaluate({"sent": True, "merchant": False})["sent"])
+
+        amountless = {"amountless": True, "url": "https://pay.vipps.no/?token=opaque"}
+        self.assertFalse(evaluate(amountless)["fillable"])
+        self.assertTrue(evaluate(
+            amountless, allow_source_bound_amountless=True,
+        )["ready"])
+        for case in (
+            {**amountless, "amountless": False, "amount": "256.51"},
+            {**amountless, "url": "https://pay.vipps.no/other?token=opaque"},
+            {**amountless, "url": "https://pay.vipps.no/?token=opaque&other=1"},
+            {**amountless, "url": "https://payments.example/?token=opaque"},
+            {**amountless, "merchant": False},
+            {**amountless, "currency": False},
+            {**amountless, "duplicate": True},
+            {**amountless, "nextDisabled": True},
+            {**amountless, "phoneAriaDisabled": True},
+            {**amountless, "react": False},
+            {**amountless, "extraText": "256 kr"},
+            {**amountless, "extraText": "256,- kr"},
+            {**amountless, "extraText": "kr 256,51"},
+            {**amountless, "extraText": "€256.51"},
+            {**amountless, "extraText": "$999.00"},
+            {**amountless, "extraText": "999,00 EUR"},
+            {**amountless, "extraText": "SEK"},
+            {**amountless, "extraText": "¥1000"},
+            {**amountless, "extraText": "1000 JPY"},
+            {**amountless, "extraText": "CHF 256"},
+            {**amountless, "extraText": "NOK total 256,-"},
+            {**amountless, "extraText": "NOK total 256"},
+            {**amountless, "extraText": "NOK,—"},
+            {**amountless, "extraText": "kr.—"},
+            {**amountless, "extraText": "２５６"},
+            {**amountless, "extraText": "٢٥٦"},
+            {**amountless, "extraText": "₿"},
+            {**amountless, "extraText": "¤"},
+        ):
+            with self.subTest(amountless=case):
+                self.assertFalse(evaluate(
+                    case, allow_source_bound_amountless=True,
+                )["fillable"])
 
     @unittest.skipUnless(shutil.which("node"), "Node executes observed Vipps acknowledgement")
     def test_oda_vipps_post_dispatch_ack_requires_exact_receipt_phone_and_context(self):
@@ -3477,14 +3545,25 @@ process.stdout.write(eval(script));
             {"identity": True, "ready": False, "sent": True, "expired": False, "fillable": False, "phone_matches": False},
         ])
 
-        context = browser._complete_oda_vipps_request(
-            "tab-1",
-            25650,
-            expected_order_id="order-1",
-            source_url=source,
-        )
+        with mock.patch(
+            "oda_browser._oda_vipps_gateway_script", wraps=_oda_vipps_gateway_script,
+        ) as gateway_script:
+            context = browser._complete_oda_vipps_request(
+                "tab-1",
+                25650,
+                expected_order_id="order-1",
+                source_url=source,
+            )
 
         self.assertEqual(context["order_id"], "order-1")
+        self.assertTrue(all(
+            call.kwargs.get("allow_source_bound_amountless") is True
+            for call in gateway_script.call_args_list[:-1]
+        ))
+        self.assertNotIn(
+            "allow_source_bound_amountless",
+            gateway_script.call_args_list[-1].kwargs,
+        )
         self.assertFalse(any(call.args[:2] == ("network", "requests")
                              for call in browser._invoke.call_args_list))
         self.assertEqual(browser._invoke.call_args_list[-3:], [
@@ -3551,7 +3630,7 @@ process.stdout.write(eval(script));
             "fillable": False, "phone_matches": False,
         })
 
-        with self.assertRaisesRegex(HouseholdError, "did not follow the reviewed Oda click"):
+        with self.assertRaisesRegex(HouseholdError, "navigated, but the Vipps gateway was not recognized"):
             browser._complete_oda_vipps_request(
                 "tab-1",
                 25650,
@@ -3561,6 +3640,104 @@ process.stdout.write(eval(script));
 
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
+
+    def test_oda_vipps_amountless_mode_requires_the_exact_recovery_source_and_order(self):
+        gateway = "https://pay.vipps.no/?token=opaque"
+
+        def attempted_script(expected_order_id, source_url):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser.vipps_phone_number = "90000000"
+            browser._checkout_deadline = 25.1
+            browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+            browser._invoke = mock.Mock(return_value={"url": gateway})
+            browser._eval = mock.Mock(return_value={
+                "identity": True, "ready": False, "sent": False, "expired": False,
+                "fillable": False, "phone_matches": False,
+            })
+            browser._settle = mock.Mock()
+            with mock.patch("oda_browser.time.monotonic", return_value=0.0):
+                with mock.patch(
+                    "oda_browser._oda_vipps_gateway_script", return_value="gateway-script",
+                ) as gateway_script:
+                    with self.assertRaisesRegex(
+                        HouseholdError, "navigated, but the Vipps gateway was not recognized",
+                    ):
+                        browser._complete_oda_vipps_request(
+                            "tab-1", 25650, expected_order_id=expected_order_id,
+                            source_url=source_url,
+                        )
+            return gateway_script.call_args.kwargs
+
+        source = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
+        self.assertTrue(attempted_script("order-1", source)["allow_source_bound_amountless"])
+        for order_id, unbound_source in (
+            (None, source),
+            ("order-2", source),
+            ("order-1", "https://oda.com/no/checkout/confirm/?orderNumber=order-1"),
+            ("order-1", source + "&other=1"),
+        ):
+            with self.subTest(order_id=order_id, source=unbound_source):
+                self.assertFalse(attempted_script(
+                    order_id, unbound_source,
+                )["allow_source_bound_amountless"])
+
+    def test_oda_vipps_amountless_recovery_reaches_the_durable_request_fence(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._settle = mock.Mock()
+        browser._require_checkout_time = mock.Mock()
+        gateway = "https://pay.vipps.no/?token=opaque"
+
+        def invoke(action, *args, **_kwargs):
+            if (action, args) == ("get", ("url",)):
+                return {"url": gateway}
+            if (action, args) == ("get", ("box", "[data-oda-household-vipps-next]")):
+                return {"x": 10, "y": 20, "width": 30, "height": 40}
+            return {}
+
+        browser._invoke = mock.Mock(side_effect=invoke)
+
+        def evaluate(script):
+            self.assertIn("const amountlessBound=true&&", script)
+            return {"identity": True, "ready": True, "sent": False, "expired": False,
+                    "fillable": True, "phone_matches": True}
+
+        browser._eval = mock.Mock(side_effect=evaluate)
+        fenced = []
+
+        def before_request(context):
+            fenced.append(context)
+            raise HouseholdError("stop at durable request fence")
+
+        with self.assertRaisesRegex(HouseholdError, "durable request fence"):
+            browser._complete_oda_vipps_request(
+                "tab-1", 25650, before_request,
+                expected_order_id="order-1",
+                source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            )
+
+        self.assertEqual(len(fenced), 1)
+        self.assertEqual(fenced[0]["order_id"], "order-1")
+        self.assertFalse(any(call.args[:2] == ("mouse", "down")
+                             for call in browser._invoke.call_args_list))
+
+    def test_oda_vipps_gateway_deadline_distinguishes_no_navigation(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.vipps_phone_number = "90000000"
+        browser._checkout_deadline = 25.1
+        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        source = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
+        browser._invoke = mock.Mock(return_value={"url": source})
+        browser._eval = mock.Mock()
+        browser._settle = mock.Mock()
+
+        with mock.patch("oda_browser.time.monotonic", return_value=0.0):
+            with self.assertRaisesRegex(HouseholdError, "did not navigate to Vipps"):
+                browser._complete_oda_vipps_request(
+                    "tab-1", 25650, expected_order_id="order-1", source_url=source,
+                )
+        browser._eval.assert_not_called()
 
     def test_oda_vipps_waits_past_ten_seconds_for_a_late_gateway(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -3631,7 +3808,7 @@ process.stdout.write(eval(script));
 
         browser._eval = mock.Mock(side_effect=slow_evaluate)
         with mock.patch("oda_browser.time.monotonic", side_effect=lambda: clock[0]):
-            with self.assertRaisesRegex(HouseholdError, "did not follow"):
+            with self.assertRaisesRegex(HouseholdError, "navigated, but the Vipps gateway was not recognized"):
                 browser._complete_oda_vipps_request(
                     "tab-1", 25620, expected_order_id="order-1",
                     source_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
