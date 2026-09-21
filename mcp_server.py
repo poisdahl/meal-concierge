@@ -1435,9 +1435,12 @@ def _issues_only_product_result_projection(
         "details_omitted": True,
         "product_plan": plan,
         "next": (
-            "Use each requirement's candidate_search query and compact candidates to correct "
-            "or add candidate_approvals and price_mode, then prepare the entire same menu "
-            "again with the unchanged binding. Do not bypass product apply with raw cart changes."
+            "In candidate_search, query='$item' means the exact item field in that same row. "
+            "Use any compact candidates shown; when candidates is empty or unsuitable, call "
+            "meal_concierge_catalog action=products with query=row.item (or the returned literal "
+            "query) for that requirement. Then correct or add candidate_approvals and price_mode "
+            "and prepare the entire same menu again with the unchanged binding. Do not bypass "
+            "product apply with raw cart changes."
         ),
     }
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))

@@ -2458,7 +2458,10 @@ class StateMigrationTests(unittest.TestCase):
                 "week": "2026-W43", "dishes": [deepcopy(migrated["menu"]["dishes"][0])], "salads": [],
             }
             replacement["dishes"][0]["name"] = "A oppdatert"
-            updated = app.handle({"operation": "menu", "action": "save", "menu": replacement})
+            updated = app.handle({
+                "operation": "menu", "action": "save", "menu": replacement,
+                "menu_ref": app._cart_menu_ref(migrated["menu"]),
+            })
             self.assertEqual(updated["menu"]["dishes"][0]["name"], "A oppdatert")
             pending = migrated["pending_checkout"]
             self.assertEqual(pending["menu_ref"]["menu_id"], pending["menu"]["menu_id"])
@@ -4210,6 +4213,7 @@ class RecipeFlowTests(unittest.TestCase):
         second = app.handle({
             "operation": "menu", "action": "save",
             "menu": {"week": "2026-W41", "dishes": [{"library_recipe_ref": adapter.reference}], "salads": []},
+            "menu_ref": app._cart_menu_ref(first),
             "allow_repeat_keys": [long_key], "override_reason": "owner requested the repeat",
         })["menu"]
         self.assertEqual(second["dishes"][0]["recipe_key"], long_key)
@@ -4690,13 +4694,13 @@ class RecipeFlowTests(unittest.TestCase):
                 thread.join(4)
         state = self.store.read()
         self.assertEqual(len([value for value in outcomes if value.startswith("menu_")]), 1)
-        self.assertEqual(len([value for value in outcomes if "menu changed while saving" in value]), 1)
+        self.assertEqual(len([value for value in outcomes if "exact menu_ref" in value]), 1)
         self.assertEqual(len([value for value in state["recipe_usage"].values() if value["status"] == "planned"]), 1)
 
     def test_predispatch_can_be_abandoned_but_uncertain_checkout_blocks(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         self.prepare_checkout_with_current_cart()
-        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Annen fisk"))})["menu"]
+        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Annen fisk")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
         state = self.store.read()
         self.assertIsNone(state["pending_checkout"])
         self.assertEqual(state["recipe_usage"][first["menu_id"]]["status"], "cancelled")
@@ -4706,7 +4710,7 @@ class RecipeFlowTests(unittest.TestCase):
         with self.store.locked() as locked:
             locked["pending_checkout"]["status"] = "uncertain"
         with self.assertRaisesRegex(HouseholdError, "may have been dispatched"):
-            self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W42", full_recipe("Tredje fisk"))})
+            self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W42", full_recipe("Tredje fisk")), "menu_ref": self.app._cart_menu_ref(second)})
 
     def test_ordered_menu_cannot_be_revised_in_place(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
@@ -4720,7 +4724,7 @@ class RecipeFlowTests(unittest.TestCase):
                 "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
                 "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
             })
-        replacement = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
+        replacement = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
         state = self.store.read()
         self.assertNotEqual(replacement["menu_id"], first["menu_id"])
         self.assertEqual(state["recipe_usage"][first["menu_id"]]["status"], "ordered")
@@ -4741,11 +4745,11 @@ class RecipeFlowTests(unittest.TestCase):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W40", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}})["menu"]
         self.app.handle({"operation": "recipes", "action": "mark_cooked", "menu_id": first["menu_id"], "recipe_key": f"bank:{saved['id']}", "week": "2026-W40"})
         with self.assertRaisesRegex(HouseholdError, "cooldown blocks"):
-            self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}})
+            self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}, "menu_ref": self.app._cart_menu_ref(first)})
 
     def test_stale_menu_clear_cannot_remove_a_newer_menu(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
-        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
+        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
         with self.assertRaisesRegex(HouseholdError, "menu_ref does not match the current menu"):
             self.app.handle({"operation": "menu", "action": "clear", "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})
         self.assertEqual(self.store.read()["menu"]["menu_id"], second["menu_id"])
@@ -4838,7 +4842,7 @@ class RecipeFlowTests(unittest.TestCase):
             self.app._record_order_snapshot(state, {"menu": first, "cart_plan": {
                 "provider": "oda", "menu_ref": self.app._cart_menu_ref(first),
                 "required_quantities": {"10": 1}}}, "order-1")
-        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
+        second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
         with self.store.locked() as state:
             self.app._record_order_snapshot(state, {"menu": second, "cart_plan": {
                 "provider": "oda", "menu_ref": self.app._cart_menu_ref(second),
@@ -4892,10 +4896,10 @@ class RecipeFlowTests(unittest.TestCase):
             state["menu"]["phase"] = "ordered"
             state["menu"]["order_id"] = "old"
         with self.assertRaisesRegex(HouseholdError, "cooldown blocks"):
-            self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}})
+            self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}, "menu_ref": self.app._cart_menu_ref(first)})
         marked = self.app.handle({"operation": "recipes", "action": "mark_not_cooked", "menu_id": first["menu_id"], "recipe_key": f"bank:{saved['id']}", "week": "2026-W40"})
         self.assertFalse(marked["cooked"])
-        next_menu = self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}})["menu"]
+        next_menu = self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W41", "dishes": [{"recipe_ref": {"id": saved["id"]}}]}, "menu_ref": self.app._cart_menu_ref(first)})["menu"]
         self.assertEqual(next_menu["week"], "2026-W41")
 
         with self.store.locked() as state:
@@ -4904,6 +4908,7 @@ class RecipeFlowTests(unittest.TestCase):
         overridden = self.app.handle({
             "operation": "menu", "action": "save",
             "menu": {"week": "2026-W42", "dishes": [{"recipe_ref": {"id": saved["id"]}}]},
+            "menu_ref": self.app._cart_menu_ref(next_menu),
             "allow_repeat_keys": [f"bank:{saved['id']}"], "override_reason": "Brukeren ba uttrykkelig om den igjen",
         })["menu"]
         self.assertEqual(self.store.read()["recipe_usage"][overridden["menu_id"]]["cooldown_overrides"][f"bank:{saved['id']}"], "Brukeren ba uttrykkelig om den igjen")
@@ -5018,7 +5023,7 @@ class RecipeFlowTests(unittest.TestCase):
             state["email_recipient"] = "first@example.test"
         scheduled = self.app.handle({"operation": "email", "action": "schedule", "order_id": "old", "delivery_date": datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()})
         self.app.handle({"operation": "email", **scheduled["automation_ack"]})
-        self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny meny"))})
+        self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny meny")), "menu_ref": self.app._cart_menu_ref(ordered)})
         with self.store.locked() as state:
             state["email_recipient"] = "second@example.test"
         self.oda.order_delivery = datetime.now(ZoneInfo("Europe/Oslo")).date().isoformat()
@@ -5211,6 +5216,7 @@ class RecipeFlowTests(unittest.TestCase):
         oda_menu.update({"phase": "ordered", "order_id": "same"})
         meny_menu = self.app.handle({
             "operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("MENY-rett")),
+            "menu_ref": self.app._cart_menu_ref(oda_menu),
         })["menu"]
         meny_menu.update({"phase": "ordered", "order_id": "same"})
         store = StateStore(Path(self.temp.name) / "meny-snapshot-collision", {**CONFIG, "provider": "meny"})
@@ -5345,7 +5351,7 @@ class RecipeFlowTests(unittest.TestCase):
             state["order_snapshots"]["old"] = deepcopy(original)
             state["recipe_usage"][original["menu_id"]]["status"] = "ordered"
             state["recipe_usage"][original["menu_id"]]["order_id"] = "old"
-        current = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny meny"))})["menu"]
+        current = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny meny")), "menu_ref": self.app._cart_menu_ref(original)})["menu"]
         with self.store.locked() as state:
             self.app._record_order_snapshot(state, {"menu": current, "order_change": {"order_id": "old"}}, "old")
         state = self.store.read()

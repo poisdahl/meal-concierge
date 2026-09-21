@@ -1125,6 +1125,50 @@ def plan_week(
         for candidate in eligible
         for index, day in enumerate(source_dates)
     }
+
+    def strict_prefix_signature(
+        selected: tuple[Mapping[str, Any], ...],
+    ) -> tuple[Any, ...]:
+        """Partition equal candidate sets by order-sensitive batch contributions."""
+        if not layout:
+            return tuple()
+        evaluated = tuple(
+            candidate
+            for candidate, allocation in zip(
+                selected, layout["sources"][:len(selected)], strict=True,
+            )
+            for _ in allocation["eating_dates"]
+        )
+        signature: list[Any] = []
+        for target in checked["strict_targets"]:
+            if target == "active_minutes":
+                low, high, _maximum = _active_window(profile)
+                values = [
+                    candidate["facts"]["active_minutes"]["value"]
+                    for candidate in evaluated
+                ]
+                signature.append((
+                    target,
+                    any(value is None for value in values),
+                    any(value is not None and not low <= value <= high for value in values),
+                ))
+            elif target == "minimum_vegetable_types":
+                # Duplicate batch servings do not change a set of vegetable types.
+                continue
+            else:
+                facet = {
+                    "minimum_fish_portions": "fish",
+                    "minimum_legume_dinners": "legume",
+                    "minimum_wholegrain_or_potato_dinners": "wholegrain_or_potato",
+                }[target]
+                wanted = _positive_int(profile, target, 0)
+                observed = sum(
+                    facet in candidate["facts"]["dietary_facets"]["values"]
+                    for candidate in evaluated
+                )
+                signature.append((target, min(wanted, observed)))
+        return tuple(signature)
+
     if complete_states <= MAX_EXPLORED_STATES:
         explored_states = complete_states
         candidate_sequences = permutations(eligible, count)
@@ -1139,7 +1183,7 @@ def plan_week(
         explored_states = 0
         for index in range(count):
             by_candidate_set: dict[
-                tuple[str, ...],
+                tuple[tuple[str, ...], tuple[Any, ...]],
                 list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]],
             ] = {}
             for prefix in frontier:
@@ -1168,15 +1212,18 @@ def plan_week(
                         tuple(item["reference_key"] for item in selected),
                         selected,
                     )
-                    candidate_set = tuple(sorted(ranked_prefix[1]))
-                    retained = by_candidate_set.setdefault(candidate_set, [])
+                    state_key = (
+                        tuple(sorted(ranked_prefix[1])),
+                        strict_prefix_signature(selected),
+                    )
+                    retained = by_candidate_set.setdefault(state_key, [])
                     retained.append(ranked_prefix)
                     retained.sort(key=lambda item: (item[0], item[1]))
                     del retained[checked["alternatives"]:]
             frontier = [
                 item[2]
-                for candidate_set in sorted(by_candidate_set)
-                for item in by_candidate_set[candidate_set]
+                for state_key in sorted(by_candidate_set)
+                for item in by_candidate_set[state_key]
             ]
             if not frontier:
                 break

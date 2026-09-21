@@ -921,6 +921,54 @@ class WeeklyPlannerTests(unittest.TestCase):
             for slot in result["selection"]["slots"]
         ), 2)
 
+    def test_bounded_batch_search_retains_strict_relevant_slot_assignment(self):
+        candidates = self.save_candidates(12)
+        candidates[0]["facts"] = explicit_facts(dietary=["fish"], complete=True)
+        for candidate in candidates[1:]:
+            candidate["facts"] = explicit_facts(dietary=[], complete=True)
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({
+                "dinner_days": 7,
+                "dishes": 6,
+                "batch_dishes": 1,
+                "meal_mode": "mixed",
+                "cook_days": [
+                    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+                ],
+                "recurring_batch_accepted": True,
+                "prepared_portion_range": [4, 8],
+            })
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 2,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        dates = [f"2026-09-{day:02d}" for day in range(7, 14)]
+        original = planner._slot_reasons
+
+        def prefer_fish_early(candidate, day, index, count, profile):
+            reasons = original(candidate, day, index, count, profile)
+            if "fish" in candidate["facts"]["dietary_facets"]["values"]:
+                reasons.append({
+                    "code": "test:prefer_fish_early",
+                    "weight": 300 if index == 0 else -300,
+                    "detail": index,
+                })
+            return reasons
+
+        with mock.patch("planner._slot_reasons", side_effect=prefer_fish_early):
+            result = self.plan(self.request(
+                candidates, dates=dates,
+            ))
+        self.assertEqual(result["status"], "planned")
+        source_slots = result["selection"]["source_slots"]
+        fish_slot = next(
+            slot for slot in source_slots
+            if "fish" in slot["dietary_facets"]["values"]
+        )
+        self.assertEqual(fish_slot["date"], dates[5])
+
     def test_candidate_day_alternative_and_date_bounds_are_exact(self):
         candidates = self.save_candidates(13)
         with self.assertRaisesRegex(PlannerError, "one to 12"):

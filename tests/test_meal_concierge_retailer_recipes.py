@@ -407,6 +407,19 @@ class RetailerPublicDetailTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "service-owned retailer evidence"):
             normalize_recipe(forged)
 
+        from recipes import prepare_recipe_input
+        changed = prepare_recipe_input(
+            {**normalized, "notes": "Household note"}, prior=normalized,
+        )
+        self.assertEqual(
+            changed["ingredients"][0]["_store_product_hint"],
+            normalized["ingredients"][0]["_store_product_hint"],
+        )
+        tampered = deepcopy(normalized)
+        tampered["ingredients"][0]["_store_product_hint"]["product_ref"] += 1
+        with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
+            prepare_recipe_input(tampered, prior=normalized)
+
         ambiguous = self.fetched(
             source,
             ingredients=["1 ss Olivenolje", "1 ss Olivenolje"],

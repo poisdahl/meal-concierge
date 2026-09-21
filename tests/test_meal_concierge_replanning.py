@@ -180,8 +180,9 @@ class ReplanningTests(unittest.TestCase):
         with self.store.locked() as state:
             state['menu'] = deepcopy(successor)
             state['menu_planning']['retired'] = {}
-        self.app.handle({'operation':'menu','action':'save', 'menu':{'week':self.menu['week'],
-            'dishes':[{'recipe_ref':self.menu['slots'][1]['reference']['recipe_ref']}]}})
+        self.app.handle({'operation':'menu','action':'save', 'menu':{'week':'2026-W38',
+            'dishes':[{'recipe_ref':self.menu['slots'][1]['reference']['recipe_ref']}]},
+            'menu_ref':mp.menu_ref(successor)})
         summary = self.app._usage_summary(self.store.read(), carried, self.menu['week'])
         self.assertEqual(len(summary['blocked_by']), 1)
         self.assertEqual(summary['blocked_by'][0]['menu_id'], self.store.read()['menu']['menu_id'])

@@ -1417,19 +1417,23 @@ class PlanningOperations:
                 if supplied_menu_id:
                     if not isinstance(current, Mapping) or canonical(supplied_ref) != canonical(mp.menu_ref(current)):
                         raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
-                    if current.get("supersedes"):
-                        raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
-                    current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
-                    if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
-                        raise HouseholdError("an ordered menu is immutable; save a new menu instead")
-                    if isinstance(current_usage, Mapping) and (
-                        current_usage.get("cooked_keys")
-                        or current_usage.get("not_cooked_keys")
-                        or current_usage.get("cooldown_overrides")
-                    ):
-                        raise HouseholdError("a menu with explicit usage history is immutable; save a new menu instead")
-                    menu_id = supplied_menu_id
-                    revision = expected_revision + 1
+                    if current.get("week") != menu.get("week"):
+                        menu_id = f"menu_{secrets.token_hex(12)}"
+                        revision = 1
+                    else:
+                        if current.get("supersedes"):
+                            raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
+                        current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
+                        if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
+                            raise HouseholdError("an ordered menu is immutable; save a new menu instead")
+                        if isinstance(current_usage, Mapping) and (
+                            current_usage.get("cooked_keys")
+                            or current_usage.get("not_cooked_keys")
+                            or current_usage.get("cooldown_overrides")
+                        ):
+                            raise HouseholdError("a menu with explicit usage history is immutable; save a new menu instead")
+                        menu_id = supplied_menu_id
+                        revision = expected_revision + 1
                 else:
                     if canonical(current) != canonical(baseline_menu):
                         raise HouseholdError("menu changed while saving; read it and try again")

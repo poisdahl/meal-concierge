@@ -1057,10 +1057,48 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
     ) if prior is not None else None
     if prior is not None and prior["schema_version"] == 2 and isinstance(value, Mapping) and value.get("schema_version") == 1:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
+    if isinstance(value, Mapping) and prior is not None:
+        value = deepcopy(dict(value))
+        incoming = value.get("ingredients")
+        previous = prior.get("ingredients")
+        if isinstance(incoming, list) and isinstance(previous, list):
+            for index, ingredient in enumerate(incoming):
+                if not isinstance(ingredient, Mapping) or "_store_product_hint" not in ingredient:
+                    continue
+                prior_ingredient = previous[index] if index < len(previous) else None
+                prior_hint = (
+                    prior_ingredient.get("_store_product_hint")
+                    if isinstance(prior_ingredient, Mapping) else None
+                )
+                incoming_item = ingredient.get("item") or ingredient.get("name")
+                prior_item = prior_ingredient.get("item") if isinstance(prior_ingredient, Mapping) else None
+                if (
+                    ingredient.get("_store_product_hint") != prior_hint
+                    or _normalized_text(incoming_item) != _normalized_text(prior_item)
+                ):
+                    raise RecipeError("_store_product_hint must match exact prior retailer evidence")
+                ingredient = dict(ingredient)
+                ingredient.pop("_store_product_hint", None)
+                incoming[index] = ingredient
     value = bind_recipe_source(value, prior=prior)
     if isinstance(value, Mapping) and isinstance(value.get("source"), Mapping) and str(value["source"].get("relationship") or "").casefold() == "generated" and value.get("schema_version", 1) == 1:
         value = {**value, "schema_version": 2}
     recipe = normalize_recipe(value)
+    if prior is not None:
+        for index, ingredient in enumerate(recipe.get("ingredients", [])):
+            if index >= len(prior.get("ingredients", [])):
+                continue
+            prior_ingredient = prior["ingredients"][index]
+            hint = prior_ingredient.get("_store_product_hint")
+            if (
+                hint is not None
+                and _normalized_text(ingredient.get("item"))
+                == _normalized_text(prior_ingredient.get("item"))
+            ):
+                ingredient["_store_product_hint"] = deepcopy(hint)
+        recipe = normalize_recipe(
+            recipe, trusted_store_product_hints=True,
+        )
     if prior is not None and prior.get("schema_version") == 2 and recipe["schema_version"] != 2:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
     if prior is not None and prior.get("source_provider") is not None:
@@ -5066,13 +5104,19 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def update(self, recipe_id: Any, expected_revision: Any, value: Any, *, status: str | None = None, idempotency_key: Any = None) -> dict[str, Any]:
+    def update(
+        self, recipe_id: Any, expected_revision: Any, value: Any, *,
+        status: str | None = None, idempotency_key: Any = None,
+        trusted_store_product_hints: bool = False,
+    ) -> dict[str, Any]:
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise RecipeError("expected_revision must be a positive integer")
         if status is not None and (not isinstance(status, str) or status not in {"active", "draft"}):
             raise RecipeError("recipe status must be active or draft")
-        recipe = normalize_recipe(value)
+        recipe = normalize_recipe(
+            value, trusted_store_product_hints=trusted_store_product_hints,
+        )
         key = self._idempotency_key(idempotency_key)
         request_hash = _hash({"recipe_id": recipe_id, "expected_revision": expected_revision, "recipe": recipe, "status": status})
         try:

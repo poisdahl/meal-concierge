@@ -671,6 +671,8 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertIn("candidate_approvals", projected["next"])
         self.assertIn("price_mode", projected["next"])
         self.assertIn("entire same menu", projected["next"])
+        self.assertIn("query='$item' means the exact item field", projected["next"])
+        self.assertIn("meal_concierge_catalog action=products", projected["next"])
         self.assertEqual(result, before)
 
     def test_ids_and_reasons_survive_when_even_one_candidate_ref_cannot_fit(self):
@@ -718,6 +720,7 @@ class ProductProjectionTests(unittest.TestCase):
             and row["candidate_search"]["candidates"] == []
             for row in rows
         ))
+        self.assertIn("query=row.item", projected["next"])
 
     def test_oversized_apply_binding_returns_bounded_non_actionable_result(self):
         module = self.module()

@@ -187,7 +187,7 @@ class RecipeOperations:
         # Validate all metadata before persisting even an unreferenced asset.
         recipe = deepcopy(snapshot["recipe"])
         recipe["image"] = {**image, "asset_id": "sha256:" + "0" * 64}
-        normalize_recipe(recipe)
+        normalize_recipe(recipe, trusted_store_product_hints=True)
         self._require_recipe_provider(recipe)
         try:
             if data is not None:
@@ -223,7 +223,11 @@ class RecipeOperations:
                 raise RecipeError("prepared cover exceeds 1 MiB; reduce its dimensions on the client")
             recipe["image"]["asset_id"] = "sha256:" + hashlib.sha256(managed).hexdigest()
             self.recipes.assets.install_managed(recipe["image"]["asset_id"], managed)
-            result = self.recipes.persist_discovery(normalize_recipe(recipe), source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+            result = self.recipes.persist_discovery(
+                normalize_recipe(recipe, trusted_store_product_hints=True),
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                trusted_store_product_hints=True,
+            )
             return {**result, "personal_entry_created": False}
         except (RecipeAssetError, RecipeImportSourceError) as exc:
             raise RecipeError(str(exc)) from exc
@@ -3152,7 +3156,11 @@ class RecipeOperations:
                 return {**result, "personal_entry_created": False}
             if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():
                 raise RecipeError("estimate acceptance requires an idempotency_key")
-            return {"recipe": self.recipes.update(request["recipe_id"], request["expected_revision"], accepted, idempotency_key=request["idempotency_key"])}
+            return {"recipe": self.recipes.update(
+                request["recipe_id"], request["expected_revision"], accepted,
+                idempotency_key=request["idempotency_key"],
+                trusted_store_product_hints=True,
+            )}
         if action == "discover":
             return self._discover_recipes(request)
         if action == "convert":
@@ -3173,7 +3181,11 @@ class RecipeOperations:
             if canonical(converted["source"]) != canonical(original["source"]):
                 raise RecipeError("conversion must preserve the exact source attribution")
             self._require_recipe_provider(converted)
-            result = self.recipes.persist_discovery(converted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+            result = self.recipes.persist_discovery(
+                converted,
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                trusted_store_product_hints=True,
+            )
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
             scaled = scale_recipe(converted)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
