@@ -1068,6 +1068,32 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(contradicted["status"], "needs_input")
         self.assertEqual(contradicted["unresolved_requirements"][0]["reason"], "candidate_semantic_mismatch")
 
+    def test_unreviewed_fresh_qualifier_omissions_need_explicit_authority(self):
+        for item, name in (
+            ("fersk pasta", "Pasta"),
+            ("fersk gjær", "Gjær"),
+            ("fersk koriander", "Koriander"),
+        ):
+            with self.subTest(item=item):
+                value = menu({"item": item, "quantity": 100, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product("10", name, 100, "g", [option(1200)])
+                planned = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(item, [candidate]),
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": ["10"],
+                    }],
+                )
+                self.assertEqual(planned["status"], "needs_input")
+                self.assertEqual(
+                    planned["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+
     def test_semantic_authorization_checks_exact_selected_ref_before_broad_scope_filter(self):
         cases = (
             (

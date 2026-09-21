@@ -509,6 +509,24 @@ def _authorized_semantic_difference(
     return differences if not semantic_product_conflict(stripped_requirement, product) else None
 
 
+def _ordinary_qualifier_omission(
+    requirement: Mapping[str, Any], differences: list[str],
+) -> bool:
+    """Allow only reviewed, identity-specific title omissions without authority."""
+    wanted = str(requirement.get("item") or "").casefold()
+    reviewed = {
+        "fresh_not_in_product_title": r"\b(?:brokkoli|broccoli)\b",
+        "frozen_not_in_product_title": r"\b(?:rosenkål|brysselkål|brussels\s+sprouts?)\b",
+        "dried_not_in_product_title": r"\boregano\b",
+        "canned_not_in_product_title": r"\b(?:sorte\s+bønner|black\s+beans?)\b",
+        "preparation_not_in_product_title": r"\b(?:gul\s+løk|løk|onions?)\b",
+    }
+    return bool(differences) and all(
+        difference in reviewed and re.search(reviewed[difference], wanted)
+        for difference in differences
+    )
+
+
 def _positive_fraction(value: Any) -> Fraction | None:
     try:
         return read_quantity(value, legacy_float=True)
@@ -1396,11 +1414,7 @@ def build_product_plan(
             if approval is not None
             and product_ref in approval["candidate_refs"]
             and differences
-            and set(differences) <= {
-                "fresh_not_in_product_title", "frozen_not_in_product_title",
-                "dried_not_in_product_title", "canned_not_in_product_title",
-                "preparation_not_in_product_title",
-            }
+            and _ordinary_qualifier_omission(requirement, differences)
         }
         allowed_semantic_refs = set(ordinary_omissions)
         if authorized_semantic_ref is not None:

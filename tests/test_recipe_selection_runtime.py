@@ -651,11 +651,17 @@ class ProductProjectionTests(unittest.TestCase):
             **{reason: count for count, reason in reason_ranges},
             "shared_package_group_unavailable": 3,
         })
-        for row in plan["requirements"][:15]:
-            self.assertEqual(len(row["issue"]["candidate_refs"]), 1)
         self.assertTrue(all(
             set(row) >= {"requirement_id", "item", "quantity", "unit", "status", "issue"}
             for row in plan["requirements"]
+        ))
+        self.assertTrue(all(
+            row["candidate_search"]["query"] == "$item"
+            and (
+                len(row["candidate_search"]["candidates"]) == 1
+                or row["candidate_search"].get("omitted_products", 0) >= 1
+            )
+            for row in plan["requirements"][:15]
         ))
         self.assertTrue(all(
             not ({"observation", "selection", "sources"} & set(row))
@@ -705,6 +711,11 @@ class ProductProjectionTests(unittest.TestCase):
             row["issue"]["reason"] == "exact_candidate_scope_needs_selection"
             and "candidate_refs" not in row["issue"]
             and "candidate_diagnostics" not in row["issue"]
+            for row in rows
+        ))
+        self.assertTrue(all(
+            row["candidate_search"]["query"] == "$item"
+            and row["candidate_search"]["candidates"] == []
             for row in rows
         ))
 
@@ -1041,7 +1052,11 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertNotIn("apply_arguments", projected)
         issue = projected["product_plan"]["requirements"][0]["issue"]
         self.assertEqual(issue["reason"], "exact_candidate_scope_needs_selection")
-        self.assertEqual(issue["candidate_refs"], [1])
+        self.assertNotIn("candidate_refs", issue)
+        self.assertEqual(
+            projected["product_plan"]["requirements"][0]["candidate_search"],
+            {"query": "$item", "candidates": [], "omitted_products": 1},
+        )
         self.assertNotIn('\\"', json.dumps(projected, ensure_ascii=False))
         self.assertEqual(result, before)
 

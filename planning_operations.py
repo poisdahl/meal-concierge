@@ -1385,6 +1385,10 @@ class PlanningOperations:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and current.get("digest") == digest:
                     return {"menu": deepcopy(current), "idempotent": True}
+                if isinstance(current, Mapping) and supplied_ref is None:
+                    raise HouseholdError(
+                        "replacing the current menu requires its exact menu_ref from menu get"
+                    )
                 if planner_context is None:
                     for collection in ("dishes", "salads"):
                         for recipe in menu[collection]:

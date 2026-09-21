@@ -303,11 +303,16 @@ class RecipeOperations:
                 response = self.provider_client.call("recipe_detail", {"recipe_id": source_recipe["source"]["external_id"]}, deadline=deadline)
         if not isinstance(response, Mapping) or response.get("provider") != provider or not isinstance(response.get("recipe"), Mapping):
             raise RecipeError("recipe detail provider response is invalid")
-        recipe = normalize_recipe(bind_recipe_source(response["recipe"], provider=provider))
+        recipe = normalize_recipe(
+            bind_recipe_source(response["recipe"], provider=provider),
+            trusted_store_product_hints=True,
+        )
         if any(recipe["source"].get(field) != source_recipe["source"].get(field) for field in ("url", "external_id")):
             raise RecipeError("recipe detail source identity changed")
         self._require_recipe_provider(recipe)
-        result = self.recipes.persist_discovery(recipe)
+        result = self.recipes.persist_discovery(
+            recipe, trusted_store_product_hints=True,
+        )
         self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "detail")
         return {**result, "capabilities": deepcopy(response.get("capabilities", {}))}
 
@@ -3138,7 +3143,11 @@ class RecipeOperations:
                 original = self.recipes.get(request["recipe_id"], request["expected_revision"])
             accepted = accept_recipe_estimates(original, request.get("recipe_digest"), request.get("estimate_fields"), request.get("confirmation_statement"))
             if has_discovery:
-                result = self.recipes.persist_discovery(accepted, source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None))
+                result = self.recipes.persist_discovery(
+                    accepted,
+                    source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                    trusted_store_product_hints=True,
+                )
                 self.recipes.remember_discovery_transform(request["discovery_ref"], result["discovery_ref"], "conversion")
                 return {**result, "personal_entry_created": False}
             if not isinstance(request.get("idempotency_key"), str) or not request["idempotency_key"].strip():

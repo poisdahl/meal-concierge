@@ -556,7 +556,9 @@ def _store_product_hint(value: Any, field: str) -> dict[str, Any] | None:
     }
 
 
-def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
+def _ingredient_v1(
+    value: Any, index: int, *, trusted_store_product_hints: bool = False,
+) -> dict[str, Any]:
     if isinstance(value, str):
         text = _bounded_text(value, f"ingredients[{index}]", required=True, maximum=500)
         return {"raw": text, "item": text, "quantity": None, "unit": None, "scalable": False, "notes": None, "optional": bool(re.search(r"\(\s*(?:optional|valgfri(?:tt)?)\b", text, re.I)), "pantry": False}
@@ -600,6 +602,8 @@ def _ingredient_v1(value: Any, index: int) -> dict[str, Any]:
         result["amount"] = f"{_format_number(quantity)} {unit}"
     elif supplied_amount:
         result["amount"] = supplied_amount
+    if "_store_product_hint" in value and not trusted_store_product_hints:
+        raise RecipeError("_store_product_hint is service-owned retailer evidence")
     hint = _store_product_hint(value.get("_store_product_hint"), f"ingredients[{index}]._store_product_hint")
     if hint is not None:
         result["_store_product_hint"] = hint
@@ -670,7 +674,10 @@ def _amount_evidence(value: Any, field: str, *, original: str | None, basis: str
     return {key: _evidence(value.get(key), f"{field}.{key}", original=original, basis=basis) for key in ("quantity", "unit")}
 
 
-def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
+def _ingredient(
+    value: Any, index: int, *, basis: str,
+    trusted_store_product_hints: bool = False,
+) -> dict[str, Any]:
     field = f"ingredients[{index}]"
     if isinstance(value, str):
         value = {"raw": value, "item": value, "original_text": value, "scalable": False}
@@ -698,6 +705,8 @@ def _ingredient(value: Any, index: int, *, basis: str) -> dict[str, Any]:
         "notes": _bounded_text(value.get("notes"), f"{field}.notes", maximum=500),
         **flags, "evidence": _amount_evidence(value.get("evidence"), f"{field}.evidence", original=original, basis=basis),
     }
+    if "_store_product_hint" in value and not trusted_store_product_hints:
+        raise RecipeError("_store_product_hint is service-owned retailer evidence")
     hint = _store_product_hint(value.get("_store_product_hint"), f"{field}._store_product_hint")
     if hint is not None:
         result["_store_product_hint"] = hint
@@ -818,7 +827,9 @@ def categories_from_tags(tags: list[str]) -> list[str]:
                    if (label := " ".join(tag.casefold().split())) in CATEGORY_ALIASES})
 
 
-def normalize_recipe(value: Any) -> dict[str, Any]:
+def normalize_recipe(
+    value: Any, *, trusted_store_product_hints: bool = False,
+) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise RecipeError("recipe must be an object")
     _check_shape(value)
@@ -890,8 +901,15 @@ def normalize_recipe(value: Any) -> dict[str, Any]:
         result.update({
             "portions": portions,
             "ingredients": [
-                _ingredient_v1(item, index) if version == 1 else
-                _ingredient(item, index, basis="user" if source["relationship"] == "user_supplied" else "estimate" if source["relationship"] == "generated" else "unknown")
+                _ingredient_v1(
+                    item, index,
+                    trusted_store_product_hints=trusted_store_product_hints,
+                ) if version == 1 else
+                _ingredient(
+                    item, index,
+                    basis="user" if source["relationship"] == "user_supplied" else "estimate" if source["relationship"] == "generated" else "unknown",
+                    trusted_store_product_hints=trusted_store_product_hints,
+                )
                 for index, item in enumerate(ingredients)
             ],
             "steps": [_bounded_text(item, f"steps[{index}]", required=True) for index, item in enumerate(steps)],
@@ -934,7 +952,7 @@ def _stored_recipe_document(value: Any) -> dict[str, Any]:
     if not isinstance(decoded, Mapping):
         raise RecipeError("recipe bank is unavailable")
     try:
-        normalized = normalize_recipe(decoded)
+        normalized = normalize_recipe(decoded, trusted_store_product_hints=True)
     except RecipeError as exc:
         raise RecipeError("recipe bank is unavailable") from exc
     if _canonical(normalized) != _canonical(decoded):
@@ -1002,7 +1020,7 @@ def _unresolved_evidence(evidence: Any) -> bool:
 
 
 def recipe_digest(recipe: Mapping[str, Any]) -> str:
-    return _hash(normalize_recipe(recipe))
+    return _hash(normalize_recipe(recipe, trusted_store_product_hints=True))
 
 
 def _evidence_value(recipe: Mapping[str, Any], path: str) -> Any:
@@ -1034,7 +1052,9 @@ def _prior_evidence_paths(recipe: Mapping[str, Any], prior: Mapping[str, Any] | 
 
 def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Validate caller/import authority once, separately from stored decoding."""
-    prior = normalize_recipe(prior) if prior is not None else None
+    prior = normalize_recipe(
+        prior, trusted_store_product_hints=True,
+    ) if prior is not None else None
     if prior is not None and prior["schema_version"] == 2 and isinstance(value, Mapping) and value.get("schema_version") == 1:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
     value = bind_recipe_source(value, prior=prior)
@@ -1082,7 +1102,7 @@ ESTIMATE_CONFIRMATION = "I accept these exact recipe estimates and their stated 
 
 
 def accept_recipe_estimates(recipe: Mapping[str, Any], digest: Any, fields: Any, statement: Any) -> dict[str, Any]:
-    result = normalize_recipe(recipe)
+    result = normalize_recipe(recipe, trusted_store_product_hints=True)
     if digest != recipe_digest(result):
         raise RecipeError("estimate acceptance needs the exact current recipe_digest")
     if statement != ESTIMATE_CONFIRMATION:
@@ -1987,8 +2007,13 @@ class RecipeStore:
             )
 
     @staticmethod
-    def _snapshot_parts(recipe: Mapping[str, Any], source_identity: str | None = None) -> tuple[dict[str, Any], str, str, str]:
-        document = normalize_recipe(recipe)
+    def _snapshot_parts(
+        recipe: Mapping[str, Any], source_identity: str | None = None, *,
+        trusted_store_product_hints: bool = False,
+    ) -> tuple[dict[str, Any], str, str, str]:
+        document = normalize_recipe(
+            recipe, trusted_store_product_hints=trusted_store_product_hints,
+        )
         qualified_identity = source_identity
         source_identity = qualified_identity or source_key(document)
         source = document.get("source") or {}
@@ -2056,7 +2081,9 @@ class RecipeStore:
         recipe = _stored_recipe_document(row["document"])
         identity = row["source_identity"]
         qualified = identity if isinstance(identity, str) and identity.startswith("import:v1:") else None
-        _, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(recipe, qualified)
+        _, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(
+            recipe, qualified, trusted_store_product_hints=True,
+        )
         if (
             snapshot_key != row["snapshot_key"]
             or content_hash != row["content_hash"]
@@ -4127,11 +4154,17 @@ class RecipeStore:
                                "WHERE key LIKE 'recipe_transform:v1:%' ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
                                (MAX_UNBOUND_DISCOVERY_SNAPSHOTS,))
 
-    def persist_discovery(self, value: Any, *, source_identity: str | None = None) -> dict[str, Any]:
+    def persist_discovery(
+        self, value: Any, *, source_identity: str | None = None,
+        trusted_store_product_hints: bool = False,
+    ) -> dict[str, Any]:
         """Store a trusted source projection; import identity is service-derived."""
         if source_identity is not None and re.fullmatch(r"import:v1:[a-f0-9]{64}", source_identity) is None:
             raise RecipeError("qualified import identity is invalid")
-        document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(value, source_identity)
+        document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(
+            value, source_identity,
+            trusted_store_product_hints=trusted_store_product_hints,
+        )
         serialized = _canonical(document)
         try:
             with self._connection() as connection:
@@ -4161,7 +4194,10 @@ class RecipeStore:
                         if revision is None:
                             raise RecipeError("recipe bank is unavailable")
                         document, bound_key, content_hash, attribution_digest = (
-                            self._snapshot_parts(_stored_recipe_document(revision["document"]), source_identity)
+                            self._snapshot_parts(
+                                _stored_recipe_document(revision["document"]), source_identity,
+                                trusted_store_product_hints=True,
+                            )
                         )
                         if bound_key != snapshot_key:
                             raise RecipeError("recipe bank is unavailable")
@@ -4315,7 +4351,8 @@ class RecipeStore:
                             "requires": "reconcile the original source account before copying"}}
                 if existing is not None:
                     _, _, existing_content_hash, existing_attribution_digest = self._snapshot_parts(
-                        _stored_recipe_document(existing["document"]), qualified
+                        _stored_recipe_document(existing["document"]), qualified,
+                        trusted_store_product_hints=True,
                     )
                     if (
                         existing_content_hash != resolved["content_hash"]
@@ -4497,21 +4534,32 @@ class RecipeStore:
             raise RecipeError("recipe must be an object")
         originals = []
         if prior is not None:
-            originals.append(normalize_recipe(prior))
+            originals.append(normalize_recipe(
+                prior, trusted_store_product_hints=True,
+            ))
         reference = value.get("recipe_ref")
         if isinstance(reference, Mapping):
             if set(reference) != {"id", "revision"}:
                 raise RecipeError("copied recipe_ref must contain an exact id and revision")
-            originals.append(normalize_recipe(self.get(reference["id"], reference["revision"], _transaction=_transaction)))
+            originals.append(normalize_recipe(
+                self.get(reference["id"], reference["revision"], _transaction=_transaction),
+                trusted_store_product_hints=True,
+            ))
         if value.get("id") is not None:
             if value.get("revision") is None:
                 raise RecipeError("copied recipe id requires its exact revision")
-            originals.append(normalize_recipe(self.get(value["id"], value["revision"], _transaction=_transaction)))
+            originals.append(normalize_recipe(
+                self.get(value["id"], value["revision"], _transaction=_transaction),
+                trusted_store_product_hints=True,
+            ))
         if value.get("library_recipe_ref") is not None:
             ref = validate_library_recipe_ref(value["library_recipe_ref"])
             if ref["library_id"] != "builtin":
                 raise RecipeError("external recipe copies require an exact service-resolved discovery")
-            originals.append(normalize_recipe(self.get(ref["recipe_id"], ref["version"], _transaction=_transaction)))
+            originals.append(normalize_recipe(
+                self.get(ref["recipe_id"], ref["version"], _transaction=_transaction),
+                trusted_store_product_hints=True,
+            ))
         if value.get("discovery_ref") is not None:
             originals.append(self.resolve_discovery(value["discovery_ref"], _transaction=_transaction)["recipe"])
         if originals and any(_canonical(item) != _canonical(originals[0]) for item in originals[1:]):

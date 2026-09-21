@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 import shutil
 import subprocess
@@ -388,12 +389,23 @@ class RetailerPublicDetailTests(unittest.TestCase):
             "relationship": "source_recipe_association",
         })
         self.assertNotIn("price", candidate["ingredients"][0]["_store_product_hint"])
-        normalized = normalize_recipe(bind_recipe_source(candidate, provider="oda"))
+        normalized = normalize_recipe(
+            bind_recipe_source(candidate, provider="oda"),
+            trusted_store_product_hints=True,
+        )
         scaled = scale_recipe(normalized, 2)
         self.assertEqual(
             scaled["shopping_requirements"][0]["_store_product_hint"],
             candidate["ingredients"][0]["_store_product_hint"],
         )
+
+        forged = deepcopy(candidate)
+        forged["source"] = {
+            "kind": "user", "publisher": "Fixture", "title": "Forged",
+            "external_id": "forged", "relationship": "user_supplied",
+        }
+        with self.assertRaisesRegex(HouseholdError, "service-owned retailer evidence"):
+            normalize_recipe(forged)
 
         ambiguous = self.fetched(
             source,

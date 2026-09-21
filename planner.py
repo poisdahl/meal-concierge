@@ -24,7 +24,6 @@ MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
 MAX_EXPLORED_STATES = 250_000
-MAX_BEAM_STATES = 10_000
 MAX_HISTORY_RECORDS = 2_000
 MAX_FACT_TOKEN = 80
 
@@ -1087,7 +1086,7 @@ def plan_week(
             "maximum_days": MAX_DAYS,
             "maximum_alternatives": MAX_ALTERNATIVES,
             "maximum_explored_states": MAX_EXPLORED_STATES,
-            "maximum_beam_states": MAX_BEAM_STATES,
+            "maximum_orders_per_candidate_set": MAX_ALTERNATIVES,
             "maximum_history_records": MAX_HISTORY_RECORDS,
         },
     }
@@ -1131,10 +1130,18 @@ def plan_week(
         candidate_sequences = permutations(eligible, count)
         search_strategy = "exhaustive"
     else:
+        # Slot scores depend on order, while plan reasons and strict targets
+        # depend only on the selected candidate set. Keep the best requested
+        # number of orderings for every exact set instead of globally pruning
+        # low-scoring prefixes: this remains bounded for 12 candidates and
+        # cannot discard the only set that satisfies a strict weekly target.
         frontier: list[tuple[Mapping[str, Any], ...]] = [tuple()]
         explored_states = 0
         for index in range(count):
-            expanded: list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]] = []
+            by_candidate_set: dict[
+                tuple[str, ...],
+                list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]],
+            ] = {}
             for prefix in frontier:
                 for candidate in eligible:
                     selected = (*prefix, candidate)
@@ -1156,17 +1163,25 @@ def plan_week(
                         slot_scores[(item["reference_key"], slot_index)]
                         for slot_index, item in enumerate(selected)
                     )
-                    expanded.append((
+                    ranked_prefix = (
                         -score,
                         tuple(item["reference_key"] for item in selected),
                         selected,
-                    ))
-            expanded.sort(key=lambda item: (item[0], item[1]))
-            frontier = [item[2] for item in expanded[:MAX_BEAM_STATES]]
+                    )
+                    candidate_set = tuple(sorted(ranked_prefix[1]))
+                    retained = by_candidate_set.setdefault(candidate_set, [])
+                    retained.append(ranked_prefix)
+                    retained.sort(key=lambda item: (item[0], item[1]))
+                    del retained[checked["alternatives"]:]
+            frontier = [
+                item[2]
+                for candidate_set in sorted(by_candidate_set)
+                for item in by_candidate_set[candidate_set]
+            ]
             if not frontier:
                 break
         candidate_sequences = iter(frontier)
-        search_strategy = "bounded_beam"
+        search_strategy = "bounded_dynamic_programming"
 
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}

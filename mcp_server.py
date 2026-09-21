@@ -1397,6 +1397,21 @@ def _issues_only_product_plan(
             row["issue"] = projected_issues[0]
         elif projected_issues:
             row["issues"] = projected_issues
+        if isinstance(observation, dict):
+            item_query = str(requirement.get("item") or "")
+            observed_query = str(observation.get("query") or item_query)
+            query = "$item" if observed_query == item_query else observed_query[:300]
+            candidate_search = {
+                "query": query,
+                "candidates": [
+                    _compact_candidate_product(product)
+                    for product in (products or [])[:candidate_limit]
+                    if isinstance(product, dict)
+                ],
+            }
+            if len(products or []) > candidate_limit:
+                candidate_search["omitted_products"] = len(products or []) - candidate_limit
+            row["candidate_search"] = candidate_search
         compact_requirements.append(row)
     compact["requirements"] = compact_requirements
     if standalone:
@@ -1420,9 +1435,9 @@ def _issues_only_product_result_projection(
         "details_omitted": True,
         "product_plan": plan,
         "next": (
-            "Correct or add candidate_approvals and price_mode for the listed reasons, "
-            "then prepare the entire same menu again with the unchanged binding. Do not "
-            "bypass product apply with raw cart changes."
+            "Use each requirement's candidate_search query and compact candidates to correct "
+            "or add candidate_approvals and price_mode, then prepare the entire same menu "
+            "again with the unchanged binding. Do not bypass product apply with raw cart changes."
         ),
     }
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
