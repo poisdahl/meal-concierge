@@ -665,15 +665,26 @@ Manual user-supplied URL imports remain available when automatic web search is
 disabled. Use setup `apply` with `changes.web_search` to update `enabled`,
 `broad`, or the complete `sites` list; preserve unrelated source settings.
 
-Then call menu `plan` with `planner_input` containing
-the week and requested dates/portions; omit `candidates` so the server collects
-and resolves the local bank/packs and enabled selected retailer alongside the
-supplemental web references. Do not replace these with a manual shortlist.
+Build the week with culinary judgment from the complete household profile, not
+only its numeric minimums. Resolve enough active local, optional, private and
+retailer candidates to propose a coherent seven-dinner week, considering actual
+ingredients and methods, ordinary availability, variety, effort, leftovers and
+the household's advisory preferences. Pass those exact references as
+`planner_input.candidates`; the service validates hard restrictions, cooldowns,
+saved minimums, dates and deterministic evidence before anything can be saved.
+A missing source label or a few draft examples do not prove that a collection is
+unusable. If validation identifies a concrete shortfall, replace the affected
+candidate and validate again instead of abandoning ordinary planning or asking
+the owner to solve the shortlist.
+
+If a useful explicit candidate set cannot be assembled, menu `plan` may omit
+`candidates` so the server performs bounded discovery across enabled sources.
 Report returned source failures, shortfalls and unknowns;
 these never authorize automatic AI generation. Only a returned
 `ai_fallback_eligible=true` permits the separate clearly marked generation flow.
-For an explicit selected scope, up to 12 exact candidates remain supported; if
-the assignment budget is exceeded, narrow that scope and explain it. Use the ranked winner; request up to three alternatives only
+For an explicit selected scope, up to 12 exact candidates remain supported and
+ordinary seven-day planning uses bounded deterministic search when exhaustive
+assignment would exceed the work limit. Use the ranked winner; request up to three alternatives only
 when useful to the request. Ranking is only within those candidates and the
 returned policy. Pass the small returned `save_ref` unchanged as `planner_ref`
 for menu save. Show `selection` as the menu and reasons; do not copy or rebuild
@@ -747,12 +758,20 @@ prefers three/four. Report actual cooking amounts; do not repeat an old planner
 conflict when a fresh menu assessment is ready. An accepted
 one-week quantity adjustment belongs in planner_input.prepared_portion_range;
 never temporarily edit and restore the permanent profile to obtain a plan.
-A cooldown override needs the exact recipe key and the user's current reason.
+Replace dinners in an existing week with menu `replan_prepare` and
+`replan_apply`; this preserves actual cooked/ordered history while excluding the
+retired planned slots from their own cooldown. Use
+`planner_input.cooldown_overrides` only when the user explicitly requests a
+genuinely historical repeat, with the exact candidate recipe key and current
+reason. Do not pass legacy top-level repeat keys or override reasons.
 
 Menu get/assess shows coverage, explicit ingredient conflicts and unknowns.
 Legacy recipe lists do not establish exact dinner dates. Native recipe refs
 scale to household portions unless the request supplies an explicit portion
-count. Save/update uses exact menu ID and revision; never overwrite a conflict.
+count. Every existing-menu action uses the exact
+`menu_ref={menu_id,revision,digest}` returned by menu get/save/replan. New saves
+omit it; update, clear, lock and replan pass it unchanged. Never split it into
+top-level ID/revision fields or overwrite a conflict.
 Selected recipes and their source, rights, attribution and quantities are frozen
 in menu/order/email snapshots. Product IDs do not belong in recipe documents.
 

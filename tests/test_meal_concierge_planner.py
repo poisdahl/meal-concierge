@@ -833,13 +833,38 @@ class WeeklyPlannerTests(unittest.TestCase):
             "2026-09-12",
         )
 
-    def test_work_budget_fails_clearly_without_truncation(self):
+    def test_large_ordinary_week_uses_bounded_deterministic_search(self):
         candidates = self.save_candidates(10)
         dates = [f"2026-09-{day:02d}" for day in range(7, 14)]
-        with self.assertRaisesRegex(
-            PlannerError, rf"states exceeds {MAX_EXPLORED_STATES}"
-        ):
-            self.plan(self.request(candidates, dates=dates))
+        first = self.plan(self.request(candidates, dates=dates))
+        repeated = self.plan(self.request(list(reversed(candidates)), dates=dates))
+        self.assertEqual(first["status"], "planned")
+        self.assertEqual(first["search_strategy"], "bounded_beam")
+        self.assertLessEqual(first["explored_states"], MAX_EXPLORED_STATES)
+        self.assertEqual(first["selection_digest"], repeated["selection_digest"])
+        self.assertEqual(len(first["selection"]["slots"]), 7)
+
+    def test_bounded_search_retains_weekly_minimum_candidates(self):
+        candidates = self.save_candidates(10)
+        candidates[0]["facts"] = explicit_facts(dietary=["fish"])
+        candidates[1]["facts"] = explicit_facts(dietary=["fish"])
+        with self.store.locked() as state:
+            state["profile"]["diet"].update({
+                "minimum_fish_portions": 2,
+                "minimum_legume_dinners": 0,
+                "minimum_wholegrain_or_potato_dinners": 0,
+                "minimum_vegetable_types": 0,
+            })
+        result = self.plan(self.request(
+            candidates,
+            dates=[f"2026-09-{day:02d}" for day in range(7, 14)],
+        ))
+        self.assertEqual(result["status"], "planned")
+        fish = sum(
+            "fish" in slot["dietary_facets"]["values"]
+            for slot in result["selection"]["slots"]
+        )
+        self.assertEqual(fish, 2)
 
     def test_candidate_day_alternative_and_date_bounds_are_exact(self):
         candidates = self.save_candidates(13)

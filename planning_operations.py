@@ -1277,12 +1277,11 @@ class PlanningOperations:
             with self.product_plan_lock, self.store.locked() as state:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and (current.get("menu_id") or current.get("revision") is not None):
-                    supplied_menu_id = request.get("menu_id")
-                    expected_revision = request.get("expected_revision")
-                    if supplied_menu_id != current.get("menu_id"):
-                        raise HouseholdError("menu_id does not match the current menu")
-                    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision != current.get("revision"):
-                        raise HouseholdError(f"menu revision conflict; current revision is {current.get('revision')}")
+                    supplied_ref = request.get("menu_ref")
+                    if not isinstance(supplied_ref, Mapping) or set(supplied_ref) != {"menu_id", "revision", "digest"}:
+                        raise HouseholdError("menu clear requires the exact menu_ref from menu get")
+                    if canonical(supplied_ref) != canonical(mp.menu_ref(current)):
+                        raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
                 self._abandon_predispatch(state, reason="menu cleared")
                 if isinstance(current, Mapping):
                     mp.retire_planned_slots(state, current)
@@ -1342,8 +1341,14 @@ class PlanningOperations:
                 if len(override_reason) > 500:
                     raise HouseholdError("cooldown override reason is too long")
                 override_map = {key: override_reason for key in repeat_keys}
-            supplied_menu_id = str(request.get("menu_id") or "") or None
-            expected_revision = request.get("expected_revision")
+            supplied_ref = request.get("menu_ref")
+            if supplied_ref is not None and (
+                not isinstance(supplied_ref, Mapping)
+                or set(supplied_ref) != {"menu_id", "revision", "digest"}
+            ):
+                raise HouseholdError("menu update requires the exact menu_ref from menu get")
+            supplied_menu_id = str(supplied_ref.get("menu_id") or "") if supplied_ref else None
+            expected_revision = supplied_ref.get("revision") if supplied_ref else None
             def matched_override(key: str) -> str | None:
                 aliases = library_recipe_key_aliases(key)
                 return next((
@@ -1406,10 +1411,8 @@ class PlanningOperations:
                         + canonical(minimums)
                     )
                 if supplied_menu_id:
-                    if not isinstance(current, Mapping) or current.get("menu_id") != supplied_menu_id:
-                        raise HouseholdError("menu_id does not match the current menu")
-                    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or current.get("revision") != expected_revision:
-                        raise HouseholdError(f"menu revision conflict; current revision is {current.get('revision')}")
+                    if not isinstance(current, Mapping) or canonical(supplied_ref) != canonical(mp.menu_ref(current)):
+                        raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
                     if current.get("supersedes"):
                         raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
                     current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)

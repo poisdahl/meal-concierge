@@ -148,7 +148,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertTrue(data.startswith(b"%PDF-"))
         self.assertIn(b"/Subtype /Image", data)
         original = deepcopy(self.app.store.read()["recipe_delivery"]["jobs"]["one"])
-        self.app.handle({"operation": "menu", "action": "clear", "menu_id": self.menu["menu_id"], "expected_revision": self.menu["revision"]})
+        self.app.handle({"operation": "menu", "action": "clear", "menu_ref": menu_ref(self.menu)})
         (self.app.store.directory / "recipe-assets" / asset_filename(self.asset)).unlink()
         self.assertEqual(job, self.request())
         export_part(rpc, "one", pdf["id"], self.root / "again.pdf")

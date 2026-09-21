@@ -4654,10 +4654,10 @@ class RecipeFlowTests(unittest.TestCase):
         repeated = self.app.handle({"operation": "menu", "action": "save", "menu": value})
         self.assertTrue(repeated["idempotent"])
         changed = menu("2026-W40", full_recipe("Ny fisk"))
-        updated = self.app.handle({"operation": "menu", "action": "save", "menu": changed, "menu_id": first["menu_id"], "expected_revision": 1})["menu"]
+        updated = self.app.handle({"operation": "menu", "action": "save", "menu": changed, "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})["menu"]
         self.assertEqual(updated["revision"], 2)
         with self.assertRaisesRegex(HouseholdError, "current revision is 2"):
-            self.app.handle({"operation": "menu", "action": "save", "menu": value, "menu_id": first["menu_id"], "expected_revision": 1})
+            self.app.handle({"operation": "menu", "action": "save", "menu": value, "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})
 
     def test_new_inline_menu_recipe_requires_explicit_provenance(self):
         incomplete = full_recipe()
@@ -4747,7 +4747,7 @@ class RecipeFlowTests(unittest.TestCase):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny"))})["menu"]
         with self.assertRaisesRegex(HouseholdError, "menu_id does not match"):
-            self.app.handle({"operation": "menu", "action": "clear", "menu_id": first["menu_id"], "expected_revision": first["revision"]})
+            self.app.handle({"operation": "menu", "action": "clear", "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")}})
         self.assertEqual(self.store.read()["menu"]["menu_id"], second["menu_id"])
 
     def test_ordered_current_menu_cannot_bind_to_a_second_new_order(self):

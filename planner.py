@@ -19,11 +19,12 @@ from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v4"
+PLANNER_VERSION = "weekly-menu-v5"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
 MAX_EXPLORED_STATES = 250_000
+MAX_BEAM_STATES = 10_000
 MAX_HISTORY_RECORDS = 2_000
 MAX_FACT_TOKEN = 80
 
@@ -1086,6 +1087,7 @@ def plan_week(
             "maximum_days": MAX_DAYS,
             "maximum_alternatives": MAX_ALTERNATIVES,
             "maximum_explored_states": MAX_EXPLORED_STATES,
+            "maximum_beam_states": MAX_BEAM_STATES,
             "maximum_history_records": MAX_HISTORY_RECORDS,
         },
     }
@@ -1109,11 +1111,7 @@ def plan_week(
             }],
             "selections": [],
         }
-    explored_states = math.perm(len(eligible), count)
-    if explored_states > MAX_EXPLORED_STATES:
-        raise PlannerError(
-            f"planner work limit exceeded: {explored_states} states exceeds {MAX_EXPLORED_STATES}"
-        )
+    complete_states = math.perm(len(eligible), count)
     scope = [{
         "reference": deepcopy(item["reference"]),
         "reference_key": item["reference_key"],
@@ -1128,10 +1126,52 @@ def plan_week(
         for candidate in eligible
         for index, day in enumerate(source_dates)
     }
+    if complete_states <= MAX_EXPLORED_STATES:
+        explored_states = complete_states
+        candidate_sequences = permutations(eligible, count)
+        search_strategy = "exhaustive"
+    else:
+        frontier: list[tuple[Mapping[str, Any], ...]] = [tuple()]
+        explored_states = 0
+        for index in range(count):
+            expanded: list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]] = []
+            for prefix in frontier:
+                for candidate in eligible:
+                    selected = (*prefix, candidate)
+                    if len({item["recipe_key"] for item in selected}) != len(selected):
+                        continue
+                    if len({item["dedupe_key"] for item in selected}) != len(selected):
+                        continue
+                    if len({item["content_digest"] for item in selected}) != len(selected):
+                        continue
+                    explored_states += 1
+                    if explored_states > MAX_EXPLORED_STATES:
+                        raise PlannerError("planner bounded search exhausted unexpectedly")
+                    if (
+                        layout and layout["sources"][index]["batch"]
+                        and candidate.get("supplied_facts", {}).get("batch_guidance", {}).get("suitability") == "unsuitable"
+                    ):
+                        continue
+                    score = sum(reason["weight"] for reason in _plan_reasons(selected, profile)) + sum(
+                        slot_scores[(item["reference_key"], slot_index)]
+                        for slot_index, item in enumerate(selected)
+                    )
+                    expanded.append((
+                        -score,
+                        tuple(item["reference_key"] for item in selected),
+                        selected,
+                    ))
+            expanded.sort(key=lambda item: (item[0], item[1]))
+            frontier = [item[2] for item in expanded[:MAX_BEAM_STATES]]
+            if not frontier:
+                break
+        candidate_sequences = iter(frontier)
+        search_strategy = "bounded_beam"
+
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}
     strict_failures = 0
-    for selected in permutations(eligible, count):
+    for selected in candidate_sequences:
         if len({item["recipe_key"] for item in selected}) != count:
             continue
         if len({item["dedupe_key"] for item in selected}) != count:
@@ -1198,6 +1238,7 @@ def plan_week(
         **base_result,
         "status": "planned",
         "explored_states": explored_states,
+        "search_strategy": search_strategy,
         "selection": deepcopy(selections[0]),
         "selection_digest": selections[0]["selection_digest"],
         "selections": selections,
