@@ -1178,6 +1178,7 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
     } if isinstance(unresolved, list) else {}
     compact_requirements = []
     represented = set()
+    more_product_options = False
     for requirement in plan.get("requirements", []):
         if not isinstance(requirement, dict):
             continue
@@ -1206,14 +1207,13 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
         observation = requirement.get("observation")
         if isinstance(observation, dict):
             products = observation.get("products") if isinstance(observation.get("products"), list) else []
+            more_product_options = more_product_options or len(products) > candidate_limit
             row["observation"] = {
                 "products": [
                     _compact_candidate_product(product)
                     for product in products[:candidate_limit]
                 ],
                 **({"omitted_products": len(products) - candidate_limit}
-                   if len(products) > candidate_limit else {}),
-                **({"next": "Use another returned candidate_ref or rerun prepare with an exact localized search_query to inspect a different bounded scope."}
                    if len(products) > candidate_limit else {}),
                 **({"source_product_evidence": observation["source_product_evidence"]}
                    if "source_product_evidence" in observation else {}),
@@ -1227,6 +1227,9 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
             row["dietary_summary"] = dietary
         compact_requirements.append(row)
     compact["requirements"] = compact_requirements
+    if more_product_options:
+        compact["more_product_options"] = True
+        compact["candidate_continuation"] = "Use another shown candidate_ref or rerun prepare with an exact localized search_query."
     remaining = [
         issue for issue in unresolved
         if not isinstance(issue, dict) or issue.get("requirement_id") not in represented
