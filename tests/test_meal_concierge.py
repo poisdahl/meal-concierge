@@ -1775,6 +1775,122 @@ class CoreTestsBase:
                 with self.assertRaisesRegex(HouseholdError, message):
                     browser._review_checkout(cart)
 
+    def test_checkout_mismatch_diagnostics_are_bounded_flags_and_counts(self):
+        lines = [
+            {
+                "name": f"Product {index}",
+                "identity": f"product {index} 500 g brand",
+                "quantity": 2 if index < 4 else 1,
+            }
+            for index in range(55)
+        ]
+        items = [
+            {"quantity": line["quantity"], "text": line["identity"]}
+            for line in lines
+        ]
+        expected = {
+            "lines": lines,
+            "product_count": 59,
+            "total_minor": 241247,
+            "delivery_text": "Hjemlevering mellom kl 07 og 13, 3. sep",
+            "delivery_address": "SECRET ADDRESS 1",
+        }
+        delivery = "Vi leverer varene dine torsdag 3. september 07:00–13:00 Endre"
+        base_surface = {
+            "url": CHECKOUT_URL,
+            "authenticated": True,
+            "available": True,
+            "items": items,
+            "total_matches": True,
+            "delivery_roots": [delivery],
+            "address_matches": True,
+            "masked_payment": True,
+            "payment_display": "•••• 1234",
+            "submit_controls": 1,
+        }
+
+        def review(surface):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser._cart_expectation = mock.Mock(return_value=deepcopy(expected))
+            browser._verify_checkout_account = mock.Mock(return_value="a" * 64)
+            browser._navigate_to_checkout = mock.Mock()
+            browser._expand_checkout_items = mock.Mock(return_value="items")
+            browser._expand_checkout_amount_summary = mock.Mock()
+            browser._read_checkout_amounts = mock.Mock(return_value={})
+            browser._eval = mock.Mock(return_value=deepcopy(surface))
+            return browser._review_checkout({})
+
+        accepted = review(base_surface)
+        self.assertTrue(accepted["line_matches"])
+        self.assertTrue(accepted["delivery_matches"])
+
+        cases = {
+            "line": ({**base_surface, "items": [
+                {**items[0], "text": "SECRET_ACTUAL_PRODUCT"}, *items[1:],
+            ]}, {"line_matches": False}),
+            "total": ({**base_surface, "total_matches": False}, {"total_matches": False}),
+            "delivery": ({**base_surface, "delivery_roots": [
+                "SECRET_ADDRESS wrong delivery window",
+            ]}, {"delivery_matches": False}),
+            "submit": ({**base_surface, "submit_controls": 0}, {"submit_controls": 0}),
+            "negative submit": ({
+                **base_surface, "submit_controls": -1,
+            }, {"submit_controls": None}),
+            "huge submit": ({
+                **base_surface, "submit_controls": 10**3000,
+            }, {"submit_controls": None}),
+            "invalid quantity": ({**base_surface, "items": [
+                {**items[0], "quantity": "SECRET_QUANTITY"}, *items[1:],
+            ]}, {
+                "line_matches": False,
+                "actual_product_quantity_count": None,
+            }),
+            "huge quantity": ({**base_surface, "items": [
+                {**items[0], "quantity": 10**3000}, *items[1:],
+            ]}, {
+                "line_matches": False,
+                "actual_product_quantity_count": None,
+            }),
+            "combined": ({
+                **base_surface,
+                "items": items[:-1],
+                "total_matches": False,
+                "delivery_roots": ["SECRET_ADDRESS wrong delivery window"],
+                "submit_controls": 0,
+            }, {
+                "line_matches": False,
+                "total_matches": False,
+                "delivery_matches": False,
+                "submit_controls": 0,
+                "actual_line_count": 54,
+                "actual_product_quantity_count": 58,
+            }),
+        }
+        for label, (surface, wanted) in cases.items():
+            surface = {**surface, "payment_display": "SECRET_PAYMENT"}
+            with self.subTest(label=label), self.assertRaises(OdaCheckoutMismatchError) as raised:
+                review(surface)
+            message = str(raised.exception)
+            self.assertLess(len(message), 512)
+            diagnostic = json.loads(message[message.index("{"):])
+            self.assertEqual(diagnostic["expected_line_count"], 55)
+            self.assertEqual(diagnostic["expected_product_quantity_count"], 59)
+            self.assertEqual(diagnostic["actual_line_count"], wanted.get("actual_line_count", 55))
+            self.assertEqual(
+                diagnostic["actual_product_quantity_count"],
+                wanted["actual_product_quantity_count"]
+                if "actual_product_quantity_count" in wanted else 59,
+            )
+            for key in ("line_matches", "total_matches", "delivery_matches"):
+                self.assertEqual(diagnostic[key], wanted.get(key, True))
+            self.assertEqual(diagnostic["submit_controls"], wanted.get("submit_controls", 1))
+            for secret in (
+                "Product 0", "product 0", "SECRET_ACTUAL_PRODUCT",
+                "SECRET_QUANTITY", "SECRET ADDRESS", "SECRET_ADDRESS",
+                "SECRET_PAYMENT",
+            ):
+                self.assertNotIn(secret, message)
+
 
     def test_oda_final_click_rechecks_every_protected_amount_component(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -9223,6 +9339,38 @@ class FlowTests(unittest.TestCase):
         ))
 
         with self.assertRaisesRegex(HouseholdError, "actual location: about:blank"):
+            self.app.handle({"operation": "checkout", "action": "prepare"})
+
+        after = self.store.read()
+        for field in (
+            "pending_checkout", "pending_cancellation", "order_change",
+            "pending_cart_change",
+        ):
+            self.assertIsNone(after.get(field))
+        self.assertEqual(after.get("cart_plan"), before.get("cart_plan"))
+        self.assertEqual(self.oda.cart, cart_before)
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_surface_mismatch_diagnostics_do_not_mutate_state_or_click(self):
+        before = self.store.read()
+        cart_before = deepcopy(self.oda.cart)
+        diagnostic = {
+            "line_matches": False,
+            "total_matches": True,
+            "delivery_matches": True,
+            "submit_controls": 1,
+            "expected_line_count": 55,
+            "actual_line_count": 55,
+            "expected_product_quantity_count": 59,
+            "actual_product_quantity_count": 59,
+        }
+        self.browser.review_checkout = mock.Mock(side_effect=OdaCheckoutMismatchError(
+            "Oda checkout does not match the reviewed cart "
+            + json.dumps(diagnostic, sort_keys=True, separators=(",", ":"))
+        ))
+
+        with self.assertRaisesRegex(OdaCheckoutMismatchError, '"line_matches":false'):
             self.app.handle({"operation": "checkout", "action": "prepare"})
 
         after = self.store.read()

@@ -610,6 +610,32 @@ def checkout_lines_match(expected: list[Mapping[str, Any]], actual: Any) -> bool
     return assign(0, set())
 
 
+def _checkout_item_counts(items: Any) -> tuple[int | None, int | None]:
+    """Return bounded checkout line and summed quantity counts without item data."""
+    if not isinstance(items, list):
+        return None, None
+    quantity_count = 0
+    for item in items:
+        quantity = item.get("quantity") if isinstance(item, Mapping) else None
+        valid_integer = (
+            isinstance(quantity, int)
+            and not isinstance(quantity, bool)
+            and 0 <= quantity <= 1_000_000
+        )
+        valid_float = (
+            isinstance(quantity, float)
+            and math.isfinite(quantity)
+            and quantity.is_integer()
+            and 0 <= quantity <= 1_000_000
+        )
+        if not (valid_integer or valid_float):
+            return len(items), None
+        quantity_count += int(quantity)
+        if quantity_count > 1_000_000:
+            return len(items), None
+    return len(items), quantity_count
+
+
 def delivery_signature(value: str, *, provider: str = "oda") -> tuple[int, int, int, int, int, str] | None:
     normalized = " ".join(unicodedata.normalize("NFC", value).lower().split())
     if provider not in {"oda", "mathem"}:
@@ -1415,10 +1441,28 @@ class OdaBrowser:
         if result["masked_payment"] is not True:
             raise HouseholdError("Oda configured payment selection could not be verified; review checkout_payment in setup, then request a new checkout review")
         surface = dict(result)
-        result["line_matches"] = checkout_lines_match(expected["lines"], result.pop("items"))
+        items = result.pop("items")
+        actual_line_count, actual_product_quantity_count = _checkout_item_counts(items)
+        result["line_matches"] = checkout_lines_match(expected["lines"], items)
         result["delivery_matches"] = checkout_delivery_matches(expected["delivery_text"], result.pop("delivery_roots"))
         if not all(result[key] is True for key in ("authenticated", "available", "line_matches", "total_matches", "delivery_matches", "address_matches", "masked_payment")) or result["submit_controls"] != 1:
-            raise OdaCheckoutMismatchError("Oda checkout does not match the reviewed cart")
+            diagnostics = {
+                "line_matches": result["line_matches"] is True,
+                "total_matches": result["total_matches"] is True,
+                "delivery_matches": result["delivery_matches"] is True,
+                "submit_controls": (
+                    result["submit_controls"]
+                    if 0 <= result["submit_controls"] <= 1_000_000 else None
+                ),
+                "expected_line_count": len(expected["lines"]),
+                "actual_line_count": actual_line_count,
+                "expected_product_quantity_count": expected["product_count"],
+                "actual_product_quantity_count": actual_product_quantity_count,
+            }
+            raise OdaCheckoutMismatchError(
+                "Oda checkout does not match the reviewed cart "
+                + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
+            )
         if addition_expectation is not None:
             amounts = self._eval(_retail_addition_amount_script(addition_expectation, provider=self.checkout_provider, vipps=bool(payment and payment.get("method") == "vipps")))
             if amounts.get("amounts_valid") is not True:
