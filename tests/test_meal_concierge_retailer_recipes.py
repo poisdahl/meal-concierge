@@ -420,6 +420,33 @@ class RetailerPublicDetailTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
             prepare_recipe_input(tampered, prior=normalized)
 
+        second = deepcopy(normalized["ingredients"][0])
+        second["item"] = "Brokkoli"
+        second["original_text"] = "500 g Brokkoli"
+        second["_store_product_hint"] = {
+            **second["_store_product_hint"], "product_ref": 8420,
+            "name": "Brokkoli", "url": "https://oda.com/no/products/8420-brokkoli/",
+        }
+        two_ingredient = normalize_recipe(
+            {**normalized, "ingredients": [normalized["ingredients"][0], second]},
+            trusted_store_product_hints=True,
+        )
+        reordered = deepcopy(two_ingredient)
+        reordered["ingredients"].reverse()
+        prepared = prepare_recipe_input(reordered, prior=two_ingredient)
+        self.assertEqual(
+            [row["_store_product_hint"]["product_ref"] for row in prepared["ingredients"]],
+            [8420, 8416],
+        )
+        omitted = deepcopy(reordered)
+        for ingredient in omitted["ingredients"]:
+            ingredient.pop("_store_product_hint")
+        prepared = prepare_recipe_input(omitted, prior=two_ingredient)
+        self.assertEqual(
+            [row["_store_product_hint"]["product_ref"] for row in prepared["ingredients"]],
+            [8420, 8416],
+        )
+
         ambiguous = self.fetched(
             source,
             ingredients=["1 ss Olivenolje", "1 ss Olivenolje"],

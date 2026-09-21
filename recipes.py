@@ -1062,20 +1062,24 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
         incoming = value.get("ingredients")
         previous = prior.get("ingredients")
         if isinstance(incoming, list) and isinstance(previous, list):
+            previous_by_item: dict[str, list[Mapping[str, Any]]] = {}
+            for previous_ingredient in previous:
+                if not isinstance(previous_ingredient, Mapping):
+                    continue
+                previous_by_item.setdefault(
+                    _normalized_text(previous_ingredient.get("item")), [],
+                ).append(previous_ingredient)
             for index, ingredient in enumerate(incoming):
                 if not isinstance(ingredient, Mapping) or "_store_product_hint" not in ingredient:
                     continue
-                prior_ingredient = previous[index] if index < len(previous) else None
+                incoming_item = ingredient.get("item") or ingredient.get("name")
+                prior_matches = previous_by_item.get(_normalized_text(incoming_item), [])
+                prior_ingredient = prior_matches[0] if len(prior_matches) == 1 else None
                 prior_hint = (
                     prior_ingredient.get("_store_product_hint")
                     if isinstance(prior_ingredient, Mapping) else None
                 )
-                incoming_item = ingredient.get("item") or ingredient.get("name")
-                prior_item = prior_ingredient.get("item") if isinstance(prior_ingredient, Mapping) else None
-                if (
-                    ingredient.get("_store_product_hint") != prior_hint
-                    or _normalized_text(incoming_item) != _normalized_text(prior_item)
-                ):
+                if ingredient.get("_store_product_hint") != prior_hint:
                     raise RecipeError("_store_product_hint must match exact prior retailer evidence")
                 ingredient = dict(ingredient)
                 ingredient.pop("_store_product_hint", None)
@@ -1085,16 +1089,20 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
         value = {**value, "schema_version": 2}
     recipe = normalize_recipe(value)
     if prior is not None:
-        for index, ingredient in enumerate(recipe.get("ingredients", [])):
-            if index >= len(prior.get("ingredients", [])):
+        prior_by_item: dict[str, list[Mapping[str, Any]]] = {}
+        for prior_ingredient in prior.get("ingredients", []):
+            prior_by_item.setdefault(
+                _normalized_text(prior_ingredient.get("item")), [],
+            ).append(prior_ingredient)
+        for ingredient in recipe.get("ingredients", []):
+            prior_matches = prior_by_item.get(
+                _normalized_text(ingredient.get("item")), [],
+            )
+            if len(prior_matches) != 1:
                 continue
-            prior_ingredient = prior["ingredients"][index]
+            prior_ingredient = prior_matches[0]
             hint = prior_ingredient.get("_store_product_hint")
-            if (
-                hint is not None
-                and _normalized_text(ingredient.get("item"))
-                == _normalized_text(prior_ingredient.get("item"))
-            ):
+            if hint is not None:
                 ingredient["_store_product_hint"] = deepcopy(hint)
         recipe = normalize_recipe(
             recipe, trusted_store_product_hints=True,
