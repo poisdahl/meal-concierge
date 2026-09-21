@@ -2875,6 +2875,214 @@ class RetryAmountTests(unittest.TestCase):
         self.assertEqual(execute(click, url=url.replace("order-1", "order-2"))["clicks"], [])
         self.assertEqual(execute(click, url=url, button="Betal med 46,50 kr")["clicks"], [])
 
+    def test_oda_recovery_binds_itemized_product_discounts_once(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import _oda_checkout_amount_script
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node executes the actual amount review")
+
+        rows = [
+            ["55 varer", "2 457,30 kr"],
+            ["8kr: Produkt A", "-8,10 kr"],
+            ["20kr: Produkt B", "-20,50 kr"],
+            ["26kr: Produkt C", "-26,80 kr"],
+            ["37kr: Produkt D", "-37,60 kr"],
+            ["Leveringsemballasje", "30,17 kr"],
+            ["Total inkl. MVA", "2 394,47 kr"],
+        ]
+
+        def execute(script, selected_rows, harness=PAYMENT_DOM, **config):
+            completed = subprocess.run(
+                [node, "-e", harness],
+                input=json.dumps({"script": script, "c": {"rows": selected_rows, **config}}),
+                text=True,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+            return json.loads(completed.stdout)
+
+        read = _oda_checkout_amount_script(239447, expected_product_count=55, retry=True)
+        observed = execute(read, rows)["result"]
+        self.assertTrue(observed["amounts_valid"])
+        self.assertEqual(observed["amounts"], {
+            "product_subtotal": 245730,
+            "delivery_price": None,
+            "discounts": -9300,
+            "deposits": None,
+            "bags": 3017,
+            "other_fees": None,
+            "provider_total": 239447,
+        })
+
+        div_cell_harness = PAYMENT_DOM.replace(
+            "parts.map(x=>new E('span',x))",
+            "parts.map(x=>new E('div',x))",
+        )
+        div_cells = execute(
+            _oda_checkout_amount_script(10000, expected_product_count=1, retry=True),
+            [["1 vare", "108,10 kr"], ["8kr: Produkt A", "-8,10 kr"],
+             ["Total inkl. MVA", "100,00 kr"]],
+            harness=div_cell_harness,
+        )["result"]
+        self.assertTrue(div_cells["amounts_valid"])
+        self.assertEqual(div_cells["amounts"]["discounts"], -810)
+
+        decorated_label_harness = PAYMENT_DOM.replace(
+            "rows.map(parts=>new E('div','',parts.map(x=>new E('span',x))))",
+            "rows.map((parts,index)=>new E('div','',parts.map((x,cell)=>new E('div',x,index===1&&cell===0?[new E('span',''),new E('span','')]:[]))))",
+        )
+        decorated_label = execute(
+            _oda_checkout_amount_script(10000, expected_product_count=1, retry=True),
+            [["1 vare", "108,10 kr"], ["8kr: Produkt A", "-8,10 kr"],
+             ["Total inkl. MVA", "100,00 kr"]],
+            harness=decorated_label_harness,
+        )["result"]
+        self.assertTrue(decorated_label["amounts_valid"])
+        self.assertEqual(decorated_label["amounts"]["discounts"], -810)
+
+        changed = deepcopy(rows)
+        changed[1][1] = "-8,11 kr"
+        invalid = execute(read, changed)["result"]
+        self.assertFalse(invalid["amounts_valid"])
+        self.assertEqual(invalid["amount_check_failures"], ["row_arithmetic"])
+
+        equal_aggregate = [*rows[:5], ["Du sparer", "-93,00 kr"], *rows[5:]]
+        equal = execute(read, equal_aggregate)["result"]
+        self.assertTrue(equal["amounts_valid"])
+        self.assertEqual(equal["amounts"]["discounts"], -9300)
+
+        mismatched_aggregate = deepcopy(equal_aggregate)
+        mismatched_aggregate[5][1] = "-92,99 kr"
+        mismatch = execute(read, mismatched_aggregate)["result"]
+        self.assertFalse(mismatch["amounts_valid"])
+        self.assertIn("row_arithmetic", mismatch["amount_check_failures"])
+
+        for row in (
+            ["Tilfeldig rabatt", "-8,10 kr"],
+            ["8kr: Produkt A", "8,10 kr"],
+            ["8.5kr: Produkt A", "-8,10 kr"],
+            ["8kr: Produkt A", "-8 kr"],
+            ["8kr: Produkt A", "-8,10kr"],
+            ["8kr: Produkt A", "kr -8,10"],
+            ["8kr: Produkt A", "ukjent"],
+            ["8kr: Produkt A", ""],
+        ):
+            with self.subTest(row=row):
+                unknown = execute(read, [
+                    ["55 varer", "2 394,47 kr"],
+                    row,
+                    ["Total inkl. MVA", "2 394,47 kr"],
+                ])["result"]
+                self.assertFalse(unknown["amounts_valid"])
+                self.assertIn("unrecognized_amount_row", unknown["amount_check_failures"])
+
+        normal_checkout = execute(
+            _oda_checkout_amount_script(900, expected_product_count=1),
+            [["1 vare", "10,00 kr"], ["1kr: Produkt", "-1,00 kr"],
+             ["Delsum", "9,00 kr"], ["Total inkl. MVA", "9,00 kr"]],
+        )["result"]
+        self.assertFalse(normal_checkout["amounts_valid"])
+        self.assertIn("unrecognized_amount_row", normal_checkout["amount_check_failures"])
+
+        valid_single = [
+            ["1 vare", "108,10 kr"],
+            ["8kr: Produkt A", "-8,10 kr"],
+            ["Du sparer", "-8,10 kr"],
+            ["Total inkl. MVA", "100,00 kr"],
+        ]
+        single_read = _oda_checkout_amount_script(10000, expected_product_count=1, retry=True)
+        expected_single = execute(single_read, valid_single)["result"]
+        self.assertTrue(expected_single["amounts_valid"])
+        single_click = _oda_checkout_amount_script(
+            10000,
+            expected_product_count=1,
+            retry=True,
+            vipps=True,
+            expected_amounts=expected_single["amounts"],
+            expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+        )
+        for malformed in ("-8,10kr", "kr -8,10", "ukjent", "8,10kr", ""):
+            with self.subTest(malformed_itemized_amount=malformed):
+                malformed_rows = deepcopy(valid_single)
+                malformed_rows[1][1] = malformed
+                rejected = execute(single_read, malformed_rows)["result"]
+                self.assertFalse(rejected["amounts_valid"])
+                self.assertIn("unrecognized_amount_row", rejected["amount_check_failures"])
+                self.assertEqual(execute(
+                    single_click,
+                    malformed_rows,
+                    url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+                    button="Betal med 100,00 kr",
+                )["clicks"], [])
+
+        too_many = [
+            ["1 vare", "101,00 kr"],
+            *[[f"1kr: Produkt {index}", "-1,00 kr"] for index in range(101)],
+            ["Total inkl. MVA", "0,00 kr"],
+        ]
+        overflow = execute(_oda_checkout_amount_script(
+            0, expected_product_count=1, retry=True,
+        ), too_many)["result"]
+        self.assertFalse(overflow["amounts_valid"])
+        self.assertIn("unrecognized_amount_row", overflow["amount_check_failures"])
+
+        nested_harness = PAYMENT_DOM.replace(
+            "const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));",
+            "const summary=new E('section','',rows.map((parts,index)=>index===1&&c.nestedDiscount?new E('div','',[new E('span',parts[0]),new E('span',parts[1]),new E('div','',[new E('span','1kr: Inner'),new E('span','-1,00 kr')])]):new E('div','',parts.map(x=>new E('span',x)))));",
+        )
+        nested_rows = [
+            ["1 vare", "101,00 kr"],
+            ["8kr: Outer", "ukjent"],
+            ["Total inkl. MVA", "100,00 kr"],
+        ]
+        nested = execute(
+            _oda_checkout_amount_script(10000, expected_product_count=1, retry=True),
+            nested_rows,
+            harness=nested_harness,
+            nestedDiscount=True,
+        )["result"]
+        self.assertFalse(nested["amounts_valid"])
+        self.assertIn("unrecognized_amount_row", nested["amount_check_failures"])
+        nested_expected = execute(
+            _oda_checkout_amount_script(10000, expected_product_count=1, retry=True),
+            [["1 vare", "101,00 kr"], ["1kr: Inner", "-1,00 kr"],
+             ["Total inkl. MVA", "100,00 kr"]],
+        )["result"]["amounts"]
+        nested_click = _oda_checkout_amount_script(
+            10000,
+            expected_product_count=1,
+            retry=True,
+            vipps=True,
+            expected_amounts=nested_expected,
+            expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+        )
+        self.assertEqual(execute(
+            nested_click,
+            nested_rows,
+            harness=nested_harness,
+            nestedDiscount=True,
+            url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            button="Betal med 100,00 kr",
+        )["clicks"], [])
+
+        url = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
+        click = _oda_checkout_amount_script(
+            239447,
+            expected_product_count=55,
+            retry=True,
+            vipps=True,
+            expected_amounts=observed["amounts"],
+            expected_url=url,
+        )
+        button = "Betal med 2 394,47 kr"
+        self.assertEqual(execute(click, rows, url=url, button=button)["clicks"], ["PAY"])
+        self.assertEqual(execute(click, changed, url=url, button=button)["clicks"], [])
+
 
 class AuthenticationBrowserTests(unittest.TestCase):
     def test_late_addition_native_failure_requires_exact_original_pair_and_numeric_change(self):
