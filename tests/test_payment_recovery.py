@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import StateStore, HouseholdError, CheckoutPreconditionError, cart_summary
 from service import Application
-from oda_browser import _oda_checkout_amounts_minor
+from oda_browser import RecoveryClickNotDispatchedError, _oda_checkout_amounts_minor
 
 CART = {"items": [{"product_id": "67626", "name": "Wholegrain pasta", "quantity": 1, "price": 16.70}],
         "count": 1, "totalGrossAmount": 246.40,
@@ -597,6 +597,239 @@ class RecoveryTests(unittest.TestCase):
             vipps_approval_completed=True,
         )["confirmed"])
         self.assertEqual(self.browser.clicks, 1)
+
+    def test_recovery_provider_and_dietary_preflights_finish_before_final_submit(self):
+        prepared = self.prepare()
+        events = []
+        original_dietary = self.app._checkout_dietary
+        original_target = self.app._checkout_recovery_target
+
+        def dietary(*args, **kwargs):
+            events.append("dietary")
+            return original_dietary(*args, **kwargs)
+
+        def target(*args, **kwargs):
+            events.append("provider")
+            return original_target(*args, **kwargs)
+
+        def submit(_cart, _review, before_click, **_kwargs):
+            events.append("submit")
+            before_click()
+            events.append("claimed")
+            raise HouseholdError("lost after click-capable dispatch")
+
+        self.app._checkout_dietary = dietary
+        self.app._checkout_recovery_target = target
+        self.browser.submit_payment_recovery = submit
+        with self.assertRaisesRegex(HouseholdError, "lost after"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(events, ["dietary", "provider", "submit", "claimed"])
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["recovery"]["status"],
+            "clicking",
+        )
+
+    def test_concurrent_recovery_confirms_claim_and_dispatch_at_most_once(self):
+        import threading
+
+        prepared = self.prepare()
+        claimed = threading.Event()
+        release = threading.Event()
+        outcomes = []
+        submit_calls = 0
+
+        def submit(_cart, _review, before_click, **_kwargs):
+            nonlocal submit_calls
+            submit_calls += 1
+            before_click()
+            self.browser.clicks += 1
+            claimed.set()
+            self.assertTrue(release.wait(5))
+            raise HouseholdError("lost after the only dispatch")
+
+        def confirm():
+            try:
+                outcomes.append(self.call(
+                    "confirm", confirmation_id=prepared["confirmation_id"],
+                ))
+            except HouseholdError as exc:
+                outcomes.append(exc)
+
+        self.browser.submit_payment_recovery = submit
+        first = threading.Thread(target=confirm)
+        second = threading.Thread(target=confirm)
+        first.start()
+        self.assertTrue(claimed.wait(5))
+        second.start()
+        release.set()
+        first.join(5)
+        second.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(submit_calls, 1)
+        self.assertEqual(self.browser.clicks, 1)
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["recovery"]["status"],
+            "clicking",
+        )
+        self.assertEqual(len(outcomes), 2)
+
+    def test_recovery_callback_rechecks_all_cheap_dispatch_bindings(self):
+        baseline = deepcopy(self.app.store.read())
+        baseline_order = deepcopy(self.merchant.order)
+
+        def restore():
+            with self.app.store.locked() as state:
+                state.clear()
+                state.update(deepcopy(baseline))
+            self.merchant.status = "unpaid_order"
+            self.merchant.order = deepcopy(baseline_order)
+            self.browser.clicks = 0
+            return self.prepare()
+
+        def parent_status(state, _prepared, _request):
+            state["pending_checkout"]["status"] = "awaiting_user_payment"
+
+        def child_status(state, _prepared, _request):
+            state["pending_checkout"]["recovery"]["status"] = "uncertain"
+
+        def protected(state, prepared, _request):
+            state.setdefault("protected_results", {})[prepared["confirmation_id"]] = {
+                "kind": "checkout", "target_id": "order-1",
+                "intent_signature": None, "completed_at": self.now.isoformat(),
+                "result": {"confirmed": False},
+            }
+
+        def payment(state, _prepared, _request):
+            state["checkout_payment"] = {"method": "saved_card"}
+
+        def payment_choice(state, _prepared, _request):
+            state["pending_checkout"]["recovery"]["browser_review"]["payment_choice"] = {
+                "method": "saved_card", "card_last4": None,
+            }
+
+        def profile(state, _prepared, _request):
+            state["profile"]["diet"]["allergies_or_sensitivities"] = ["mustard"]
+
+        def dietary_request(_state, _prepared, request):
+            request["dietary_review"] = ["changed-after-gate"]
+
+        def expiry(state, _prepared, _request):
+            state["pending_checkout"]["recovery"]["expires_at"] = self.now.isoformat()
+
+        def old_request(state, _prepared, _request):
+            state["pending_checkout"]["vipps_request_status"] = "sent"
+
+        cases = {
+            "parent_status": parent_status,
+            "child_status": child_status,
+            "protected_result": protected,
+            "payment_preference": payment,
+            "payment_choice": payment_choice,
+            "dietary_profile": profile,
+            "dietary_request": dietary_request,
+            "confirmation_expiry": expiry,
+            "old_request": old_request,
+        }
+        for name, mutate in cases.items():
+            with self.subTest(race=name):
+                prepared = restore()
+                request = {
+                    "operation": "checkout", "action": "confirm",
+                    "confirmation_id": prepared["confirmation_id"],
+                    "dietary_review": [],
+                }
+
+                def submit(_cart, _review, before_click, **_kwargs):
+                    with self.app.store.locked() as state:
+                        mutate(state, prepared, request)
+                    before_click()
+                    self.browser.clicks += 1
+
+                self.browser.submit_payment_recovery = submit
+                with self.assertRaises(CheckoutPreconditionError):
+                    self.app.handle(request)
+                self.assertEqual(self.browser.clicks, 0)
+                retained = self.app.store.read().get("pending_checkout")
+                if retained and retained.get("recovery"):
+                    self.assertNotEqual(
+                        retained["recovery"].get("status"), "clicking",
+                        name,
+                    )
+
+    def test_recovery_scheduler_and_request_deadline_are_rechecked_without_io(self):
+        prepared = self.prepare()
+        pending = self.app.store.read()["pending_checkout"]
+        child = pending["recovery"]
+        request = {"dietary_review": []}
+        request_digest = self.app._recovery_dietary_request_digest(request)
+        with self.app.store.locked() as state:
+            with self.assertRaisesRegex(CheckoutPreconditionError, "request expired"):
+                self.app._recovery_dispatch_state_guard(
+                    state, pending, child, request, request_digest, 0, claim=False,
+                )
+        with self.app.store.locked() as state:
+            state["pending_checkout"]["automatic_checkout"] = True
+            state["pending_checkout"]["scheduler_context"] = {
+                "occurrence": "2026-09-09", "attempt_id": "attempt-1", "manual": True,
+            }
+            state.setdefault("occurrences", {})["2026-09-09"] = {
+                "attempt_id": "attempt-2",
+            }
+            current = deepcopy(state["pending_checkout"])
+            current_child = current["recovery"]
+            with self.assertRaisesRegex(CheckoutPreconditionError, "stale"):
+                self.app._recovery_dispatch_state_guard(
+                    state, current, current_child, request,
+                    request_digest, None, claim=False,
+                )
+
+    def test_only_validated_false_cleans_claim_and_post_dispatch_errors_keep_fence(self):
+        prepared = self.prepare()
+
+        def arbitrary_post_claim_cpe(_cart, _review, before_click, **_kwargs):
+            before_click()
+            raise CheckoutPreconditionError("unproven post-claim failure")
+
+        self.browser.submit_payment_recovery = arbitrary_post_claim_cpe
+        with self.assertRaisesRegex(CheckoutPreconditionError, "unproven"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(
+            self.app.store.read()["pending_checkout"]["recovery"]["status"],
+            "clicking",
+        )
+
+        with self.app.store.locked() as state:
+            state["pending_checkout"] = deepcopy(self.original)
+        prepared = self.prepare()
+
+        def validated_false(_cart, _review, before_click, **_kwargs):
+            before_click()
+            raise RecoveryClickNotDispatchedError("validated explicit clicked:false")
+
+        self.browser.submit_payment_recovery = validated_false
+        with self.assertRaisesRegex(RecoveryClickNotDispatchedError, "clicked:false"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(self.app.store.read()["pending_checkout"], self.original)
+
+        prepared = self.prepare()
+        context = {
+            "tab_id": "vipps-tab", "expected_total": 24640,
+            "gateway_url_digest": "a" * 64, "order_id": "order-1",
+        }
+
+        def lost_after_vipps(_cart, _review, before_click, **kwargs):
+            before_click()
+            kwargs["before_vipps_request"](context)
+            raise HouseholdError("lost after Vipps handoff")
+
+        self.browser.submit_payment_recovery = lost_after_vipps
+        with self.assertRaisesRegex(HouseholdError, "lost after Vipps"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["status"], "clicking")
+        self.assertEqual(child["vipps_request_status"], "dispatching")
+        self.assertEqual(child["vipps_request_context"], context)
 
     def contextless_exact_retry_attempt(self):
         with self.app.store.locked() as state:
@@ -3100,7 +3333,7 @@ class RetryAmountTests(unittest.TestCase):
                 HouseholdError("lost browser response"),
             ),
         )
-        with self.assertRaisesRegex(CheckoutPreconditionError, "lost browser response"):
+        with self.assertRaisesRegex(HouseholdError, "click result is uncertain"):
             browser.submit_payment_recovery(
                 {}, review, lambda: events.append("callback"),
             )
@@ -3119,7 +3352,7 @@ class RetryAmountTests(unittest.TestCase):
             if failure is not None:
                 raise failure
         browser._require_checkout_time = expiring_time_check
-        with self.assertRaisesRegex(CheckoutPreconditionError, "deadline expired"):
+        with self.assertRaises(RecoveryClickNotDispatchedError):
             browser.submit_payment_recovery(
                 {}, review, lambda: events.append("callback"),
             )
@@ -3140,7 +3373,7 @@ class RetryAmountTests(unittest.TestCase):
         events = []
         false = deepcopy(suffix_false)
         browser = browser_with(events, lambda script: events.append("eval") or deepcopy(false))
-        with self.assertRaises(CheckoutPreconditionError) as caught:
+        with self.assertRaises(RecoveryClickNotDispatchedError) as caught:
             browser.submit_payment_recovery(
                 {}, review, lambda: events.append("callback"),
             )
@@ -3211,7 +3444,9 @@ class RetryAmountTests(unittest.TestCase):
                 browser = browser_with(
                     events, lambda script: events.append("eval") or deepcopy(malformed),
                 )
-                with self.assertRaises(CheckoutPreconditionError) as caught:
+                with self.assertRaisesRegex(
+                    HouseholdError, "click result is uncertain",
+                ) as caught:
                     browser.submit_payment_recovery(
                         {}, review, lambda: events.append("callback"),
                     )
@@ -3220,6 +3455,22 @@ class RetryAmountTests(unittest.TestCase):
                 browser._capture_checkout_payment.assert_not_called()
                 self.assertNotIn("Private Product", str(caught.exception))
                 self.assertNotIn("Eksempelveien", str(caught.exception))
+
+        events = []
+        browser = browser_with(
+            events, lambda script: events.append("eval") or {"clicked": True},
+        )
+        browser._capture_checkout_payment.side_effect = CheckoutPreconditionError(
+            "private post-click detail",
+        )
+        with self.assertRaisesRegex(
+            HouseholdError, "dispatched but its result is uncertain",
+        ) as caught:
+            browser.submit_payment_recovery(
+                {}, review, lambda: events.append("callback"),
+            )
+        self.assertEqual(events.count("eval"), 1)
+        self.assertNotIn("private post-click detail", str(caught.exception))
 
     def test_observed_retry_without_delsum_and_atomic_amount_binding(self):
         import json

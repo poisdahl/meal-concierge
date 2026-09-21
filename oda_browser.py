@@ -105,6 +105,12 @@ FINAL_CLICK_MARGIN = 15
 # the full downstream click/capture margin and repeats the frozen comparison.
 RECOVERY_FINAL_CLICK_ATTEMPTS = 9
 RECOVERY_FINAL_CLICK_INTERVAL = 0.25
+
+
+class RecoveryClickNotDispatchedError(CheckoutPreconditionError):
+    """The exact atomic recovery script returned a validated clicked:false."""
+
+
 VIPPS_FORM_POLLS = 40
 VIPPS_POLL_INTERVAL = 0.25
 VIPPS_POST_GATEWAY_MARGIN = VIPPS_FORM_POLLS * VIPPS_POLL_INTERVAL + FINAL_CLICK_MARGIN
@@ -1350,6 +1356,8 @@ class OdaBrowser:
                 VIPPS_POST_GATEWAY_MARGIN + VIPPS_POLL_INTERVAL
                 if vipps else FINAL_CLICK_MARGIN
             )
+            eval_in_flight = False
+            safe = None
             try:
                 current = self.review_payment_recovery(cart, review["order_id"],
                     payment=review["payment_choice"], expected_binding=review["binding"], deadline=deadline,
@@ -1362,7 +1370,6 @@ class OdaBrowser:
                 dispatch_tab = self._checkout_dispatch_tab()
                 if vipps and dispatch_tab is None:
                     raise HouseholdError("The Oda/Vipps payment tab is unavailable; do not send payment")
-                before_click()
                 surface = _oda_checkout_surface_script(
                     expected,
                     review["payment_choice"],
@@ -1381,18 +1388,20 @@ class OdaBrowser:
                           + "),expected=" + json.dumps(review["surface"], ensure_ascii=False)
                           + ";const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;"
                           + "if(JSON.stringify(canonical(actual))!==JSON.stringify(canonical(expected))){const keys=['url','authenticated','available','items','total_matches','delivery_roots','address_matches','masked_payment','payment_display','submit_controls','summary_count_matches'];return JSON.stringify({clicked:false,diagnostic:{stage:'surface',difference_keys:keys.filter(key=>JSON.stringify(canonical(actual[key]))!==JSON.stringify(canonical(expected[key])))}})}return " + click + ";})()")
+                before_click()
                 clicked = None
-                safe = None
                 for attempt in range(RECOVERY_FINAL_CLICK_ATTEMPTS):
                     if attempt:
                         self._require_checkout_time(required_time)
                         self._settle(RECOVERY_FINAL_CLICK_INTERVAL)
                     self._require_checkout_time(required_time)
+                    eval_in_flight = True
                     clicked = self._eval(script)
                     if (isinstance(clicked, Mapping)
                             and set(clicked) == {"clicked"}
                             and type(clicked["clicked"]) is bool
                             and clicked["clicked"] is True):
+                        eval_in_flight = False
                         break
                     safe = None
                     if (isinstance(clicked, Mapping)
@@ -1499,8 +1508,22 @@ class OdaBrowser:
                                         }, "itemized_mismatch_count": count,
                                             "itemized_mismatches": clean}
                     if safe is None:
-                        break
+                        raise HouseholdError(
+                            "Recovery payment click result is uncertain; reconcile this attempt"
+                        )
+                    eval_in_flight = False
             except HouseholdError as exc:
+                if eval_in_flight:
+                    raise HouseholdError(
+                        "Recovery payment click result is uncertain; reconcile this attempt"
+                    ) from exc
+                if safe is not None:
+                    detail = ": " + json.dumps(
+                        safe, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+                    )
+                    raise RecoveryClickNotDispatchedError(
+                        "Recovery changed before the final payment click" + detail
+                    ) from exc
                 raise CheckoutPreconditionError(str(exc)) from exc
             if not (isinstance(clicked, Mapping)
                     and set(clicked) == {"clicked"}
@@ -1509,17 +1532,22 @@ class OdaBrowser:
                 detail = "" if safe is None else ": " + json.dumps(
                     safe, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
                 )
-                raise CheckoutPreconditionError(
+                raise RecoveryClickNotDispatchedError(
                     "Recovery changed before the final payment click" + detail
                 )
-            return self._capture_checkout_payment(dispatch_tab,
-                order_id=(review["order_id"] if vipps else None),
-                authentication_expected=review["payment_choice"]["method"] == "saved_card",
-                capture_failure=False,
-                vipps_expected_total=(expected["total_minor"]
-                                      if vipps else None),
-                vipps_source_url=(review["surface"]["url"] if vipps else None),
-                before_vipps_request=before_vipps_request)
+            try:
+                return self._capture_checkout_payment(dispatch_tab,
+                    order_id=(review["order_id"] if vipps else None),
+                    authentication_expected=review["payment_choice"]["method"] == "saved_card",
+                    capture_failure=False,
+                    vipps_expected_total=(expected["total_minor"]
+                                          if vipps else None),
+                    vipps_source_url=(review["surface"]["url"] if vipps else None),
+                    before_vipps_request=before_vipps_request)
+            except CheckoutPreconditionError as exc:
+                raise HouseholdError(
+                    "Recovery payment was dispatched but its result is uncertain; reconcile this attempt"
+                ) from exc
 
     def _order_cart(self, cart, order_id, order, binding):
         binding = require_order_binding(binding)
