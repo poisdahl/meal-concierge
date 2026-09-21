@@ -101,6 +101,8 @@ CHECKOUT_URL = "https://oda.com/no/checkout/confirm/"
 CHECKOUT_BROWSER_TIMEOUT = 90
 CANCELLATION_BROWSER_TIMEOUT = 105
 FINAL_CLICK_MARGIN = 15
+RECOVERY_FINAL_CLICK_ATTEMPTS = 4
+RECOVERY_FINAL_CLICK_INTERVAL = 0.25
 VIPPS_FORM_POLLS = 40
 VIPPS_POLL_INTERVAL = 0.25
 VIPPS_POST_GATEWAY_MARGIN = VIPPS_FORM_POLLS * VIPPS_POLL_INTERVAL + FINAL_CLICK_MARGIN
@@ -373,8 +375,17 @@ def _oda_checkout_amount_script(
  if(!CLICK_MODE)return JSON.stringify({amounts,amounts_valid:amountsValid&&labels.length===1});
  const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;
  const expectedItemizedDiscounts=EXPECTED_DISCOUNT_ROWS;
- const ready=location.href===EXPECTED_URL&&labels.length===1&&amountsValid&&JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts))&&(expectedItemizedDiscounts===null||JSON.stringify(itemizedDiscountBindings)===JSON.stringify(expectedItemizedDiscounts));
- if(!ready)return JSON.stringify({clicked:false});
+ const urlMatches=location.href===EXPECTED_URL;
+ const controlMatches=labels.length===1;
+ const amountMatches=JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts));
+ const itemizedMatches=expectedItemizedDiscounts===null||JSON.stringify(itemizedDiscountBindings)===JSON.stringify(expectedItemizedDiscounts);
+ const ready=urlMatches&&controlMatches&&amountsValid&&amountMatches&&itemizedMatches;
+ if(!ready){
+   const expectedRows=expectedItemizedDiscounts||[],rowCount=Math.max(expectedRows.length,itemizedDiscountBindings.length),mismatchIndexes=[];
+   for(let index=0;index<rowCount;index++)if(JSON.stringify(itemizedDiscountBindings[index])!==JSON.stringify(expectedRows[index]))mismatchIndexes.push(index);
+   const prefix=row=>{const match=typeof row?.label==='string'?row.label.match(/^([1-9]\d{0,5})kr:/i):null;return match?Number(match[1]):null};
+   return JSON.stringify({clicked:false,diagnostic:{stage:'amount',url_matches:urlMatches,control_matches:controlMatches,amount_matches:amountMatches,arithmetic_matches:amountsValid,itemized_matches:itemizedMatches,itemized_mismatch_count:mismatchIndexes.length,itemized_mismatches:mismatchIndexes.slice(0,8).map(index=>({index,expected_prefix:prefix(expectedRows[index]),actual_prefix:prefix(itemizedDiscountBindings[index]),expected_amount:Number.isSafeInteger(expectedRows[index]?.amount)?expectedRows[index].amount:null,actual_amount:Number.isSafeInteger(itemizedDiscountBindings[index]?.amount)?itemizedDiscountBindings[index].amount:null}))}});
+ }
  labels[0].click();return JSON.stringify({clicked:true});
 })()
 """
@@ -1367,12 +1378,115 @@ class OdaBrowser:
                 script = ("(() => {const actual=JSON.parse(" + surface
                           + "),expected=" + json.dumps(review["surface"], ensure_ascii=False)
                           + ";const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;"
-                          + "if(JSON.stringify(canonical(actual))!==JSON.stringify(canonical(expected)))return JSON.stringify({clicked:false});return " + click + ";})()")
+                          + "if(JSON.stringify(canonical(actual))!==JSON.stringify(canonical(expected))){const keys=['url','authenticated','available','items','total_matches','delivery_roots','address_matches','masked_payment','payment_display','submit_controls','summary_count_matches'];return JSON.stringify({clicked:false,diagnostic:{stage:'surface',difference_keys:keys.filter(key=>JSON.stringify(canonical(actual[key]))!==JSON.stringify(canonical(expected[key])))}})}return " + click + ";})()")
+                clicked = None
+                safe = None
+                for attempt in range(RECOVERY_FINAL_CLICK_ATTEMPTS):
+                    if attempt:
+                        self._require_checkout_time(required_time)
+                        self._settle(RECOVERY_FINAL_CLICK_INTERVAL)
+                        self._require_checkout_time(required_time)
+                    clicked = self._eval(script)
+                    if (isinstance(clicked, Mapping)
+                            and set(clicked) == {"clicked"}
+                            and type(clicked["clicked"]) is bool
+                            and clicked["clicked"] is True):
+                        break
+                    safe = None
+                    if (isinstance(clicked, Mapping)
+                            and set(clicked) == {"clicked", "diagnostic"}
+                            and type(clicked["clicked"]) is bool
+                            and clicked["clicked"] is False):
+                        diagnostic = clicked["diagnostic"]
+                        if (isinstance(diagnostic, Mapping)
+                                and set(diagnostic) == {"stage", "difference_keys"}
+                                and diagnostic.get("stage") == "surface"):
+                            allowed = (
+                                "url", "authenticated", "available", "items", "total_matches",
+                                "delivery_roots", "address_matches", "masked_payment",
+                                "payment_display", "submit_controls", "summary_count_matches",
+                            )
+                            keys = diagnostic.get("difference_keys")
+                            if (isinstance(keys, list) and 0 < len(keys) <= len(allowed)
+                                    and all(type(key) is str and key in allowed for key in keys)
+                                    and len(keys) == len(set(keys))
+                                    and keys == [key for key in allowed if key in keys]):
+                                safe = {"stage": "surface", "difference_keys": list(keys)}
+                        elif (isinstance(diagnostic, Mapping)
+                                and set(diagnostic) == {
+                                    "stage", "url_matches", "control_matches", "amount_matches",
+                                    "arithmetic_matches", "itemized_matches",
+                                    "itemized_mismatch_count", "itemized_mismatches",
+                                } and diagnostic.get("stage") == "amount"):
+                            flags = (
+                                "url_matches", "control_matches", "amount_matches",
+                                "arithmetic_matches", "itemized_matches",
+                            )
+                            count = diagnostic.get("itemized_mismatch_count")
+                            rows = diagnostic.get("itemized_mismatches")
+                            if (all(type(diagnostic.get(key)) is bool for key in flags)
+                                    and not all(diagnostic[key] for key in flags)
+                                    and type(count) is int and 0 <= count <= 100
+                                    and isinstance(rows, list) and len(rows) <= 8):
+                                clean = []
+                                for row in rows:
+                                    if not isinstance(row, Mapping) or set(row) != {
+                                            "index", "expected_prefix", "actual_prefix",
+                                            "expected_amount", "actual_amount",
+                                    }:
+                                        break
+                                    item = {}
+                                    for key, lower, upper in (
+                                        ("index", 0, 99), ("expected_prefix", 1, 999999),
+                                        ("actual_prefix", 1, 999999),
+                                        ("expected_amount", -10**12, -1),
+                                        ("actual_amount", -10**12, -1),
+                                    ):
+                                        value = row.get(key)
+                                        if not (value is None or type(value) is int
+                                                and lower <= value <= upper):
+                                            break
+                                        item[key] = value
+                                    else:
+                                        clean.append(item)
+                                        continue
+                                    break
+                                else:
+                                    indexes = [row["index"] for row in clean]
+                                    row_shapes_match = all(
+                                        (row["expected_prefix"] is None)
+                                        == (row["expected_amount"] is None)
+                                        and (row["actual_prefix"] is None)
+                                        == (row["actual_amount"] is None)
+                                        and not (row["expected_prefix"] is None
+                                                 and row["actual_prefix"] is None)
+                                        for row in clean
+                                    )
+                                    itemized_shape_matches = (
+                                        diagnostic["itemized_matches"] is (count == 0)
+                                        and len(clean) == min(count, 8)
+                                        and indexes == sorted(set(indexes))
+                                        and row_shapes_match
+                                    )
+                                    if itemized_shape_matches:
+                                        safe = {"stage": "amount", **{
+                                            key: diagnostic[key] for key in flags
+                                        }, "itemized_mismatch_count": count,
+                                            "itemized_mismatches": clean}
+                    if safe is None:
+                        break
             except HouseholdError as exc:
                 raise CheckoutPreconditionError(str(exc)) from exc
-            clicked = self._eval(script)
-            if clicked != {"clicked": True}:
-                raise CheckoutPreconditionError("Recovery changed before the final payment click")
+            if not (isinstance(clicked, Mapping)
+                    and set(clicked) == {"clicked"}
+                    and type(clicked["clicked"]) is bool
+                    and clicked["clicked"] is True):
+                detail = "" if safe is None else ": " + json.dumps(
+                    safe, ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+                )
+                raise CheckoutPreconditionError(
+                    "Recovery changed before the final payment click" + detail
+                )
             return self._capture_checkout_payment(dispatch_tab,
                 order_id=(review["order_id"] if vipps else None),
                 authentication_expected=review["payment_choice"]["method"] == "saved_card",
