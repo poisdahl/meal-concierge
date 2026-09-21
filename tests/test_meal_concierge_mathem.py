@@ -567,7 +567,12 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     if change:
                         with self.assertRaises(CheckoutPreconditionError):submit()
                     else:submit()
-                    self.assertEqual(observed,[{'result':{'clicked':change is None},'clicks':0 if change else 1}])
+                    self.assertEqual(len(observed),1)
+                    self.assertIs(observed[0]['result']['clicked'],change is None)
+                    self.assertEqual(observed[0]['clicks'],0 if change else 1)
+                    if 'diagnostic' in observed[0]['result']:
+                        self.assertEqual(observed[0]['result']['diagnostic']['stage'],'amount')
+                        self.assertNotIn('Pasta',json.dumps(observed[0]['result']['diagnostic']))
 
 class SharedRetailOrderCountTests(unittest.TestCase):
     def test_current_order_shapes_use_product_quantities(self):
