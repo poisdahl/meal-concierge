@@ -1115,6 +1115,41 @@ class CoreTestsBase:
         conflicting_size = [{"identity": product_identity("Melk 1 l", "2 x 1 l", "Testmerke"), "quantity": 1}]
         self.assertFalse(checkout_lines_match(conflicting_size, [{"text": "Melk 2 x 1 l Testmerke", "quantity": 1}]))
 
+    def test_checkout_product_identity_deduplicates_matching_count_before_repeated_suffix(self):
+        expected = [{
+            "identity": product_identity(
+                "Testvare 3 store porsjoner",
+                "Mild, 3 store porsjoner, 450 g",
+                "Testmerke",
+            ),
+            "quantity": 1,
+        }]
+        self.assertTrue(checkout_lines_match(expected, [{
+            "text": "Testvare Mild, 3 store porsjoner, 450 g Testmerke",
+            "quantity": 1,
+        }]))
+        self.assertFalse(checkout_lines_match(expected, [{
+            "text": "Testvare Mild, 4 store porsjoner, 450 g Testmerke",
+            "quantity": 1,
+        }]))
+        self.assertFalse(checkout_lines_match(expected, [{
+            "text": "Testvare Mild, 3 store porsjoner, 500 g Testmerke",
+            "quantity": 1,
+        }]))
+
+        conflicting_internal_count = [{
+            "identity": product_identity(
+                "Testvare 3 store porsjoner",
+                "Mild, 4 store porsjoner, 450 g",
+                "Testmerke",
+            ),
+            "quantity": 1,
+        }]
+        self.assertFalse(checkout_lines_match(conflicting_internal_count, [{
+            "text": "Testvare Mild, 4 store porsjoner, 450 g Testmerke",
+            "quantity": 1,
+        }]))
+
     def test_checkout_product_identity_accepts_repeated_dom_brand(self):
         expected = [{"identity": product_identity("Zalo Ultra", "500 ml", "Zalo"), "quantity": 1}]
         self.assertTrue(checkout_lines_match(expected, [{"text": "Zalo Ultra 500 ml, Zalo", "quantity": 1}]))

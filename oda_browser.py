@@ -571,9 +571,22 @@ def product_identity(name: str, description: str, brand: str) -> str:
     for length in range(min(len(name_tokens) - 1, len(description_tokens)), 0, -1):
         suffix = name_tokens[-length:]
         repeated_at_start = description_tokens[:length] == suffix
-        repeated_later = not any(token.isdigit() for token in suffix) and any(description_tokens[start:start + length] == suffix for start in range(1, len(description_tokens) - length + 1))
+        repeated_positions = [
+            start
+            for start in range(1, len(description_tokens) - length + 1)
+            if description_tokens[start:start + length] == suffix
+        ]
+        repeated_later = not any(token.isdigit() for token in suffix) and bool(repeated_positions)
         if repeated_at_start or repeated_later:
-            name_tokens = name_tokens[:-length]
+            trim_length = length
+            if repeated_later and length >= 2 and len(name_tokens) > length:
+                preceding_token = name_tokens[-length - 1]
+                if preceding_token.isdigit() and any(
+                    description_tokens[start - 1] == preceding_token
+                    for start in repeated_positions
+                ):
+                    trim_length += 1
+            name_tokens = name_tokens[:-trim_length]
             break
     return " ".join(name_tokens + description_tokens + brand_tokens)
 
