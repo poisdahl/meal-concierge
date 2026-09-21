@@ -14,6 +14,7 @@ from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo
 from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError,
+                         RecoveryClickNotDispatchedError,
                          _oda_checkout_amounts_minor,
                          delivery_signature as oda_delivery_signature,
                          require_order_binding)
@@ -2767,6 +2768,97 @@ class OrderOperations:
         return (switch.get("source_confirmation_id") == attempt.get("confirmation_id")
                 and (switch.get("closure") or {}).get("status") == "closed")
 
+    def _recovery_old_request_allows_dispatch(self, pending, child):
+        if (self.provider != "oda"
+                or (pending.get("checkout_payment") or {}).get("method") != "vipps"):
+            return True
+        original_status = pending.get("vipps_request_status")
+        prior_recovery_closed = (
+            original_status is None
+            and child.get("prior_vipps_request_status")
+            in {"expired", "verifying", "not_sent"}
+        )
+        legacy_offer = (
+            original_status is None
+            and pending.get("vipps_request_context") is None
+            and pending.get("vipps_request_attempted_at") is None
+            and pending.get("payment_requested_at") is None
+            and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+            and child.get("owner_reported_no_vipps_request") is True
+            and child.get("original_confirmation_id") == pending.get("confirmation_id")
+        )
+        return (
+            original_status in {"expired", "verifying", "not_sent"}
+            or self._closed_payment_switch(pending) is not None
+            or prior_recovery_closed
+            or legacy_offer
+        )
+
+    @staticmethod
+    def _recovery_dietary_request_digest(request):
+        from dietary_assessment import digest
+        request = request or {}
+        return digest({
+            "dietary_review": request.get("dietary_review"),
+            "dietary_review_digest": request.get("dietary_review_digest"),
+        })
+
+    def _recovery_dispatch_state_guard(
+        self, state, pending, child, request, request_digest, deadline, *, claim,
+    ):
+        """Validate only local state before the exact recovery click."""
+        from dietary_assessment import digest
+
+        confirmation_id = child["confirmation_id"]
+        if self._read_protected_result(state, confirmation_id, "checkout"):
+            raise CheckoutPreconditionError("Recovery confirmation already has a protected result")
+        current = state.get("pending_checkout")
+        current_child = (current or {}).get("recovery")
+        if (not isinstance(current, Mapping)
+                or current.get("status") != pending.get("status")
+                or not isinstance(current_child, Mapping)
+                or current_child.get("status") != "awaiting_confirmation"
+                or current_child.get("confirmation_id") != confirmation_id
+                or canonical(current) != canonical(pending)):
+            raise CheckoutPreconditionError("Recovery state changed before payment")
+        if state.get("checkout_payment") != pending.get(
+            "payment_preference", pending.get("checkout_payment")
+        ):
+            raise CheckoutPreconditionError("Payment preference changed during recovery")
+        if canonical(current_child.get("browser_review", {}).get("payment_choice")) != canonical(
+            child.get("browser_review", {}).get("payment_choice")
+        ):
+            raise CheckoutPreconditionError("Recovery payment choice changed before payment")
+        profile = state.get("profile") or {}
+        current_profile_digest = digest({
+            "diet": profile.get("diet"),
+            "equipment": (profile.get("meals") or {}).get("equipment", []),
+        })
+        if current_profile_digest != child.get("dietary_assessment", {}).get("profile_digest"):
+            raise CheckoutPreconditionError(
+                "Recovery dietary profile changed before payment; prepare a new review"
+            )
+        if self._recovery_dietary_request_digest(request) != request_digest:
+            raise CheckoutPreconditionError("Recovery dietary review changed before payment")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise CheckoutPreconditionError("Recovery request expired before payment")
+        if self._now() >= datetime.fromisoformat(child["expires_at"]):
+            raise CheckoutPreconditionError("Recovery confirmation expired before payment")
+        try:
+            self._pending_scheduler_guard(state, pending)
+        except HouseholdError as exc:
+            raise CheckoutPreconditionError(str(exc)) from exc
+        if not self._recovery_old_request_allows_dispatch(current, current_child):
+            raise CheckoutPreconditionError(
+                "The original Oda/Vipps request is not positively closed; do not retry payment"
+            )
+        if claim:
+            current_child["status"] = "clicking"
+            if child["browser_review"]["payment_choice"]["method"] == "saved_card":
+                current_child["authentication_unresolved"] = True
+            return deepcopy(current)
+        return None
+
     def _recovery_prepared_view(self, pending):
         child = pending["recovery"]
         return {"confirmed": False, "recovery": True, "order_id": child["order_id"],
@@ -3287,49 +3379,17 @@ class OrderOperations:
                 return {**gate, "confirmation_id": child["confirmation_id"],
                         "summary": recovery_summary}
 
+            request_digest = self._recovery_dietary_request_digest(request)
             dispatch_claimed = False
-            dispatched = deepcopy(pending)
+            dispatched = None
             vipps_dispatched = None
-            dispatched["recovery"]["status"] = "clicking"
-            if child["browser_review"]["payment_choice"]["method"] == "saved_card":
-                dispatched["recovery"]["authentication_unresolved"] = True
 
             def before_click():
-                nonlocal dispatch_claimed
-                if (self.provider == "oda"
-                        and (pending.get("checkout_payment") or {}).get("method") == "vipps"):
-                    original_status = pending.get("vipps_request_status")
-                    prior_recovery_closed = (
-                        original_status is None
-                        and child.get("prior_vipps_request_status")
-                        in {"expired", "verifying", "not_sent"}
-                    )
-                    legacy_offer = (
-                        original_status is None
-                        and pending.get("vipps_request_context") is None
-                        and pending.get("vipps_request_attempted_at") is None
-                        and pending.get("payment_requested_at") is None
-                        and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
-                        and child.get("owner_reported_no_vipps_request") is True
-                        and child.get("original_confirmation_id") == pending.get("confirmation_id")
-                    )
-                    if (original_status not in {"expired", "verifying", "not_sent"}
-                            and not self._closed_payment_switch(pending)
-                            and not prior_recovery_closed and not legacy_offer):
-                        raise HouseholdError("The original Oda/Vipps request is not positively closed; do not retry payment")
-                if self._checkout_recovery_target(
-                    pending, deadline, verify_retry_page=False
-                ) != child["order_id"]:
-                    raise HouseholdError("Recovery merchant target changed")
-                if self._checkout_dietary(pending["summary"], deadline) != child["dietary_assessment"]:
-                    raise HouseholdError("Recovery dietary findings changed; prepare a new review")
+                nonlocal dispatch_claimed, dispatched
                 with self.store.locked() as state:
-                    if canonical(state.get("pending_checkout")) != canonical(pending):
-                        raise HouseholdError("Recovery state changed before payment")
-                    if self._now() >= datetime.fromisoformat(child["expires_at"]):
-                        raise HouseholdError("Recovery confirmation expired before payment")
-                    self._pending_scheduler_guard(state, pending)
-                    state["pending_checkout"]["recovery"] = deepcopy(dispatched["recovery"])
+                    dispatched = self._recovery_dispatch_state_guard(
+                        state, pending, child, request, request_digest, deadline, claim=True,
+                    )
                 dispatch_claimed = True
 
             def before_vipps_request(context):
@@ -3346,6 +3406,19 @@ class OrderOperations:
                     current["vipps_request_context"] = deepcopy(context)
                     vipps_dispatched = deepcopy(state["pending_checkout"])
 
+            if not self._recovery_old_request_allows_dispatch(pending, child):
+                raise HouseholdError(
+                    "The original Oda/Vipps request is not positively closed; do not retry payment"
+                )
+            target = self._checkout_recovery_target(
+                pending, deadline, verify_retry_page=False,
+            )
+            if target != child["order_id"]:
+                raise HouseholdError("Recovery merchant target changed")
+            with self.store.locked() as state:
+                self._recovery_dispatch_state_guard(
+                    state, pending, child, request, request_digest, deadline, claim=False,
+                )
             try:
                 submit_result = self.browser.submit_payment_recovery(
                     pending["cart"], child["browser_review"], before_click,
@@ -3374,14 +3447,16 @@ class OrderOperations:
                         current["status"] = "awaiting_user_payment"
                         current["vipps_request_status"] = "sent"
                         current["payment_requested_at"] = self._now().isoformat()
-            except CheckoutPreconditionError:
-                # This exception guarantees no final click. Discard only the
-                # recovery review; the original uncertain purchase stays intact.
-                with self.store.locked() as state:
-                    current = state.get("pending_checkout")
-                    expected = (vipps_dispatched or dispatched) if dispatch_claimed else pending
-                    if canonical(current) == canonical(expected):
-                        current.pop("recovery")
+            except CheckoutPreconditionError as exc:
+                # Before the claim, no click-capable turn was dispatched. After
+                # it, only the validated atomic clicked:false result proves that
+                # the durable dispatch fence may be removed.
+                if not dispatch_claimed or isinstance(exc, RecoveryClickNotDispatchedError):
+                    with self.store.locked() as state:
+                        current = state.get("pending_checkout")
+                        expected = (vipps_dispatched or dispatched) if dispatch_claimed else pending
+                        if canonical(current) == canonical(expected):
+                            current.pop("recovery")
                 raise
             if vipps_request_sent:
                 return {

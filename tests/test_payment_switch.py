@@ -194,10 +194,15 @@ class PaymentSwitchTests(unittest.TestCase):
         self.assertEqual((self.cancel_clicks, self.target_reads, self.card_clicks), (1, 1, 0))
 
     def test_target_change_before_card_dispatch_blocks_payment(self):
+        from unittest import mock
+
         prepared = self.switch()
         self.target_invalid = True
+        submit = mock.Mock(side_effect=self.browser.submit_payment_recovery)
+        self.browser.submit_payment_recovery = submit
         with self.assertRaisesRegex(HouseholdError, 'target changed'):
             self.call('confirm', confirmation_id=prepared['confirmation_id'])
+        submit.assert_not_called()
         self.assertEqual(self.card_clicks, 0)
 
     def test_free_bags_on_retry_preserve_actual_review_and_complete_same_addition(self):
