@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import calendar
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -27,6 +28,68 @@ from core import CancellationPreconditionError, CheckoutPreconditionError, House
 
 class OdaCheckoutMismatchError(HouseholdError):
     """The live checkout surface no longer matches the supplied cart snapshot."""
+
+
+def _safe_browser_location(value: Any) -> str:
+    """Describe one browser location without credentials, query or fragment."""
+    if value == "about:blank":
+        return "about:blank"
+    if not isinstance(value, str) or any(
+        ord(character) <= 32 or ord(character) == 127 for character in value
+    ):
+        return "missing-or-non-http"
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname if parsed is not None else None
+        port = parsed.port if parsed is not None else None
+    except ValueError:
+        return "invalid"
+    if (
+        parsed is None
+        or parsed.scheme not in {"http", "https"}
+        or hostname is None
+        or "%" in hostname
+        or "\\" in parsed.netloc
+        or any(ord(character) <= 32 or ord(character) == 127 for character in parsed.netloc)
+    ):
+        return "missing-or-non-http"
+    try:
+        if ":" in hostname:
+            diagnostic_hostname = str(ipaddress.ip_address(hostname))
+            host = f"[{diagnostic_hostname}]"
+        else:
+            diagnostic_hostname = hostname.encode("idna").decode("ascii")
+            label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+            if (
+                len(diagnostic_hostname.rstrip(".")) > 253
+                or re.fullmatch(rf"{label}(?:\.{label})*\.?", diagnostic_hostname) is None
+            ):
+                return "missing-or-non-http"
+            host = diagnostic_hostname
+    except (UnicodeError, ValueError):
+        return "missing-or-non-http"
+    default_port = 443 if parsed.scheme == "https" else 80
+    authority = host if port in {None, default_port} else f"{host}:{port}"
+    safe_segments = {
+        "no", "se", "account", "delivery", "login", "signin", "sign-in",
+        "auth", "oauth", "checkout", "cart", "confirm", "modify",
+        "recommendations", "retry", "orders", "payment", "payments",
+    }
+    segments = [
+        segment if not segment or segment.casefold() in safe_segments else ":redacted"
+        for segment in (parsed.path or "/").split("/")
+    ]
+    return f"{parsed.scheme}://{authority}{'/'.join(segments)}"
+
+
+class OdaBrowserPageMismatchError(HouseholdError):
+    """A read-only browser open did not remain on its exact requested page."""
+
+    def __init__(self, actual: Any):
+        self.retryable_cold_blank = actual == "about:blank"
+        super().__init__(
+            f"Oda browser left the requested page (actual location: {_safe_browser_location(actual)})"
+        )
 
 
 STORE_URL = "https://oda.com/no/"
@@ -1036,9 +1099,15 @@ class OdaBrowser:
             raise HouseholdError("Dedicated browser provider client is unavailable or mismatched")
         return client
 
-    def _verify_checkout_account(self, address: str) -> str:
+    def _verify_checkout_account(
+        self, address: str, *, retry_cold_open: bool = False,
+    ) -> str:
         reference = self._account_reference(address)
-        self._open(_retail_store_url(self.checkout_provider) + "account/delivery/")
+        account_url = _retail_store_url(self.checkout_provider) + "account/delivery/"
+        if retry_cold_open:
+            self._open_checkout_account_preclick(account_url)
+        else:
+            self._open(account_url)
         for _ in range(20):
             if self._eval(_checkout_account_script(reference, provider=self.checkout_provider)) == {"account_matches": True}:
                 self._require_checkout_time()
@@ -1046,9 +1115,29 @@ class OdaBrowser:
             self._settle(0.25)
         raise HouseholdError("Log the dedicated browser into the same account as retailer OAuth")
 
-    def review_checkout(self, cart: Mapping[str, Any], *, deadline: float | None = None, payment: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _open_checkout_account_preclick(self, url: str) -> None:
+        """Retry one cold blank tab before any checkout control can be touched."""
+        try:
+            self._open(url)
+            return
+        except OdaBrowserPageMismatchError as exc:
+            if not exc.retryable_cold_blank:
+                raise
+        try:
+            self.close()
+        except HouseholdError:
+            pass
+        self._settle(0.25)
+        self._open(url)
+
+    def review_checkout(self, cart: Mapping[str, Any], *, deadline: float | None = None, payment: Mapping[str, Any] | None = None, _retry_cold_open: bool = True) -> dict[str, Any]:
         with self._checkout_operation(deadline):
-            return self._review_checkout(cart, payment=payment, select_payment=True) if payment is not None else self._review_checkout(cart)
+            return self._review_checkout(
+                cart, payment=payment, select_payment=True,
+                retry_cold_open=_retry_cold_open,
+            ) if payment is not None else self._review_checkout(
+                cart, retry_cold_open=_retry_cold_open,
+            )
 
     def close_vipps_request(self, context, before_cancel, *, deadline=None, prior=None):
         from oda_payment_switch import close_vipps_request
@@ -1298,9 +1387,11 @@ class OdaBrowser:
             self._settle(0.25)
         raise HouseholdError("Oda checkout items did not finish rendering")
 
-    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _review_checkout(self, cart: Mapping[str, Any], *, order_id: str | None = None, delivery_text: str | None = None, payment: Mapping[str, Any] | None = None, select_payment: bool = False, addition_expectation: Mapping[str, Any] | None = None, retry_cold_open: bool = False) -> dict[str, Any]:
         expected = self._cart_expectation(cart)
-        account_digest = self._verify_checkout_account(expected["delivery_address"]) if order_id is None else None
+        account_digest = self._verify_checkout_account(
+            expected["delivery_address"], retry_cold_open=retry_cold_open,
+        ) if order_id is None else None
         if delivery_text is not None:
             expected["delivery_text"] = delivery_text
         if order_id is None:
@@ -2235,8 +2326,12 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                 and re.fullmatch(r"\d{8}", str(self.vipps_phone_number or "")) is None):
             raise CheckoutPreconditionError("An exact private Vipps phone number is required before Oda checkout")
         try:
-            current = (self._review_checkout(cart, payment=review["payment_choice"], select_payment=True)
-                       if "payment_choice" in review else self.review_checkout(cart))
+            current = (self._review_checkout(
+                cart, payment=review["payment_choice"], select_payment=True,
+                retry_cold_open=False,
+            ) if "payment_choice" in review else self.review_checkout(
+                cart, _retry_cold_open=False,
+            ))
         except HouseholdError as exc:
             raise CheckoutPreconditionError(str(exc)) from exc
         if current != dict(review):
@@ -2681,8 +2776,12 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
 
     def _open(self, url: str) -> None:
         data = self._invoke("open", url)
-        if str(data.get("url") or "").rstrip("/") != url.rstrip("/"):
-            raise HouseholdError("Oda browser left the requested page")
+        actual = data.get("url")
+        actual_text = str(actual or "")
+        normalized_actual = actual_text[:-1] if actual_text.endswith("/") else actual_text
+        normalized_expected = url[:-1] if url.endswith("/") else url
+        if normalized_actual != normalized_expected:
+            raise OdaBrowserPageMismatchError(actual)
 
     def _eval(self, script: str, *, browser_args: str = DEFAULT_BROWSER_ARGS) -> dict[str, Any]:
         data = self._invoke("eval", "--stdin", stdin=script, browser_args=browser_args)
@@ -2779,13 +2878,17 @@ class MathemBrowser(OdaBrowser):
         self.session = f"mathem-household-{self.instance}"
 
 
-    def _review_checkout(self, cart, *, order_id=None, delivery_text=None):
+    def _review_checkout(
+        self, cart, *, order_id=None, delivery_text=None, retry_cold_open=False,
+    ):
         if order_id is not None or delivery_text is not None:
             raise HouseholdError("Mathem existing-order changes require their dedicated protected workflow")
         expected = self._cart_expectation(cart)
         if delivery_signature(expected["delivery_text"], provider="mathem") is None:
             raise HouseholdError("Select a Mathem delivery window before checkout")
-        account_digest = self._verify_checkout_account(expected["delivery_address"])
+        account_digest = self._verify_checkout_account(
+            expected["delivery_address"], retry_cold_open=retry_cold_open,
+        )
         self._navigate_to_checkout()
         result = self._review_mathem_surface(expected)
         result["account_reference_digest"] = account_digest
@@ -2979,7 +3082,7 @@ class MathemBrowser(OdaBrowser):
 
     def _submit_checkout(self, cart, review, before_click=None):
         try:
-            current = self.review_checkout(cart)
+            current = self.review_checkout(cart, _retry_cold_open=False)
             if current != dict(review):
                 raise HouseholdError("Mathem checkout changed after confirmation")
             expected = self._cart_expectation(cart)

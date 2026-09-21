@@ -18,6 +18,7 @@ import time
 import types
 import unittest
 from unittest import mock
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 
@@ -2252,6 +2253,179 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
         )
         self.assertEqual(actions, [("continue", True)])
 
+    def test_checkout_account_retries_one_cold_blank_before_verification(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        browser._account_reference = mock.Mock(return_value=123)
+        target = "https://oda.com/no/account/delivery/"
+        opened = iter([{"url": "about:blank"}, {"url": target}])
+
+        def invoke(command, *arguments, **_kwargs):
+            if command == "open":
+                self.assertEqual(arguments, (target,))
+                return next(opened)
+            self.assertEqual(command, "close")
+            return {}
+
+        browser._invoke = mock.Mock(side_effect=invoke)
+        browser._eval = mock.Mock(return_value={"account_matches": True})
+        browser._settle = mock.Mock()
+        browser._require_checkout_time = mock.Mock()
+
+        digest = browser._verify_checkout_account(
+            "Eksempelveien 1", retry_cold_open=True,
+        )
+
+        self.assertEqual(digest, hashlib.sha256(b"123").hexdigest())
+        self.assertEqual(browser._invoke.call_args_list, [
+            mock.call("open", target),
+            mock.call("close", check=False),
+            mock.call("open", target),
+        ])
+        browser._settle.assert_called_once_with(0.25)
+        browser._eval.assert_called_once()
+
+    def test_checkout_account_stops_after_two_cold_blank_opens_without_clicking(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        browser._account_reference = mock.Mock(return_value=123)
+        browser._invoke = mock.Mock(side_effect=[
+            {"url": "about:blank"}, {}, {"url": "about:blank"},
+        ])
+        browser._eval = mock.Mock(side_effect=AssertionError("account page must not be read"))
+        browser._settle = mock.Mock()
+
+        with self.assertRaisesRegex(
+            HouseholdError,
+            r"Oda browser left the requested page \(actual location: about:blank\)",
+        ):
+            browser._verify_checkout_account(
+                "Eksempelveien 1", retry_cold_open=True,
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in browser._invoke.call_args_list],
+            ["open", "close", "open"],
+        )
+        self.assertNotIn("click", [call.args[0] for call in browser._invoke.call_args_list])
+        browser._eval.assert_not_called()
+
+    def test_checkout_account_rejects_internal_and_external_redirects_without_retry(self):
+        target = "https://oda.com/no/account/delivery/"
+        redirects = (
+            "https://oda.com/no/login/?returnUrl=%2Fno%2Faccount%2Fdelivery%2F&token=secret#private",
+            "https://user:password@example.invalid/login?token=secret#private",
+        )
+        for redirect in redirects:
+            with self.subTest(redirect=redirect):
+                browser = OdaBrowser.__new__(OdaBrowser)
+                browser.checkout_provider = "oda"
+                browser._account_reference = mock.Mock(return_value=123)
+                browser._invoke = mock.Mock(return_value={"url": redirect})
+                browser._eval = mock.Mock(side_effect=AssertionError("redirect must not be read"))
+                browser._settle = mock.Mock()
+
+                with self.assertRaises(HouseholdError) as raised:
+                    browser._verify_checkout_account(
+                        "Eksempelveien 1", retry_cold_open=True,
+                    )
+
+                message = str(raised.exception)
+                parsed = urlsplit(redirect)
+                self.assertIn(f"{parsed.scheme}://{parsed.hostname}{parsed.path}", message)
+                for secret in ("returnUrl", "token", "secret", "private", "user", "password"):
+                    self.assertNotIn(secret, message)
+                browser._invoke.assert_called_once_with("open", target)
+                browser._eval.assert_not_called()
+
+    def test_checkout_account_does_not_retry_cold_blank_outside_fresh_review(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        browser._account_reference = mock.Mock(return_value=123)
+        browser._invoke = mock.Mock(return_value={"url": "about:blank"})
+        browser._eval = mock.Mock(side_effect=AssertionError("blank page must not be read"))
+        browser._settle = mock.Mock()
+
+        with self.assertRaisesRegex(HouseholdError, "actual location: about:blank"):
+            browser._verify_checkout_account("Eksempelveien 1")
+
+        browser._invoke.assert_called_once_with(
+            "open", "https://oda.com/no/account/delivery/",
+        )
+        browser._settle.assert_not_called()
+        browser._eval.assert_not_called()
+
+    def test_checkout_cold_open_retry_is_enabled_only_for_initial_review(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser._checkout_operation = mock.Mock(return_value=nullcontext())
+        browser._review_checkout = mock.Mock(return_value={"review": True})
+
+        self.assertEqual(browser.review_checkout({}), {"review": True})
+        browser._review_checkout.assert_called_once_with({}, retry_cold_open=True)
+
+        browser._review_checkout.reset_mock(side_effect=True)
+        browser._review_checkout.side_effect = HouseholdError("cold browser mismatch")
+        with self.assertRaisesRegex(CheckoutPreconditionError, "cold browser mismatch"):
+            browser._submit_checkout({}, {})
+        browser._review_checkout.assert_called_once_with(
+            {}, retry_cold_open=False,
+        )
+
+    def test_browser_location_diagnostic_redacts_unknown_path_segments(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        target = "https://oda.com/no/account/delivery/"
+        browser._invoke = mock.Mock(return_value={
+            "url": "https://example.invalid/magic-link/SECRET-TOKEN?code=secret#private",
+        })
+
+        with self.assertRaises(HouseholdError) as raised:
+            browser._open(target)
+
+        message = str(raised.exception)
+        self.assertIn("https://example.invalid/:redacted/:redacted", message)
+        for secret in ("magic-link", "SECRET-TOKEN", "code", "secret", "private"):
+            self.assertNotIn(secret, message)
+
+    def test_browser_location_diagnostic_rejects_malformed_authority(self):
+        malformed = (
+            r"https://user:password@example.invalid\SECRET-TOKEN/no/login?token=query-secret#fragment-secret",
+            "https://example.invalid%2FSECRET-TOKEN/no/login?token=query-secret#fragment-secret",
+            "https://example.invalid%5CSECRET-TOKEN/no/login",
+            "https://example.invalid%40SECRET-TOKEN/no/login",
+            "https://example.invalid;SECRET-TOKEN/no/login",
+            "https://[fe80::1%SECRET-TOKEN]/no/login?token=query-secret#fragment-secret",
+            "https://[fe80::1%2FSECRET-TOKEN]/no/login",
+            "https://[fe80::1%25SECRET-TOKEN]/no/login",
+            "https://example.invalid\nSECRET-TOKEN/no/login?token=query-secret#fragment-secret",
+            "https://example.invalid\rSECRET-TOKEN/no/login",
+            "https://example.invalid\tSECRET-TOKEN/no/login",
+        )
+        for actual in malformed:
+            with self.subTest(actual=actual):
+                browser = OdaBrowser.__new__(OdaBrowser)
+                browser._invoke = mock.Mock(return_value={"url": actual})
+
+                with self.assertRaises(HouseholdError) as raised:
+                    browser._open("https://oda.com/no/account/delivery/")
+
+                message = str(raised.exception)
+                self.assertIn("actual location: missing-or-non-http", message)
+                for secret in (
+                    "user", "password", "example.invalid", "SECRET-TOKEN",
+                    "token", "query-secret", "fragment-secret",
+                ):
+                    self.assertNotIn(secret, message)
+
+    def test_browser_open_rejects_multiple_trailing_slashes(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        target = "https://oda.com/no/account/delivery/"
+        browser._invoke = mock.Mock(return_value={"url": target + "///"})
+
+        with self.assertRaisesRegex(HouseholdError, "browser left the requested page"):
+            browser._open(target)
+
+        browser._invoke.assert_called_once_with("open", target)
+
     def test_checkout_allows_the_entry_route_to_settle_after_cart_click(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         events = []
@@ -2619,7 +2793,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         browser = OdaBrowser.__new__(OdaBrowser)
         browser._checkout_deadline = None
         browser._invoke = lambda *_arguments, **_kwargs: {}
-        browser.review_checkout = lambda _cart: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
+        browser.review_checkout = lambda _cart, **_kwargs: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
         browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1, "delivery_address": "Eksempelveien 1"}
         browser._account_reference = lambda address: 123
         evaluations = []
@@ -2635,7 +2809,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         import hashlib
         browser = OdaBrowser.__new__(OdaBrowser)
         browser._checkout_dispatch_tab = lambda: None
-        browser.review_checkout = lambda _cart: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
+        browser.review_checkout = lambda _cart, **_kwargs: {"review": "same", "surface": {}, "account_reference_digest": hashlib.sha256(b"123").hexdigest()}
         browser._cart_expectation = lambda _cart: {"total_minor": 100, "product_count": 1, "delivery_address": "Eksempelveien 1"}
         browser._account_reference = lambda address: 123
         evaluations = []
@@ -2795,8 +2969,11 @@ process.stdout.write(eval(script));
         }
         calls = []
 
-        def rereview(_cart, *, payment=None, select_payment=False):
-            calls.append((payment, select_payment))
+        def rereview(
+            _cart, *, payment=None, select_payment=False,
+            retry_cold_open=False,
+        ):
+            calls.append((payment, select_payment, retry_cold_open))
             return review
 
         browser._review_checkout = rereview
@@ -2811,7 +2988,7 @@ process.stdout.write(eval(script));
         browser.vipps_phone_number = "90000000"
         browser._submit_checkout({}, review)
 
-        self.assertEqual(calls, [(payment, True)])
+        self.assertEqual(calls, [(payment, True, False)])
         browser._click_checkout_submit.assert_called_once()
 
     @unittest.skipUnless(shutil.which("node"), "Node executes Oda order DOM contract")
@@ -9035,6 +9212,27 @@ class FlowTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "payment preference changed"):
             self.app.handle({"operation": "checkout", "action": "prepare"})
         self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_browser_failure_before_review_preserves_cart_and_journals(self):
+        before = self.store.read()
+        cart_before = deepcopy(self.oda.cart)
+        self.browser.review_checkout = mock.Mock(side_effect=HouseholdError(
+            "Oda browser left the requested page (actual location: about:blank)"
+        ))
+
+        with self.assertRaisesRegex(HouseholdError, "actual location: about:blank"):
+            self.app.handle({"operation": "checkout", "action": "prepare"})
+
+        after = self.store.read()
+        for field in (
+            "pending_checkout", "pending_cancellation", "order_change",
+            "pending_cart_change",
+        ):
+            self.assertIsNone(after.get(field))
+        self.assertEqual(after.get("cart_plan"), before.get("cart_plan"))
+        self.assertEqual(self.oda.cart, cart_before)
         self.assertEqual(self.browser.checkout_clicks, 0)
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
