@@ -415,6 +415,37 @@ class RetailerPublicDetailTests(unittest.TestCase):
             changed["ingredients"][0]["_store_product_hint"],
             normalized["ingredients"][0]["_store_product_hint"],
         )
+        import tempfile
+        from core import StateStore
+        from service import Application
+        with tempfile.TemporaryDirectory() as temp:
+            class Provider:
+                def probe(self):
+                    return {"protocol_version": "fixture", "server": {"name": "fixture"}, "tool_count": 1}
+            store = StateStore(Path(temp), {
+                "instance": "retailer-update", "household": "Synthetic", "provider": "oda",
+            })
+            app = Application(store, Provider(), None)
+            with store.locked() as state:
+                state["setup"]["status"] = "complete"
+            snapshot = app.recipes.persist_discovery(
+                normalized, trusted_store_product_hints=True,
+            )
+            saved = app.recipes.save_discovery(
+                snapshot["discovery_ref"], status="active",
+                idempotency_key="save-verified-oda",
+            )
+            update = deepcopy(saved)
+            update["notes"] = "Updated household note"
+            updated = app.handle({
+                "operation": "recipes", "action": "update",
+                "recipe_id": saved["id"], "expected_revision": saved["revision"],
+                "recipe": update, "idempotency_key": "update-verified-oda",
+            })["recipe"]
+            self.assertEqual(
+                updated["ingredients"][0]["_store_product_hint"],
+                normalized["ingredients"][0]["_store_product_hint"],
+            )
         tampered = deepcopy(normalized)
         tampered["ingredients"][0]["_store_product_hint"]["product_ref"] += 1
         with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
@@ -446,6 +477,17 @@ class RetailerPublicDetailTests(unittest.TestCase):
             [row["_store_product_hint"]["product_ref"] for row in prepared["ingredients"]],
             [8420, 8416],
         )
+        duplicated = deepcopy(normalized)
+        duplicated["ingredients"].append(deepcopy(duplicated["ingredients"][0]))
+        with self.assertRaisesRegex(HouseholdError, "exact prior retailer evidence"):
+            prepare_recipe_input(duplicated, prior=normalized)
+        for ingredient in duplicated["ingredients"]:
+            ingredient.pop("_store_product_hint")
+        prepared = prepare_recipe_input(duplicated, prior=normalized)
+        self.assertTrue(all(
+            "_store_product_hint" not in ingredient
+            for ingredient in prepared["ingredients"]
+        ))
 
         ambiguous = self.fetched(
             source,

@@ -1063,18 +1063,30 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
         previous = prior.get("ingredients")
         if isinstance(incoming, list) and isinstance(previous, list):
             previous_by_item: dict[str, list[Mapping[str, Any]]] = {}
+            incoming_item_counts: dict[str, int] = {}
             for previous_ingredient in previous:
                 if not isinstance(previous_ingredient, Mapping):
                     continue
                 previous_by_item.setdefault(
                     _normalized_text(previous_ingredient.get("item")), [],
                 ).append(previous_ingredient)
+            for incoming_ingredient in incoming:
+                if not isinstance(incoming_ingredient, Mapping):
+                    continue
+                incoming_item = incoming_ingredient.get("item") or incoming_ingredient.get("name")
+                normalized_item = _normalized_text(incoming_item)
+                incoming_item_counts[normalized_item] = incoming_item_counts.get(normalized_item, 0) + 1
             for index, ingredient in enumerate(incoming):
                 if not isinstance(ingredient, Mapping) or "_store_product_hint" not in ingredient:
                     continue
                 incoming_item = ingredient.get("item") or ingredient.get("name")
-                prior_matches = previous_by_item.get(_normalized_text(incoming_item), [])
-                prior_ingredient = prior_matches[0] if len(prior_matches) == 1 else None
+                normalized_item = _normalized_text(incoming_item)
+                prior_matches = previous_by_item.get(normalized_item, [])
+                prior_ingredient = (
+                    prior_matches[0]
+                    if len(prior_matches) == 1 and incoming_item_counts.get(normalized_item) == 1
+                    else None
+                )
                 prior_hint = (
                     prior_ingredient.get("_store_product_hint")
                     if isinstance(prior_ingredient, Mapping) else None
@@ -1094,11 +1106,14 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
             prior_by_item.setdefault(
                 _normalized_text(prior_ingredient.get("item")), [],
             ).append(prior_ingredient)
+        recipe_item_counts: dict[str, int] = {}
         for ingredient in recipe.get("ingredients", []):
-            prior_matches = prior_by_item.get(
-                _normalized_text(ingredient.get("item")), [],
-            )
-            if len(prior_matches) != 1:
+            normalized_item = _normalized_text(ingredient.get("item"))
+            recipe_item_counts[normalized_item] = recipe_item_counts.get(normalized_item, 0) + 1
+        for ingredient in recipe.get("ingredients", []):
+            normalized_item = _normalized_text(ingredient.get("item"))
+            prior_matches = prior_by_item.get(normalized_item, [])
+            if len(prior_matches) != 1 or recipe_item_counts.get(normalized_item) != 1:
                 continue
             prior_ingredient = prior_matches[0]
             hint = prior_ingredient.get("_store_product_hint")

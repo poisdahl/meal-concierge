@@ -3673,7 +3673,10 @@ class RecipeOperations:
             prior = self.recipes.get(recipe_id, expected)
             value = self.recipes.prepare_input(request.get("recipe"), prior=prior)
             key = request.get("idempotency_key")
-            return {"recipe": self.recipes.update(recipe_id, expected, value, status=request.get("status"), idempotency_key=key)}
+            return {"recipe": self.recipes.update(
+                recipe_id, expected, value, status=request.get("status"),
+                idempotency_key=key, trusted_store_product_hints=True,
+            )}
         if action == "archive":
             if request.get("library_id") not in {None, "builtin"}:
                 raise RecipeLibraryError("external recipe lifecycle is not implemented")
