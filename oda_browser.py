@@ -887,6 +887,7 @@ def _oda_vipps_gateway_script(
     expected_phone: str,
     *,
     expected_url: str,
+    allow_source_bound_amountless: bool = False,
     allow_post_dispatch_ack: bool = False,
     require_hit: bool = False,
     hit_x: float = 0,
@@ -909,6 +910,11 @@ def _oda_vipps_gateway_script(
  const amounts=[...text.matchAll(/(?:\bNOK\s*(\d+(?:[ .]\d{3})*)[,.](\d{2})\b|\b(\d+(?:[ .]\d{3})*)[,.](\d{2})\s*(?:kr|NOK)\b)/gi)].map(m=>Number((m[1]||m[3]).replace(/[ .]/g,''))*100+Number(m[2]||m[4]));
  const merchant=/(?:^|\s)Oda(?:\s|$)/i.test(text);
  const amountBound=amounts.length>0&&amounts.every(value=>value===EXPECTED_TOTAL);
+ const query=[...current.searchParams.entries()];
+ const exactAmountlessDestination=current.origin==='https://pay.vipps.no'&&current.pathname==='/'&&!current.hash&&query.length===1&&query[0][0]==='token'&&query[0][1].length>0;
+ const currencyEvidence=/\bNOK\b/i.test(text);
+ const currencyCodes=[...text.matchAll(/\b[A-Z]{3}\b/g)].map(match=>match[0]);
+ const displayedMoney=/\p{N}/u.test(text)||currencyCodes.some(code=>code!=='NOK')||/\p{Sc}/u.test(text)||/\b(?:NOK|kr)\s*[,.:;]?\s*[−—–-]/i.test(text);
  const receipts=[...text.matchAll(/We've sent a payment request to\s+([+\d][\d ()-]*)(?=\s|$)/gi)];
  const receiptPhone=receipts.length===1?receipts[0][1].replace(/\D/g,''):'';
  const receiptPhoneMatches=receiptPhone===EXPECTED_PHONE||receiptPhone==='47'+EXPECTED_PHONE;
@@ -929,7 +935,9 @@ def _oda_vipps_gateway_script(
    const candidateButtons=[...candidate.querySelectorAll(buttonSelector)].filter(visible);
    if(candidatePhones.length===1&&candidatePhones[0]===phones[0]&&candidateButtons.length===1){paymentRoot=candidate;buttons=candidateButtons;break;}
  }
- const fillable=identity&&!sent&&!expired&&merchant&&amountBound&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1;
+ const sourceBoundControls=phones.length===1&&enabled(phones[0])&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1&&enabled(buttons[0])&&norm(buttons[0].innerText||buttons[0].value||buttons[0].getAttribute('aria-label')||'')==='Next'&&Object.keys(buttons[0]).some(key=>key.startsWith('__reactProps'));
+ const amountlessBound=ALLOW_SOURCE_BOUND_AMOUNTLESS&&exactAmountlessDestination&&currencyEvidence&&!displayedMoney&&amounts.length===0&&sourceBoundControls;
+ const fillable=identity&&!sent&&!expired&&merchant&&(amountBound||amountlessBound)&&root.querySelectorAll('input[type="password"]').length===0&&phones.length===1&&!phones[0].disabled&&!phones[0].readOnly&&Boolean(paymentRoot)&&buttons.length===1;
  const phoneMatches=fillable&&(national===EXPECTED_PHONE||national==='47'+EXPECTED_PHONE);
  const exact=fillable&&phoneMatches;
  if(fillable)phones[0].setAttribute('data-oda-household-vipps-phone','');
@@ -942,7 +950,7 @@ def _oda_vipps_gateway_script(
 })()
 """.replace("EXPECTED_TOTAL", str(expected_total)).replace("EXPECTED_PHONE", json.dumps(expected_phone)).replace(
         "EXPECTED_URL", json.dumps(expected_url),
-    ).replace("ALLOW_POST_DISPATCH_ACK", "true" if allow_post_dispatch_ack else "false").replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
+    ).replace("ALLOW_SOURCE_BOUND_AMOUNTLESS", "true" if allow_source_bound_amountless else "false").replace("ALLOW_POST_DISPATCH_ACK", "true" if allow_post_dispatch_ack else "false").replace("REQUIRE_HIT", "true" if require_hit else "false").replace("HIT_X", json.dumps(hit_x)).replace("HIT_Y", json.dumps(hit_y))
 
 
 def _oda_vipps_phone_fill_script(phone_number: str, expected_url: str) -> str:
@@ -2167,7 +2175,20 @@ class OdaBrowser:
         if not isinstance(source_url, str):
             raise HouseholdError("The Oda/Vipps payment has no reviewed source page; do not send payment")
         source_url = _oda_https_gateway_url(source_url)
+        source = urlsplit(source_url)
+        store = urlsplit(STORE_URL)
+        source_params = parse_qs(source.query, keep_blank_values=True)
+        allow_source_bound_amountless = bool(
+            expected_order_id is not None
+            and source.scheme == store.scheme
+            and source.netloc == store.netloc
+            and source.path == store.path + "checkout/retry/"
+            and not source.fragment
+            and set(source_params) == {"orderNumber"}
+            and source_params["orderNumber"] == [expected_order_id]
+        )
         gateway_url = None
+        followed_source = False
         started_at = time.monotonic()
         checkout_deadline = getattr(self, "_checkout_deadline", None)
         gateway_deadline = (
@@ -2186,12 +2207,13 @@ class OdaBrowser:
                 if self._checkout_dispatch_tab() != dispatch_tab:
                     raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
                 try:
-                    current_url = _oda_https_gateway_url(
-                        str(self._invoke("get", "url").get("url") or "")
-                    )
+                    observed_url = str(self._invoke("get", "url").get("url") or "")
+                    followed_source = followed_source or observed_url != source_url
+                    current_url = _oda_https_gateway_url(observed_url)
                     if current_url != source_url:
                         candidate = self._eval(_oda_vipps_gateway_script(
                             expected_total, self.vipps_phone_number, expected_url=current_url,
+                            allow_source_bound_amountless=allow_source_bound_amountless,
                         ))
                         if (candidate.get("identity") is True
                                 and (candidate.get("fillable") is True
@@ -2209,8 +2231,10 @@ class OdaBrowser:
         if gateway_url is None:
             addition = bool(expected_order_id and source_url == f"{CHECKOUT_URL}?orderNumber={expected_order_id}")
             raise HouseholdError(
-                "The Oda/Vipps payment page did not follow the reviewed Oda click; do not send payment. "
-                "No guarded Vipps phone-request click was made. Reconcile the existing order; "
+                ("The reviewed Oda payment page did not navigate to Vipps; do not send payment. "
+                 if not followed_source else
+                 "The reviewed Oda payment page navigated, but the Vipps gateway was not recognized; do not send payment. ")
+                + "No guarded Vipps phone-request click was made. Reconcile the existing order; "
                 + ("retain this addition attempt; automated payment recovery is not yet available for this addition. "
                    "The original paid order alone does not confirm the added goods. " if addition else
                    "if the owner received no request, review recovery for that same order with the requested payment method. ")
@@ -2224,6 +2248,7 @@ class OdaBrowser:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             observed = self._eval(_oda_vipps_gateway_script(
                 expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                allow_source_bound_amountless=allow_source_bound_amountless,
             ))
             if observed.get("sent") is True:
                 raise HouseholdError("The Oda/Vipps request was already sent before its bound control was verified; reconcile the same order")
@@ -2252,6 +2277,7 @@ class OdaBrowser:
         if (self._checkout_dispatch_tab() != dispatch_tab
                 or self._eval(_oda_vipps_gateway_script(
                     expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    allow_source_bound_amountless=allow_source_bound_amountless,
                     require_hit=True, hit_x=x, hit_y=y,
                 )) != {"identity": True, "ready": True, "sent": False, "expired": False,
                        "fillable": True, "phone_matches": True}):
@@ -2269,6 +2295,7 @@ class OdaBrowser:
         if (self._checkout_dispatch_tab() != dispatch_tab or current_gateway_url != gateway_url
                 or self._eval(_oda_vipps_gateway_script(
                     expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    allow_source_bound_amountless=allow_source_bound_amountless,
                     require_hit=True, hit_x=x, hit_y=y,
                 )) != {"identity": True, "ready": True, "sent": False, "expired": False,
                        "fillable": True, "phone_matches": True}):
