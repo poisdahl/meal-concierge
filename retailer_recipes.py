@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+from html.parser import HTMLParser
 import json
 import re
 from typing import Any, Mapping
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from core import HouseholdError
 
@@ -20,6 +21,167 @@ MENY_RECIPE_CAPABILITIES = {
     "product_associations": "unsupported",
     "native_cart": "unsupported",
 }
+
+
+class _ScriptText(HTMLParser):
+    """Collect inert script text from one already bounded public page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._current: list[str] | None = None
+        self.scripts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":
+            self._current = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._current is not None:
+            self.scripts.append("".join(self._current))
+            self._current = None
+
+
+def _fetch_retail_webpage(url: str) -> tuple[dict[str, Any], bytes]:
+    """Fetch once so culinary JSON-LD and Oda's direct associations share evidence."""
+    from recipe_import_readers import MAX_WEBPAGE_BYTES, read_webpage
+    from recipe_import_sources import _get_bytes, _source_result, RecipeImportSourceError
+
+    raw, content_type = _get_bytes(
+        url, maximum=MAX_WEBPAGE_BYTES, accept="text/html, application/xhtml+xml"
+    )
+    if content_type not in {"text/html", "application/xhtml+xml"}:
+        raise RecipeImportSourceError("public recipe source must return HTML")
+    result = read_webpage(raw, source_url=url)
+    result["recipes"] = [
+        _source_result(record, {"kind": "web", "url": url})
+        for record in result["recipes"]
+    ]
+    result["fetch_method"] = "direct"
+    return result, raw
+
+
+def _oda_product_hints(raw: bytes) -> list[dict[str, Any]]:
+    """Read only directly linked ingredient/product facts from Oda's page state.
+
+    These are source hints, not product observations: no price, package,
+    availability or quantity claim crosses this boundary.
+    """
+    try:
+        page = raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise HouseholdError("Oda recipe page encoding changed") from exc
+    parser = _ScriptText()
+    try:
+        parser.feed(page)
+    except (ValueError, RecursionError) as exc:
+        raise HouseholdError("Oda recipe page state changed") from exc
+    decoder = json.JSONDecoder()
+    association_rows: list[Any] | None = None
+    prefix = "self.__next_f.push("
+    marker = '"ingredients":'
+    for script in parser.scripts:
+        if not script.startswith(prefix) or not script.endswith(")"):
+            continue
+        try:
+            frame = json.loads(script[len(prefix):-1])
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(frame, list) or len(frame) != 2 or not isinstance(frame[1], str):
+            continue
+        state = frame[1]
+        position = 0
+        while True:
+            position = state.find(marker, position)
+            if position < 0:
+                break
+            start = position + len(marker)
+            try:
+                rows, end = decoder.raw_decode(state, start)
+            except (ValueError, RecursionError):
+                position = start
+                continue
+            position = end
+            if not isinstance(rows, list) or not rows:
+                continue
+            if not any(isinstance(row, Mapping) and "product" in row and "ingredient" in row for row in rows):
+                continue
+            if association_rows is not None:
+                raise HouseholdError("Oda recipe product associations are ambiguous")
+            association_rows = rows
+    if association_rows is None:
+        return []
+
+    def association_text(value: Any) -> str:
+        if not isinstance(value, str):
+            raise HouseholdError("Oda recipe product association changed")
+        text = " ".join(value.split())
+        if not text or len(text.encode("utf-8")) > 300 or "\x00" in text:
+            raise HouseholdError("Oda recipe product association changed")
+        return text
+
+    hints = []
+    seen_ingredients: set[int] = set()
+    for row in association_rows:
+        if not isinstance(row, Mapping):
+            raise HouseholdError("Oda recipe product association changed")
+        ingredient, product = row.get("ingredient"), row.get("product")
+        if not isinstance(ingredient, Mapping) or not isinstance(product, Mapping):
+            raise HouseholdError("Oda recipe product association changed")
+        ingredient_id, product_id = ingredient.get("id"), product.get("id")
+        title = association_text(ingredient.get("title"))
+        name = association_text(product.get("fullName"))
+        url = product.get("frontUrl")
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if (
+            type(ingredient_id) is not int or ingredient_id <= 0 or ingredient_id in seen_ingredients
+            or type(product_id) is not int or product_id <= 0
+            or parsed is None or parsed.scheme != "https"
+            or parsed.hostname not in {"oda.com", "www.oda.com"}
+            or parsed.netloc != parsed.hostname or parsed.query or parsed.fragment
+            or re.fullmatch(rf"/no/products/{product_id}-[A-Za-z0-9._~-]+/", parsed.path) is None
+        ):
+            raise HouseholdError("Oda recipe product association changed")
+        seen_ingredients.add(ingredient_id)
+        hints.append({
+            "ingredient_id": ingredient_id,
+            "ingredient": title,
+            "provider": "oda",
+            "product_ref": product_id,
+            "name": name,
+            "url": url,
+            "relationship": "source_recipe_association",
+        })
+    return hints
+
+
+def _attach_oda_product_hints(candidate: dict[str, Any], hints: list[dict[str, Any]]) -> None:
+    """Attach only unambiguous title-linked hints to their source ingredient row."""
+    def normalized(value: Any) -> str:
+        return " ".join(re.sub(r"\s*,\s*", " ", str(value or "").casefold()).split())
+
+    ingredients = [
+        ingredient for ingredient in candidate.get("ingredients", [])
+        if isinstance(ingredient, dict)
+    ]
+    assigned: set[int] = set()
+    for hint in hints:
+        title = normalized(hint["ingredient"])
+        rows = [
+            ingredient for ingredient in ingredients
+            if normalized(ingredient.get("item")) == title
+            or normalized(ingredient.get("original_text")).endswith(" " + title)
+        ]
+        if len(rows) != 1 or id(rows[0]) in assigned:
+            continue
+        rows[0]["_store_product_hint"] = {
+            key: hint[key]
+            for key in ("provider", "product_ref", "name", "url", "relationship")
+        }
+        assigned.add(id(rows[0]))
 
 
 def meny_recipe_path(value: Any) -> str:
@@ -171,7 +333,7 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
     from html import unescape
     from urllib.parse import urlsplit
     from recipes import source_ingredient
-    from recipe_import_sources import fetch_public_webpage, TIMEOUT
+    from recipe_import_sources import TIMEOUT
     import time
     from recipe_quantities import quantity_json, read_quantity
 
@@ -187,7 +349,7 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
         raise HouseholdError("retailer recipe URL must match its exact provider and numeric search identity")
     if deadline is not None and time.monotonic() + TIMEOUT > deadline:
         raise HouseholdError("retailer recipe detail search time budget is exhausted")
-    page = fetch_public_webpage(url)
+    page, raw_page = _fetch_retail_webpage(url)
     rows = page.get("recipes") if isinstance(page, dict) else None
     if not isinstance(page, dict) or page.get("requires_interpretation") or not isinstance(rows, list) or len(rows) != 1:
         raise HouseholdError("retailer recipe page must contain one complete structured recipe")
@@ -221,6 +383,8 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
                     raw, item=found[3], measure=found[1] + " " + aliases[found[2]],
                     language="sv-SE",
                 )
+    elif provider == "oda":
+        _attach_oda_product_hints(candidate, _oda_product_hints(raw_page))
     candidate["source"].update(kind=provider, publisher=provider.upper(),
         title=candidate["name"], external_id=source["external_id"], relationship="original")
     candidate["source_provider"] = provider
@@ -228,5 +392,5 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
     candidate["external_snapshot"] = {"fetched_at": datetime.now(timezone.utc).isoformat(),
         "content_hash": hashlib.sha256(json.dumps(candidate, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
         "source_revision_id": None, "permanent_url": None,
-        "changes": "Public structured recipe page; verified base portions and metric source measures, without native cart expansion."}
+        "changes": "Public structured recipe page; verified base portions and metric source measures. Oda ingredient-linked products, when present, are advisory source hints only; no native cart expansion."}
     return candidate
