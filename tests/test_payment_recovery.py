@@ -3654,15 +3654,25 @@ class RetryAmountTests(unittest.TestCase):
                     button="Betal med 100,00 kr",
                 )["clicks"], [])
 
+        persisted_itemized = json.loads(json.dumps(
+            observed["itemized_discount_rows"], sort_keys=True,
+        ))
+        self.assertEqual(list(persisted_itemized[0]), ["amount", "label"])
         full_click = _oda_checkout_amount_script(
             239447,
             expected_product_count=55,
             retry=True,
             vipps=True,
             expected_amounts=observed["amounts"],
-            expected_itemized_discounts=observed["itemized_discount_rows"],
+            expected_itemized_discounts=persisted_itemized,
             expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
         )
+        self.assertEqual(execute(
+            full_click,
+            rows,
+            url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            button="Betal med 2 394,47 kr",
+        )["clicks"], ["PAY"])
         suffix_changed = deepcopy(rows)
         for index in range(1, 5):
             prefix = suffix_changed[index][0].split(":", 1)[0]

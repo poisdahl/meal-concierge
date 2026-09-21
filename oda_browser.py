@@ -386,11 +386,11 @@ def _oda_checkout_amount_script(
  const urlMatches=location.href===EXPECTED_URL;
  const controlMatches=labels.length===1;
  const amountMatches=JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts));
- const itemizedMatches=expectedItemizedDiscounts===null||JSON.stringify(itemizedDiscountBindings)===JSON.stringify(expectedItemizedDiscounts);
+ const itemizedMatches=expectedItemizedDiscounts===null||JSON.stringify(canonical(itemizedDiscountBindings))===JSON.stringify(canonical(expectedItemizedDiscounts));
  const ready=urlMatches&&controlMatches&&amountsValid&&amountMatches&&itemizedMatches;
  if(!ready){
    const expectedRows=expectedItemizedDiscounts||[],rowCount=Math.max(expectedRows.length,itemizedDiscountBindings.length),mismatchIndexes=[];
-   for(let index=0;index<rowCount;index++)if(JSON.stringify(itemizedDiscountBindings[index])!==JSON.stringify(expectedRows[index]))mismatchIndexes.push(index);
+   for(let index=0;index<rowCount;index++)if(JSON.stringify(canonical(itemizedDiscountBindings[index]))!==JSON.stringify(canonical(expectedRows[index])))mismatchIndexes.push(index);
    const prefix=row=>{const match=typeof row?.label==='string'?row.label.match(/^([1-9]\d{0,5})kr:/i):null;return match?Number(match[1]):null};
    const mismatch=index=>{const expected=expectedRows[index],actual=itemizedDiscountBindings[index],expectedPrefix=prefix(expected),actualPrefix=prefix(actual),expectedAmount=Number.isSafeInteger(expected?.amount)?expected.amount:null,actualAmount=Number.isSafeInteger(actual?.amount)?actual.amount:null,present=expected!==undefined&&actual!==undefined,kind=!present?'row_presence':expectedPrefix===actualPrefix&&expectedAmount===actualAmount?'suffix_identity':expectedPrefix===actualPrefix?'amount':expectedAmount===actualAmount?'promo_prefix':'prefix_and_amount';return {index,mismatch_kind:kind,expected_prefix:expectedPrefix,actual_prefix:actualPrefix,expected_amount:expectedAmount,actual_amount:actualAmount}};
    return JSON.stringify({clicked:false,diagnostic:{stage:'amount',url_matches:urlMatches,control_matches:controlMatches,amount_matches:amountMatches,arithmetic_matches:amountsValid,itemized_matches:itemizedMatches,itemized_mismatch_count:mismatchIndexes.length,itemized_mismatches:mismatchIndexes.slice(0,8).map(mismatch)}});
