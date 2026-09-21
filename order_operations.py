@@ -13,7 +13,10 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo
-from oda_browser import require_order_binding, OdaCheckoutMismatchError, delivery_signature as oda_delivery_signature, _oda_checkout_amounts_minor
+from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError,
+                         _oda_checkout_amounts_minor,
+                         delivery_signature as oda_delivery_signature,
+                         require_order_binding)
 from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
@@ -3096,16 +3099,17 @@ class OrderOperations:
         if authentication:
             return authentication
         order_id = self._checkout_recovery_target(pending, deadline, requested_order_id)
+        stored_pending = deepcopy(pending)
+        defer_order_binding = False
         if (self.provider == "oda"
                 and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                 and not pending.get("order_change")
                 and pending.get("unpaid_order_binding_source") not in ODA_VIPPS_ORDER_BINDING_SOURCES):
-            with self.store.locked() as state:
-                if canonical(state.get("pending_checkout")) != canonical(pending):
-                    raise HouseholdError("The pending checkout changed while binding its exact Oda order")
-                state["pending_checkout"]["unpaid_order_id"] = order_id
-                state["pending_checkout"]["unpaid_order_binding_source"] = "oda_retry_available_page"
-                pending = deepcopy(state["pending_checkout"])
+            # The supplied order has been independently resolved, but do not
+            # persist its binding until the complete read-only review passes.
+            pending["unpaid_order_id"] = order_id
+            pending["unpaid_order_binding_source"] = "oda_retry_available_page"
+            defer_order_binding = True
         binding = require_order_binding(pending["order_change"]["binding"] if pending.get("order_change") else {
             "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
             "receipt_address": pending["summary"]["delivery"]["address"],
@@ -3117,6 +3121,9 @@ class OrderOperations:
         review = self.browser.review_payment_recovery(pending["cart"], order_id,
             payment=payment, expected_binding=binding, deadline=deadline,
             **self._recovery_browser_options(pending))
+        if (review.get("order_id") != order_id
+                or canonical(review.get("binding")) != canonical(binding)):
+            raise HouseholdError("Recovery review differs from the exact order binding")
         if checkout_payment is None and not switch and review["payment_display"] != pending["browser_review"]["payment_display"]:
             raise HouseholdError("Recovery payment differs from the original reviewed method")
         expected_amounts = _oda_checkout_amounts_minor(pending["browser_review"]["amounts"], provider=self.provider)
@@ -3143,10 +3150,26 @@ class OrderOperations:
             # The retry overview total is not the calculated payable shown by
             # the final button. Freeze it separately without inventing a fee.
             expected_amounts.pop("provider_total")
-        observed_amounts = {key: review["amounts_minor"].get(key) for key in expected_amounts}
-        if self.provider == "oda" and pending.get("order_change"):
-            # Oda can omit a free fee in the original addition and show it as
-            # zero on retry. Keep the actual review intact for final dispatch.
+        review_amounts = review.get("amounts_minor")
+        if self.provider == "oda":
+            if (not isinstance(review_amounts, Mapping)
+                    or set(review_amounts) != set(ODA_CHECKOUT_AMOUNT_KEYS)):
+                raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+            for key, value in review_amounts.items():
+                if key == "other_fees" and value is not None:
+                    if (not isinstance(value, Mapping) or len(value) != 1
+                            or any(not isinstance(label, str) or type(amount) is not int
+                                   for label, amount in value.items())):
+                        raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+                elif value is not None and type(value) is not int:
+                    raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+        if not isinstance(review_amounts, Mapping):
+            raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+        observed_amounts = {key: review_amounts.get(key) for key in expected_amounts}
+        if self.provider == "oda":
+            # Oda can omit a free fee in the original review and show it as
+            # zero on retry, or the inverse. Keep the actual review intact for
+            # final dispatch.
             for key in ("delivery_price", "deposits", "bags"):
                 values = (expected_amounts.get(key), observed_amounts.get(key))
                 if any(value is not None and type(value) is not int for value in values):
@@ -3206,7 +3229,7 @@ class OrderOperations:
             child["owner_reported_no_vipps_request"] = True
             child["original_confirmation_id"] = pending["confirmation_id"]
         with self.store.locked() as state:
-            if canonical(state.get("pending_checkout")) != canonical(pending):
+            if canonical(state.get("pending_checkout")) != canonical(stored_pending):
                 raise HouseholdError("The pending checkout changed during recovery preparation")
             previous_switch = (previous or {}).get("payment_switch") or {}
             switched_previous = bool(previous and previous_switch.get("source_confirmation_id") == previous.get("confirmation_id")
@@ -3222,6 +3245,9 @@ class OrderOperations:
                     "next": "This payment is closed and was superseded by a fresh recovery review. Use the current confirmation; never resend this payment.",
                 }, target_id=previous["order_id"])
                 state["protected_results"][previous["confirmation_id"]]["failed_attempt"] = deepcopy(previous)
+            if defer_order_binding:
+                state["pending_checkout"]["unpaid_order_id"] = order_id
+                state["pending_checkout"]["unpaid_order_binding_source"] = "oda_retry_available_page"
             state["pending_checkout"]["recovery"] = child
         return self._recovery_prepared_view({**pending, "recovery": child})
 

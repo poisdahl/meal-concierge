@@ -1804,6 +1804,152 @@ class RecoveryTests(unittest.TestCase):
                 self.prepare()
         self.assertEqual(self.browser.clicks, 0)
 
+    def test_oda_new_order_recovery_normalizes_only_omitted_zero_fees(self):
+        from unittest import mock
+
+        self.browser.submit_payment_recovery = mock.Mock(
+            side_effect=AssertionError("prepare must not submit recovery"),
+        )
+        original_amounts = {
+            "product_subtotal": 2457.30,
+            "delivery_price": 0.0,
+            "discounts": -93.0,
+            "deposits": None,
+            "bags": 30.17,
+            "other_fees": None,
+            "provider_total": 2394.47,
+        }
+        retry_amounts = _oda_checkout_amounts_minor(original_amounts)
+
+        def seed(delivery_price):
+            pending = deepcopy(self.original)
+            pending["cart"]["totalGrossAmount"] = 2394.47
+            pending["summary"] = {
+                **cart_summary(pending["cart"]),
+                "payment_method": "vipps",
+            }
+            pending["summary"]["delivery"]["slot"] = {
+                "slot_ref": "oda:2026-09-12:70",
+                "provider_slot_id": 70,
+                "start_at": "2026-09-12T05:00:00Z",
+                "end_at": "2026-09-12T11:00:00Z",
+                "price_kind": "exact",
+                "price_ore": 0,
+                "selected": True,
+            }
+            pending["browser_review"]["amounts"] = {
+                **original_amounts,
+                "delivery_price": delivery_price,
+            }
+            with self.app.store.locked() as state:
+                state["pending_checkout"] = pending
+            self.merchant.order["grossAmount"] = 2394.47
+            self.merchant.calls.clear()
+            return pending
+
+        for original_delivery, retry_delivery in ((0.0, None), (None, 0)):
+            with self.subTest(original=original_delivery, retry=retry_delivery):
+                pending = seed(original_delivery)
+                self.browser.review_change = lambda review, value=retry_delivery: review[
+                    "amounts_minor"
+                ].update({**retry_amounts, "delivery_price": value})
+                prepared = self.prepare()
+                self.assertEqual(prepared["summary"]["total"], 2394.47)
+                retained = self.app.store.read()["pending_checkout"]
+                review = retained["recovery"]["browser_review"]["amounts_minor"]
+                self.assertEqual(review, {
+                    **retry_amounts,
+                    "delivery_price": retry_delivery,
+                })
+                self.assertEqual(
+                    {key: value for key, value in retained.items() if key != "recovery"},
+                    pending,
+                )
+                self.assertEqual(retained["recovery"]["status"], "awaiting_confirmation")
+                self.assertNotIn("payment_requested_at", retained["recovery"])
+                self.assertEqual(self.browser.clicks, 0)
+                self.browser.submit_payment_recovery.assert_not_called()
+
+        for changed in (
+            {"delivery_price": 1},
+            {"delivery_price": True},
+            {"delivery_price": 0.0},
+            {"delivery_price": "0"},
+            {"deposits": 1},
+            {"bags": 3018},
+            {"discounts": -9299},
+            {"other_fees": {"Ukjent": 0}},
+            {"provider_total": 239448},
+            {"product_subtotal": 245730.0},
+            {"discounts": False},
+            {"provider_total": 239447.0},
+        ):
+            with self.subTest(changed=changed):
+                pending = seed(0.0)
+                self.browser.review_change = lambda review, value=changed: review[
+                    "amounts_minor"
+                ].update({**retry_amounts, "delivery_price": None, **value})
+                with self.assertRaisesRegex(HouseholdError, "Recovery fees differ"):
+                    self.prepare()
+                self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+                self.assertEqual(self.browser.clicks, 0)
+                self.browser.submit_payment_recovery.assert_not_called()
+
+        for malformed in ("missing", "extra", "nested_float"):
+            with self.subTest(malformed=malformed):
+                pending = seed(0.0)
+                def change(review, kind=malformed):
+                    review["amounts_minor"].update({**retry_amounts, "delivery_price": None})
+                    if kind == "missing":
+                        review["amounts_minor"].pop("deposits")
+                    elif kind == "extra":
+                        review["amounts_minor"]["unexpected"] = 0
+                    else:
+                        review["amounts_minor"]["other_fees"] = {
+                            "Tillegg for mindre bestilling": 0.0,
+                        }
+                self.browser.review_change = change
+                with self.assertRaisesRegex(HouseholdError, "Recovery fees differ"):
+                    self.prepare()
+                self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+                self.assertEqual(self.browser.clicks, 0)
+                self.browser.submit_payment_recovery.assert_not_called()
+
+        for changed in ("order", "binding"):
+            with self.subTest(changed_review_identity=changed):
+                pending = seed(0.0)
+                def change(review, field=changed):
+                    review["amounts_minor"].update({**retry_amounts, "delivery_price": None})
+                    if field == "order":
+                        review["order_id"] = "order-2"
+                    else:
+                        review["binding"] = {
+                            **review["binding"],
+                            "account_reference_digest": "b" * 64,
+                        }
+                self.browser.review_change = change
+                with self.assertRaisesRegex(HouseholdError, "exact order binding"):
+                    self.prepare()
+                self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+                self.assertEqual(self.browser.clicks, 0)
+                self.browser.submit_payment_recovery.assert_not_called()
+
+        pending = seed(0.0)
+        pending.pop("vipps_request_status")
+        pending.pop("unpaid_order_id")
+        pending.pop("unpaid_order_binding_source")
+        with self.app.store.locked() as state:
+            state["pending_checkout"] = deepcopy(pending)
+        self.browser.payment_state = "retry_available"
+        self.browser.review_change = lambda review: review["amounts_minor"].update(
+            {**retry_amounts, "delivery_price": None, "bags": 3018},
+        )
+        with self.assertRaisesRegex(HouseholdError, "Recovery fees differ"):
+            self.call("prepare", recovery=True, order_id="order-1")
+        self.assertEqual(self.app.store.read()["pending_checkout"], pending)
+        self.assertEqual(self.browser.clicks, 0)
+        self.browser.submit_payment_recovery.assert_not_called()
+
     def test_paid_race_before_click_preserves_original_without_payment(self):
         prepared = self.prepare()
         self.merchant.status = "paid_and_modifiable"
@@ -2918,6 +3064,12 @@ class RetryAmountTests(unittest.TestCase):
             "other_fees": None,
             "provider_total": 239447,
         })
+        self.assertEqual(observed["itemized_discount_rows"], [
+            {"label": "8kr: Produkt A", "amount": -810},
+            {"label": "20kr: Produkt B", "amount": -2050},
+            {"label": "26kr: Produkt C", "amount": -2680},
+            {"label": "37kr: Produkt D", "amount": -3760},
+        ])
 
         div_cell_harness = PAYMENT_DOM.replace(
             "parts.map(x=>new E('span',x))",
@@ -3004,6 +3156,7 @@ class RetryAmountTests(unittest.TestCase):
             retry=True,
             vipps=True,
             expected_amounts=expected_single["amounts"],
+            expected_itemized_discounts=expected_single["itemized_discount_rows"],
             expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
         )
         for malformed in ("-8,10kr", "kr -8,10", "ukjent", "8,10kr", ""):
@@ -3019,6 +3172,41 @@ class RetryAmountTests(unittest.TestCase):
                     url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
                     button="Betal med 100,00 kr",
                 )["clicks"], [])
+
+        full_click = _oda_checkout_amount_script(
+            239447,
+            expected_product_count=55,
+            retry=True,
+            vipps=True,
+            expected_amounts=observed["amounts"],
+            expected_itemized_discounts=observed["itemized_discount_rows"],
+            expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+        )
+        redistributed = deepcopy(rows)
+        redistributed[1][1] = "-8,11 kr"
+        redistributed[2][1] = "-20,49 kr"
+        redistributed_read = execute(read, redistributed)["result"]
+        self.assertTrue(redistributed_read["amounts_valid"])
+        self.assertEqual(redistributed_read["amounts"]["discounts"], -9300)
+        self.assertEqual(execute(
+            full_click,
+            redistributed,
+            url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            button="Betal med 2 394,47 kr",
+        )["clicks"], [])
+
+        reassigned = deepcopy(rows)
+        reassigned[1] = ["20kr: Produkt B", "-8,10 kr"]
+        reassigned[2] = ["8kr: Produkt A", "-20,50 kr"]
+        reassigned_read = execute(read, reassigned)["result"]
+        self.assertTrue(reassigned_read["amounts_valid"])
+        self.assertEqual(reassigned_read["amounts"]["discounts"], -9300)
+        self.assertEqual(execute(
+            full_click,
+            reassigned,
+            url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            button="Betal med 2 394,47 kr",
+        )["clicks"], [])
 
         too_many = [
             ["1 vare", "101,00 kr"],

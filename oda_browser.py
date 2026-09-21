@@ -234,6 +234,7 @@ def _oda_checkout_amount_script(
     *,
     expected_product_count: int,
     expected_amounts: Mapping[str, Any] | None = None,
+    expected_itemized_discounts: list[Mapping[str, Any]] | None = None,
     expected_url: str | None = None,
     provider: str = "oda",
     vipps: bool = False,
@@ -246,6 +247,16 @@ def _oda_checkout_amount_script(
     click_mode = expected_amounts is not None or expected_url is not None
     if click_mode and (expected_amounts is None or expected_url is None):
         raise HouseholdError("Oda final checkout amount binding is incomplete")
+    if (expected_itemized_discounts is not None
+            and (not isinstance(expected_itemized_discounts, list)
+                 or len(expected_itemized_discounts) > 100
+                 or any(not isinstance(row, Mapping)
+                        or set(row) != {"label", "amount"}
+                        or not isinstance(row["label"], str)
+                        or not row["label"] or len(row["label"]) > 200
+                        or type(row["amount"]) is not int or row["amount"] >= 0
+                        for row in expected_itemized_discounts))):
+        raise HouseholdError("Oda itemized discount binding is invalid")
     if isinstance(expected_product_count, bool) or not isinstance(expected_product_count, int) or not 0 < expected_product_count <= 1_000_000:
         raise HouseholdError("Oda checkout product count is invalid")
     script = r"""
@@ -281,16 +292,17 @@ def _oda_checkout_amount_script(
      while(root){
        const lines=(root.innerText||'').split(/\n+/).map(norm).filter(Boolean);
        if(lines[0]!==label)break;
-       if(lines.length===2){selected={root,lines,value:parseAmount(lines[1])};break;}
-       if(!fallback&&[...root.children].filter(visible).length>=2)fallback={root,lines,value:null};
+       if(lines.length===2){selected={root,label,lines,value:parseAmount(lines[1])};break;}
+       if(!fallback&&[...root.children].filter(visible).length>=2)fallback={root,label,lines,value:null};
        root=root.parentElement?.closest('div')||null;
      }
-     return selected||fallback||{root:node.closest('div')||node,lines:[label],value:null};
+     return selected||fallback||{root:node.closest('div')||node,label,lines:[label],value:null};
    });
  const itemizedCandidateTotal=itemizedDiscountLabelRows.reduce((total,row)=>total+(row.value||0),0);
  const itemizedRowsValid=itemizedDiscountLabelRows.length<=100&&itemizedDiscountLabelRows.every(row=>
    row.lines.length===2&&Number.isSafeInteger(row.value)&&row.value<0)&&Number.isSafeInteger(itemizedCandidateTotal);
  const itemizedDiscountRows=itemizedRowsValid?itemizedDiscountLabelRows:[];
+ const itemizedDiscountBindings=itemizedDiscountRows.map(row=>({label:row.label,amount:row.value}));
  const states={
    product_subtotal:rowState(productLabel),
    delivery_price:rowState(amountLabels.delivery_price),
@@ -352,7 +364,7 @@ def _oda_checkout_amount_script(
    ...(!itemizedRowsValid||unknownRows.length?['unrecognized_amount_row']:[]),
    ...(!ADDITION_RETRY&&amounts.provider_total!==TOTAL?['original_total_changed']:[]),
  ];
- if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,amounts_valid:amountsValid,...(amountFailures.length?{amount_check_failures:amountFailures}:{})});
+ if(!CLICK_MODE&&!VERIFY_READ_PAYMENT)return JSON.stringify({amounts,...(ITEMIZED_DISCOUNTS?{itemized_discount_rows:itemizedDiscountBindings}:{}),amounts_valid:amountsValid,...(amountFailures.length?{amount_check_failures:amountFailures}:{})});
  const expectedAmounts=EXPECTED_AMOUNTS;
  const money=value=>[...norm(value).matchAll(/\b(\d+(?:[ .]\d{3})*),(\d{2})\s*(?:kr|CURRENCY_CODE)\b/gi)].map(match=>Number(match[1].replace(/[ .]/g,''))*100+Number(match[2]));
  const labels=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>/^(FINAL_CONTROL)\s+\d+(?:[ .]\d{3})*,\d{2}\s*(?:kr|CURRENCY_CODE)$/i.test(norm(x.innerText||x.getAttribute('aria-label')||''))).filter(x=>{const values=money(x.innerText||x.getAttribute('aria-label')||'');return values.length===1&&values[0]===TOTAL;});
@@ -360,7 +372,8 @@ def _oda_checkout_amount_script(
  // are separate sources. Do not offer a confirmation when they disagree.
  if(!CLICK_MODE)return JSON.stringify({amounts,amounts_valid:amountsValid&&labels.length===1});
  const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;
- const ready=location.href===EXPECTED_URL&&labels.length===1&&amountsValid&&JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts));
+ const expectedItemizedDiscounts=EXPECTED_DISCOUNT_ROWS;
+ const ready=location.href===EXPECTED_URL&&labels.length===1&&amountsValid&&JSON.stringify(canonical(amounts))===JSON.stringify(canonical(expectedAmounts))&&(expectedItemizedDiscounts===null||JSON.stringify(itemizedDiscountBindings)===JSON.stringify(expectedItemizedDiscounts));
  if(!ready)return JSON.stringify({clicked:false});
  labels[0].click();return JSON.stringify({clicked:true});
 })()
@@ -386,6 +399,10 @@ def _oda_checkout_amount_script(
         .replace(
             "EXPECTED_AMOUNTS",
             json.dumps(expected_amounts, ensure_ascii=False, separators=(",", ":")),
+        )
+        .replace(
+            "EXPECTED_DISCOUNT_ROWS",
+            json.dumps(expected_itemized_discounts, separators=(",", ":")),
         )
         .replace("EXPECTED_URL", json.dumps(expected_url))
     )
@@ -1299,7 +1316,10 @@ class OdaBrowser:
                 raise HouseholdError("The merchant recovery amounts cannot be verified (" + ", ".join(failures) + "); review the same order without sending payment")
             return {"order_id": order_id, "binding": dict(binding), "payment_choice": dict(payment),
                     "payment_display": surface["payment_display"], "surface": surface,
-                    "amounts_minor": amounts["amounts"], "summary_only": summary_only}
+                    "amounts_minor": amounts["amounts"],
+                    **({"itemized_discount_rows": amounts["itemized_discount_rows"]}
+                       if "itemized_discount_rows" in amounts else {}),
+                    "summary_only": summary_only}
 
     def submit_payment_recovery(self, cart, review, before_click, *, deadline=None, addition=None, before_vipps_request=None):
         with self._checkout_operation(deadline, preserve_session=True):
@@ -1341,6 +1361,7 @@ class OdaBrowser:
                 click = _oda_checkout_amount_script(expected["total_minor"],
                     expected_product_count=expected["product_count"], provider=self.checkout_provider,
                     expected_amounts=review["amounts_minor"], expected_url=review["surface"]["url"],
+                    expected_itemized_discounts=review.get("itemized_discount_rows"),
                     vipps=review["payment_choice"].get("method") == "vipps", retry=True,
                     addition_retry=bool(addition)).strip()
                 script = ("(() => {const actual=JSON.parse(" + surface
