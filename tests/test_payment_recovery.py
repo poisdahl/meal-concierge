@@ -2995,7 +2995,7 @@ class RetryAmountTests(unittest.TestCase):
                             before_vipps_request=None,
                         )
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
-                    self.assertEqual(len(observed), 4 if change else 1)
+                    self.assertEqual(len(observed), 9 if change else 1)
                     if change:
                         self.assertTrue(all(result["result"]["clicked"] is False for result in observed))
                         diagnostic = json.dumps(
@@ -3057,6 +3057,42 @@ class RetryAmountTests(unittest.TestCase):
         ])
         browser._capture_checkout_payment.assert_called_once()
 
+        events, scripts = [], []
+        suffix_false = {"clicked": False, "diagnostic": {
+            "stage": "amount",
+            "url_matches": True,
+            "control_matches": True,
+            "amount_matches": True,
+            "arithmetic_matches": True,
+            "itemized_matches": False,
+            "itemized_mismatch_count": 4,
+            "itemized_mismatches": [
+                {"index": index, "mismatch_kind": "suffix_identity",
+                 "expected_prefix": prefix, "actual_prefix": prefix,
+                 "expected_amount": amount, "actual_amount": amount}
+                for index, (prefix, amount) in enumerate(
+                    ((8, -810), (20, -2050), (26, -2680), (37, -3760))
+                )
+            ],
+        }}
+        results = iter([deepcopy(suffix_false) for _ in range(8)] + [{"clicked": True}])
+        def suffix_then_exact(script):
+            events.append("eval")
+            scripts.append(script)
+            return next(results)
+        browser = browser_with(events, suffix_then_exact)
+        self.assertEqual(browser.submit_payment_recovery(
+            {}, review, lambda: events.append("callback"),
+        ), {"captured": True})
+        self.assertEqual(events.count("eval"), 9)
+        self.assertEqual(events.count(("settle", 0.25)), 8)
+        self.assertTrue(all(
+            events[index - 1] == "time"
+            for index, event in enumerate(events) if event == "eval"
+        ))
+        self.assertEqual(len(set(scripts)), 1)
+        browser._capture_checkout_payment.assert_called_once()
+
         events = []
         browser = browser_with(
             events,
@@ -3065,6 +3101,25 @@ class RetryAmountTests(unittest.TestCase):
             ),
         )
         with self.assertRaisesRegex(CheckoutPreconditionError, "lost browser response"):
+            browser.submit_payment_recovery(
+                {}, review, lambda: events.append("callback"),
+            )
+        self.assertEqual(events.count("eval"), 1)
+        self.assertNotIn(("settle", 0.25), events)
+        browser._capture_checkout_payment.assert_not_called()
+
+        events = []
+        browser = browser_with(
+            events, lambda script: events.append("eval") or deepcopy(suffix_false),
+        )
+        time_checks = iter((None, None, HouseholdError("checkout deadline expired")))
+        def expiring_time_check(seconds):
+            events.append("time")
+            failure = next(time_checks)
+            if failure is not None:
+                raise failure
+        browser._require_checkout_time = expiring_time_check
+        with self.assertRaisesRegex(CheckoutPreconditionError, "deadline expired"):
             browser.submit_payment_recovery(
                 {}, review, lambda: events.append("callback"),
             )
@@ -3083,22 +3138,7 @@ class RetryAmountTests(unittest.TestCase):
         browser._capture_checkout_payment.assert_not_called()
 
         events = []
-        false = {"clicked": False, "diagnostic": {
-            "stage": "amount",
-            "url_matches": True,
-            "control_matches": True,
-            "amount_matches": True,
-            "arithmetic_matches": True,
-            "itemized_matches": False,
-            "itemized_mismatch_count": 1,
-            "itemized_mismatches": [{
-                "index": 0,
-                "expected_prefix": 8,
-                "actual_prefix": 20,
-                "expected_amount": -810,
-                "actual_amount": -2050,
-            }],
-        }}
+        false = deepcopy(suffix_false)
         browser = browser_with(events, lambda script: events.append("eval") or deepcopy(false))
         with self.assertRaises(CheckoutPreconditionError) as caught:
             browser.submit_payment_recovery(
@@ -3109,8 +3149,8 @@ class RetryAmountTests(unittest.TestCase):
         self.assertIn('"expected_prefix":8', message)
         self.assertNotIn("Private Product", message)
         self.assertNotIn("Eksempelveien", message)
-        self.assertEqual(events.count("eval"), 4)
-        self.assertEqual(events.count(("settle", 0.25)), 3)
+        self.assertEqual(events.count("eval"), 9)
+        self.assertEqual(events.count(("settle", 0.25)), 8)
         browser._capture_checkout_payment.assert_not_called()
 
         malformed_results = [
@@ -3126,15 +3166,40 @@ class RetryAmountTests(unittest.TestCase):
                 **false["diagnostic"], "raw": "Eksempelveien 1",
             }},
             {"clicked": False, "diagnostic": {
-                **false["diagnostic"], "itemized_mismatches": [{
+                **false["diagnostic"], "itemized_mismatch_count": 1,
+                "itemized_mismatches": [{
+                    key: value for key, value in false["diagnostic"]["itemized_mismatches"][0].items()
+                    if key != "mismatch_kind"
+                }],
+            }},
+            {"clicked": False, "diagnostic": {
+                **false["diagnostic"], "itemized_mismatch_count": 1,
+                "itemized_mismatches": [{
+                    **false["diagnostic"]["itemized_mismatches"][0],
+                    "mismatch_kind": "amount",
+                }],
+            }},
+            {"clicked": False, "diagnostic": {
+                **false["diagnostic"], "itemized_mismatch_count": 1,
+                "itemized_mismatches": [{
+                    **false["diagnostic"]["itemized_mismatches"][0],
+                    "mismatch_kind": [],
+                }],
+            }},
+            {"clicked": False, "diagnostic": {
+                **false["diagnostic"], "itemized_mismatch_count": 1,
+                "itemized_mismatches": [{
                     "index": 0,
+                    "mismatch_kind": "row_presence",
                     "expected_prefix": None, "actual_prefix": None,
                     "expected_amount": None, "actual_amount": None,
                 }],
             }},
             {"clicked": False, "diagnostic": {
-                **false["diagnostic"], "itemized_mismatches": [{
+                **false["diagnostic"], "itemized_mismatch_count": 1,
+                "itemized_mismatches": [{
                     "index": 0,
+                    "mismatch_kind": "prefix_and_amount",
                     "expected_prefix": 8, "actual_prefix": 20,
                     "expected_amount": 0, "actual_amount": 0,
                 }],
@@ -3347,6 +3412,31 @@ class RetryAmountTests(unittest.TestCase):
             expected_itemized_discounts=observed["itemized_discount_rows"],
             expected_url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
         )
+        suffix_changed = deepcopy(rows)
+        for index in range(1, 5):
+            prefix = suffix_changed[index][0].split(":", 1)[0]
+            suffix_changed[index][0] = prefix + ": Midlertidig etikett"
+        suffix_click = execute(
+            full_click,
+            suffix_changed,
+            url="https://oda.com/no/checkout/retry/?orderNumber=order-1",
+            button="Betal med 2 394,47 kr",
+        )
+        self.assertEqual(suffix_click["clicks"], [])
+        suffix_diagnostic = suffix_click["result"]["diagnostic"]
+        self.assertEqual(suffix_diagnostic["itemized_mismatch_count"], 4)
+        self.assertEqual(
+            [row["mismatch_kind"] for row in suffix_diagnostic["itemized_mismatches"]],
+            ["suffix_identity"] * 4,
+        )
+        self.assertTrue(all(
+            row["expected_prefix"] == row["actual_prefix"]
+            and row["expected_amount"] == row["actual_amount"]
+            for row in suffix_diagnostic["itemized_mismatches"]
+        ))
+        self.assertNotIn("Midlertidig", json.dumps(suffix_diagnostic, ensure_ascii=False))
+        self.assertNotIn("Produkt", json.dumps(suffix_diagnostic, ensure_ascii=False))
+
         redistributed = deepcopy(rows)
         redistributed[1][1] = "-8,11 kr"
         redistributed[2][1] = "-20,49 kr"
@@ -3371,6 +3461,10 @@ class RetryAmountTests(unittest.TestCase):
             [row["index"] for row in redistributed_diagnostic["itemized_mismatches"]],
             [0, 1],
         )
+        self.assertEqual(
+            [row["mismatch_kind"] for row in redistributed_diagnostic["itemized_mismatches"]],
+            ["amount", "amount"],
+        )
 
         reassigned = deepcopy(rows)
         reassigned[1] = ["20kr: Produkt B", "-8,10 kr"]
@@ -3392,12 +3486,14 @@ class RetryAmountTests(unittest.TestCase):
             reassigned_diagnostic["itemized_mismatches"],
             [{
                 "index": 0,
+                "mismatch_kind": "promo_prefix",
                 "expected_prefix": 8,
                 "actual_prefix": 20,
                 "expected_amount": -810,
                 "actual_amount": -810,
             }, {
                 "index": 1,
+                "mismatch_kind": "promo_prefix",
                 "expected_prefix": 20,
                 "actual_prefix": 8,
                 "expected_amount": -2050,

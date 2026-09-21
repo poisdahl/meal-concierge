@@ -101,7 +101,9 @@ CHECKOUT_URL = "https://oda.com/no/checkout/confirm/"
 CHECKOUT_BROWSER_TIMEOUT = 90
 CANCELLATION_BROWSER_TIMEOUT = 105
 FINAL_CLICK_MARGIN = 15
-RECOVERY_FINAL_CLICK_ATTEMPTS = 4
+# One immediate read plus a two-second settle window. Every read still needs
+# the full downstream click/capture margin and repeats the frozen comparison.
+RECOVERY_FINAL_CLICK_ATTEMPTS = 9
 RECOVERY_FINAL_CLICK_INTERVAL = 0.25
 VIPPS_FORM_POLLS = 40
 VIPPS_POLL_INTERVAL = 0.25
@@ -384,7 +386,8 @@ def _oda_checkout_amount_script(
    const expectedRows=expectedItemizedDiscounts||[],rowCount=Math.max(expectedRows.length,itemizedDiscountBindings.length),mismatchIndexes=[];
    for(let index=0;index<rowCount;index++)if(JSON.stringify(itemizedDiscountBindings[index])!==JSON.stringify(expectedRows[index]))mismatchIndexes.push(index);
    const prefix=row=>{const match=typeof row?.label==='string'?row.label.match(/^([1-9]\d{0,5})kr:/i):null;return match?Number(match[1]):null};
-   return JSON.stringify({clicked:false,diagnostic:{stage:'amount',url_matches:urlMatches,control_matches:controlMatches,amount_matches:amountMatches,arithmetic_matches:amountsValid,itemized_matches:itemizedMatches,itemized_mismatch_count:mismatchIndexes.length,itemized_mismatches:mismatchIndexes.slice(0,8).map(index=>({index,expected_prefix:prefix(expectedRows[index]),actual_prefix:prefix(itemizedDiscountBindings[index]),expected_amount:Number.isSafeInteger(expectedRows[index]?.amount)?expectedRows[index].amount:null,actual_amount:Number.isSafeInteger(itemizedDiscountBindings[index]?.amount)?itemizedDiscountBindings[index].amount:null}))}});
+   const mismatch=index=>{const expected=expectedRows[index],actual=itemizedDiscountBindings[index],expectedPrefix=prefix(expected),actualPrefix=prefix(actual),expectedAmount=Number.isSafeInteger(expected?.amount)?expected.amount:null,actualAmount=Number.isSafeInteger(actual?.amount)?actual.amount:null,present=expected!==undefined&&actual!==undefined,kind=!present?'row_presence':expectedPrefix===actualPrefix&&expectedAmount===actualAmount?'suffix_identity':expectedPrefix===actualPrefix?'amount':expectedAmount===actualAmount?'promo_prefix':'prefix_and_amount';return {index,mismatch_kind:kind,expected_prefix:expectedPrefix,actual_prefix:actualPrefix,expected_amount:expectedAmount,actual_amount:actualAmount}};
+   return JSON.stringify({clicked:false,diagnostic:{stage:'amount',url_matches:urlMatches,control_matches:controlMatches,amount_matches:amountMatches,arithmetic_matches:amountsValid,itemized_matches:itemizedMatches,itemized_mismatch_count:mismatchIndexes.length,itemized_mismatches:mismatchIndexes.slice(0,8).map(mismatch)}});
  }
  labels[0].click();return JSON.stringify({clicked:true});
 })()
@@ -1360,7 +1363,6 @@ class OdaBrowser:
                 if vipps and dispatch_tab is None:
                     raise HouseholdError("The Oda/Vipps payment tab is unavailable; do not send payment")
                 before_click()
-                self._require_checkout_time(required_time)
                 surface = _oda_checkout_surface_script(
                     expected,
                     review["payment_choice"],
@@ -1385,7 +1387,7 @@ class OdaBrowser:
                     if attempt:
                         self._require_checkout_time(required_time)
                         self._settle(RECOVERY_FINAL_CLICK_INTERVAL)
-                        self._require_checkout_time(required_time)
+                    self._require_checkout_time(required_time)
                     clicked = self._eval(script)
                     if (isinstance(clicked, Mapping)
                             and set(clicked) == {"clicked"}
@@ -1431,11 +1433,17 @@ class OdaBrowser:
                                 clean = []
                                 for row in rows:
                                     if not isinstance(row, Mapping) or set(row) != {
-                                            "index", "expected_prefix", "actual_prefix",
+                                            "index", "mismatch_kind", "expected_prefix", "actual_prefix",
                                             "expected_amount", "actual_amount",
                                     }:
                                         break
-                                    item = {}
+                                    kind = row.get("mismatch_kind")
+                                    if type(kind) is not str or kind not in {
+                                            "row_presence", "suffix_identity", "amount",
+                                            "promo_prefix", "prefix_and_amount",
+                                    }:
+                                        break
+                                    item = {"mismatch_kind": kind}
                                     for key, lower, upper in (
                                         ("index", 0, 99), ("expected_prefix", 1, 999999),
                                         ("actual_prefix", 1, 999999),
@@ -1462,11 +1470,28 @@ class OdaBrowser:
                                                  and row["actual_prefix"] is None)
                                         for row in clean
                                     )
+                                    kinds_match = all(
+                                        row["mismatch_kind"] == (
+                                            "row_presence"
+                                            if (row["expected_prefix"] is None
+                                                or row["actual_prefix"] is None)
+                                            else "suffix_identity"
+                                            if (row["expected_prefix"] == row["actual_prefix"]
+                                                and row["expected_amount"] == row["actual_amount"])
+                                            else "amount"
+                                            if row["expected_prefix"] == row["actual_prefix"]
+                                            else "promo_prefix"
+                                            if row["expected_amount"] == row["actual_amount"]
+                                            else "prefix_and_amount"
+                                        )
+                                        for row in clean
+                                    )
                                     itemized_shape_matches = (
                                         diagnostic["itemized_matches"] is (count == 0)
                                         and len(clean) == min(count, 8)
                                         and indexes == sorted(set(indexes))
                                         and row_shapes_match
+                                        and kinds_match
                                     )
                                     if itemized_shape_matches:
                                         safe = {"stage": "amount", **{
