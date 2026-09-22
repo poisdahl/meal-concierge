@@ -248,81 +248,24 @@ def _semantic_features(text: str) -> dict[str, Any]:
     }
 
 
-def _prepared_product_forms(text: str) -> set[str]:
-    """Return explicit prepared-product categories, including safe compounds."""
-    patterns = {
-        "juice": r"\b(?:juice|jus)\b",
-        "pesto": r"\bpesto\b",
-        "aioli": r"\baioli\b",
-        "dressing": r"\bdressing\b",
-        "sauce": r"\b(?:saus|sauce)\b|\b[a-zæøåöä]+saus\b",
-        "puree": r"\b(?:puré|puree)\b",
-        # Norwegian pasta is also the noodle identity. Only the bounded curry
-        # construction denotes paste when it is written as a compound.
-        "paste": r"\bpaste\b|\bkarripasta\b",
-        "soup": r"\b(?:suppe|soup)\b",
-        "ketchup": r"\bketchup\b",
-        "chutney": r"\bchutney\b",
-        "salsa": r"\bsalsa\b",
-        "bread": r"\b(?:brød|bread)\b",
-        "powder": r"\b(?:pulver|powder)\b",
-        "tortilla": r"\btortillas?\b",
-        "noodle": r"\b(?:nudler?|noodles?)\b|\b[a-zæøåöä]+nudler?\b",
-        "cracker": r"\b(?:crackers?|kjeks)\b",
-        "mix": r"\bmix\b",
-    }
-    return {name for name, pattern in patterns.items() if re.search(pattern, text)}
+_REVIEWED_EXACT_PREPARED_TITLES = {
+    "rød karripasta": "santa maria red curry paste",
+    "søt chilisaus": "santa maria sweet chili sauce original",
+}
 
 
-def _prepared_product_identity_tokens(text: str) -> set[str]:
-    """Return normalized identity words around a prepared-product form."""
-    expanded = re.sub(r"\b([a-zæøåöä]+)saus\b", r"\1 saus", text)
-    expanded = re.sub(r"\bkarripasta\b", "karri paste", expanded)
-    equivalents = {
-        "rød": "red", "røde": "red", "grønn": "green", "grønne": "green",
-        "grön": "green", "brun": "brown", "brune": "brown",
-        "karri": "curry",
-        "søt": "sweet", "søte": "sweet", "chilli": "chili",
-        "tomat": "tomato", "tomater": "tomato",
-        "hvitløk": "garlic", "vitlök": "garlic",
-        "soya": "soy", "soja": "soy", "fisk": "fish", "fiske": "fish",
-    }
-    form_words = {
-        "juice", "jus", "pesto", "aioli", "dressing", "saus", "sauce",
-        "puré", "puree", "paste", "pasta", "suppe", "soup", "ketchup",
-        "chutney", "salsa", "brød", "bread", "pulver", "powder",
-        "tortilla", "tortillas", "nudel", "nudler", "noodle", "noodles",
-        "cracker", "crackers", "kjeks", "mix",
-    }
-    connectors = {"av", "for", "i", "med", "og", "til", "and", "of", "with"}
-    return {
-        equivalents.get(token, token)
-        for token in re.findall(r"[a-zæøåöä]+", expanded)
-        if token not in form_words and token not in connectors
-    }
-
-
-def _prepared_product_identity_conflict(wanted: set[str], offered: set[str]) -> bool:
-    """Reject missing anchors and contradictory explicit identity facets."""
-    if not wanted.issubset(offered):
-        return True
-    facet_groups = (
-        {"black", "brown", "green", "red", "white"},
-        {
-            "chili", "curry", "fish", "garlic", "mango", "miso", "onion",
-            "soy", "tamarind", "tomato",
-        },
-    )
-    return any(
-        wanted.intersection(group)
-        and not offered.intersection(group).issubset(wanted.intersection(group))
-        for group in facet_groups
-    )
+def _reviewed_exact_prepared_title_match(
+    requirement: Mapping[str, Any], product: Mapping[str, Any],
+) -> bool:
+    wanted = _identity(requirement.get("item"))
+    offered = _identity(product.get("name"))
+    return bool(wanted and offered == _REVIEWED_EXACT_PREPARED_TITLES.get(wanted))
 
 
 def _semantic_product_conflict(
     requirement: Mapping[str, Any], product: Mapping[str, Any], *,
     exact_retailer_identity_approved: bool = False,
+    reviewed_prepared_title_approved: bool = False,
 ) -> bool:
     """Reject explicit identity, form and variant contradictions fail-closed."""
     def semantic_text(value: Any) -> str:
@@ -333,6 +276,11 @@ def _semantic_product_conflict(
     wanted = semantic_text(requirement.get("item"))
     offered = semantic_text(product.get("name"))
     if not wanted or not offered:
+        return False
+    reviewed_offered = _REVIEWED_EXACT_PREPARED_TITLES.get(wanted)
+    if reviewed_offered is not None:
+        if not reviewed_prepared_title_approved or offered != reviewed_offered:
+            return True
         return False
     wanted_features = _semantic_features(wanted)
     offered_features = _semantic_features(offered)
@@ -392,24 +340,16 @@ def _semantic_product_conflict(
     # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
     # prose around a recognizable identity. It cannot turn a prepared product
     # or a non-food use of that word back into the requested staple.
-    wanted_prepared_forms = _prepared_product_forms(wanted)
-    offered_prepared_forms = _prepared_product_forms(offered)
-    wanted_prepared_identity = _prepared_product_identity_tokens(wanted)
-    offered_prepared_identity = _prepared_product_identity_tokens(offered)
+    prepared_product_form = re.compile(
+        r"\b(?:juice|jus|pesto|aioli|dressing|saus|sauce|puré|puree|paste|"
+        r"suppe|soup|ketchup|chutney|salsa|brød|bread|pulver|powder|"
+        r"tortillas?|nudler?|noodles?|crackers?|kjeks|mix)\b"
+    )
     nonfood_context = re.compile(
         r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
     )
     if (
-        (
-            (wanted_prepared_forms or offered_prepared_forms)
-            and wanted_prepared_forms != offered_prepared_forms
-        )
-        or (
-            wanted_prepared_forms
-            and _prepared_product_identity_conflict(
-                wanted_prepared_identity, offered_prepared_identity,
-            )
-        )
+        (prepared_product_form.search(offered) and not prepared_product_form.search(wanted))
         or nonfood_context.search(offered)
     ):
         return True
@@ -523,9 +463,13 @@ def _ordinary_retailer_identity_uncertainty(
 ) -> bool:
     """Recognize identity plus retail metadata without interpreting food prose."""
     if _semantic_product_conflict(
-        requirement, product, exact_retailer_identity_approved=True,
+        requirement, product,
+        exact_retailer_identity_approved=True,
+        reviewed_prepared_title_approved=True,
     ):
         return False
+    if _reviewed_exact_prepared_title_match(requirement, product):
+        return True
     wanted = str(requirement.get("item") or "").casefold()
     title = str(product.get("name") or "")
     identity_words = {
@@ -1595,7 +1539,14 @@ def build_product_plan(
             product_ref = product.get("product_ref")
             if product_ref == authority_ref:
                 authority_differences = _authorized_semantic_difference(requirement, product)
-            if semantic_product_conflict(requirement, product):
+            exact_candidate_approved = bool(
+                approval is not None
+                and product_ref in approval["candidate_refs"]
+            )
+            if _semantic_product_conflict(
+                requirement, product,
+                reviewed_prepared_title_approved=exact_candidate_approved,
+            ):
                 exact_identity_only = _ordinary_retailer_identity_uncertainty(
                     requirement, product,
                 )
