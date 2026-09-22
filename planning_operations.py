@@ -648,6 +648,7 @@ class PlanningOperations:
         planning["locks"][mp.lock_key(successor)] = carried_locks
         planning["applied"][supplied["replan_digest"]] = mp.menu_ref(successor)
         state["menu"] = successor
+        self._clear_persisted_product_plan(state.get("cart_plan"))
         return {"menu": deepcopy(successor), "shopping_comparison": deepcopy(supplied["shopping_comparison"])}
 
     def _add_slot(self, request):
@@ -1490,6 +1491,7 @@ class PlanningOperations:
                         old_usage["status"] = "cancelled"
                 menu.update({"menu_id": menu_id, "revision": revision, "digest": digest, "phase": "draft"})
                 state["menu"] = deepcopy(menu)
+                self._clear_persisted_product_plan(state.get("cart_plan"))
                 state.setdefault("recipe_usage", {})[menu_id] = {
                     "week": menu["week"], "status": "planned", "recipe_keys": keys,
                     "cooked_keys": [], "not_cooked_keys": [],
@@ -2134,6 +2136,115 @@ class PlanningOperations:
         return [list(group) for group in sorted(groups)]
 
     @staticmethod
+    def _product_requirement_scope_digest(plan: Mapping[str, Any]) -> str:
+        scope = [{
+            key: deepcopy(row.get(key))
+            for key in ("requirement_id", "identity", "item", "quantity", "unit", "sources")
+        } for row in plan.get("requirements", []) if isinstance(row, Mapping)]
+        return mp.digest(scope)
+
+    @classmethod
+    def _full_plan_authority(
+        cls, plan: Mapping[str, Any], menu_ref: Mapping[str, Any],
+        cart_plan: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Bind the exact selections applied by one complete product plan."""
+        selected = cls._partial_plan_authority(plan)
+        authority = {
+            "menu_ref": deepcopy(dict(menu_ref)),
+            "product_plan_digest": plan.get("product_plan_digest"),
+            "cart_digest": cart_plan.get("last_synced_digest"),
+            "cart_requirements_digest": mp.digest(
+                cart_plan.get("menu_required_quantities")
+            ),
+            "requirement_scope_digest": cls._product_requirement_scope_digest(plan),
+            "dependent_groups": cls._continuation_dependent_groups(plan),
+            **selected,
+        }
+        authority["authority_digest"] = mp.digest(authority)
+        return authority
+
+    @classmethod
+    def _full_seed_authority(
+        cls, cart_plan: Mapping[str, Any], menu_ref: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Recover exact full-apply selections only from unchanged state."""
+        authority = cart_plan.get("product_plan_authority")
+        required = {
+            "menu_ref", "product_plan_digest", "cart_digest",
+            "cart_requirements_digest", "requirement_scope_digest",
+            "dependent_groups", "context", "selected_requirements",
+            "authority_digest",
+        }
+        if not isinstance(authority, Mapping) or set(authority) != required:
+            raise HouseholdError(
+                "persisted full product selections lack exact digest-bound authority"
+            )
+        unsigned = {
+            key: deepcopy(value) for key, value in authority.items()
+            if key != "authority_digest"
+        }
+        if authority.get("authority_digest") != mp.digest(unsigned):
+            raise HouseholdError("persisted full product selection authority is invalid")
+        cart_digest = authority.get("cart_digest")
+        if (
+            canonical(authority.get("menu_ref")) != canonical(menu_ref)
+            or canonical(cart_plan.get("menu_ref")) != canonical(menu_ref)
+            or authority.get("product_plan_digest") != cart_plan.get("product_plan_digest")
+            or not isinstance(cart_digest, str)
+            or cart_plan.get("last_synced_digest") != cart_digest
+            or cart_plan.get("status") != "active"
+            or cart_plan.get("pending_cart_digest") is not None
+            or (
+                cart_plan.get("approved_cart_digest") is not None
+                and cart_plan.get("approved_cart_digest") != cart_digest
+            )
+            or authority.get("cart_requirements_digest") != mp.digest(
+                cart_plan.get("menu_required_quantities")
+            )
+        ):
+            raise HouseholdError(
+                "persisted full product selection authority no longer matches its menu, plan or cart"
+            )
+        selected = authority.get("selected_requirements")
+        if (
+            not isinstance(selected, list) or not selected
+            or any(not isinstance(row, Mapping) for row in selected)
+        ):
+            raise HouseholdError("persisted full product selection authority is invalid")
+        selected_plan = {
+            "requirements": [{**dict(row), "status": "selected"} for row in selected]
+        }
+        narrowed = cls._continuation_approvals(selected_plan)
+        narrowed_by_id = {
+            row.get("requirement_id"): row for row in narrowed
+            if isinstance(row.get("requirement_id"), str)
+        }
+        if len(narrowed_by_id) != len(selected):
+            raise HouseholdError("persisted full product selection authority is invalid")
+        for row in selected:
+            requirement_id = row.get("requirement_id")
+            selection = row.get("selection")
+            products = selection.get("products") if isinstance(selection, Mapping) else None
+            selected_refs = {
+                product.get("product_ref")
+                for product in products or [] if isinstance(product, Mapping)
+            }
+            approval = narrowed_by_id.get(requirement_id)
+            if (
+                not isinstance(requirement_id, str) or not selected_refs
+                or not isinstance(approval, Mapping)
+                or set(approval.get("candidate_refs", [])) != selected_refs
+            ):
+                raise HouseholdError(
+                    "persisted full product selection differs from its recorded approval"
+                )
+        return {
+            **deepcopy(dict(authority)),
+            "candidate_approvals": narrowed,
+        }
+
+    @staticmethod
     def _merge_product_plan_approvals(
         previous: Any, delta: Any, mode: Any, *, dependent_groups: Any = None,
     ) -> list[dict[str, Any]]:
@@ -2223,10 +2334,6 @@ class PlanningOperations:
         budget_ore: Any, price_mode: str, replaced_ref: str | None = None,
         expected_record: Mapping[str, Any] | None = None,
     ) -> tuple[str, str]:
-        scope = [{
-            key: deepcopy(row.get(key))
-            for key in ("requirement_id", "identity", "item", "quantity", "unit", "sources")
-        } for row in plan.get("requirements", []) if isinstance(row, Mapping)]
         record = {
             "kind": "product_plan",
             "menu_ref": deepcopy(dict(menu_ref)),
@@ -2236,7 +2343,7 @@ class PlanningOperations:
             "budget_ore": budget_ore,
             "price_mode": price_mode,
             "product_plan_digest": plan.get("product_plan_digest"),
-            "requirement_scope_digest": mp.digest(scope),
+            "requirement_scope_digest": self._product_requirement_scope_digest(plan),
         }
         record["selection_digest"] = mp.digest({
             "candidate_approvals": record["candidate_approvals"],
@@ -2565,6 +2672,18 @@ class PlanningOperations:
                 "started_at": self._now().isoformat(),
             }
 
+    @staticmethod
+    def _clear_persisted_product_plan(cart_plan: Any) -> None:
+        if not isinstance(cart_plan, dict):
+            return
+        for key in (
+            "product_plan_digest", "product_plan_authority", "product_plan_summary",
+            "partial_product_plan_digest", "partial_product_plan_digests",
+            "partial_product_plan_lines", "partial_product_plan_approvals",
+            "partial_product_plan_authority", "partial_product_plan_summary",
+        ):
+            cart_plan.pop(key, None)
+
     def _products(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
         if action == "record_ingredients":
@@ -2585,9 +2704,7 @@ class PlanningOperations:
                 merged.update({canonical(d["source"]): deepcopy(d) for d in decisions})
                 state["menu_ingredient_decisions"] = {"menu_ref": deepcopy(reference), "decisions": list(merged.values())}
                 state.pop("product_plan_completion", None)
-                plan = state.get("cart_plan") or {}
-                plan.pop("product_plan_digest", None)
-                plan.pop("product_plan_summary", None)
+                self._clear_persisted_product_plan(state.get("cart_plan"))
             return {"recorded": True, "menu_ref": reference, "ingredient_decisions": list(merged.values()),
                     "cart_changed": False, "next": "Use these recorded ingredients for this menu; prepare/apply its updated products for an authorized shop."}
         deadline = time.monotonic() + PRODUCT_OPERATION_TIMEOUT
@@ -2600,6 +2717,8 @@ class PlanningOperations:
             continuation_ref = request.get("product_plan_ref")
             continuation_record = None
             persisted_seed = []
+            persisted_authority = None
+            persisted_dependencies = None
             mode = request.get("continuation_mode", "extend")
             if continuation_ref is not None:
                 if any(request.get(key) is not None for key in (
@@ -2628,21 +2747,48 @@ class PlanningOperations:
                 )
                 state = self.store.read()
                 cart_plan = state.get("cart_plan") or {}
-                if (
-                    saved_ref is not None
-                    and canonical(cart_plan.get("menu_ref")) == canonical(saved_ref)
-                    and any(key in cart_plan for key in (
+                partial_state = any(key in cart_plan for key in (
                         "partial_product_plan_digest", "partial_product_plan_approvals",
                         "partial_product_plan_authority",
                     ))
-                ):
+                full_state = any(key in cart_plan for key in (
+                    "product_plan_digest", "product_plan_authority",
+                ))
+                if saved_ref is not None and partial_state:
+                    if canonical(cart_plan.get("menu_ref")) != canonical(saved_ref):
+                        raise HouseholdError(
+                            "persisted partial product selections belong to a different menu"
+                        )
                     persisted_seed = self._partial_seed_approvals(cart_plan)
+                elif saved_ref is not None and full_state:
+                    stored_authority = cart_plan.get("product_plan_authority")
+                    stored_context = (
+                        stored_authority.get("context")
+                        if isinstance(stored_authority, Mapping) else None
+                    )
+                    explicit_context_change = isinstance(stored_context, Mapping) and any(
+                        key in request and request.get(key) is not None
+                        and (key != "ingredient_decisions" or bool(request.get(key)))
+                        and canonical(request.get(key)) != canonical(stored_context.get(key))
+                        for key in ("ingredient_decisions", "budget_ore", "price_mode")
+                    )
+                    if not explicit_context_change:
+                        persisted_authority = self._full_seed_authority(cart_plan, saved_ref)
+                        persisted_seed = persisted_authority["candidate_approvals"]
+                        persisted_dependencies = persisted_authority["dependent_groups"]
                 approvals = self._merge_product_plan_approvals(
                     persisted_seed, request.get("candidate_approvals") or [], "extend",
+                    dependent_groups=persisted_dependencies,
                 )
-                ingredient_decisions = request.get("ingredient_decisions")
-                budget_ore = request.get("budget_ore")
-                price_mode = request.get("price_mode") or "exact"
+                if persisted_authority is not None:
+                    context = persisted_authority["context"]
+                    ingredient_decisions = deepcopy(context.get("ingredient_decisions"))
+                    budget_ore = context.get("budget_ore")
+                    price_mode = context.get("price_mode") or "exact"
+                else:
+                    ingredient_decisions = request.get("ingredient_decisions")
+                    budget_ore = request.get("budget_ore")
+                    price_mode = request.get("price_mode") or "exact"
             plan = self._prepare_products(
                 binding=binding,
                 menu=menu,
@@ -2651,6 +2797,16 @@ class PlanningOperations:
                 budget_ore=budget_ore, price_mode=price_mode,
                 deadline=deadline,
             )
+            if persisted_authority is not None:
+                if (
+                    self._product_requirement_scope_digest(plan)
+                    != persisted_authority["requirement_scope_digest"]
+                    or canonical(self._partial_plan_authority(plan).get("context"))
+                    != canonical(persisted_authority.get("context"))
+                ):
+                    raise HouseholdError(
+                        "persisted full product selection scope or context changed"
+                    )
             partial_apply_digest = plan.get("partial_product_plan_digest")
             if persisted_seed and plan.get("status") == "prepared":
                 # The returned full plan remains digest-valid, while callers
@@ -2954,6 +3110,7 @@ class PlanningOperations:
                     state.pop("managed_product_apply_fence", None)
                     cart_plan = state["cart_plan"]
                     cart_plan.pop("product_plan_digest", None)
+                    cart_plan.pop("product_plan_authority", None)
                     cart_plan.pop("product_plan_summary", None)
                     cart_plan["partial_product_plan_digest"] = combined_digest
                     digests = cart_plan.setdefault("partial_product_plan_digests", [])
@@ -3122,6 +3279,9 @@ class PlanningOperations:
                 state["cart_plan"].pop("partial_product_plan_authority", None)
                 state["cart_plan"].pop("partial_product_plan_summary", None)
                 state["cart_plan"]["product_plan_digest"] = supplied["product_plan_digest"]
+                state["cart_plan"]["product_plan_authority"] = self._full_plan_authority(
+                    supplied, expected_menu_ref, state["cart_plan"]
+                )
                 state["cart_plan"]["product_plan_summary"] = {
                     key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions", "coverage_status")
                 }
@@ -3511,8 +3671,7 @@ class PlanningOperations:
                 )
                 if (current.get("menu_required_quantities", current.get("required_quantities")) != menu_requirements
                         or set(current.get("start_as_extra_product_ids", [])) != start_as_extra):
-                    current.pop("product_plan_digest", None)
-                    current.pop("product_plan_summary", None)
+                    self._clear_persisted_product_plan(current)
                 current["required_quantities"] = dict(requirements)
                 current["start_as_extra_product_ids"] = sorted(start_as_extra)
                 current["product_names"].update(requirement_names)

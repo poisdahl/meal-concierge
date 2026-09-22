@@ -168,6 +168,163 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertEqual(self.store.read()["cart_plan"]["product_plan_digest"], plan["product_plan_digest"])
         self.assertEqual(len({kw["deadline"] for _, _, kw in self.provider.calls}), 1)
 
+    def test_full_apply_authority_retains_exact_refs_for_unrelated_delta_and_correction(self):
+        dinners = deepcopy(DINNERS)
+        dinners[0] = dinners[0] + [
+            (f"week staple {index}", 25) for index in range(14)
+        ]
+        refs = self.save_recipes([
+            recipe(f"Dinner {index}", rows) for index, rows in enumerate(dinners)
+        ])
+        self.menu = self.app.handle({
+            "operation": "menu", "action": "save",
+            "menu": {"week": "2026-W37", "dishes": refs, "salads": []},
+        })["menu"]
+        plan = self.complete()
+        self.assertEqual(len(plan["requirements"]), 51)
+        applied_rows = {row["identity"]: row for row in plan["requirements"]}
+        applied_refs = {
+            identity: [product["product_ref"] for product in row["selection"]["products"]]
+            for identity, row in applied_rows.items()
+        }
+        salmon_candidates = self.provider.entry("salmon")["products"]
+        selected_ref = salmon_candidates[0]["product_ref"]
+        cheaper_later_ref = salmon_candidates[1]["product_ref"]
+        self.assertEqual(applied_refs["salmon"], [selected_ref])
+
+        result = self.apply(plan)
+        self.assertTrue(result["applied"])
+        cart_plan = self.store.read()["cart_plan"]
+        authority = cart_plan["product_plan_authority"]
+        expected_authority = self.app._partial_plan_authority(plan)
+        self.assertEqual(authority["context"], expected_authority["context"])
+        self.assertEqual(
+            authority["selected_requirements"],
+            expected_authority["selected_requirements"],
+        )
+        self.assertEqual(authority["product_plan_digest"], plan["product_plan_digest"])
+        self.assertEqual(authority["cart_digest"], cart_plan["last_synced_digest"])
+        self.assertEqual(
+            authority["authority_digest"],
+            mp.digest({key: value for key, value in authority.items()
+                       if key != "authority_digest"}),
+        )
+        with self.store.locked() as state:
+            state["cart_plan"]["approved_cart_digest"] = state["cart_plan"][
+                "last_synced_digest"
+            ]
+
+        cheaper_option = salmon_candidates[1]["purchase_options"][0]
+        cheaper_option.update(
+            merchandise_ore=50, mandatory_deposit_ore=0, total_payable_ore=50,
+        )
+        ginger = applied_rows["ginger"]
+        ginger_ref = applied_refs["ginger"][0]
+        self.provider.calls.clear()
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": ginger["requirement_id"],
+                "candidate_refs": [ginger_ref],
+            }],
+        })
+        self.assertIsNotNone(prepared["apply_arguments"])
+        prepared_rows = {
+            row["identity"]: row for row in prepared["product_plan"]["requirements"]
+        }
+        self.assertEqual(
+            [product["product_ref"] for product in prepared_rows["salmon"]["selection"]["products"]],
+            applied_refs["salmon"],
+        )
+        self.assertEqual(
+            prepared_rows["salmon"]["candidate_approval"]["candidate_refs"],
+            [selected_ref],
+        )
+        self.assertNotIn(
+            "manipulate_cart", [tool for tool, _arguments, _kwargs in self.provider.calls]
+        )
+        self.assertEqual(
+            sum(tool == "product_search" for tool, _arguments, _kwargs in self.provider.calls),
+            len(plan["requirements"]),
+        )
+        self.assertEqual(
+            {tool for tool, _arguments, _kwargs in self.provider.calls},
+            {"product_search"},
+        )
+
+        corrected = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"],
+            "candidate_approvals": [{
+                "requirement_id": applied_rows["salmon"]["requirement_id"],
+                "candidate_refs": [cheaper_later_ref],
+            }],
+        })
+        corrected_rows = {
+            row["identity"]: row for row in corrected["product_plan"]["requirements"]
+        }
+        self.assertEqual(
+            [product["product_ref"] for product in corrected_rows["salmon"]["selection"]["products"]],
+            [cheaper_later_ref],
+        )
+        for identity in set(applied_refs) - {"salmon"}:
+            self.assertEqual(
+                [product["product_ref"] for product in corrected_rows[identity]["selection"]["products"]],
+                applied_refs[identity],
+                identity,
+            )
+
+    def test_full_apply_authority_fails_closed_on_legacy_and_identity_drift(self):
+        self.save_week()
+        plan = self.complete()
+        self.assertTrue(self.apply(plan)["applied"])
+        baseline = self.store.read()
+
+        cases = {
+            "legacy": lambda state: state["cart_plan"].pop("product_plan_authority"),
+            "menu": lambda state: state["menu"].update(
+                revision=state["menu"]["revision"] + 1
+            ),
+            "plan": lambda state: state["cart_plan"].update(
+                product_plan_digest="0" * 64
+            ),
+            "cart": lambda state: state["cart_plan"].update(
+                last_synced_digest="0" * 64
+            ),
+            "authority digest": lambda state: state["cart_plan"][
+                "product_plan_authority"
+            ].update(authority_digest="0" * 64),
+            "scope": lambda state: (
+                state["menu"]["dishes"][0]["ingredients"][0]["quantity"].update(
+                    numerator=301
+                ),
+                state["menu"]["dishes"][0]["shopping_requirements"][0][
+                    "quantity"
+                ].update(numerator=301),
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(drift=label):
+                with self.store.locked() as state:
+                    state.clear()
+                    state.update(deepcopy(baseline))
+                    mutate(state)
+                    menu_ref = self.app._cart_menu_ref(state["menu"])
+                self.provider.calls.clear()
+                with self.assertRaisesRegex(
+                    HouseholdError,
+                    "digest-bound authority|authority is invalid|no longer matches|scope or context changed",
+                ):
+                    self.app.handle({
+                        "operation": "products", "action": "prepare",
+                        "menu_ref": menu_ref,
+                    })
+                self.assertNotIn(
+                    "manipulate_cart",
+                    [tool for tool, _arguments, _kwargs in self.provider.calls],
+                )
+
     def test_partial_timeout_retains_successes_and_all_remaining_needs(self):
         self.save_week()
         self.provider.fail_query = "ginger"
