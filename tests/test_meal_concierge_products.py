@@ -752,6 +752,9 @@ class ProductPlannerTests(unittest.TestCase):
             ("tomatpestoer", "Hvitløkspestoer"),
             ("tomatsuppen", "Hvitløkssuppen"),
             ("rødkarripastaen", "Grønnkarripastaen"),
+            ("tomatsuppa", "Fiskesuppa"),
+            ("hvitløkspulvere", "Chilipulvere"),
+            ("kryddermiks", "Nøttemiks"),
         )
         for wanted, offered in cases:
             with self.subTest(wanted=wanted, offered=offered):

@@ -267,16 +267,18 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
         "nudel": "noodle", "nudler": "noodle",
         "noodle": "noodle", "noodles": "noodle",
         "cracker": "cracker", "crackers": "cracker", "kjeks": "cracker",
-        "mix": "mix",
+        "mix": "mix", "miks": "mix",
     }
     # Inflected prepared-form words must not fall back to ordinary exact-ref
     # approval merely because their spelling differs from the singular form.
     forms = {}
     for base, category in {**base_forms, "purée": "puree"}.items():
         variants = {base}
-        variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et"))
+        variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et", "e", "a", "ne"))
         if base.endswith("e"):
             variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
+        if base == "suppe":
+            variants.add("suppa")
         forms.update({variant: category for variant in variants})
     compounds = sorted(forms, key=len, reverse=True)
     normalized = unicodedata.normalize("NFC", text).casefold()
