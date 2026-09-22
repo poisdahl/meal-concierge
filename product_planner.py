@@ -16,6 +16,7 @@ from core import HouseholdError
 
 
 PRODUCT_PLAN_VERSION = "product-plan-v4"
+PRODUCT_CONTINUATION_VERSION = "product-continuation-v1"
 MAX_REQUIREMENTS = 64
 MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
@@ -248,7 +249,10 @@ def _semantic_features(text: str) -> dict[str, Any]:
     }
 
 
-def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[str, Any]) -> bool:
+def _semantic_product_conflict(
+    requirement: Mapping[str, Any], product: Mapping[str, Any], *,
+    exact_retailer_identity_approved: bool = False,
+) -> bool:
     """Reject explicit identity, form and variant contradictions fail-closed."""
     def semantic_text(value: Any) -> str:
         if not isinstance(value, str):
@@ -275,20 +279,56 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
         (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:^|\s)(?:(?:fersk|fresh)\s+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
         (r"^(?:tomat|tomato|tomater|tomatoes)$", rf"(?:^|\s)(?:(?:ferske?|fresh|økologiske?|organic|norske?)\s+)?(?:tomat(?:er)?|(?:cherry|plomme|cocktail|klase)tomat(?:er)?)(?:\s+løsvekt)?{package_tail}$|(?:^|\s)(?:(?:cherry|plum|cocktail|cluster|vine)\s+)?tomato(?:es)?{package_tail}$"),
     )
-    if any(re.fullmatch(base, wanted) and not re.search(allowed, offered)
-           for base, allowed in bare_identity_forms):
+    bare_identity_presence = (
+        (r"^(?:smør|butter)$", r"\b(?:[a-zæøåöä]*smør|butter)\b"),
+        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"\b(?:mel|hvetemel|flour|vetemjöl)\b"),
+        (r"^salt$", r"\b[a-zæøåöä]*salt\b"),
+        (r"^(?:ris|rice)$", r"\b(?:[a-zæøåöä]*ris|rice)\b"),
+        (r"^(?:melk|milk|mjölk)$", r"\b(?:[a-zæøåöä]*melk|milk|mjölk)\b"),
+        (r"^(?:hvitløk|garlic|vitlök)$", r"\b(?:hvitløk|garlic|vitlök)\b"),
+        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:[a-zæøåöä]*tomat\w*|tomatoes?)\b"),
+    )
+    if any(
+        re.fullmatch(base, wanted) and not re.search(identity, offered)
+        for base, identity in bare_identity_presence
+    ):
+        return True
+    retailer_identity_may_be_resolved = exact_retailer_identity_approved
+    if (
+        not retailer_identity_may_be_resolved
+        and any(
+            re.fullmatch(base, wanted) and not re.search(allowed, offered)
+            for base, allowed in bare_identity_forms
+        )
+    ):
         return True
     bare_compound_guards = (
-        (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa)[-\s]*(?:smør|butter)\b"),
-        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b"),
-        (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt[-\s]+(?:kjeks|crackers?|chips?)\b)"),
-        (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding)\b)"),
-        (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\bmilk[-\s]*chocolate\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea)[-\s]*(?:melk|milk|mjölk)\b)"),
-        (r"^(?:hvitløk|garlic|vitlök)$", r"\b(?:hvitløk|garlic|vitlök)s?[-\s]*(?:pulver|powder|paste|puré|puree|saus|sauce)\b"),
-        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*[-\s]*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup)\b"),
+        (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa|cookie)[-\s]*(?:smør|butter)\b"),
+        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"(?:\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b|\bflour\s+tortillas?\b)"),
+        (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt(?:[-\s]+|\s*&\s*)(?:kjeks|crackers?|chips?|pepper\s+mix)\b)"),
+        (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding|flour)\b|\b(?:bygg|konjak|linse)ris\b)"),
+        (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\b(?:chocolate|hemp|potato)[-\s]*milk\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea|hamp|hemp|potet|potato)[-\s]*(?:melk|milk|mjölk)\b)"),
+        (r"^(?:hvitløk|garlic|vitlök)$", r"(?:\b(?:hvitløk|garlic|vitlök)s?\s*[,/-]?\s*(?:pulver|powder|paste|puré|puree|saus|sauce|brød|bread|presset|pressed|knust|crushed|hakket|minced|aioli|dressing|olje|oil)\b|\b(?:presset|pressed|knust|crushed|hakket|minced)\s+(?:hvitløk|garlic|vitlök)\b)"),
+        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*\s*[,/-]?\s*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup|chutney|juice|jus|pesto|salsa)\b"),
     )
     if any(re.fullmatch(base, wanted) and re.search(compound, offered)
            for base, compound in bare_compound_guards):
+        return True
+    # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
+    # prose around a recognizable identity. It cannot turn a prepared product
+    # or a non-food use of that word back into the requested staple.
+    prepared_product_form = re.compile(
+        r"\b(?:juice|jus|pesto|aioli|dressing|saus|sauce|puré|puree|paste|"
+        r"suppe|soup|ketchup|chutney|salsa|brød|bread|pulver|powder|"
+        r"tortillas?|nudler?|noodles?|crackers?|kjeks|mix)\b"
+    )
+    nonfood_context = re.compile(
+        r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
+    )
+    if (
+        (prepared_product_form.search(offered) and not prepared_product_form.search(wanted))
+        or nonfood_context.search(offered)
+    ):
         return True
     for axis in (
         "state", "skin", "salt", "coriander_form", "chili_form",
@@ -388,6 +428,79 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
     if wanted_meat and not offered_meat and re.search(r"\b(?:kjøttdeig|farse|köttfärs|mince|minced meat)\b", offered):
         return True
     return False
+
+
+def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[str, Any]) -> bool:
+    """Reject explicit identity, form and variant contradictions fail-closed."""
+    return _semantic_product_conflict(requirement, product)
+
+
+def _ordinary_retailer_identity_uncertainty(
+    requirement: Mapping[str, Any], product: Mapping[str, Any],
+) -> bool:
+    """Recognize identity plus retail metadata without interpreting food prose."""
+    if _semantic_product_conflict(
+        requirement, product, exact_retailer_identity_approved=True,
+    ):
+        return False
+    wanted = str(requirement.get("item") or "").casefold()
+    title = str(product.get("name") or "")
+    identity_words = {
+        r"(?:smør|butter)": r"(?:[a-zæøåöä]*smør|butter)",
+        r"(?:mel|hvetemel|flour|vetemjöl)": r"(?:mel|hvetemel|flour|vetemjöl)",
+        r"salt": r"[a-zæøåöä]*salt",
+        r"(?:ris|rice)": r"(?:[a-zæøåöä]*ris|rice)",
+        r"(?:melk|milk|mjölk)": r"(?:[a-zæøåöä]*melk|milk|mjölk)",
+        r"(?:hvitløk|garlic|vitlök)": r"(?:hvitløk|garlic|vitlök)",
+        r"(?:tomat|tomato|tomater|tomatoes)": r"(?:[a-zæøåöä]*tomat(?:er)?|tomatoes?)",
+    }
+    identity_pattern = next((
+        pattern for base, pattern in identity_words.items()
+        if re.fullmatch(base, wanted)
+    ), None)
+    if identity_pattern is None:
+        return False
+    word_matches = list(re.finditer(r"[A-Za-zÆØÅæøåÖÄöä]+", title))
+    identity_indexes = {
+        index for index, match in enumerate(word_matches)
+        if re.fullmatch(identity_pattern, match.group(0).casefold())
+    }
+    if not identity_indexes:
+        return False
+    allowed_lower_metadata = {
+        "fersk", "ferske", "fresh", "økologisk", "økologiske", "organic",
+        "norsk", "norske", "klasse", "klase", "løsvekt", "siktet",
+        "fint", "grovt", "lett", "hel", "med", "jod", "stk", "pk",
+        "pakke", "kg", "g", "l", "ml", "cl", "vår", "laveste", "pris",
+        "norge", "norway", "nederland", "netherlands", "spania", "spain",
+        "kina", "china",
+    }
+    display = product.get("display")
+    brand = display.get("brand") if isinstance(display, Mapping) else None
+    brand_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-zÆØÅæøåÖÄöä]+", brand or "")
+    }
+    for index, match in enumerate(word_matches):
+        if index in identity_indexes:
+            continue
+        token = match.group(0)
+        normalized = token.casefold()
+        if (
+            normalized in allowed_lower_metadata
+            or normalized in brand_tokens
+            or "gartneri" in normalized
+        ):
+            continue
+        return False
+    metadata_evidence = bool(
+        re.search(r"\d+(?:[.,-]\d+)?\s*(?:kg|g|l|ml|cl|stk|pk|%)\b", title, re.I)
+        or re.search(r"\b(?:vår\s+laveste\s+pris|økologisk\w*|organic|klasse|klase|løsvekt)\b", title, re.I)
+        or re.search(r"\b(?:norge|norway|nederland|netherlands|spania|spain|kina|china)\b", title, re.I)
+        or re.search(r"gartneri", title, re.I)
+        or "/" in title
+    )
+    return metadata_evidence
 
 
 def _authorized_semantic_difference(
@@ -899,6 +1012,22 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
     return approvals
 
 
+def _replayable_candidate_approval(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return only the public approval input fields from a normalized plan row."""
+    result = {
+        key: deepcopy(value[key])
+        for key in (
+            "requirement_id", "candidate_refs", "max_excess", "search_query",
+            "package_count", "quantity_basis", "semantic_authorization", "shared_package",
+        )
+        if key in value
+    }
+    if "shared_package" in result:
+        result.pop("package_count", None)
+        result.pop("quantity_basis", None)
+    return result
+
+
 def _normalize_hard_product_constraints(value: Any) -> dict[str, list[str]]:
     if value is None:
         return {}
@@ -1183,6 +1312,322 @@ def product_plan_digest(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical(_without_presentation(authoritative)).encode()).hexdigest()
 
 
+def product_selection_digest(value: Mapping[str, Any]) -> str:
+    """Bind exact menu identity and durable selection decisions, not provider facts."""
+    if not isinstance(value, Mapping):
+        raise HouseholdError("product selection digest needs one product plan")
+    rows = []
+    for requirement in value.get("requirements", []):
+        if not isinstance(requirement, Mapping) or requirement.get("status") != "selected":
+            continue
+        selection = requirement.get("selection")
+        if not isinstance(selection, Mapping):
+            raise HouseholdError("selected requirement lacks a selection")
+        rows.append({
+            "requirement_id": requirement.get("requirement_id"),
+            "identity": requirement.get("identity"),
+            "quantity": deepcopy(requirement.get("quantity")),
+            "unit": requirement.get("unit"),
+            "candidate_approval": deepcopy(requirement.get("candidate_approval")),
+            "selected_products": [
+                {
+                    "product_ref": product.get("product_ref"),
+                    "quantity": product.get("quantity"),
+                }
+                for product in selection.get("products", [])
+                if isinstance(product, Mapping)
+            ],
+            "shared_package_allocation": deepcopy(
+                selection.get("shared_package_allocation")
+            ),
+        })
+    payload = {
+        "product_plan_version": value.get("product_plan_version"),
+        "binding": deepcopy(value.get("binding")),
+        "requirements": sorted(rows, key=lambda row: row["requirement_id"] or ""),
+    }
+    return hashlib.sha256(canonical(payload).encode()).hexdigest()
+
+
+def _selection_decision(requirement: Mapping[str, Any]) -> dict[str, Any]:
+    selection = requirement.get("selection")
+    if not isinstance(selection, Mapping):
+        raise HouseholdError("selected requirement lacks a selection decision")
+    return {
+        "requirement_id": requirement.get("requirement_id"),
+        "products": sorted(({
+            "product_ref": product.get("product_ref"),
+            "quantity": product.get("quantity"),
+        } for product in selection.get("products", []) if isinstance(product, Mapping)),
+            key=lambda product: _ref_sort_key(product["product_ref"])),
+        "package_count": selection.get("package_count"),
+        "shared_package_allocation": deepcopy(
+            selection.get("shared_package_allocation")
+        ),
+    }
+
+
+def _provider_observation_digests(
+    plan: Mapping[str, Any], requirement_ids: set[str],
+) -> dict[str, str]:
+    """Bind each selected row's provider facts, including observation time."""
+    rows = {}
+    for requirement in plan.get("requirements", []):
+        if (
+            not isinstance(requirement, Mapping)
+            or requirement.get("requirement_id") not in requirement_ids
+        ):
+            continue
+        selection = requirement.get("selection")
+        observation = requirement.get("observation")
+        if not isinstance(selection, Mapping) or not isinstance(observation, Mapping):
+            raise HouseholdError("continued selection lacks provider observation facts")
+        selected_refs = {
+            product.get("product_ref")
+            for product in selection.get("products", [])
+            if isinstance(product, Mapping)
+        }
+        products = [
+            deepcopy(product)
+            for product in observation.get("products", [])
+            if isinstance(product, Mapping) and product.get("product_ref") in selected_refs
+        ]
+        if {product.get("product_ref") for product in products} != selected_refs:
+            raise HouseholdError("continued selection is missing exact provider facts")
+        row = {
+            "requirement_id": requirement.get("requirement_id"),
+            "observed_at": observation.get("observed_at"),
+            "products": sorted(products, key=lambda product: _ref_sort_key(product["product_ref"])),
+        }
+        rows[row["requirement_id"]] = hashlib.sha256(canonical(row).encode()).hexdigest()
+    if set(rows) != requirement_ids:
+        raise HouseholdError("continued selections were not all observed")
+    return rows
+
+
+def _exact_saved_menu_ref(plan: Mapping[str, Any]) -> dict[str, Any]:
+    binding = plan.get("binding")
+    reference = binding.get("menu_ref") if isinstance(binding, Mapping) else None
+    if (
+        not isinstance(binding, Mapping)
+        or binding.get("kind") != "saved_menu"
+        or not isinstance(reference, Mapping)
+        or set(reference) != {"menu_id", "revision", "digest"}
+        or not isinstance(reference.get("menu_id"), str) or not reference["menu_id"]
+        or type(reference.get("revision")) is not int or reference["revision"] < 1
+        or not isinstance(reference.get("digest"), str)
+        or re.fullmatch(r"[a-f0-9]{64}", reference["digest"]) is None
+    ):
+        raise HouseholdError("product continuation needs one exact saved menu revision")
+    return deepcopy(dict(reference))
+
+
+def prepare_product_plan_continuation(
+    prior_product_plan: Mapping[str, Any], *, menu_ref: Mapping[str, Any],
+    prior_selection_digest: str, affected_requirement_ids: list[str],
+    candidate_approvals: Any,
+) -> dict[str, Any]:
+    """Create a pure, digest-bound approval delta for a parent operation layer.
+
+    The caller remains responsible for resolving current provider references and
+    rebuilding every retained and changed row from fresh provider observations.
+    """
+    prior = validate_product_plan(
+        prior_product_plan,
+        prior_product_plan.get("product_plan_digest")
+        if isinstance(prior_product_plan, Mapping) else None,
+    )
+    exact_menu_ref = _exact_saved_menu_ref(prior)
+    if not isinstance(menu_ref, Mapping) or canonical(menu_ref) != canonical(exact_menu_ref):
+        raise HouseholdError("product continuation menu revision changed")
+    expected_selection_digest = product_selection_digest(prior)
+    if (
+        not isinstance(prior_selection_digest, str)
+        or not re.fullmatch(r"[a-f0-9]{64}", prior_selection_digest)
+        or prior_selection_digest != expected_selection_digest
+    ):
+        raise HouseholdError("product continuation prior selection digest changed")
+    rows = {
+        row.get("requirement_id"): row
+        for row in prior.get("requirements", [])
+        if isinstance(row, Mapping) and isinstance(row.get("requirement_id"), str)
+    }
+    known_ids = set(rows)
+    if (
+        not isinstance(affected_requirement_ids, list)
+        or not affected_requirement_ids
+        or len(affected_requirement_ids) > MAX_REQUIREMENTS
+        or any(not isinstance(value, str) or value not in known_ids for value in affected_requirement_ids)
+        or len(set(affected_requirement_ids)) != len(affected_requirement_ids)
+    ):
+        raise HouseholdError("product continuation affected requirements are invalid")
+
+    dependent_groups = []
+    for requirement_id, row in rows.items():
+        selection = row.get("selection")
+        allocation = (
+            selection.get("shared_package_allocation")
+            if isinstance(selection, Mapping) else None
+        )
+        members = allocation.get("requirement_ids") if isinstance(allocation, Mapping) else None
+        if isinstance(members, list) and set(members).issubset(known_ids):
+            group = tuple(sorted(set(members)))
+            if len(group) > 1 and group not in dependent_groups:
+                dependent_groups.append(group)
+        approval = row.get("candidate_approval")
+        shared = approval.get("shared_package") if isinstance(approval, Mapping) else None
+        members = shared.get("requirement_ids") if isinstance(shared, Mapping) else None
+        if isinstance(members, list) and set(members).issubset(known_ids):
+            group = tuple(sorted(set(members)))
+            if len(group) > 1 and group not in dependent_groups:
+                dependent_groups.append(group)
+
+    invalidated = set(affected_requirement_ids)
+    changed = True
+    while changed:
+        changed = False
+        for group in dependent_groups:
+            if invalidated.intersection(group) and not set(group).issubset(invalidated):
+                invalidated.update(group)
+                changed = True
+
+    delta = normalize_approvals(candidate_approvals, known_ids)
+    if set(delta).difference(invalidated):
+        raise HouseholdError("product continuation delta may change only invalidated requirements")
+    retained = {}
+    for requirement_id, row in rows.items():
+        if requirement_id in invalidated:
+            continue
+        approval = row.get("candidate_approval")
+        if not isinstance(approval, Mapping):
+            raise HouseholdError("prior product selection lacks replayable approval")
+        retained[requirement_id] = _replayable_candidate_approval(approval)
+    combined = {
+        **retained,
+        **{
+            requirement_id: _replayable_candidate_approval(approval)
+            for requirement_id, approval in delta.items()
+        },
+    }
+    # Recheck shared-package authority after the delta overlay. An incomplete
+    # invalidated group may remain omitted, but no retained half-group can leak.
+    normalized = normalize_approvals(list(combined.values()), known_ids)
+    revalidation_ids = set(normalized)
+    contract: dict[str, Any] = {
+        "product_continuation_version": PRODUCT_CONTINUATION_VERSION,
+        "menu_ref": exact_menu_ref,
+        "prior_product_plan_digest": prior["product_plan_digest"],
+        "prior_selection_digest": prior_selection_digest,
+        "affected_requirement_ids": sorted(affected_requirement_ids),
+        "invalidated_requirement_ids": sorted(invalidated),
+        "retained_requirement_ids": sorted(retained),
+        "retained_selections": [
+            _selection_decision(rows[requirement_id])
+            for requirement_id in sorted(retained)
+        ],
+        "candidate_approvals": [
+            _replayable_candidate_approval(normalized[requirement_id])
+            for requirement_id in sorted(normalized)
+        ],
+        "provider_revalidation_requirement_ids": sorted(revalidation_ids),
+        "prior_provider_observation_digests": _provider_observation_digests(
+            prior, revalidation_ids,
+        ),
+    }
+    contract["continuation_digest"] = hashlib.sha256(canonical(contract).encode()).hexdigest()
+    return contract
+
+
+def finalize_product_plan_continuation(
+    continuation: Mapping[str, Any], fresh_product_plan: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a fully re-observed continuation to a new final product digest."""
+    if not isinstance(continuation, Mapping):
+        raise HouseholdError("product continuation contract is invalid")
+    contract = deepcopy(dict(continuation))
+    if set(contract) != {
+        "product_continuation_version", "menu_ref", "prior_product_plan_digest",
+        "prior_selection_digest", "affected_requirement_ids",
+        "invalidated_requirement_ids", "retained_requirement_ids",
+        "retained_selections", "candidate_approvals",
+        "provider_revalidation_requirement_ids",
+        "prior_provider_observation_digests", "continuation_digest",
+    }:
+        raise HouseholdError("product continuation contract is invalid")
+    supplied_digest = contract.pop("continuation_digest", None)
+    if (
+        contract.get("product_continuation_version") != PRODUCT_CONTINUATION_VERSION
+        or not isinstance(supplied_digest, str)
+        or hashlib.sha256(canonical(contract).encode()).hexdigest() != supplied_digest
+    ):
+        raise HouseholdError("product continuation contract or digest changed")
+    fresh = validate_product_plan(
+        fresh_product_plan,
+        fresh_product_plan.get("product_plan_digest")
+        if isinstance(fresh_product_plan, Mapping) else None,
+    )
+    if canonical(_exact_saved_menu_ref(fresh)) != canonical(contract.get("menu_ref")):
+        raise HouseholdError("fresh product plan does not bind the continuation menu revision")
+    fresh_approvals = {
+        row.get("requirement_id"): _replayable_candidate_approval(
+            row.get("candidate_approval")
+        )
+        for row in fresh.get("requirements", [])
+        if (
+            isinstance(row, Mapping)
+            and row.get("status") == "selected"
+            and isinstance(row.get("candidate_approval"), Mapping)
+        )
+    }
+    expected_approvals = {
+        approval.get("requirement_id"): deepcopy(dict(approval))
+        for approval in contract.get("candidate_approvals", [])
+        if isinstance(approval, Mapping)
+    }
+    if canonical(fresh_approvals) != canonical(expected_approvals):
+        raise HouseholdError("fresh product plan does not contain the exact continuation approvals")
+    required_revalidation = set(contract.get("provider_revalidation_requirement_ids", []))
+    if required_revalidation != set(fresh_approvals):
+        raise HouseholdError("fresh product plan did not revalidate every continued selection")
+    fresh_provider_digests = _provider_observation_digests(fresh, required_revalidation)
+    prior_provider_digests = contract.get("prior_provider_observation_digests")
+    if (
+        not isinstance(prior_provider_digests, Mapping)
+        or set(prior_provider_digests) != required_revalidation
+        or any(
+            fresh_provider_digests[requirement_id] == prior_provider_digests[requirement_id]
+            for requirement_id in required_revalidation
+        )
+    ):
+        raise HouseholdError("continued product selections need fresh provider observations")
+    fresh_rows = {
+        row.get("requirement_id"): row
+        for row in fresh.get("requirements", [])
+        if isinstance(row, Mapping) and row.get("status") == "selected"
+    }
+    retained_decisions = [
+        _selection_decision(fresh_rows[requirement_id])
+        for requirement_id in contract.get("retained_requirement_ids", [])
+        if requirement_id in fresh_rows
+    ]
+    if canonical(retained_decisions) != canonical(contract.get("retained_selections")):
+        raise HouseholdError("an unaffected product selection changed during continuation")
+    prior_digest = contract.get("prior_product_plan_digest")
+    fresh["continuation"] = {
+        key: deepcopy(contract[key])
+        for key in (
+            "product_continuation_version", "prior_product_plan_digest",
+            "prior_selection_digest", "affected_requirement_ids",
+            "invalidated_requirement_ids", "retained_requirement_ids",
+        )
+    }
+    fresh["continuation"]["continuation_digest"] = supplied_digest
+    fresh["product_plan_digest"] = product_plan_digest(fresh)
+    if fresh["product_plan_digest"] == prior_digest:
+        raise HouseholdError("continued product plan did not produce a new final digest")
+    return fresh
+
+
 def partial_product_plan_digest(value: Mapping[str, Any]) -> str | None:
     """Bind only selected lines so unrelated unresolved search churn cannot block them."""
     if value.get("budget_status") == "exceeded":
@@ -1391,6 +1836,7 @@ def build_product_plan(
         authority = approval.get("semantic_authorization") if approval else None
         authority_ref = authority.get("candidate_ref") if isinstance(authority, Mapping) else None
         semantic_mismatches = {}
+        identity_unverified = {}
         authority_differences = None
         for product in observation.get("products", []):
             if not isinstance(product, Mapping):
@@ -1399,9 +1845,17 @@ def build_product_plan(
             if product_ref == authority_ref:
                 authority_differences = _authorized_semantic_difference(requirement, product)
             if semantic_product_conflict(requirement, product):
-                semantic_mismatches[product_ref] = _authorized_semantic_difference(
-                    requirement, product
+                exact_identity_only = _ordinary_retailer_identity_uncertainty(
+                    requirement, product,
                 )
+                if exact_identity_only:
+                    identity_unverified[product_ref] = [
+                        "retailer_title_identity_verified_by_exact_candidate_approval"
+                    ]
+                else:
+                    semantic_mismatches[product_ref] = _authorized_semantic_difference(
+                        requirement, product
+                    )
         authorized_semantic_ref = (
             authority_ref
             if isinstance(authority, Mapping)
@@ -1428,6 +1882,10 @@ def build_product_plan(
         if excluded_semantic_refs:
             safe_observation["excluded_candidate_count"] = len(excluded_semantic_refs)
             safe_observation["excluded_candidate_reason"] = "candidate_semantic_mismatch"
+        if identity_unverified:
+            item["identity_unverified_candidate_refs"] = sorted(
+                identity_unverified, key=_ref_sort_key,
+            )
         for product in safe_observation.get("products", []):
             product["candidate_approval"] = {
                 "requirement_id": requirement_id,
@@ -1453,7 +1911,8 @@ def build_product_plan(
         selected_ordinary = [
             {"product_ref": product_ref, "differences": deepcopy(differences)}
             for product_ref, differences in sorted(
-                ordinary_omissions.items(), key=lambda item: _ref_sort_key(item[0])
+                {**ordinary_omissions, **identity_unverified}.items(),
+                key=lambda item: _ref_sort_key(item[0]),
             )
             if product_ref in approval["candidate_refs"]
         ]
