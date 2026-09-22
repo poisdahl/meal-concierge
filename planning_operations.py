@@ -2208,7 +2208,7 @@ class PlanningOperations:
             )
         selected = authority.get("selected_requirements")
         if (
-            not isinstance(selected, list) or not selected
+            not isinstance(selected, list)
             or any(not isinstance(row, Mapping) for row in selected)
         ):
             raise HouseholdError("persisted full product selection authority is invalid")
@@ -2243,6 +2243,44 @@ class PlanningOperations:
             **deepcopy(dict(authority)),
             "candidate_approvals": narrowed,
         }
+
+    def _verify_full_seed_cart(
+        self, authority: Mapping[str, Any], *, menu_ref: Mapping[str, Any],
+        deadline: float | None,
+    ) -> None:
+        cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
+        summary = cart_summary(cart)
+        live, names = self._cart_lines(summary)
+        current_plan = self.store.read().get("cart_plan")
+        current_authority = (
+            current_plan.get("product_plan_authority")
+            if isinstance(current_plan, Mapping) else None
+        )
+        if (
+            not isinstance(current_authority, Mapping)
+            or current_authority.get("authority_digest") != authority.get("authority_digest")
+            or canonical(current_plan.get("menu_ref")) != canonical(menu_ref)
+            or current_plan.get("product_plan_digest") != authority.get("product_plan_digest")
+        ):
+            raise HouseholdError(
+                "persisted full product selection changed during cart verification; prepare again"
+            )
+        if self._cart_digest(live) == authority.get("cart_digest"):
+            return
+        with self.store.locked() as state:
+            cart_plan = state.get("cart_plan")
+            current = cart_plan.get("product_plan_authority") if isinstance(cart_plan, dict) else None
+            if (
+                isinstance(cart_plan, dict)
+                and isinstance(current, Mapping)
+                and current.get("authority_digest") == authority.get("authority_digest")
+                and canonical(cart_plan.get("menu_ref")) == canonical(menu_ref)
+                and cart_plan.get("product_plan_digest") == authority.get("product_plan_digest")
+            ):
+                self._set_cart_needs_input(cart_plan, live, names)
+        raise HouseholdError(
+            "retailer cart changed since the full product apply; reconcile the current cart before preparing again"
+        )
 
     @staticmethod
     def _merge_product_plan_approvals(
@@ -2778,6 +2816,9 @@ class PlanningOperations:
                     )
                     if not explicit_context_change:
                         persisted_authority = self._full_seed_authority(cart_plan, saved_ref)
+                        self._verify_full_seed_cart(
+                            persisted_authority, menu_ref=saved_ref, deadline=deadline,
+                        )
                         persisted_seed = persisted_authority["candidate_approvals"]
                         persisted_dependencies = persisted_authority["dependent_groups"]
                 approvals = self._merge_product_plan_approvals(
@@ -3247,6 +3288,18 @@ class PlanningOperations:
                         "partial_product_plan_authority", "partial_product_plan_summary",
                     ):
                         state["cart_plan"].pop(key, None)
+                    state["cart_plan"]["product_plan_digest"] = supplied["product_plan_digest"]
+                    state["cart_plan"]["product_plan_authority"] = self._full_plan_authority(
+                        supplied, expected_menu_ref, state["cart_plan"]
+                    )
+                    state["cart_plan"]["product_plan_summary"] = {
+                        key: deepcopy(supplied.get(key))
+                        for key in (
+                            "totals", "cost_status", "budget_status", "budget_ore",
+                            "ingredient_decisions", "coverage_status",
+                        )
+                    }
+                    state["cart_plan"]["product_plan_summary"]["quantity_estimates"] = []
                 return {
                     "applied": True,
                     "cart_changed": bool(cart_result.get("applied_operations")),

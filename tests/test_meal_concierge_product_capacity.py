@@ -250,7 +250,11 @@ class ProductCapacityTests(unittest.TestCase):
         )
         self.assertEqual(
             {tool for tool, _arguments, _kwargs in self.provider.calls},
-            {"product_search"},
+            {"get_cart", "product_search"},
+        )
+        self.assertEqual(
+            sum(tool == "get_cart" for tool, _arguments, _kwargs in self.provider.calls),
+            1,
         )
 
         corrected = self.app.handle({
@@ -331,6 +335,112 @@ class ProductCapacityTests(unittest.TestCase):
                     "manipulate_cart",
                     [tool for tool, _arguments, _kwargs in self.provider.calls],
                 )
+
+    def test_full_apply_authority_supports_empty_exact_selection(self):
+        self.save_week()
+        initial = self.prepare()
+        decisions = [
+            {"source": deepcopy(source), "action": "have_all"}
+            for row in initial["requirements"] for source in row["sources"]
+        ]
+        covered = self.prepare(ingredient_decisions=decisions)
+        self.assertEqual(covered["requirements"], [])
+        applied = self.apply(covered)
+        self.assertTrue(applied["applied"])
+        self.assertTrue(applied["nothing_to_buy"])
+        authority = self.store.read()["cart_plan"]["product_plan_authority"]
+        self.assertEqual(authority["selected_requirements"], [])
+        self.assertEqual(authority["context"]["ingredient_decisions"], decisions)
+
+        self.provider.calls.clear()
+        refreshed = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+        })
+        self.assertEqual(refreshed["product_plan"]["requirements"], [])
+        self.assertEqual(refreshed["product_plan"]["ingredient_decisions"], decisions)
+        self.assertIsNotNone(refreshed["apply_arguments"])
+        self.assertEqual(
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+            ["get_cart"],
+        )
+
+    def test_full_apply_authority_supports_empty_selection_with_due_recurring(self):
+        self.save_week()
+        initial = self.prepare()
+        recurring_ref = self.provider.entry("salmon")["products"][0]["product_ref"]
+        self.app.handle({
+            "operation": "recurring", "action": "add", "item": {
+                "product_id": recurring_ref, "product_name": "Recurring fixture",
+                "quantity": 1,
+                "schedule": {"every": 1, "unit": "weeks", "anchor": "2026-W37"},
+            },
+        })
+        decisions = [
+            {"source": deepcopy(source), "action": "have_all"}
+            for row in initial["requirements"] for source in row["sources"]
+        ]
+        covered = self.prepare(ingredient_decisions=decisions)
+        self.assertEqual(covered["requirements"], [])
+        self.assertTrue(self.apply(covered)["applied"])
+        authority = self.store.read()["cart_plan"]["product_plan_authority"]
+        self.assertEqual(authority["selected_requirements"], [])
+        self.assertEqual(self.provider.quantities[recurring_ref], 1)
+
+        self.provider.calls.clear()
+        refreshed = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+        })
+        self.assertEqual(refreshed["product_plan"]["requirements"], [])
+        self.assertEqual(refreshed["product_plan"]["ingredient_decisions"], decisions)
+        self.assertEqual(
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+            ["get_cart"],
+        )
+
+    def test_full_apply_seed_reads_live_cart_and_fails_closed_on_drift(self):
+        self.save_week()
+        plan = self.complete()
+        self.assertTrue(self.apply(plan)["applied"])
+        selected_ref = next(
+            product["product_ref"]
+            for row in plan["requirements"] for product in row["selection"]["products"]
+        )
+        self.provider.quantities[selected_ref] += 1
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(HouseholdError, "retailer cart changed"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "menu_ref": self.app._cart_menu_ref(self.menu),
+            })
+        self.assertEqual(
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+            ["get_cart"],
+        )
+        self.assertEqual(self.store.read()["cart_plan"]["status"], "needs_input")
+
+    def test_full_apply_seed_rejects_local_transition_during_cart_read(self):
+        self.save_week()
+        plan = self.complete()
+        self.assertTrue(self.apply(plan)["applied"])
+
+        def change_plan_during_read(tool, _arguments):
+            if tool == "get_cart":
+                with self.store.locked() as state:
+                    state["cart_plan"]["product_plan_digest"] = "0" * 64
+
+        self.provider.on_call = change_plan_during_read
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(HouseholdError, "changed during cart verification"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "menu_ref": self.app._cart_menu_ref(self.menu),
+            })
+        self.assertEqual(
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+            ["get_cart"],
+        )
 
     def test_partial_timeout_retains_successes_and_all_remaining_needs(self):
         self.save_week()
