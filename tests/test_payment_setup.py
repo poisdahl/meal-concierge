@@ -289,6 +289,19 @@ class PaymentBrowserTests(unittest.TestCase):
         self.assertIn('"clicked":true', str(not_ready.exception))
         self.assertIn('"show_controls":1', str(not_ready.exception))
 
+        late_control, calls, settles = browser_for([
+            {"summaryOnly": True},
+            {"summaryOnly": True},
+            {"summaryOnly": True, "expandButtons": "summary"},
+        ])
+        with self.assertRaisesRegex(HouseholdError, '"attempts":3') as unconfirmed:
+            late_control._expand_checkout_amount_summary()
+        self.assertEqual([call["clicks"] for call in calls], [[], [], ["SUMMARY"]])
+        self.assertEqual(settles, [0.25, 0.25])
+        self.assertIn('"condition":"expansion_unconfirmed"', str(unconfirmed.exception))
+        self.assertIn('"clicked":true', str(unconfirmed.exception))
+        self.assertIn('"state":"clicked"', str(unconfirmed.exception))
+
         missing, calls, settles = browser_for([{"summaryOnly": True}])
         with self.assertRaisesRegex(HouseholdError, '"attempts":3') as absent:
             missing._expand_checkout_amount_summary()

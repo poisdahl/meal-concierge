@@ -1781,7 +1781,11 @@ class OdaBrowser:
             + json.dumps({
                 "stage": "summary_control",
                 "state": last_state,
-                "condition": "expansion_not_ready" if clicked else "control_missing",
+                "condition": (
+                    "expansion_unconfirmed" if last_state == "clicked" else
+                    "expansion_not_ready" if clicked else
+                    "control_missing"
+                ),
                 "clicked": clicked,
                 **last_counts,
                 "attempts": 3,
