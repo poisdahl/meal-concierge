@@ -2023,9 +2023,119 @@ class PlanningOperations:
                 values.append(compact)
         return values
 
+    @classmethod
+    def _continuation_approvals(cls, plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Lock continued rows to the exact products selected by this plan."""
+        approvals = {
+            row["requirement_id"]: row
+            for row in cls._plan_approvals(plan, selected_only=True)
+        }
+        for requirement in plan.get("requirements", []):
+            if not isinstance(requirement, Mapping) or requirement.get("status") != "selected":
+                continue
+            approval = approvals.get(requirement.get("requirement_id"))
+            selection = requirement.get("selection")
+            products = selection.get("products") if isinstance(selection, Mapping) else None
+            if not isinstance(approval, dict) or not isinstance(products, list):
+                continue
+            selected_refs = {
+                product.get("product_ref")
+                for product in products if isinstance(product, Mapping)
+            }
+            approval["candidate_refs"] = [
+                reference for reference in approval["candidate_refs"]
+                if reference in selected_refs
+            ]
+            authority = approval.get("semantic_authorization")
+            if (
+                isinstance(authority, Mapping)
+                and authority.get("candidate_ref") not in selected_refs
+            ):
+                approval.pop("semantic_authorization", None)
+        return [approvals[key] for key in sorted(approvals)]
+
+    @classmethod
+    def _partial_seed_approvals(cls, cart_plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Recover only the exact refs already authorized by a partial apply."""
+        stored = cart_plan.get("partial_product_plan_approvals")
+        authority = cart_plan.get("partial_product_plan_authority")
+        selected = authority.get("selected_requirements") if isinstance(authority, Mapping) else None
+        if (
+            not isinstance(stored, list) or not stored
+            or not isinstance(selected, list) or not selected
+            or any(not isinstance(row, Mapping) for row in stored + selected)
+        ):
+            raise HouseholdError(
+                "persisted partial product selections lack exact digest-bound authority"
+            )
+        stored_by_id = {
+            row.get("requirement_id"): deepcopy(dict(row)) for row in stored
+            if isinstance(row.get("requirement_id"), str)
+        }
+        selected_by_id = {
+            row.get("requirement_id"): row for row in selected
+            if isinstance(row.get("requirement_id"), str)
+        }
+        if (
+            len(stored_by_id) != len(stored)
+            or len(selected_by_id) != len(selected)
+            or set(stored_by_id) != set(selected_by_id)
+        ):
+            raise HouseholdError(
+                "persisted partial product approvals do not match their recorded authority"
+            )
+        selected_plan = {
+            "requirements": [{**dict(row), "status": "selected"} for row in selected]
+        }
+        authority_approvals = {
+            row["requirement_id"]: row
+            for row in cls._plan_approvals(
+                selected_plan, selected_only=True,
+            )
+        }
+        if canonical(stored_by_id) != canonical(authority_approvals):
+            raise HouseholdError(
+                "persisted partial product approvals do not match their recorded authority"
+            )
+        narrowed = cls._continuation_approvals(selected_plan)
+        narrowed_by_id = {row["requirement_id"]: row for row in narrowed}
+        for requirement_id, row in selected_by_id.items():
+            selection = row.get("selection")
+            products = selection.get("products") if isinstance(selection, Mapping) else None
+            selected_refs = {
+                product.get("product_ref")
+                for product in products or [] if isinstance(product, Mapping)
+            }
+            approval = narrowed_by_id.get(requirement_id)
+            if (
+                not selected_refs or not isinstance(approval, Mapping)
+                or set(approval.get("candidate_refs", [])) != selected_refs
+            ):
+                raise HouseholdError(
+                    "persisted partial product selection differs from its recorded approval"
+                )
+        return narrowed
+
+    @staticmethod
+    def _continuation_dependent_groups(plan: Mapping[str, Any]) -> list[list[str]]:
+        groups = set()
+        for requirement in plan.get("requirements", []):
+            selection = requirement.get("selection") if isinstance(requirement, Mapping) else None
+            allocation = (
+                selection.get("shared_package_allocation")
+                if isinstance(selection, Mapping) else None
+            )
+            members = allocation.get("requirement_ids") if isinstance(allocation, Mapping) else None
+            if (
+                isinstance(members, list) and len(members) > 1
+                and all(isinstance(member, str) for member in members)
+            ):
+                groups.add(tuple(sorted(set(members))))
+        return [list(group) for group in sorted(groups)]
+
     @staticmethod
     def _merge_product_plan_approvals(
-        previous: Any, delta: Any, mode: Any,
+        previous: Any, delta: Any, mode: Any, *, dependent_groups: Any = None,
     ) -> list[dict[str, Any]]:
         if mode not in {"extend", "replace", "reset"}:
             raise HouseholdError("continuation_mode must be extend, replace or reset")
@@ -2046,14 +2156,36 @@ class PlanningOperations:
             for row in prior
             if isinstance(row.get("requirement_id"), str)
         } if mode == "extend" else {}
-        # A shared package is one authority unit. Changing any member removes
+        groups = []
+        if dependent_groups is not None:
+            if (
+                not isinstance(dependent_groups, list)
+                or len(dependent_groups) > MAX_REQUIREMENTS
+                or any(
+                    not isinstance(group, list) or not 2 <= len(group) <= MAX_REQUIREMENTS
+                    or any(not isinstance(member, str) for member in group)
+                    or len(set(group)) != len(group)
+                    for group in dependent_groups
+                )
+            ):
+                raise HouseholdError("stored product continuation dependencies are invalid")
+            groups.extend(tuple(group) for group in dependent_groups)
+        # A shared selection is one dependency unit. Changing any member removes
         # the complete prior unit before the replacement delta is considered.
         invalidated = set()
         for row in combined.values():
             shared = row.get("shared_package")
             members = shared.get("requirement_ids") if isinstance(shared, Mapping) else None
-            if isinstance(members, list) and changed_ids.intersection(members):
-                invalidated.update(member for member in members if isinstance(member, str))
+            if isinstance(members, list):
+                groups.append(tuple(member for member in members if isinstance(member, str)))
+        invalidated.update(changed_ids)
+        changed = True
+        while changed:
+            changed = False
+            for group in groups:
+                if invalidated.intersection(group) and not set(group).issubset(invalidated):
+                    invalidated.update(group)
+                    changed = True
         for requirement_id in invalidated:
             combined.pop(requirement_id, None)
         for row in delta:
@@ -2070,11 +2202,15 @@ class PlanningOperations:
         required = {
             "kind", "menu_ref", "candidate_approvals", "ingredient_decisions",
             "budget_ore", "price_mode", "selection_digest", "product_plan_digest",
-            "requirement_scope_digest",
+            "requirement_scope_digest", "dependent_groups",
         }
         if not isinstance(record, Mapping) or set(record) != required or record.get("kind") != "product_plan":
             raise HouseholdError("product_plan_ref is stale, unknown or belongs to another menu")
-        if record.get("selection_digest") != mp.digest(record.get("candidate_approvals")):
+        selection = {
+            "candidate_approvals": record.get("candidate_approvals"),
+            "dependent_groups": record.get("dependent_groups"),
+        }
+        if record.get("selection_digest") != mp.digest(selection):
             raise HouseholdError("stored product_plan_ref selection is invalid")
         menu = state.get("menu")
         if not isinstance(menu, Mapping) or canonical(mp.menu_ref(menu)) != canonical(record.get("menu_ref")):
@@ -2095,13 +2231,17 @@ class PlanningOperations:
             "kind": "product_plan",
             "menu_ref": deepcopy(dict(menu_ref)),
             "candidate_approvals": deepcopy(approvals),
+            "dependent_groups": self._continuation_dependent_groups(plan),
             "ingredient_decisions": deepcopy(ingredient_decisions),
             "budget_ore": budget_ore,
             "price_mode": price_mode,
-            "selection_digest": mp.digest(approvals),
             "product_plan_digest": plan.get("product_plan_digest"),
             "requirement_scope_digest": mp.digest(scope),
         }
+        record["selection_digest"] = mp.digest({
+            "candidate_approvals": record["candidate_approvals"],
+            "dependent_groups": record["dependent_groups"],
+        })
         with self.store.locked() as state:
             menu = state.get("menu")
             if not isinstance(menu, Mapping) or canonical(mp.menu_ref(menu)) != canonical(menu_ref):
@@ -2473,6 +2613,7 @@ class PlanningOperations:
                 approvals = self._merge_product_plan_approvals(
                     continuation_record["candidate_approvals"],
                     request.get("candidate_approvals") or [], mode,
+                    dependent_groups=continuation_record["dependent_groups"],
                 )
                 ingredient_decisions = continuation_record["ingredient_decisions"]
                 budget_ore = continuation_record["budget_ore"]
@@ -2490,9 +2631,12 @@ class PlanningOperations:
                 if (
                     saved_ref is not None
                     and canonical(cart_plan.get("menu_ref")) == canonical(saved_ref)
-                    and isinstance(cart_plan.get("partial_product_plan_approvals"), list)
+                    and any(key in cart_plan for key in (
+                        "partial_product_plan_digest", "partial_product_plan_approvals",
+                        "partial_product_plan_authority",
+                    ))
                 ):
-                    persisted_seed = cart_plan["partial_product_plan_approvals"]
+                    persisted_seed = self._partial_seed_approvals(cart_plan)
                 approvals = self._merge_product_plan_approvals(
                     persisted_seed, request.get("candidate_approvals") or [], "extend",
                 )
@@ -2516,7 +2660,7 @@ class PlanningOperations:
             # Store only selections regenerated from the just-refreshed
             # provider observations. Persisted partial approvals are inputs to
             # that refresh above, never unverified output authority.
-            retained_approvals = self._plan_approvals(plan, selected_only=True)
+            retained_approvals = self._continuation_approvals(plan)
             product_plan_ref = None
             selection_digest = None
             if saved_ref is not None:

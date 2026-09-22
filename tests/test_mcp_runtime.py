@@ -193,6 +193,8 @@ async def sdk_checks(root, process):
         assert {t.name for t in discovered.tools} == expected
         for tool in discovered.tools:
             assert tool.input_schema["type"] == "object"
+            description = (tool.description or "").casefold()
+            assert "cli.py" not in description and "local cli" not in description, tool.name
             if tool.name in {"meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products"}:
                 assert tool.output_schema is None
             else:
