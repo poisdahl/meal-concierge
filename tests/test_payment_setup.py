@@ -281,16 +281,22 @@ class PaymentBrowserTests(unittest.TestCase):
         unchanged, calls, settles = browser_for([{
             "summaryOnly": True, "expandButtons": "summary",
         }])
-        with self.assertRaisesRegex(HouseholdError, '"attempts":3'):
+        with self.assertRaisesRegex(HouseholdError, '"attempts":3') as not_ready:
             unchanged._expand_checkout_amount_summary()
         self.assertEqual([click for call in calls for click in call["clicks"]], ["SUMMARY"])
         self.assertEqual(settles, [0.25, 0.25])
+        self.assertIn('"condition":"expansion_not_ready"', str(not_ready.exception))
+        self.assertIn('"clicked":true', str(not_ready.exception))
+        self.assertIn('"show_controls":1', str(not_ready.exception))
 
         missing, calls, settles = browser_for([{"summaryOnly": True}])
-        with self.assertRaisesRegex(HouseholdError, '"attempts":3'):
+        with self.assertRaisesRegex(HouseholdError, '"attempts":3') as absent:
             missing._expand_checkout_amount_summary()
         self.assertEqual(len(calls), 3)
         self.assertEqual(settles, [0.25, 0.25])
+        self.assertIn('"condition":"control_missing"', str(absent.exception))
+        self.assertIn('"clicked":false', str(absent.exception))
+        self.assertIn('"show_controls":0', str(absent.exception))
 
         malformed = OdaBrowser.__new__(OdaBrowser)
         malformed.checkout_provider = "oda"

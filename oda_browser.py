@@ -1735,6 +1735,7 @@ class OdaBrowser:
 })()
 """.replace("SHOW_LABEL", json.dumps("Visa sammanfattning" if self.checkout_provider == "mathem" else "Vis oppsummering")).replace("HIDE_LABEL", json.dumps("Dölj sammanfattning" if self.checkout_provider == "mathem" else "Skjul oppsummering"))
         last_state = "waiting"
+        last_counts = {"show_controls": 0, "hide_controls": 0}
         clicked = False
         for attempt in range(3):
             control = self._eval(script.replace("ALREADY_CLICKED", json.dumps(clicked)))
@@ -1758,6 +1759,10 @@ class OdaBrowser:
                     '{"stage":"summary_control","state":"invalid_response"}'
                 )
             last_state = control["state"]
+            last_counts = {
+                "show_controls": control["show_controls"],
+                "hide_controls": control["hide_controls"],
+            }
             diagnostic = json.dumps({
                 "stage": "summary_control",
                 "state": last_state,
@@ -1773,8 +1778,14 @@ class OdaBrowser:
                 self._settle(0.25)
         raise HouseholdError(
             "Oda checkout amount summary control did not become ready "
-            + json.dumps({"stage": "summary_control", "state": last_state, "attempts": 3},
-                         sort_keys=True, separators=(",", ":"))
+            + json.dumps({
+                "stage": "summary_control",
+                "state": last_state,
+                "condition": "expansion_not_ready" if clicked else "control_missing",
+                "clicked": clicked,
+                **last_counts,
+                "attempts": 3,
+            }, sort_keys=True, separators=(",", ":"))
         )
 
     def _read_checkout_amounts(self, expected_total: int, expected_product_count: int) -> dict[str, Any]:
