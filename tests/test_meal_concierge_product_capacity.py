@@ -418,7 +418,41 @@ class ProductCapacityTests(unittest.TestCase):
             [tool for tool, _arguments, _kwargs in self.provider.calls],
             ["get_cart"],
         )
-        self.assertEqual(self.store.read()["cart_plan"]["status"], "needs_input")
+        fenced = self.store.read()["cart_plan"]
+        self.assertEqual(fenced["status"], "needs_input")
+
+        self.provider.calls.clear()
+        reconciled = self.app.handle({
+            "operation": "cart", "action": "reconcile",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "decision": "keep_current",
+            "cart_digest": fenced["pending_cart_digest"],
+        })
+        self.assertTrue(reconciled["reconciled"])
+        current = self.store.read()["cart_plan"]
+        self.assertEqual(current["status"], "active")
+        self.assertNotIn("product_plan_digest", current)
+        self.assertNotIn("product_plan_authority", current)
+        self.assertNotIn("product_plan_summary", current)
+        self.assertNotIn(
+            "manipulate_cart",
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+        )
+
+        self.provider.calls.clear()
+        recovered = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+        })
+        self.assertEqual(recovered["product_plan"]["status"], "needs_input")
+        self.assertEqual(
+            sum(tool == "product_search" for tool, _arguments, _kwargs in self.provider.calls),
+            len(plan["requirements"]),
+        )
+        self.assertNotIn(
+            "manipulate_cart",
+            [tool for tool, _arguments, _kwargs in self.provider.calls],
+        )
 
     def test_full_apply_seed_rejects_local_transition_during_cart_read(self):
         self.save_week()

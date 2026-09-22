@@ -4037,6 +4037,14 @@ class PlanningOperations:
             current["pending_cart_digest"] = None
             current["status"] = "active"
             current["updated_at"] = self._now().isoformat()
+            authority = current.get("product_plan_authority")
+            if (
+                isinstance(authority, Mapping)
+                and authority.get("cart_digest") != approved_digest
+            ):
+                current.pop("product_plan_digest", None)
+                current.pop("product_plan_authority", None)
+                current.pop("product_plan_summary", None)
             plan = deepcopy(current)
         return {
             "reconciled": True,
