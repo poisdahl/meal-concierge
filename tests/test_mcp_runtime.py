@@ -76,6 +76,12 @@ def serve(root):
                 # The existing Mathem fixture defaults to the number returned;
                 # product planning requires the actual requested search bound.
                 result["scope"]["requested_size"] = arguments.get("size", 1)
+                query = arguments["queries"][0]
+                if query.startswith("wire-continuation-"):
+                    index = int(query.removeprefix("wire-continuation-").split(" ", 1)[0])
+                    for product in result["products"]:
+                        product["product_ref"] = 20_000 + index
+                        product["product_id"] = 20_000 + index
             with (root / "provider.jsonl").open("a") as log:
                 log.write(json.dumps({"tool": tool, "arguments": arguments}) + "\n")
             return result
@@ -164,7 +170,9 @@ async def wait_file(path):
 
 async def sdk_checks(root, process):
     from core import cart_summary
-    from mcp_server import _compact_product_selection
+    from mcp_server import (
+        MCP_PRODUCT_WIRE_BUDGET, _compact_product_selection, _mcp_text_wire_chars,
+    )
     from test_meal_concierge_recipes import full_recipe, menu
 
     compact_shared = _compact_product_selection({
@@ -280,6 +288,63 @@ async def sdk_checks(root, process):
         approved_plan = (await call(client, "products", menu_ref=menu_ref, candidate_approvals=[approval]))["product_plan"]
         assert approved_plan["binding"]["menu_ref"] == menu_ref
         assert approved_plan["requirements"][0]["candidate_approval"]["candidate_refs"] == [10]
+
+        # Force the exact maximum-size incomplete-continuation wire path. The
+        # Application rotates the opaque ref before mcp_server projects the
+        # large response, so the projection must carry the replacement pair.
+        oversized_recipe = full_recipe("Oversized continuation transport")
+        oversized_recipe["ingredients"] = [{
+            "quantity": 6, "unit": "stk", "scalable": True,
+            "item": f"wire-continuation-{index:02d} ägg " + "x" * 80,
+        } for index in range(64)]
+        oversized_saved = await call(
+            client, "recipe_write", recipe=oversized_recipe,
+            idempotency_key="mc01-oversized-continuation",
+        )
+        oversized_ref = {
+            "id": oversized_saved["recipe"]["id"],
+            "revision": oversized_saved["recipe"]["revision"],
+        }
+        oversized_menu = (await call(
+            client, "menu", action="save",
+            menu=menu("2026-W41", {"recipe_ref": oversized_ref}), menu_ref=menu_ref,
+        ))["menu"]
+        menu_ref = {
+            key: oversized_menu[key] for key in ("menu_id", "revision", "digest")
+        }
+        first_projection = await call(client, "products", menu_ref=menu_ref)
+        first_product_ref = first_projection["product_plan_ref"]
+        assert first_projection["product_selection_digest"]
+        approvals = [{
+            "requirement_id": row["requirement_id"],
+            "candidate_refs": [20_000 + int(row["item"].split("-", 2)[2].split(" ", 1)[0])],
+            "package_count": 1,
+            "quantity_basis": "one exact observed package; " + "reviewed " * 63,
+        } for row in first_projection["product_plan"]["requirements"][:48]]
+        continued_projection = await call(
+            client, "products", product_plan_ref=first_product_ref,
+            candidate_approvals=approvals,
+        )
+        continued_raw = next(
+            row["result"] for row in reversed([
+                json.loads(line) for line in (root / "application.jsonl").read_text().splitlines()
+            ]) if row["request"].get("product_plan_ref") == first_product_ref
+        )
+        raw_text = json.dumps(continued_raw, ensure_ascii=False, separators=(",", ":"))
+        projected_text = json.dumps(
+            continued_projection, ensure_ascii=False, separators=(",", ":"),
+        )
+        assert _mcp_text_wire_chars(raw_text) >= MCP_PRODUCT_WIRE_BUDGET
+        assert _mcp_text_wire_chars(projected_text) < MCP_PRODUCT_WIRE_BUDGET
+        assert continued_projection["projection"] == "partial_apply_arguments_with_issues"
+        replacement_ref = continued_projection["product_plan_ref"]
+        assert replacement_ref != first_product_ref
+        assert continued_raw["product_plan_ref"] == replacement_ref
+        assert continued_projection["product_selection_digest"]
+        assert continued_projection["partial_product_plan_digest"]
+        assert continued_projection["remaining_issue_count"] == 16
+        stale = await call(client, "products", product_plan_ref=first_product_ref)
+        assert stale["ok"] is False and "stale, unknown" in stale["error"], stale
         # Three ordinary domain rejections must not look like three broken MCP
         # calls to clients that disable a server after repeated tool errors.
         for tool, arguments, message in (

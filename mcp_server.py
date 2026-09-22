@@ -1505,6 +1505,23 @@ def _issues_only_product_plan(
     return compact
 
 
+def _product_continuation_identity(result: dict[str, Any]) -> dict[str, str]:
+    """Return only a complete, server-shaped opaque continuation identity."""
+    reference = result.get("product_plan_ref")
+    selection_digest = result.get("product_selection_digest")
+    if (
+        isinstance(reference, str)
+        and re.fullmatch(r"productplan_[A-Za-z0-9_-]{16,32}", reference) is not None
+        and isinstance(selection_digest, str)
+        and re.fullmatch(r"[0-9a-f]{64}", selection_digest) is not None
+    ):
+        return {
+            "product_plan_ref": reference,
+            "product_selection_digest": selection_digest,
+        }
+    return {}
+
+
 def _issues_only_product_result_projection(
     result: dict[str, Any], *, candidate_limit: int,
 ) -> dict[str, Any] | None:
@@ -1514,17 +1531,21 @@ def _issues_only_product_result_projection(
     )
     if not isinstance(plan, dict):
         return None
+    continuation = _product_continuation_identity(result)
     projected = {
         "status": plan.get("status"),
         "projection": "issues_only",
         "details_omitted": True,
+        **continuation,
         "product_plan": plan,
         "next": (
             "In candidate_search, query='$item' means the exact item field in that same row. "
             "Use any compact candidates shown; when candidates is empty or unsuitable, call "
             "meal_concierge_catalog action=products with query=row.item (or the returned literal "
-            "query) for that requirement. Then correct or add candidate_approvals and price_mode "
-            "and prepare the entire same menu again with the unchanged binding. Do not bypass "
+            "query) for that requirement. Then correct candidate_approvals or price_mode and prepare "
+            + ("with this exact product_plan_ref. " if continuation else
+               "the entire same menu again with the unchanged binding. ") +
+            "Do not bypass "
             "product apply with raw cart changes."
         ),
     }
@@ -1563,10 +1584,12 @@ def _prepared_apply_arguments_projection(result: dict[str, Any]) -> dict[str, An
             or drift.get("current_product_plan_digest") != digest
         ):
             return None
+    continuation = _product_continuation_identity(result)
     projected = {
         "status": "prepared",
         "projection": "apply_arguments_only",
         "details_omitted": True,
+        **continuation,
         "product_plan_digest": digest,
         "apply_arguments": arguments,
         **({"observation_drift": {
@@ -1590,6 +1613,7 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
     if partial is None:
         return None
     arguments, digest = partial
+    continuation = _product_continuation_identity(result)
     for candidate_limit in (5, 3, 1, 0):
         plan = _issues_only_product_plan(
             result.get("product_plan"), candidate_limit=candidate_limit,
@@ -1614,6 +1638,7 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
             "status": "needs_input",
             "projection": "partial_apply_arguments_with_issues",
             "details_omitted": True,
+            **continuation,
             **({key: result["product_plan"][key]
                 for key in ("product_plan_digest", "coverage_status", "cost_status")
                 if key in result["product_plan"]}),
@@ -1622,8 +1647,10 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
             "remaining_issue_count": len(remaining_issues),
             "remaining_issues": remaining_issues,
             "next": (
-                "Continue resolving the listed requirements and prepare the entire same menu "
-                "again. For a clear current cart-change request, apply only the reviewed "
+                "Continue resolving the listed requirements and prepare "
+                + ("with this exact product_plan_ref. " if continuation else
+                   "the entire same menu again. ") +
+                "For a clear current cart-change request, apply only the reviewed "
                 "selected lines with these unchanged partial_apply_arguments and "
                 "cart_change_requested=true. Checkout remains blocked until full apply."
             ),
@@ -1636,14 +1663,17 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
         "status": "needs_input",
         "projection": "partial_apply_arguments_only",
         "details_omitted": True,
+        **continuation,
         "partial_product_plan_digest": digest,
         "partial_apply_arguments": arguments,
         **({"remaining_issue_count": len(unresolved)}
            if isinstance(unresolved, list) else {}),
         "next": (
             "The exact partial continuation fits, but its remaining issue details exceed "
-            "the MCP wire budget. Keep these partial_apply_arguments unchanged and report "
-            "that MCP response limit before continuing; checkout remains blocked."
+            "the MCP wire budget. "
+            + ("Continue prepare with this exact product_plan_ref. " if continuation else "") +
+            "Keep these partial_apply_arguments unchanged and report that MCP response limit "
+            "before continuing; checkout remains blocked."
         ),
     }
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
@@ -1782,13 +1812,20 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
             return projected
     original_status = result.get("status")
     original_reason = result.get("reason")
+    continuation = _product_continuation_identity(result)
     return {
         "status": "needs_input",
         "reason": "mcp_action_response_too_large",
+        **continuation,
         **({"original_status": _bounded_detail(original_status)} if original_status is not None else {}),
         **({"original_reason": _bounded_detail(original_reason)} if original_reason is not None else {}),
         "maximum_wire_chars": MCP_PRODUCT_WIRE_BUDGET,
-        "next": "Correct candidate_approvals or price_mode, then prepare the entire same menu again; do not bypass product apply with raw cart changes.",
+        "next": (
+            "Correct candidate_approvals or price_mode, then prepare "
+            + ("with this exact product_plan_ref; " if continuation else
+               "the entire same menu again; ") +
+            "do not bypass product apply with raw cart changes."
+        ),
     }
 
 
