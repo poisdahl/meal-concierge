@@ -292,6 +292,12 @@ class PaymentBrowserTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(settles, [0.25, 0.25])
 
+        malformed = OdaBrowser.__new__(OdaBrowser)
+        malformed.checkout_provider = "oda"
+        malformed._eval = lambda _script: {"expanded": 1}
+        with self.assertRaisesRegex(HouseholdError, '"state":"invalid_response"'):
+            malformed._expand_checkout_amount_summary()
+
     def test_configured_selection_clicks_only_one_existing_radio(self):
         from oda_browser import _oda_checkout_payment_script, CHECKOUT_URL
         for payment, case, expected in [

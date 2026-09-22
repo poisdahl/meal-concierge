@@ -1738,6 +1738,14 @@ class OdaBrowser:
         clicked = False
         for attempt in range(3):
             control = self._eval(script.replace("ALREADY_CLICKED", json.dumps(clicked)))
+            # Retain the exact legacy success shape used by synthetic callers;
+            # the browser script above emits only the structured states below.
+            if (
+                isinstance(control, Mapping)
+                and set(control) == {"expanded"}
+                and control["expanded"] is True
+            ):
+                return
             if (
                 not isinstance(control, Mapping)
                 or set(control) != {"state", "show_controls", "hide_controls"}
