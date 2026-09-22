@@ -867,6 +867,8 @@ class ProductProjectionTests(unittest.TestCase):
         }
         result = {
             "apply_arguments": arguments,
+            "product_plan_ref": "productplan_CCCCCCCCCCCCCCCC",
+            "product_selection_digest": "d" * 64,
             "product_plan": {
                 "status": "prepared",
                 "product_plan_digest": "a" * 64,
@@ -889,6 +891,10 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
         self.assertEqual(projected["status"], "prepared")
         self.assertEqual(projected["projection"], "apply_arguments_only")
+        self.assertEqual(projected["product_plan_ref"], result["product_plan_ref"])
+        self.assertEqual(
+            projected["product_selection_digest"], result["product_selection_digest"],
+        )
         self.assertIs(projected["details_omitted"], True)
         self.assertEqual(projected["product_plan_digest"], "a" * 64)
         self.assertEqual(projected["apply_arguments"], arguments)
@@ -911,6 +917,8 @@ class ProductProjectionTests(unittest.TestCase):
         result = {
             "apply_arguments": None,
             "partial_apply_arguments": arguments,
+            "product_plan_ref": "productplan_AAAAAAAAAAAAAAAA",
+            "product_selection_digest": "d" * 64,
             "product_plan": {
                 "status": "needs_input", "product_plan_digest": "a" * 64,
                 "partial_product_plan_digest": "c" * 64,
@@ -930,6 +938,10 @@ class ProductProjectionTests(unittest.TestCase):
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
         self.assertEqual(projected["projection"], "partial_apply_arguments_with_issues")
+        self.assertEqual(projected["product_plan_ref"], result["product_plan_ref"])
+        self.assertEqual(
+            projected["product_selection_digest"], result["product_selection_digest"],
+        )
         self.assertEqual(projected["partial_apply_arguments"], arguments)
         self.assertNotIn("cart_change_requested", projected["partial_apply_arguments"])
         self.assertEqual(
@@ -1136,6 +1148,8 @@ class ProductProjectionTests(unittest.TestCase):
             "apply_arguments": {
                 "action": "apply", "product_plan_digest": "a" * 64,
             },
+            "product_plan_ref": "productplan_BBBBBBBBBBBBBBBB",
+            "product_selection_digest": "e" * 64,
             "product_plan": {
                 "status": "needs_input",
                 "requirements": [{
@@ -1168,6 +1182,10 @@ class ProductProjectionTests(unittest.TestCase):
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
         self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
         self.assertEqual(projected["projection"], "issues_only")
+        self.assertEqual(projected["product_plan_ref"], result["product_plan_ref"])
+        self.assertEqual(
+            projected["product_selection_digest"], result["product_selection_digest"],
+        )
         self.assertNotIn("apply_arguments", projected)
         issue = projected["product_plan"]["requirements"][0]["issue"]
         self.assertEqual(issue["reason"], "exact_candidate_scope_needs_selection")
