@@ -254,6 +254,47 @@ _REVIEWED_EXACT_PREPARED_TITLES = {
 }
 
 
+def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
+    """Keep prepared form and every requested food-identity word distinct."""
+    forms = {
+        "juice": "juice", "jus": "juice", "pesto": "pesto", "aioli": "aioli",
+        "dressing": "dressing", "saus": "sauce", "sauce": "sauce",
+        "puré": "puree", "puree": "puree", "paste": "paste",
+        "suppe": "soup", "soup": "soup", "ketchup": "ketchup",
+        "chutney": "chutney", "salsa": "salsa", "brød": "bread",
+        "bread": "bread", "pulver": "powder", "powder": "powder",
+        "tortilla": "tortilla", "tortillas": "tortilla",
+        "nudel": "noodle", "nudler": "noodle",
+        "noodle": "noodle", "noodles": "noodle",
+        "cracker": "cracker", "crackers": "cracker", "kjeks": "cracker",
+        "mix": "mix",
+    }
+    compounds = ("chutney", "dressing", "nudler", "pulver", "pesto", "suppe", "juice", "brød", "saus", "kjeks")
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    normalized = re.sub(
+        r"(?:\s+\d+(?:[.,]\d+)?\s*(?:kg|g|ml|cl|l|stk|pk))+$", "", normalized,
+    )
+    categories: set[str] = set()
+    identity: list[str] = []
+    for word in re.findall(r"[a-zæøåöä]+|\d+(?:[.,]\d+)?", normalized):
+        if word in forms:
+            categories.add(forms[word])
+        elif word == "karripasta":
+            categories.add("paste")
+            identity.append("karri")
+        else:
+            suffix = next(
+                (part for part in compounds if word.endswith(part) and len(word) > len(part) + 1),
+                None,
+            )
+            if suffix:
+                categories.add(forms[suffix])
+                identity.append(word[:-len(suffix)])
+            elif word not in {"av", "of", "med", "with", "og", "and", "i", "in", "til", "to"}:
+                identity.append(word)
+    return categories, sorted(identity)
+
+
 def _reviewed_exact_prepared_title_match(
     requirement: Mapping[str, Any], product: Mapping[str, Any],
 ) -> bool:
@@ -340,16 +381,19 @@ def _semantic_product_conflict(
     # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
     # prose around a recognizable identity. It cannot turn a prepared product
     # or a non-food use of that word back into the requested staple.
-    prepared_product_form = re.compile(
-        r"\b(?:juice|jus|pesto|aioli|dressing|saus|sauce|puré|puree|paste|"
-        r"suppe|soup|ketchup|chutney|salsa|brød|bread|pulver|powder|"
-        r"tortillas?|nudler?|noodles?|crackers?|kjeks|mix)\b"
-    )
+    wanted_forms, wanted_identity = _prepared_signature(wanted)
+    offered_forms, offered_identity = _prepared_signature(offered)
     nonfood_context = re.compile(
         r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
     )
     if (
-        (prepared_product_form.search(offered) and not prepared_product_form.search(wanted))
+        (
+            (wanted_forms or offered_forms)
+            and (
+                wanted_forms != offered_forms
+                or bool(wanted_identity and wanted_identity != offered_identity)
+            )
+        )
         or nonfood_context.search(offered)
     ):
         return True

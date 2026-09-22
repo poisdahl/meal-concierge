@@ -672,7 +672,7 @@ class ProductPlannerTests(unittest.TestCase):
                     reference,
                 )
 
-    def test_other_prepared_titles_keep_existing_semantics(self):
+    def test_unreviewed_translated_prepared_titles_need_identity_review(self):
         cases = (
             ("hvit saus", 89, "White Sauce"),
             ("brun saus", 88, "Toro Brown Sauce"),
@@ -684,7 +684,6 @@ class ProductPlannerTests(unittest.TestCase):
             ("sitron dressing", 82, "Lemon Dressing"),
             ("eple chutney", 81, "Apple Chutney"),
             ("gul karri saus", 80, "Yellow Curry Sauce"),
-            ("fullkornspasta", 90, "Wholegrain Pasta"),
         )
         for wanted, reference, offered in cases:
             with self.subTest(wanted=wanted, offered=offered):
@@ -701,11 +700,69 @@ class ProductPlannerTests(unittest.TestCase):
                         "candidate_refs": [reference],
                     }],
                 )
-                self.assertEqual(plan["status"], "prepared", plan)
+                self.assertEqual(plan["status"], "needs_input", plan)
                 self.assertEqual(
-                    plan["requirements"][0]["selection"]["products"][0]["product_ref"],
-                    reference,
+                    plan["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
                 )
+
+    def test_matching_prepared_identity_and_ordinary_pasta_remain_preparable(self):
+        cases = (
+            ("hvit saus", "Hvit Saus 200 g"),
+            ("tomatsaus", "Tomatsaus 200 g"),
+            ("appelsin juice", "Appelsin Juice 200 g"),
+            ("gul karri saus", "Gul Karri Saus 200 g"),
+            ("fullkornspasta", "Wholegrain Pasta"),
+        )
+        for wanted, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(90, offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [90],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared", plan)
+
+    def test_prepared_identity_mismatch_cannot_be_exactly_approved(self):
+        cases = (
+            ("hvit saus", "Apple Juice"),
+            ("hvit saus", "Garlic Sauce"),
+            ("soya saus", "Thai Fish Sauce"),
+            ("appelsin juice", "Garlic Sauce"),
+            ("pesto", "Tomato Soup"),
+            ("tomatsaus", "Chili Sauce"),
+        )
+        for wanted, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(91, offered, 200, "g", [option(1000)])
+                for authority in (False, True):
+                    approval = {
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [91],
+                    }
+                    if authority:
+                        approval["semantic_authorization"] = {
+                            "candidate_ref": 91, "authorized_by": "current_user",
+                            "reason": "requested identity is different",
+                        }
+                    plan = build_product_plan(
+                        provider="oda", binding={}, menu=value,
+                        observations={requirement["requirement_id"]: observation(wanted, [candidate])},
+                        candidate_approvals=[approval],
+                    )
+                    self.assertEqual(plan["status"], "needs_input", plan)
+                    self.assertEqual(
+                        plan["unresolved_requirements"][0]["reason"],
+                        "semantic_authorization_not_applicable" if authority else "candidate_semantic_mismatch",
+                    )
 
     def test_prepared_form_categories_remain_fail_closed(self):
         cases = (
