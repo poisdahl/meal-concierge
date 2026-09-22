@@ -248,9 +248,24 @@ def _semantic_features(text: str) -> dict[str, Any]:
     }
 
 
+_REVIEWED_EXACT_PREPARED_TITLES = {
+    "rød karripasta": "santa maria red curry paste",
+    "søt chilisaus": "santa maria sweet chili sauce original",
+}
+
+
+def _reviewed_exact_prepared_title_match(
+    requirement: Mapping[str, Any], product: Mapping[str, Any],
+) -> bool:
+    wanted = _identity(requirement.get("item"))
+    offered = _identity(product.get("name"))
+    return bool(wanted and offered == _REVIEWED_EXACT_PREPARED_TITLES.get(wanted))
+
+
 def _semantic_product_conflict(
     requirement: Mapping[str, Any], product: Mapping[str, Any], *,
     exact_retailer_identity_approved: bool = False,
+    reviewed_prepared_title_approved: bool = False,
 ) -> bool:
     """Reject explicit identity, form and variant contradictions fail-closed."""
     def semantic_text(value: Any) -> str:
@@ -261,6 +276,11 @@ def _semantic_product_conflict(
     wanted = semantic_text(requirement.get("item"))
     offered = semantic_text(product.get("name"))
     if not wanted or not offered:
+        return False
+    reviewed_offered = _REVIEWED_EXACT_PREPARED_TITLES.get(wanted)
+    if reviewed_offered is not None:
+        if not reviewed_prepared_title_approved or offered != reviewed_offered:
+            return True
         return False
     wanted_features = _semantic_features(wanted)
     offered_features = _semantic_features(offered)
@@ -443,9 +463,13 @@ def _ordinary_retailer_identity_uncertainty(
 ) -> bool:
     """Recognize identity plus retail metadata without interpreting food prose."""
     if _semantic_product_conflict(
-        requirement, product, exact_retailer_identity_approved=True,
+        requirement, product,
+        exact_retailer_identity_approved=True,
+        reviewed_prepared_title_approved=True,
     ):
         return False
+    if _reviewed_exact_prepared_title_match(requirement, product):
+        return True
     wanted = str(requirement.get("item") or "").casefold()
     title = str(product.get("name") or "")
     identity_words = {
@@ -1515,7 +1539,14 @@ def build_product_plan(
             product_ref = product.get("product_ref")
             if product_ref == authority_ref:
                 authority_differences = _authorized_semantic_difference(requirement, product)
-            if semantic_product_conflict(requirement, product):
+            exact_candidate_approved = bool(
+                approval is not None
+                and product_ref in approval["candidate_refs"]
+            )
+            if _semantic_product_conflict(
+                requirement, product,
+                reviewed_prepared_title_approved=exact_candidate_approved,
+            ):
                 exact_identity_only = _ordinary_retailer_identity_uncertainty(
                     requirement, product,
                 )

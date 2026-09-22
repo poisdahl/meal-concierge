@@ -631,6 +631,129 @@ class ProductPlannerTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared")
 
+    def test_reviewed_prepared_titles_require_exact_candidate_selection(self):
+        cases = (
+            ("Rød karripasta", 30238, "Santa Maria Red Curry Paste"),
+            ("Søt chilisaus", 68799, "Santa Maria Sweet Chili Sauce Original"),
+        )
+        for wanted, reference, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(reference, offered, 200, "g", [option(1000)])
+                observations = {
+                    requirement["requirement_id"]: observation(wanted, [candidate])
+                }
+                unapproved = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations=observations, candidate_approvals=[],
+                )
+                self.assertEqual(unapproved["status"], "needs_input", unapproved)
+                self.assertEqual(
+                    unapproved["unresolved_requirements"][0]["reason"],
+                    "exact_candidate_scope_needs_selection",
+                )
+                self.assertEqual(
+                    unapproved["requirements"][0]["identity_unverified_candidate_refs"],
+                    [reference],
+                )
+
+                approved = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations=observations,
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [reference],
+                    }],
+                )
+                self.assertEqual(approved["status"], "prepared", approved)
+                self.assertEqual(
+                    approved["requirements"][0]["selection"]["products"][0]["product_ref"],
+                    reference,
+                )
+
+    def test_other_prepared_titles_keep_existing_semantics(self):
+        cases = (
+            ("hvit saus", 89, "White Sauce"),
+            ("brun saus", 88, "Toro Brown Sauce"),
+            ("soya saus", 87, "Kikkoman Soy Sauce"),
+            ("fiske saus", 86, "Thai Fish Sauce"),
+            ("sennep saus", 85, "Mustard Sauce"),
+            ("løk saus", 84, "Onion Sauce"),
+            ("appelsin juice", 83, "Orange Juice"),
+            ("sitron dressing", 82, "Lemon Dressing"),
+            ("eple chutney", 81, "Apple Chutney"),
+            ("gul karri saus", 80, "Yellow Curry Sauce"),
+            ("fullkornspasta", 90, "Wholegrain Pasta"),
+        )
+        for wanted, reference, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(reference, offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(wanted, [candidate])
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [reference],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared", plan)
+                self.assertEqual(
+                    plan["requirements"][0]["selection"]["products"][0]["product_ref"],
+                    reference,
+                )
+
+    def test_prepared_form_categories_remain_fail_closed(self):
+        cases = (
+            ("Rød karripasta", "Santa Maria Red Curry Sauce"),
+            ("Rød karripasta", "Santa Maria Red Green Curry Paste"),
+            ("Rød karripasta", "Santa Maria Green Curry Paste"),
+            ("Rød karripasta", "Santa Maria Curry Paste"),
+            ("Rød karripasta", "Santa Maria Red Yellow Curry Paste"),
+            ("Rød karripasta", "Santa Maria Red Curry Mustard Paste"),
+            ("Rød karripasta", "Santa Maria Red Massaman Curry Paste"),
+            ("Rød karripasta", "Santa Maria Red Panang Curry Paste"),
+            ("Rød karripasta", "Red Curry Pasta"),
+            ("Rød karripasta", "Red Curry-Pasta"),
+            ("Søt chilisaus", "Santa Maria Sweet Chili Paste"),
+            ("Søt chilisaus", "Santa Maria Sweet Chili Garlic Sauce"),
+            ("Søt chilisaus", "Santa Maria Sweet Tomato Sauce Original"),
+            ("Søt chilisaus", "Santa Maria Chili Sauce Original"),
+            ("Søt chilisaus", "Santa Maria Sweet Sour Chili Sauce"),
+            ("tomatsaus", "Tomato Paste"),
+            ("Rød karripasta", "Tomato Paste"),
+            ("Rød karripasta", "Garlic Paste"),
+            ("Rød karripasta", "Green Curry Paste"),
+            ("Søt chilisaus", "Béarnaise Sauce"),
+            ("Søt chilisaus", "Tomato Sauce"),
+            ("hvitløk", "Garlic Paste"),
+            ("hvitløk", "Hvitløkspulver"),
+        )
+        for wanted, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(10, offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(wanted, [candidate])
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [10],
+                    }],
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(
+                    plan["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+
     def test_exact_candidate_approval_resolves_ordinary_retailer_title_identity(self):
         cases = (
             (60593, "tomat", "Tomater klase Norge Mijøgartneriet", 500, "g"),
@@ -1438,6 +1561,14 @@ class ProductPlannerTests(unittest.TestCase):
             ("rømme løk og dill 9 % fett", "TINE Lettrømme 10%", "dropped requested flavors"),
             ("yoghurt vanilje 3 % fett", "Yoghurt 4%", "dropped yogurt flavor"),
             ("seterrømme 9 % fett", "Lettrømme 10%", "changed sour cream subtype"),
+            (
+                "Rød karripasta", "Santa Maria Red Yellow Curry Paste",
+                "changed curry identity",
+            ),
+            (
+                "Søt chilisaus", "Santa Maria Sweet Sour Chili Sauce",
+                "changed sauce identity",
+            ),
         )
         for item, name, reason in cases:
             with self.subTest(item=item):
