@@ -667,6 +667,8 @@ class ProductPlannerTests(unittest.TestCase):
             ("Rød karripasta", "Tomato Paste"),
             ("Rød karripasta", "Garlic Paste"),
             ("Rød karripasta", "Green Curry Paste"),
+            ("Rød karripasta", "Red Curry Pasta"),
+            ("Rød karripasta", "Red Curry-Pasta"),
             ("Søt chilisaus", "Béarnaise Sauce"),
             ("Søt chilisaus", "Tomato Sauce"),
             ("hvitløk", "Garlic Paste"),

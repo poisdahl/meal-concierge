@@ -259,7 +259,7 @@ def _prepared_product_forms(text: str) -> set[str]:
         "puree": r"\b(?:puré|puree)\b",
         # Norwegian pasta is also the noodle identity. Only the bounded curry
         # construction denotes paste when it is written as a compound.
-        "paste": r"\bpaste\b|\b(?:karri|curry)[-\s]*pasta\b",
+        "paste": r"\bpaste\b|\bkarripasta\b",
         "soup": r"\b(?:suppe|soup)\b",
         "ketchup": r"\bketchup\b",
         "chutney": r"\bchutney\b",
@@ -277,9 +277,7 @@ def _prepared_product_forms(text: str) -> set[str]:
 def _prepared_product_identity_tokens(text: str) -> set[str]:
     """Return normalized identity words around a prepared-product form."""
     expanded = re.sub(r"\b([a-zæøåöä]+)saus\b", r"\1 saus", text)
-    expanded = re.sub(
-        r"\b((?:karri|curry))[-\s]*pasta\b", r"\1 paste", expanded,
-    )
+    expanded = re.sub(r"\bkarripasta\b", "karri paste", expanded)
     equivalents = {
         "rød": "red", "røde": "red", "karri": "curry",
         "søt": "sweet", "søte": "sweet", "chilli": "chili",
