@@ -631,6 +631,62 @@ class ProductPlannerTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared")
 
+    def test_norwegian_prepared_forms_match_equivalent_english_categories(self):
+        cases = (
+            ("Rød karripasta", 30238, "Santa Maria Red Curry Paste"),
+            ("Søt chilisaus", 68799, "Santa Maria Sweet Chili Sauce Original"),
+            ("fullkornspasta", 90, "Wholegrain Pasta"),
+        )
+        for wanted, reference, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(reference, offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(wanted, [candidate])
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [reference],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared", plan)
+                self.assertEqual(
+                    plan["requirements"][0]["selection"]["products"][0]["product_ref"],
+                    reference,
+                )
+
+    def test_prepared_form_categories_remain_fail_closed(self):
+        cases = (
+            ("Rød karripasta", "Santa Maria Red Curry Sauce"),
+            ("Søt chilisaus", "Santa Maria Sweet Chili Paste"),
+            ("tomatsaus", "Tomato Paste"),
+            ("hvitløk", "Garlic Paste"),
+            ("hvitløk", "Hvitløkspulver"),
+        )
+        for wanted, offered in cases:
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(10, offered, 200, "g", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={
+                        requirement["requirement_id"]: observation(wanted, [candidate])
+                    },
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [10],
+                    }],
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(
+                    plan["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+
     def test_exact_candidate_approval_resolves_ordinary_retailer_title_identity(self):
         cases = (
             (60593, "tomat", "Tomater klase Norge Mijøgartneriet", 500, "g"),

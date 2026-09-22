@@ -248,6 +248,32 @@ def _semantic_features(text: str) -> dict[str, Any]:
     }
 
 
+def _prepared_product_forms(text: str) -> set[str]:
+    """Return explicit prepared-product categories, including safe compounds."""
+    patterns = {
+        "juice": r"\b(?:juice|jus)\b",
+        "pesto": r"\bpesto\b",
+        "aioli": r"\baioli\b",
+        "dressing": r"\bdressing\b",
+        "sauce": r"\b(?:saus|sauce)\b|\b[a-zæøåöä]+saus\b",
+        "puree": r"\b(?:puré|puree)\b",
+        # Norwegian pasta is also the noodle identity. Only the bounded curry
+        # construction denotes paste when it is written as a compound.
+        "paste": r"\bpaste\b|\b(?:karri|curry)[-\s]*pasta\b",
+        "soup": r"\b(?:suppe|soup)\b",
+        "ketchup": r"\bketchup\b",
+        "chutney": r"\bchutney\b",
+        "salsa": r"\bsalsa\b",
+        "bread": r"\b(?:brød|bread)\b",
+        "powder": r"\b(?:pulver|powder)\b",
+        "tortilla": r"\btortillas?\b",
+        "noodle": r"\b(?:nudler?|noodles?)\b|\b[a-zæøåöä]+nudler?\b",
+        "cracker": r"\b(?:crackers?|kjeks)\b",
+        "mix": r"\bmix\b",
+    }
+    return {name for name, pattern in patterns.items() if re.search(pattern, text)}
+
+
 def _semantic_product_conflict(
     requirement: Mapping[str, Any], product: Mapping[str, Any], *,
     exact_retailer_identity_approved: bool = False,
@@ -320,16 +346,16 @@ def _semantic_product_conflict(
     # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
     # prose around a recognizable identity. It cannot turn a prepared product
     # or a non-food use of that word back into the requested staple.
-    prepared_product_form = re.compile(
-        r"\b(?:juice|jus|pesto|aioli|dressing|saus|sauce|puré|puree|paste|"
-        r"suppe|soup|ketchup|chutney|salsa|brød|bread|pulver|powder|"
-        r"tortillas?|nudler?|noodles?|crackers?|kjeks|mix)\b"
-    )
+    wanted_prepared_forms = _prepared_product_forms(wanted)
+    offered_prepared_forms = _prepared_product_forms(offered)
     nonfood_context = re.compile(
         r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
     )
     if (
-        (prepared_product_form.search(offered) and not prepared_product_form.search(wanted))
+        (
+            (wanted_prepared_forms or offered_prepared_forms)
+            and wanted_prepared_forms != offered_prepared_forms
+        )
         or nonfood_context.search(offered)
     ):
         return True
