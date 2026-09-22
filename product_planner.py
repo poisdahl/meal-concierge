@@ -269,19 +269,19 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
         "cracker": "cracker", "crackers": "cracker", "kjeks": "cracker",
         "mix": "mix",
     }
-    compounds = ("chutney", "dressing", "nudler", "pulver", "pesto", "suppe", "juice", "brød", "saus", "kjeks")
+    compounds = sorted(forms, key=len, reverse=True)
     normalized = unicodedata.normalize("NFC", text).casefold()
     normalized = re.sub(
         r"(?:\s+\d+(?:[.,]\d+)?\s*(?:kg|g|ml|cl|l|stk|pk))+$", "", normalized,
     )
     categories: set[str] = set()
     identity: list[str] = []
-    for word in re.findall(r"[a-zæøåöä]+|\d+(?:[.,]\d+)?", normalized):
+    for word in re.findall(r"[^\W\d_]+|\d+(?:[.,]\d+)?", normalized):
         if word in forms:
             categories.add(forms[word])
-        elif word == "karripasta":
+        elif word.endswith("karripasta"):
             categories.add("paste")
-            identity.append("karri")
+            identity.append(word[:-len("pasta")])
         else:
             suffix = next(
                 (part for part in compounds if word.endswith(part) and len(word) > len(part) + 1),

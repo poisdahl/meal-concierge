@@ -737,6 +737,14 @@ class ProductPlannerTests(unittest.TestCase):
             ("appelsin juice", "Garlic Sauce"),
             ("pesto", "Tomato Soup"),
             ("tomatsaus", "Chili Sauce"),
+            ("potet", "Potetpuré"),
+            ("curry", "Currypaste"),
+            ("taco", "Tacomix"),
+            ("tomatpuré", "Hvitløkpuré"),
+            ("hvitløksaioli", "Trøffelaioli"),
+            ("rødkarripasta", "Grønnkarripasta"),
+            ("currypaste", "Garlicpaste"),
+            ("tomatsauce", "Garlicsauce"),
         )
         for wanted, offered in cases:
             with self.subTest(wanted=wanted, offered=offered):
