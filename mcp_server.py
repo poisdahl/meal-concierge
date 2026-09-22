@@ -9,10 +9,11 @@ import re
 import stat
 import sys
 import tempfile
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from pydantic import Field
 
 
 # Keep isolated Python launches able to import the adjacent transport.
@@ -33,7 +34,7 @@ class SemanticAuthorization(TypedDict):
 
 
 class SharedPackageAuthorization(TypedDict):
-    requirement_ids: list[str]
+    requirement_ids: Annotated[list[str], Field(min_length=2, max_length=64)]
     package_count: int
     quantity_basis: str
     authorized_by: Literal["current_user"]
@@ -41,7 +42,7 @@ class SharedPackageAuthorization(TypedDict):
 
 class RequiredCandidateApproval(TypedDict):
     requirement_id: str
-    candidate_refs: list[str | int]
+    candidate_refs: Annotated[list[str | int], Field(min_length=1, max_length=5)]
 
 
 class CandidateApproval(RequiredCandidateApproval, total=False):
@@ -51,6 +52,87 @@ class CandidateApproval(RequiredCandidateApproval, total=False):
     quantity_basis: str
     semantic_authorization: SemanticAuthorization
     shared_package: SharedPackageAuthorization
+
+
+class MenuRef(TypedDict):
+    """Canonical identity returned by every saved-menu operation."""
+
+    menu_id: str
+    revision: int
+    digest: str
+
+
+class RecipeRef(TypedDict):
+    id: str
+    revision: int
+
+
+class PlannerRecipeCandidate(TypedDict):
+    recipe_ref: RecipeRef
+    facts: NotRequired[dict[str, Any]]
+
+
+class PlannerDiscoveryCandidate(TypedDict):
+    discovery_ref: str
+    facts: NotRequired[dict[str, Any]]
+
+
+PlannerCandidate = PlannerRecipeCandidate | PlannerDiscoveryCandidate
+
+
+class AvailableIngredient(TypedDict):
+    item: str
+    quantity: NotRequired[int | float | dict[str, int]]
+    unit: NotRequired[str]
+    use_first: NotRequired[bool]
+
+
+class PlannerInput(TypedDict, total=False):
+    """Bounded planner request; date and cooldown overrides live here."""
+
+    week: str
+    dates: Annotated[list[str], Field(min_length=1, max_length=7)]
+    portions: int
+    candidates: Annotated[list[PlannerCandidate], Field(min_length=1, max_length=12)]
+    strict_targets: Annotated[list[str], Field(max_length=5)]
+    cooldown_overrides: Annotated[dict[str, str], Field(max_length=12)]
+    alternatives: int
+    as_of_date: str
+    available_ingredients: Annotated[list[AvailableIngredient], Field(max_length=32)]
+    recurring_batch: dict[str, Any]
+    prepared_portion_range: Annotated[list[int], Field(min_length=2, max_length=2)]
+    meal_mode: Literal["fresh", "batch", "mixed"]
+
+
+class PlannerSelectionRef(TypedDict):
+    planner_version: str
+    input_digest: str
+    selection_digest: str
+
+
+class PlannerSaveRef(PlannerSelectionRef):
+    request: PlannerInput
+
+
+class PlannerHandoff(PlannerSelectionRef):
+    request: PlannerInput
+    selection: dict[str, Any]
+
+
+class PreparedReplan(TypedDict):
+    """Legacy complete handoff; prefer the short returned replan_ref."""
+
+    status: Literal["prepared"]
+    source: MenuRef
+    as_of_date: str
+    remaining_dates: list[str]
+    locked_slot_ids: list[str]
+    planner_input: PlannerInput
+    state_digest: str
+    successor: dict[str, Any]
+    replaced_slot_ids: list[str]
+    shopping_comparison: dict[str, Any]
+    replan_digest: str
 
 
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
@@ -302,7 +384,7 @@ def meal_concierge_email_sender(
     action: Literal["status", "configure", "send", "reconcile", "retry", "send_order", "reconcile_order", "retry_order", "adopt_order"] = "status",
     connection_id: str | None = None, sender: str | None = None, recipient: str | None = None,
     timing: Literal["on_request", "delivery_day", "both"] = "on_request",
-    request_id: str | None = None, menu_ref: dict[str, Any] | None = None,
+    request_id: str | None = None, menu_ref: MenuRef | None = None,
     delivery_requested: bool = False, provider: Literal["oda", "meny", "mathem"] | None = None,
     order_id: str | None = None, scheduler: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -319,7 +401,7 @@ def meal_concierge_email_sender(
 def meal_concierge_recipe_delivery(
     action: Literal["status", "configure", "request", "get", "read", "begin", "ack", "reconcile", "retry", "pause", "disable", "resume", "release_hold", "release_order_hold", "discard", "automatic"] = "status",
     request_id: str | None = None, delivery_requested: bool = False,
-    menu_ref: dict[str, Any] | None = None, destinations: dict[str, Any] | None = None,
+    menu_ref: MenuRef | None = None, destinations: dict[str, Any] | None = None,
     capabilities: dict[str, Any] | None = None, changes: dict[str, Any] | None = None,
     channel: Literal["chat", "email"] | None = None, held_work: list[str] | None = None,
     held_work_digest: str | None = None,
@@ -364,15 +446,17 @@ def meal_concierge_catalog(action: Literal["products", "recipes", "usuals"], que
     return rpc("catalog", action=action, query=query, limit=limit)
 
 
-@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. record_ingredients persists explicit user stock/omit/include decisions against the exact active menu_ref without provider reads or cart changes. Later prepare/apply automatically use those authoritative decisions for that menu revision; change them with record_ingredients, not an old plan; a new revision needs freshly bound decisions. A user's named already-at-home ingredient is a stock assertion even if absent from the cart. Invalidates stale shopping completion; reprepare/apply for an authorized shop. Each menu supports at most 64 combined aggregated requirements and unresolved ingredient lines. Lowest-cost comparison shares at most 192 unique requirements/searches and approval entries across three alternatives, with five candidates per requirement and 10,000 combinations per requirement. Provider reads and requirement calculations share a 240-second deadline; failed or unfinished needs remain explicit needs_input entries. An incomplete plan cannot be fully applied, but reviewed selected lines may return partial_apply_arguments for an idempotent selected-only sync while checkout stays blocked. ingredient_decisions binds each source={collection,recipe_index,ingredient_index} to include, omit (optional only), have_all or have_quantity with an exact compatible quantity/unit. Pantry flags alone never establish stock; without a stock assertion these ingredients remain purchases. Source-marked optional ingredients can be omitted without asking again. Request-scoped available_ingredients from the exact planned menu is subtracted once after whole-menu aggregation. Later ingredient_decisions for an item replace that item's request stock for the entire menu, rather than adding another stock amount; include explicitly buys it. Unknown quantities or incompatible units leave purchases unchanged. budget_ore caps known product cost, excluding delivery/cart fees; unknown totals stay unverified. price_mode defaults to estimate and permits a single explicitly approved regular-price package with unknown deposit or an explicitly declared expected/minimum variable weight; it labels coverage and merchandise cost as estimates, never claims cheapest or final payable total, and leaves checkout as price authority. Prepare is read-only, requires one exact active menu_ref or complete planner_handoff (obtain it with menu resolve_handoff using the selected save_ref as planner_ref), searches only the configured provider, and returns needs_input until exact candidate_refs are selected per requirement. Direct Oda recipe-product associations are strongest search evidence but still require current availability, package, quantity and price observations. Routine equivalent product selection is covered by the meal/grocery request; ask only for meaningful ambiguity. Candidate selections accept an optional localized search_query when initial hits are irrelevant; returned apply arguments automatically bind selected refs to their observed product-name query. A semantic_authorization may bind one exact selected ref, authorized_by=current_user and a reason only for a nearby dairy-fat variant or a compatible source qualifier omitted from the product title; it cannot override identity, form, species or dietary checks. A shared_package must be repeated unchanged for every listed requirement, select one common ref, and include authorized_by=current_user, one package_count and quantity_basis; the group is atomic and contributes its SKU, quantity and cost exactly once. Both authorities are transient, preserved in compact apply arguments and bound by the reviewed digest. Known allergy and never-buy conflicts require alternatives; unknown nonmedical preference/exclusion evidence is advisory. Explicit lowest_cost accepts one planner_input and compares at most three exact alternatives, preserving non-price rank unless every cost is complete and comparable. Return only exact observed interchangeable candidate refs within the requested shopping scope. Its lowest-cost claim covers only those shown provider-search scopes and exact eligible product/package totals; it excludes delivery and cart-level fees and never locks a price. Prepare returns compact apply_arguments for a complete plan and partial_apply_arguments when at least one line is selected in an incomplete plan. If full details cannot fit the MCP response, compact full or partial apply arguments remain unchanged when present. For a larger incomplete plan without such a continuation, an issues_only projection preserves every requirement and blocker plus bounded exact candidate refs and diagnostic codes; omitted_products means more provider-ranked options exist, so use another shown candidate or an exact localized search_query; correct candidate_approvals or price_mode and prepare the entire same menu again. Apply accepts those unchanged arguments (exact compact menu/planner binding, approvals, stock decisions, budget, price mode and reviewed digest), or the complete unchanged product_plan and digest. Add cart_change_requested=true only for a clear current user request; returned arguments never grant authority themselves. Full compact apply regenerates the plan and requires the identical reviewed digest. Partial compact apply rereads only selected facts, syncs only selected lines without recurring goods, records no complete digest and keeps checkout blocked until later full apply. Both stop on selected drift and reuse guarded idempotent cart sync; neither orders, checks out or pays. If apply stops for cart or menu drift, reconcile that exact state and rerun prepare/apply; never convert selected package counts into raw cart ensure/change quantities as a fallback. On later prepare, pass the chosen comparison product plan as previous_product_plan to receive explicit observation_drift for that exact saved selection. The MCP response is a compact JSON text block; full diagnostic plans remain available through the local service/CLI.")
+@server.tool(structured_output=False, description="Prepare or explicitly apply an exact bounded menu-product plan. Prepare is read-only with respect to the retailer cart. Start with one canonical menu_ref={menu_id,revision,digest}, or a complete planner_handoff obtained from menu resolve_handoff. A needs_input prepare returns a short server-bound product_plan_ref; continue with that ref plus only bounded delta candidate_approvals. continuation_mode=extend is incremental, replace discards prior approvals, and reset explicitly starts over. The ref is tied to the exact saved menu revision and selection digest; stale, unknown, or cross-menu refs fail. Shared-package selections are invalidated atomically when any member changes. Existing persisted partial selections for that exact menu may seed a continuation, but every selected provider fact is reread. A continuation returns a new ref and final product digest; it never grants cart/order authority. record_ingredients persists explicit stock/omit/include decisions for the exact menu without provider reads or cart changes. Each menu supports at most 64 requirements. ingredient_decisions binds exact source positions; pantry flags alone are not stock. budget_ore caps known merchandise cost. price_mode=estimate permits explicitly reviewed bounded estimates; checkout remains final price authority. Candidate approvals can include localized search_query, tightly bounded semantic_authorization, or an atomic shared_package. Known allergy and never-buy conflicts require alternatives. Apply only unchanged returned arguments and add cart_change_requested=true for a clear current user request. Apply regenerates and revalidates the exact digest before a guarded idempotent cart sync; it never orders, checks out, or pays. A partial apply keeps checkout blocked. Reconcile actual cart/menu drift and never bypass product apply with raw cart changes. Oversized responses retain truthful applied, partial_applied, rejected_before_write, or outcome_unknown state and exact reconciliation identities.")
 def meal_concierge_products(
     action: Literal["prepare", "apply", "lowest_cost", "record_ingredients"] = "prepare",
-    planner_input: dict[str, Any] | None = None,
-    menu_ref: dict[str, Any] | None = None,
-    planner_handoff: dict[str, Any] | None = None,
-    planner_selection_ref: dict[str, Any] | None = None,
-    candidate_approvals: list[CandidateApproval] | None = None,
-    ingredient_decisions: list[dict[str, Any]] | None = None,
+    planner_input: PlannerInput | None = None,
+    menu_ref: MenuRef | None = None,
+    planner_handoff: PlannerHandoff | None = None,
+    planner_selection_ref: PlannerSelectionRef | None = None,
+    product_plan_ref: Annotated[str, Field(pattern=r"^productplan_[A-Za-z0-9_-]{16,32}$")] | None = None,
+    continuation_mode: Literal["extend", "replace", "reset"] = "extend",
+    candidate_approvals: Annotated[list[CandidateApproval], Field(max_length=64)] | None = None,
+    ingredient_decisions: Annotated[list[dict[str, Any]], Field(max_length=64)] | None = None,
     budget_ore: int | None = None,
     price_mode: Literal["exact", "estimate"] = "estimate",
     product_plan: dict[str, Any] | None = None,
@@ -386,6 +470,7 @@ def meal_concierge_products(
     result = rpc(
         "products", action=action, menu_ref=menu_ref, planner_input=planner_input,
         planner_handoff=planner_handoff, planner_selection_ref=planner_selection_ref,
+        product_plan_ref=product_plan_ref, continuation_mode=continuation_mode,
         candidate_approvals=candidate_approvals or [],
         ingredient_decisions=ingredient_decisions or [], budget_ore=budget_ore, price_mode=price_mode,
         product_plan=product_plan, product_plan_digest=product_plan_digest,
@@ -516,7 +601,7 @@ def meal_concierge_cooking(
 @server.tool(description="Sync/reconcile requires the exact current menu_ref={menu_id,revision,digest}. Use ensure with requirements=[{product_id,product_name,quantity}] only for a reported household shortage: it adds only the deficit to the requested minimum, including goods already on an Oda or Mathem order during change_begin. Ensure/change is never a fallback for a stopped menu products apply; reconcile the exact drift and rerun products prepare/apply so starting goods and menu ownership stay correct. Use change for explicit additional quantity deltas. Both work with an active menu; household extras are preserved separately. Uncertain writes survive restart and block new writes or checkout: use reconcile_change to read back the saved expected result, never resubmit. Choose an exact existing order with orders change_begin before topping up an already placed order. Never claim an order was updated until checkout confirms it. Read or directly change the cart, sync one active menu's exact product requirements without overwriting manual quantities, or reconcile one digest-bound checkout question. Sync is idempotent and uses exact provider product IDs. Reconcile requires the returned cart_digest plus an explicit keep_current or restore_missing decision; exact exclusions never reduce below menu requirements unless that missing product is explicitly accepted.")
 def meal_concierge_cart(
     action: Literal["get", "change", "ensure", "sync", "reconcile", "reconcile_change", "weekly"] = "get",
-    menu_ref: dict[str, Any] | None = None,
+    menu_ref: MenuRef | None = None,
     operations: list[dict[str, Any]] | None = None,
     requirements: list[dict[str, Any]] | None = None,
     start_as_extra_product_ids: list[str] | None = None,
@@ -1565,7 +1650,110 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
     return projected if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET else None
 
 
+def _compact_cart_apply_state(result: dict[str, Any]) -> dict[str, Any]:
+    cart_result = result.get("cart")
+    if not isinstance(cart_result, dict):
+        cart_result = {}
+    cart_plan = cart_result.get("cart_plan")
+    if not isinstance(cart_plan, dict):
+        cart_plan = result.get("cart_plan") if isinstance(result.get("cart_plan"), dict) else {}
+    menu_ref = result.get("menu_ref")
+    if not isinstance(menu_ref, dict):
+        menu_ref = cart_plan.get("menu_ref")
+    operations = cart_result.get("applied_operations", result.get("applied_operations"))
+    synced = cart_result.get("synced", result.get("synced"))
+    idempotent = cart_result.get("idempotent", result.get("idempotent"))
+    uncertain = (
+        result.get("outcome_unknown") is True
+        or result.get("cart_write_pending") is True
+        or result.get("status") == "outcome_unknown"
+    )
+    return {
+        **({"provider": cart_plan["provider"]} if "provider" in cart_plan else {}),
+        **({"menu_ref": menu_ref} if isinstance(menu_ref, dict) else {}),
+        **({"cart_digest": cart_plan["cart_digest"]} if "cart_digest" in cart_plan else {}),
+        **({"cart_status": cart_plan["status"]} if "status" in cart_plan else {}),
+        "synced": synced if isinstance(synced, bool) else None,
+        "parity": (
+            "verified" if synced is True
+            else "unknown" if uncertain
+            else "reconciliation_required" if result.get("cart_reconciliation_required") is True
+            else "not_written"
+        ),
+        "idempotent": idempotent if isinstance(idempotent, bool) else None,
+        "applied_operation_count": (
+            len(operations) if isinstance(operations, list) else None if uncertain else 0
+        ),
+    }
+
+
+def _applied_product_result_projection(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Project a completed or fenced apply without changing its outcome class."""
+    if result.get("applied") is True:
+        partial = result.get("partial_applied") is True
+        projected = {
+            "status": "partial_applied" if partial else "applied",
+            "applied": True,
+            **({"partial_applied": True, "checkout_blocked": True} if partial else {}),
+            **({"completed_from_partial": True} if result.get("completed_from_partial") is True else {}),
+            **({"nothing_to_buy": True} if result.get("nothing_to_buy") is True else {}),
+            **({"cart_changed": result["cart_changed"]} if "cart_changed" in result else {}),
+            **({"menu_ref": result["menu_ref"]} if isinstance(result.get("menu_ref"), dict) else {}),
+            **({"product_plan_digest": result["product_plan_digest"]}
+               if isinstance(result.get("product_plan_digest"), str) else {}),
+            **({"partial_product_plan_digest": result["partial_product_plan_digest"]}
+               if isinstance(result.get("partial_product_plan_digest"), str) else {}),
+            **({"remaining_issue_count": result["remaining_issue_count"]}
+               if isinstance(result.get("remaining_issue_count"), int) else {}),
+            "cart": _compact_cart_apply_state(result),
+            **({"price_verification": result["price_verification"]}
+               if "price_verification" in result else {}),
+            **({"price_locked": result["price_locked"]} if "price_locked" in result else {}),
+            **({"final_price_authority": result["final_price_authority"]}
+               if "final_price_authority" in result else {}),
+            "details_omitted": True,
+        }
+        if partial and "next" in result:
+            projected["next"] = _bounded_detail(result["next"])
+        return projected
+    if result.get("applied") is not False:
+        return None
+    cart_state = _compact_cart_apply_state(result)
+    uncertain = (
+        result.get("outcome_unknown") is True
+        or result.get("cart_write_pending") is True
+        or result.get("status") == "outcome_unknown"
+    )
+    observed_partial = (
+        result.get("partial_applied") is True
+        or result.get("reason") in {"cart_write_result_uncertain", "cart_changed_during_sync"}
+    )
+    status = "outcome_unknown" if uncertain else "partial_applied" if observed_partial else "rejected_before_write"
+    return {
+        "status": status,
+        "applied": False,
+        **({"checkout_blocked": True} if status in {"partial_applied", "outcome_unknown"} else {}),
+        **({"reason": _bounded_detail(result["reason"])} if "reason" in result else {}),
+        **({"menu_ref": result["menu_ref"]} if isinstance(result.get("menu_ref"), dict) else {}),
+        **({"product_plan_digest": result["product_plan_digest"]}
+           if isinstance(result.get("product_plan_digest"), str) else {}),
+        **({"partial_product_plan_digest": result["partial_product_plan_digest"]}
+           if isinstance(result.get("partial_product_plan_digest"), str) else {}),
+        "cart": cart_state,
+        "details_omitted": True,
+        **({"next": (
+            "Read and reconcile this exact cart identity and product-plan digest before any retry; "
+            "idempotency and parity are not established."
+        )} if status == "outcome_unknown" else {}),
+    }
+
+
 def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
+    original_text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    if isinstance(result.get("applied"), bool) and _mcp_text_wire_chars(original_text) >= MCP_PRODUCT_WIRE_BUDGET:
+        projected = _applied_product_result_projection(result)
+        if projected is not None:
+            return projected
     for candidate_limit in (5, 3, 1):
         projected = _product_result_projection(result, candidate_limit=candidate_limit)
         text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
@@ -1581,6 +1769,11 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
     projected = _partial_apply_arguments_projection(result)
     if projected is not None:
         return projected
+    projected = _applied_product_result_projection(result)
+    if projected is not None:
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        if _mcp_text_wire_chars(text) < MCP_PRODUCT_WIRE_BUDGET:
+            return projected
     for candidate_limit in (5, 3, 1, 0):
         projected = _issues_only_product_result_projection(
             result, candidate_limit=candidate_limit,
@@ -1640,11 +1833,75 @@ def _menu_successor_summary(successor: Any) -> dict[str, Any]:
     return {"week": successor.get("week"), "slots": slots}
 
 
+def _nonprepared_replan_projection(
+    result: dict[str, Any], *, wire_chars: int,
+) -> dict[str, Any] | None:
+    replan = result.get("replan")
+    if not isinstance(replan, dict) or replan.get("status") == "prepared":
+        return None
+    compact = {
+        key: replan[key]
+        for key in (
+            "status", "reason", "slot_id", "prepared_portions",
+            "consumed_at_source", "required_portions", "available_portions",
+        )
+        if key in replan
+    }
+    if "reason" in compact:
+        compact["reason"] = _bounded_detail(compact["reason"])
+    plan = replan.get("plan")
+    if isinstance(plan, dict):
+        compact["plan"] = _menu_plan_projection(plan)
+    minimums = replan.get("minimum_evaluation")
+    if isinstance(minimums, dict):
+        compact["minimum_evaluation"] = {
+            key: _bounded_detail(minimums[key])
+            for key in ("status", "complete_menu", "targets", "unknown", "failures")
+            if key in minimums
+        }
+        results = minimums.get("results")
+        if isinstance(results, list):
+            compact["minimum_evaluation"]["results"] = [{
+                key: (_bounded_detail(row[key]) if key == "detail" else row[key])
+                for key in ("target", "status", "detail") if key in row
+            } for row in results[:8] if isinstance(row, dict)]
+    if "next" in replan:
+        compact["next"] = _bounded_detail(replan["next"])
+    compact.update({
+        "projection": "nonprepared_summary",
+        "details_omitted": True,
+        "projected_wire_chars": wire_chars,
+        "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
+    })
+    projected = {
+        "replan": compact,
+        **({key: _bounded_detail(value) for key, value in result.items()
+            if key not in {"replan", "apply_arguments"} and key in {"status", "reason"}}),
+    }
+    text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    if _mcp_text_wire_chars(text) < MCP_MENU_WIRE_BUDGET:
+        return projected
+    issues = plan.get("issues") if isinstance(plan, dict) else None
+    compact.pop("plan", None)
+    if isinstance(plan, dict):
+        compact["plan"] = {
+            "status": plan.get("status"),
+            "issues": [_compact_issue(issue, plan.get("strict_targets")) for issue in issues[:24]]
+            if isinstance(issues, list) else [],
+            **({"issue_count": len(issues)} if isinstance(issues, list) else {}),
+            **({"candidate_summary": _candidate_summary(plan)} if _candidate_summary(plan) is not None else {}),
+        }
+    return {"replan": compact}
+
+
 def _bounded_menu_replan_result(result: dict[str, Any]) -> dict[str, Any]:
     text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     wire_chars = _mcp_text_wire_chars(text)
     if wire_chars < MCP_MENU_WIRE_BUDGET:
         return result
+    nonprepared = _nonprepared_replan_projection(result, wire_chars=wire_chars)
+    if nonprepared is not None:
+        return nonprepared
     prepared = result.get("replan")
     arguments = result.get("apply_arguments")
     if (
@@ -1657,11 +1914,10 @@ def _bounded_menu_replan_result(result: dict[str, Any]) -> dict[str, Any]:
     ):
         return {
             "replan": {
-                "status": "needs_input", "reason": "mcp_action_response_too_large",
+                "status": "rejected", "reason": "invalid_prepared_replan_continuation",
                 "projected_wire_chars": wire_chars,
                 "maximum_wire_chars": MCP_MENU_WIRE_BUDGET,
             },
-            "next": "Reduce the replan candidate scope and prepare again.",
         }
     successor = prepared.get("successor")
     comparison = prepared.get("shopping_comparison")
@@ -1736,7 +1992,27 @@ def _bounded_menu_replan_apply_result(result: dict[str, Any]) -> dict[str, Any]:
         "Use culinary judgment and the complete household profile to choose a coherent bounded set of exact active recipe candidates, then call plan for deterministic hard-restriction, cooldown, saved-minimum and date validation. Omitting candidates is a bounded discovery fallback, not a reason to abandon ordinary planning. Save only the unchanged save_ref as planner_ref. Existing-menu actions use the exact menu_ref={menu_id,revision,digest}; never split identity into top-level ID/revision fields. Use replan_prepare/replan_apply for same-week replacements so retired planned slots do not block themselves; planner_input.cooldown_overrides is only for an explicitly requested historical repeat. The planner returns bounded selections and source/unknown diagnostics and changes no cart. Known allergy/never-buy conflicts require alternatives; ordinary preferences remain advisory. Use add_slot for an explicitly requested dated extra meal/course. Exact replan and batch apply arguments remain opaque and replay-safe; preserve actual history and never invent consent, safety facts or source evidence."
     ),
 )
-def meal_concierge_menu(action: Literal["get", "assess", "plan", "save", "add_slot", "resolve_handoff", "clear", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"] = "get", menu: dict[str, Any] | None = None, planner_input: dict[str, Any] | None = None, planner_handoff: dict[str, Any] | None = None, planner_ref: dict[str, Any] | None = None, interactive: bool = True, menu_ref: dict[str, Any] | None = None, slot_id: str | None = None, locked: bool | None = None, remaining_dates: list[str] | None = None, locked_slot_ids: list[str] | None = None, as_of_date: str | None = None, replan: dict[str, Any] | None = None, replan_ref: str | None = None, batch_spec: dict[str, Any] | None = None, batch_plan: dict[str, Any] | None = None, batch_confirmation: dict[str, Any] | None = None, slot_input: dict[str, Any] | None = None, idempotency_key: str | None = None) -> Any:
+def meal_concierge_menu(
+    action: Literal["get", "assess", "plan", "save", "add_slot", "resolve_handoff", "clear", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"] = "get",
+    menu: dict[str, Any] | None = None,
+    planner_input: PlannerInput | None = None,
+    planner_handoff: PlannerHandoff | None = None,
+    planner_ref: PlannerSaveRef | None = None,
+    interactive: bool = True,
+    menu_ref: MenuRef | None = None,
+    slot_id: str | None = None,
+    locked: bool | None = None,
+    remaining_dates: Annotated[list[str], Field(min_length=1, max_length=7)] | None = None,
+    locked_slot_ids: Annotated[list[str], Field(max_length=31)] | None = None,
+    as_of_date: str | None = None,
+    replan: PreparedReplan | None = None,
+    replan_ref: Annotated[str, Field(pattern=r"^replan_[a-f0-9]{64}$")] | None = None,
+    batch_spec: dict[str, Any] | None = None,
+    batch_plan: dict[str, Any] | None = None,
+    batch_confirmation: dict[str, Any] | None = None,
+    slot_input: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
+) -> Any:
     from mcp.types import CallToolResult, TextContent
     result = rpc("menu", slot_input=slot_input, idempotency_key=idempotency_key, batch_spec=batch_spec, batch_plan=batch_plan, batch_confirmation=batch_confirmation, menu_ref=menu_ref, slot_id=slot_id, locked=locked, remaining_dates=remaining_dates, locked_slot_ids=locked_slot_ids, as_of_date=as_of_date, replan=replan, replan_ref=replan_ref, action=action, menu=menu, planner_input=planner_input, planner_handoff=planner_handoff, planner_ref=planner_ref, interactive=interactive)
     if action == "plan" and "plan" in result:

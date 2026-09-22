@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve()
@@ -141,6 +142,46 @@ def relay_mcp(root):
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
 class MenuProjectionTests(unittest.TestCase):
+    def test_oversized_nonprepared_replan_keeps_real_status_codes_and_counts(self):
+        spec = importlib.util.spec_from_file_location("menu_replan_projection_test", SOURCE / "mcp_server.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        result = {"replan": {
+            "status": "needs_input",
+            "reason": "no distinct replacement candidates",
+            "plan": {
+                "status": "no_plan",
+                "issues": [{
+                    "code": "insufficient_hard_constraint_candidates",
+                    "required": 1,
+                    "eligible": 0,
+                }],
+                "candidate_evaluations": [{
+                    "reference": {"recipe_ref": {"id": f"recipe-{index}", "revision": 1}},
+                    "hard_constraints": {"status": "fail", "reasons": [{
+                        "code": "dietary_assessment", "status": "fail",
+                        "detail": "x" * 5_000,
+                    }]},
+                } for index in range(24)],
+            },
+            "profile": {"private": "p" * 100_000},
+        }}
+        projected = module._bounded_menu_replan_result(result)
+        self.assertEqual(projected["replan"]["status"], "needs_input")
+        self.assertEqual(projected["replan"]["reason"], "no distinct replacement candidates")
+        self.assertEqual(projected["replan"]["plan"]["status"], "no_plan")
+        self.assertEqual(
+            projected["replan"]["plan"]["issues"][0]["code"],
+            "insufficient_hard_constraint_candidates",
+        )
+        self.assertEqual(
+            projected["replan"]["plan"]["candidate_summary"]["counts"]["fail"], 24
+        )
+        self.assertNotEqual(projected["replan"].get("reason"), "mcp_action_response_too_large")
+        self.assertNotIn("profile", projected["replan"])
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_MENU_WIRE_BUDGET)
+
     def test_projection_summarizes_rejections_and_preserves_input(self):
         spec = importlib.util.spec_from_file_location("menu_projection_test", SOURCE / "mcp_server.py")
         module = importlib.util.module_from_spec(spec)
@@ -423,6 +464,79 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertEqual(chicken["selection"]["package_count"], 2)
         self.assertEqual(chicken["observation"]["candidate_count"], 5)
         self.assertEqual(projected["apply_arguments"], result["apply_arguments"])
+
+    def test_oversized_committed_apply_stays_truthful_and_reconcilable(self):
+        module = self.module()
+        menu_ref = {"menu_id": "menu-applied", "revision": 7, "digest": "b" * 64}
+        result = {
+            "applied": True,
+            "menu_ref": menu_ref,
+            "product_plan_digest": "a" * 64,
+            "price_verification": "unchanged",
+            "price_locked": False,
+            "final_price_authority": "provider checkout summary",
+            "cart": {
+                "synced": True,
+                "idempotent": False,
+                "applied_operations": [
+                    {"productId": index, "quantity": 1, "diagnostic": "x" * 2_000}
+                    for index in range(64)
+                ],
+                "cart": {"items": [{"name": "n" * 80_000}]},
+                "cart_plan": {
+                    "provider": "oda", "menu_ref": menu_ref, "status": "active",
+                    "cart_digest": "c" * 64, "items": [{"detail": "y" * 80_000}],
+                },
+            },
+            "fresh_product_plan": {"diagnostics": "z" * 100_000},
+        }
+        projected = module._bounded_product_result(result)
+        self.assertEqual(projected["status"], "applied")
+        self.assertIs(projected["applied"], True)
+        self.assertEqual(projected["menu_ref"], menu_ref)
+        self.assertEqual(projected["product_plan_digest"], "a" * 64)
+        self.assertEqual(projected["price_verification"], "unchanged")
+        self.assertEqual(projected["cart"], {
+            "provider": "oda", "menu_ref": menu_ref, "cart_digest": "c" * 64,
+            "cart_status": "active", "synced": True, "parity": "verified",
+            "idempotent": False, "applied_operation_count": 64,
+        })
+        self.assertNotEqual(projected.get("reason"), "mcp_action_response_too_large")
+        text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(module._mcp_text_wire_chars(text), module.MCP_PRODUCT_WIRE_BUDGET)
+
+    def test_oversized_apply_outcome_classes_are_action_specific(self):
+        module = self.module()
+        menu_ref = {"menu_id": "menu", "revision": 1, "digest": "b" * 64}
+        base = {
+            "menu_ref": menu_ref, "product_plan_digest": "a" * 64,
+            "fresh_product_plan": {"diagnostics": "x" * 100_000},
+        }
+        partial = module._bounded_product_result({
+            **base, "applied": True, "partial_applied": True,
+            "partial_product_plan_digest": "c" * 64, "remaining_issue_count": 2,
+            "cart": {"synced": True, "idempotent": True, "applied_operations": [],
+                     "cart_plan": {"provider": "oda", "menu_ref": menu_ref,
+                                   "status": "active", "cart_digest": "d" * 64}},
+        })
+        self.assertEqual(partial["status"], "partial_applied")
+        self.assertIs(partial["checkout_blocked"], True)
+
+        rejected = module._bounded_product_result({
+            **base, "applied": False, "reason": "product facts changed immediately before cart sync",
+        })
+        self.assertEqual(rejected["status"], "rejected_before_write")
+        self.assertEqual(rejected["cart"]["parity"], "not_written")
+
+        unknown = module._bounded_product_result({
+            **base, "applied": False, "outcome_unknown": True,
+            "reason": "transport acknowledgement lost", "cart_write_pending": True,
+        })
+        self.assertEqual(unknown["status"], "outcome_unknown")
+        self.assertIs(unknown["checkout_blocked"], True)
+        self.assertEqual(unknown["cart"]["parity"], "unknown")
+        self.assertIsNone(unknown["cart"]["idempotent"])
+        self.assertIn("reconcile", unknown["next"])
 
     def test_sixty_four_candidate_requirements_fit_wire_budget_and_remain_actionable(self):
         module = self.module()
@@ -1062,6 +1176,253 @@ class ProductProjectionTests(unittest.TestCase):
         )
         self.assertNotIn('\\"', json.dumps(projected, ensure_ascii=False))
         self.assertEqual(result, before)
+
+
+class ProductContinuationContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "product_continuation_fixture", SOURCE / "tests" / "test_meal_concierge_products.py"
+        )
+        cls.fixtures = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.fixtures)
+        mcp_spec = importlib.util.spec_from_file_location(
+            "contract_projection_fixture", SOURCE / "mcp_server.py"
+        )
+        cls.mcp_projection = importlib.util.module_from_spec(mcp_spec)
+        mcp_spec.loader.exec_module(cls.mcp_projection)
+
+    def setUp(self):
+        from core import StateStore
+        from service import Application
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = StateStore(Path(self.temp.name), {
+            "instance": "continuation", "household": "Continuation", "profile_overrides": {},
+        })
+        self.provider = self.fixtures.FakeProvider()
+        self.app = Application(self.store, self.provider, object())
+        self.menu = {
+            "menu_id": "menu-continuation", "revision": 1, "digest": "d" * 64,
+            "phase": "draft", "dishes": [{"shopping_requirements": [{
+                "item": "Fixture Mel", "quantity": 500, "unit": "g", "scalable": True,
+            }]}], "salads": [],
+        }
+        self.menu_ref = {key: self.menu[key] for key in ("menu_id", "revision", "digest")}
+        with self.store.locked() as state:
+            state["menu"] = deepcopy(self.menu)
+
+    def test_incremental_ref_is_single_scope_resettable_and_never_writes_cart(self):
+        from core import HouseholdError
+        first = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+        })
+        first_ref = first["product_plan_ref"]
+        requirement_id = first["product_plan"]["requirements"][0]["requirement_id"]
+        self.assertRegex(first_ref, r"^productplan_[A-Za-z0-9_-]{16,32}$")
+        self.assertEqual(self.provider.cart["items"], [])
+
+        continued = self.app.handle({
+            "operation": "products", "action": "prepare", "product_plan_ref": first_ref,
+            "candidate_approvals": [{"requirement_id": requirement_id, "candidate_refs": ["10"]}],
+        })
+        self.assertEqual(continued["product_plan"]["status"], "prepared")
+        self.assertNotEqual(continued["product_plan_ref"], first_ref)
+        self.assertEqual(
+            continued["apply_arguments"]["product_plan_digest"],
+            continued["product_plan"]["product_plan_digest"],
+        )
+        self.assertEqual(self.provider.cart["items"], [])
+        with self.assertRaisesRegex(HouseholdError, "stale, unknown"):
+            self.app.handle({
+                "operation": "products", "action": "prepare", "product_plan_ref": first_ref,
+            })
+
+        reset = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "product_plan_ref": continued["product_plan_ref"],
+            "continuation_mode": "reset",
+        })
+        self.assertEqual(reset["product_plan"]["status"], "needs_input")
+        self.assertNotEqual(reset["product_plan_ref"], continued["product_plan_ref"])
+        self.assertEqual(self.provider.cart["items"], [])
+
+        with self.assertRaisesRegex(HouseholdError, "stale, unknown"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "product_plan_ref": "productplan_XXXXXXXXXXXXXXXX",
+            })
+        with self.store.locked() as state:
+            state["menu"]["revision"] = 2
+            state["menu"]["digest"] = "e" * 64
+        with self.assertRaisesRegex(HouseholdError, "changed menu"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "product_plan_ref": reset["product_plan_ref"],
+            })
+
+    def test_delta_change_invalidates_complete_shared_group(self):
+        from planning_operations import PlanningOperations
+        shared = {
+            "requirement_ids": ["req:a", "req:b"], "package_count": 1,
+            "quantity_basis": "one package", "authorized_by": "current_user",
+        }
+        previous = [{
+            "requirement_id": requirement_id, "candidate_refs": [10],
+            "shared_package": shared,
+        } for requirement_id in shared["requirement_ids"]]
+        merged = PlanningOperations._merge_product_plan_approvals(
+            previous, [{"requirement_id": "req:a", "candidate_refs": [11]}], "extend"
+        )
+        self.assertEqual(merged, [{"requirement_id": "req:a", "candidate_refs": [11]}])
+
+    def test_continuation_rejects_changed_requirement_scope(self):
+        from core import HouseholdError
+        first = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+        })
+        source = first["product_plan"]["requirements"][0]["sources"][0]
+        self.app.handle({
+            "operation": "products", "action": "record_ingredients",
+            "menu_ref": self.menu_ref,
+            "ingredient_decisions": [{"source": source, "action": "have_all"}],
+        })
+        with self.assertRaisesRegex(HouseholdError, "requirements changed"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "product_plan_ref": first["product_plan_ref"],
+            })
+
+    def test_fresh_prepares_rotate_one_ref_without_saturation(self):
+        from core import HouseholdError
+        references = []
+        for _index in range(40):
+            result = self.app.handle({
+                "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            })
+            references.append(result["product_plan_ref"])
+        self.assertEqual(len(set(references)), 40)
+        product_refs = [
+            key for key in self.store.read()["menu_planning"]["prepared"]
+            if key.startswith("productplan_")
+        ]
+        self.assertEqual(product_refs, [references[-1]])
+        with self.assertRaisesRegex(HouseholdError, "stale, unknown"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "product_plan_ref": references[-2],
+            })
+        recovered = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "product_plan_ref": references[-1], "continuation_mode": "reset",
+        })
+        self.assertNotEqual(recovered["product_plan_ref"], references[-1])
+        self.assertEqual(self.provider.cart["items"], [])
+
+    def test_real_stale_apply_projection_keeps_reviewed_identity(self):
+        self.provider.search_prices = [1000, 1100]
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": self.fixtures.menu_requirements(self.menu)[0][0]["requirement_id"],
+                "candidate_refs": ["10"],
+            }],
+        })
+        raw = self.app.handle({
+            "operation": "products", **prepared["apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertFalse(raw["applied"], raw)
+        self.assertEqual(raw["menu_ref"], self.menu_ref)
+        self.assertEqual(raw["product_plan_digest"], prepared["product_plan"]["product_plan_digest"])
+        raw["fresh_product_plan"]["projection_padding"] = "x" * 100_000
+        projected = self.mcp_projection._bounded_product_result(raw)
+        self.assertEqual(projected["status"], "rejected_before_write")
+        self.assertEqual(projected["menu_ref"], self.menu_ref)
+        self.assertEqual(projected["product_plan_digest"], raw["product_plan_digest"])
+        self.assertEqual(projected["cart"]["parity"], "not_written")
+
+    def test_real_postwrite_read_failure_projects_outcome_unknown(self):
+        from core import HouseholdError
+        requirement_id = self.fixtures.menu_requirements(self.menu)[0][0]["requirement_id"]
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": requirement_id, "candidate_refs": ["10"],
+            }],
+        })
+        original_call = self.provider.call
+        dispatched = False
+
+        def lose_postwrite_read(tool_name, arguments, **kwargs):
+            nonlocal dispatched
+            if tool_name == "get_cart" and dispatched:
+                raise HouseholdError("synthetic verification read failure")
+            result = original_call(tool_name, arguments, **kwargs)
+            if tool_name == "manipulate_cart":
+                dispatched = True
+            return result
+
+        self.provider.call = lose_postwrite_read
+        raw = self.app.handle({
+            "operation": "products", **prepared["apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertFalse(raw["applied"], raw)
+        self.assertTrue(raw["outcome_unknown"])
+        self.assertTrue(raw["cart_write_pending"])
+        self.assertTrue(raw["cart_reconciliation_required"])
+        self.assertEqual(raw["menu_ref"], self.menu_ref)
+        self.assertEqual(raw["product_plan_digest"], prepared["product_plan"]["product_plan_digest"])
+        oversized = deepcopy(raw)
+        oversized["fresh_product_plan"] = {"projection_padding": "x" * 100_000}
+        projected = self.mcp_projection._bounded_product_result(oversized)
+        self.assertEqual(projected["status"], "outcome_unknown")
+        self.assertEqual(projected["menu_ref"], self.menu_ref)
+        self.assertEqual(projected["product_plan_digest"], raw["product_plan_digest"])
+        self.assertEqual(projected["cart"]["parity"], "unknown")
+        self.assertIsNone(projected["cart"]["synced"])
+        self.assertIsNone(projected["cart"]["idempotent"])
+
+    def test_committed_mutation_then_deadline_is_outcome_unknown(self):
+        from core import HouseholdError
+        requirement_id = self.fixtures.menu_requirements(self.menu)[0][0]["requirement_id"]
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": requirement_id, "candidate_refs": ["10"],
+            }],
+        })
+        original_call = self.provider.call
+        clock = [1000.0]
+
+        def commit_then_expire(tool_name, arguments, **kwargs):
+            if tool_name == "manipulate_cart":
+                original_call(tool_name, arguments, **kwargs)
+                clock[0] = 1240.0
+                raise HouseholdError("synthetic acknowledgement lost after commit")
+            return original_call(tool_name, arguments, **kwargs)
+
+        self.provider.call = commit_then_expire
+        with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
+            raw = self.app.handle({
+                "operation": "products", **prepared["apply_arguments"],
+                "cart_change_requested": True,
+            })
+        self.assertEqual(self.provider.cart["count"], 1)
+        self.assertFalse(raw["applied"], raw)
+        self.assertTrue(raw["outcome_unknown"])
+        self.assertTrue(raw["cart_write_pending"])
+        self.assertTrue(raw["cart_reconciliation_required"])
+        self.assertEqual(raw["menu_ref"], self.menu_ref)
+        self.assertEqual(raw["product_plan_digest"], prepared["product_plan"]["product_plan_digest"])
+        oversized = deepcopy(raw)
+        oversized["fresh_product_plan"] = {"projection_padding": "x" * 100_000}
+        projected = self.mcp_projection._bounded_product_result(oversized)
+        self.assertEqual(projected["status"], "outcome_unknown")
+        self.assertEqual(projected["menu_ref"], self.menu_ref)
+        self.assertEqual(projected["product_plan_digest"], raw["product_plan_digest"])
+        self.assertEqual(projected["cart"]["parity"], "unknown")
 
 
 @unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
