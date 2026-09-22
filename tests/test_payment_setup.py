@@ -130,7 +130,11 @@ const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new
 const pay=new E('button',c.button||((c.selected??0)===0?'Betal med':'Bekreft og betal')+' 45,50 kr');pay.id='PAY';pay.disabled=!!c.payDisabled;
 const itemExpand=new E('button',c.provider==='mathem'?'Visa varor':'Vis varene');itemExpand.id='ITEM';itemExpand.hidden=!!c.itemButtonHidden;itemExpand.hideOnClick=true;
 const summaryExpand=new E('button',c.provider==='mathem'?'Visa sammanfattning':'Vis oppsummering');summaryExpand.id='SUMMARY';summaryExpand.hidden=!!c.summaryButtonHidden;summaryExpand.hideOnClick=true;
+const duplicateSummaryExpand=new E('button',c.provider==='mathem'?'Visa sammanfattning':'Vis oppsummering');duplicateSummaryExpand.id='SUMMARY_DUPLICATE';
+const summaryHide=new E('button',c.provider==='mathem'?'Dölj sammanfattning':'Skjul oppsummering');summaryHide.id='SUMMARY_HIDE';
 const expand=c.expandButtons==='both'?[itemExpand,summaryExpand]:c.expandButtons==='item'?[itemExpand]:c.expandButtons==='summary'?[summaryExpand]:[];
+if(c.duplicateSummary)expand.push(duplicateSummaryExpand);
+if(c.summaryExpanded)expand.push(summaryHide);
 global.document=new E('document','',[new E('body','',[...expand,...(c.summaryOnly?[]:[item]),delivery,...labels,summary,pay])]);document.body=document.children[0];
 global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
 global.location=new URL(c.url||'https://oda.com/no/checkout/confirm/');
@@ -183,6 +187,110 @@ class PaymentBrowserTests(unittest.TestCase):
         plural = [["2 varer", "16,70 kr"], *rows[1:]]
         self.assertTrue(self.evaluate(_oda_checkout_amount_script(24640, expected_product_count=2),
                                      rows=plural, **options)["result"]["amounts_valid"])
+
+    def test_amount_summary_diagnostics_preserve_safe_failure_categories(self):
+        from core import HouseholdError
+        from oda_browser import OdaBrowser, OdaCheckoutMismatchError
+
+        valid_rows = [
+            ["2 varer", "100,00 kr"], ["Du sparer", "-10,00 kr"],
+            ["Delsum", "90,00 kr"], ["Levering", "0,00 kr"],
+            ["Leveringsemballasje", "5,00 kr"],
+            ["Tillegg for mindre bestilling", "15,00 kr"],
+            ["Total inkl. MVA", "110,00 kr"],
+        ]
+
+        def read(rows, expected_total=11000):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser.checkout_provider = "oda"
+            browser._eval = lambda script: self.evaluate(script, rows=rows)["result"]
+            return browser._read_checkout_amounts(expected_total, 2)
+
+        self.assertEqual(read(valid_rows), {
+            "product_subtotal": 100.0, "delivery_price": 0.0,
+            "discounts": -10.0, "deposits": None, "bags": 5.0,
+            "other_fees": {"Tillegg for mindre bestilling": 15.0},
+            "provider_total": 110.0,
+        })
+
+        invalid_arithmetic = [*valid_rows[:-1], ["Total inkl. MVA", "111,00 kr"]]
+        with self.assertRaisesRegex(HouseholdError, r'"failures":\["row_arithmetic","original_total_changed"\]') as arithmetic:
+            read(invalid_arithmetic)
+        self.assertNotIsInstance(arithmetic.exception, OdaCheckoutMismatchError)
+        self.assertIn('"stage":"amount_arithmetic"', str(arithmetic.exception))
+
+        unknown_row = [*valid_rows[:-1], ["Ukjent avgift", "1,00 kr"], valid_rows[-1]]
+        with self.assertRaisesRegex(HouseholdError, "unrecognized_amount_row") as unknown:
+            read(unknown_row)
+        self.assertNotIsInstance(unknown.exception, OdaCheckoutMismatchError)
+        self.assertIn('"stage":"amount_rows"', str(unknown.exception))
+        self.assertNotIn("Ukjent avgift", str(unknown.exception))
+
+        price_drift = [
+            *valid_rows[:3], ["Levering", "1,00 kr"], *valid_rows[4:-1],
+            ["Total inkl. MVA", "111,00 kr"],
+        ]
+        with self.assertRaisesRegex(OdaCheckoutMismatchError, r'"failures":\["original_total_changed"\]') as drift:
+            read(price_drift)
+        self.assertIn('"stage":"total"', str(drift.exception))
+
+    def test_amount_summary_control_waits_only_for_bounded_readiness(self):
+        from core import HouseholdError
+        from oda_browser import OdaBrowser
+
+        def browser_for(cases):
+            browser = OdaBrowser.__new__(OdaBrowser)
+            browser.checkout_provider = "oda"
+            calls, settles = [], []
+            def evaluate(script):
+                result = self.evaluate(script, **cases[min(len(calls), len(cases) - 1)])
+                calls.append(result)
+                return result["result"]
+            browser._eval = evaluate
+            browser._settle = settles.append
+            return browser, calls, settles
+
+        delayed, calls, settles = browser_for([
+            {"summaryOnly": True},
+            {"summaryOnly": True, "expandButtons": "summary"},
+            {"summaryOnly": True, "summaryExpanded": True},
+        ])
+        delayed._expand_checkout_amount_summary()
+        self.assertEqual([call["clicks"] for call in calls], [[], ["SUMMARY"], []])
+        self.assertEqual(settles, [0.25, 0.25])
+
+        delayed_rows, calls, settles = browser_for([
+            {"summaryOnly": True, "summaryExpanded": True, "rows": []},
+            {"summaryOnly": True, "summaryExpanded": True, "rows": []},
+            {"summaryOnly": True, "summaryExpanded": True},
+        ])
+        delayed_rows._expand_checkout_amount_summary()
+        self.assertEqual(delayed_rows._read_checkout_amounts(4550, 1)["provider_total"], 45.5)
+        self.assertEqual([call["clicks"] for call in calls], [[], [], []])
+        self.assertEqual(settles, [0.25])
+
+        duplicate, calls, settles = browser_for([{
+            "summaryOnly": True, "expandButtons": "summary", "duplicateSummary": True,
+        }])
+        with self.assertRaisesRegex(HouseholdError, '"state":"ambiguous"') as caught:
+            duplicate._expand_checkout_amount_summary()
+        self.assertEqual(calls[0]["clicks"], [])
+        self.assertEqual(settles, [])
+        self.assertIn('"show_controls":2', str(caught.exception))
+
+        unchanged, calls, settles = browser_for([{
+            "summaryOnly": True, "expandButtons": "summary",
+        }])
+        with self.assertRaisesRegex(HouseholdError, '"attempts":3'):
+            unchanged._expand_checkout_amount_summary()
+        self.assertEqual([click for call in calls for click in call["clicks"]], ["SUMMARY"])
+        self.assertEqual(settles, [0.25, 0.25])
+
+        missing, calls, settles = browser_for([{"summaryOnly": True}])
+        with self.assertRaisesRegex(HouseholdError, '"attempts":3'):
+            missing._expand_checkout_amount_summary()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(settles, [0.25, 0.25])
 
     def test_configured_selection_clicks_only_one_existing_radio(self):
         from oda_browser import _oda_checkout_payment_script, CHECKOUT_URL
