@@ -635,6 +635,7 @@ class ProductPlannerTests(unittest.TestCase):
         cases = (
             ("Rød karripasta", 30238, "Santa Maria Red Curry Paste"),
             ("Søt chilisaus", 68799, "Santa Maria Sweet Chili Sauce Original"),
+            ("tomatsaus", 89, "Tomato Sauce"),
             ("fullkornspasta", 90, "Wholegrain Pasta"),
         )
         for wanted, reference, offered in cases:
@@ -663,6 +664,11 @@ class ProductPlannerTests(unittest.TestCase):
             ("Rød karripasta", "Santa Maria Red Curry Sauce"),
             ("Søt chilisaus", "Santa Maria Sweet Chili Paste"),
             ("tomatsaus", "Tomato Paste"),
+            ("Rød karripasta", "Tomato Paste"),
+            ("Rød karripasta", "Garlic Paste"),
+            ("Rød karripasta", "Green Curry Paste"),
+            ("Søt chilisaus", "Béarnaise Sauce"),
+            ("Søt chilisaus", "Tomato Sauce"),
             ("hvitløk", "Garlic Paste"),
             ("hvitløk", "Hvitløkspulver"),
         )
