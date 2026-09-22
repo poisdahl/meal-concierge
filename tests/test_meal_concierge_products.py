@@ -609,6 +609,11 @@ class ProductPlannerTests(unittest.TestCase):
             ("hvitløk", "Hvitløk Kina"),
             ("hvitløk", "Fersk Hvitløk 2 stk"),
             ("hvitløk", "Upresset hvitløk 2 stk"),
+            ("hvitløk", "Opressad vitlök 2 stk"),
+            ("hvitløk", "Unpressed garlic 2 stk"),
+            ("hvitløk", "Upresset-hvitløk 2 stk"),
+            ("hvitløk", "Opressad-vitlök 2 stk"),
+            ("hvitløk", "Unpressed-garlic 2 stk"),
             ("tomat", "Norske Tomater løsvekt"),
             ("tomat", "Cherrytomater 250 g"),
         ):
@@ -681,6 +686,9 @@ class ProductPlannerTests(unittest.TestCase):
             "Ferskpresset hvitløk 100 g", "Hvitløk ferskpresset 100 g",
             "Pressad vitlök 100 g", "Vitlök pressad 100 g",
             "Färskpressad vitlök 100 g", "Vitlök färskpressad 100 g",
+            "Nypresset hvitløk 100 g", "Nypressad vitlök 100 g",
+            "Kaldpresset hvitløk 100 g", "Håndpresset hvitløk 100 g",
+            "Maskinpresset hvitløk 100 g",
             "Garlic Bread", "Hvitløkspulver", "Hvitløk aioli", "Hvitløk majones",
             "Hvitløk Majones Norge", "Gul løk 2 stk",
         ):
@@ -688,6 +696,43 @@ class ProductPlannerTests(unittest.TestCase):
                 value = menu({"item": "hvitløk", "quantity": 1, "unit": "count"})
                 requirement = menu_requirements(value)[0][0]
                 candidate = product(9371, name, 1, "count", [option(1000)])
+                plan = build_product_plan(
+                    provider="oda", binding={}, menu=value,
+                    observations={requirement["requirement_id"]: observation("hvitløk", [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [9371],
+                    }],
+                )
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(
+                    plan["unresolved_requirements"][0]["reason"],
+                    "candidate_semantic_mismatch",
+                )
+
+        for name, brand in (
+            ("Nypresset hvitløk 100 g", "Nypresset"),
+            ("Nypressad vitlök 100 g", "Nypressad"),
+            ("Coldpressed garlic 100 g", "Coldpressed"),
+            ("Nypresset-hvitløk 100 g", "Nypresset"),
+            ("Nypresset/hvitløk 100 g", "Nypresset"),
+            ("Nypresset, hvitløk 100 g", "Nypresset"),
+            ("Kaldpresset hvitløk 100 g", "Kaldpresset"),
+            ("Håndpresset hvitløk 100 g", "Håndpresset"),
+            ("Maskinpresset hvitløk 100 g", "Maskinpresset"),
+            ("Gartneripresset hvitløk 100 g", None),
+            ("Gartneripresset-hvitløk 100 g", None),
+            ("Hvitløk X_Presset Norge", "X_Presset"),
+            ("Garlic 3DPressed Norway", "3DPressed"),
+            ("Garlic Überpressed Norway", "Überpressed"),
+            ("Garlic abc123pressed Norway", "abc123pressed"),
+        ):
+            with self.subTest(name=name, brand=brand):
+                value = menu({"item": "hvitløk", "quantity": 1, "unit": "count"})
+                requirement = menu_requirements(value)[0][0]
+                candidate = product(9371, name, 1, "count", [option(1000)])
+                if brand is not None:
+                    candidate["display"]["brand"] = brand
                 plan = build_product_plan(
                     provider="oda", binding={}, menu=value,
                     observations={requirement["requirement_id"]: observation("hvitløk", [candidate])},

@@ -275,7 +275,7 @@ def _semantic_product_conflict(
         (r"^salt$", rf"(?:^|\s)(?:(?:fint|grovt)\s+salt|havsalt|flaksalt|bordsalt|finsalt|grovsalt|salt)(?:\s+(?:fint|grovt|flak|med\s+jod))?{package_tail}$|^(?:sea\s+salt|table\s+salt){package_tail}$"),
         (r"^(?:ris|rice)$", rf"(?:^|\s)(?:jasminris|basmatiris|fullkornsris|villris|sushiris|grøtris|risottoris|ris){package_tail}$|(?:^|\s)(?:(?:jasmine|basmati|brown|white|wild|sushi|arborio|risotto|long[-\s]grain)\s+rice|rice){package_tail}$"),
         (r"^(?:melk|milk|mjölk)$", rf"(?:^|\s)(?:helmelk|lettmelk|skummet\s+melk|standardmjölk|lättmjölk|skummjölk|melk|mjölk)(?:\s+(?:lett|hel))?{package_tail}$|^(?:(?:whole|skimmed|semi[-\s]skimmed|dairy)\s+milk|milk){package_tail}$"),
-        (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:^|\s)(?:(?:fersk|fresh)\s+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
+        (r"^(?:hvitløk|garlic|vitlök)$", rf"^(?:(?:fersk|fresh)\s+|(?:upresset|opressad|unpressed)[-\s]+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
         (r"^(?:tomat|tomato|tomater|tomatoes)$", rf"(?:^|\s)(?:(?:ferske?|fresh|økologiske?|organic|norske?)\s+)?(?:tomat(?:er)?|(?:cherry|plomme|cocktail|klase)tomat(?:er)?)(?:\s+løsvekt)?{package_tail}$|(?:^|\s)(?:(?:cherry|plum|cocktail|cluster|vine)\s+)?tomato(?:es)?{package_tail}$"),
     )
     bare_identity_presence = (
@@ -301,13 +301,17 @@ def _semantic_product_conflict(
         )
     ):
         return True
+    pressed_garlic_form = (
+        r"(?!(?:upresset|opressad|unpressed)\b)"
+        r"\w*(?:presset|pressad|pressed)"
+    )
     bare_compound_guards = (
         (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa|cookie)[-\s]*(?:smør|butter)\b"),
         (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"(?:\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b|\bflour\s+tortillas?\b)"),
         (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt(?:[-\s]+|\s*&\s*)(?:kjeks|crackers?|chips?|pepper\s+mix)\b)"),
         (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding|flour)\b|\b(?:bygg|konjak|linse)ris\b)"),
         (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\b(?:chocolate|hemp|potato)[-\s]*milk\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea|hamp|hemp|potet|potato)[-\s]*(?:melk|milk|mjölk)\b)"),
-        (r"^(?:hvitløk|garlic|vitlök)$", r"(?:\b(?:hvitløk|garlic|vitlök)s?\s*[,/-]?\s*(?:pulver|powder|paste|puré|puree|saus|sauce|brød|bread|ferskpresset|presset|färskpressad|pressad|pressed|knust|crushed|hakket|minced|aioli|dressing|olje|oil)\b|\b(?:ferskpresset|presset|färskpressad|pressad|pressed|knust|crushed|hakket|minced)\s+(?:hvitløk|garlic|vitlök)\b)"),
+        (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:\b{pressed_garlic_form}\b|\b(?:hvitløk|garlic|vitlök)s?\s*[,/-]?\s*(?:pulver|powder|paste|puré|puree|saus|sauce|brød|bread|knust|crushed|hakket|minced|aioli|dressing|olje|oil)\b|\b(?:knust|crushed|hakket|minced)\s+(?:hvitløk|garlic|vitlök)\b)"),
         (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*\s*[,/-]?\s*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup|chutney|juice|jus|pesto|salsa)\b"),
     )
     if any(re.fullmatch(base, wanted) and re.search(compound, offered)
