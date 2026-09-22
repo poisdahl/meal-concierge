@@ -248,7 +248,10 @@ def _semantic_features(text: str) -> dict[str, Any]:
     }
 
 
-def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[str, Any]) -> bool:
+def _semantic_product_conflict(
+    requirement: Mapping[str, Any], product: Mapping[str, Any], *,
+    exact_retailer_identity_approved: bool = False,
+) -> bool:
     """Reject explicit identity, form and variant contradictions fail-closed."""
     def semantic_text(value: Any) -> str:
         if not isinstance(value, str):
@@ -275,20 +278,56 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
         (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:^|\s)(?:(?:fersk|fresh)\s+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
         (r"^(?:tomat|tomato|tomater|tomatoes)$", rf"(?:^|\s)(?:(?:ferske?|fresh|økologiske?|organic|norske?)\s+)?(?:tomat(?:er)?|(?:cherry|plomme|cocktail|klase)tomat(?:er)?)(?:\s+løsvekt)?{package_tail}$|(?:^|\s)(?:(?:cherry|plum|cocktail|cluster|vine)\s+)?tomato(?:es)?{package_tail}$"),
     )
-    if any(re.fullmatch(base, wanted) and not re.search(allowed, offered)
-           for base, allowed in bare_identity_forms):
+    bare_identity_presence = (
+        (r"^(?:smør|butter)$", r"\b(?:[a-zæøåöä]*smør|butter)\b"),
+        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"\b(?:mel|hvetemel|flour|vetemjöl)\b"),
+        (r"^salt$", r"\b[a-zæøåöä]*salt\b"),
+        (r"^(?:ris|rice)$", r"\b(?:[a-zæøåöä]*ris|rice)\b"),
+        (r"^(?:melk|milk|mjölk)$", r"\b(?:[a-zæøåöä]*melk|milk|mjölk)\b"),
+        (r"^(?:hvitløk|garlic|vitlök)$", r"\b(?:hvitløk|garlic|vitlök)\b"),
+        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:[a-zæøåöä]*tomat\w*|tomatoes?)\b"),
+    )
+    if any(
+        re.fullmatch(base, wanted) and not re.search(identity, offered)
+        for base, identity in bare_identity_presence
+    ):
+        return True
+    retailer_identity_may_be_resolved = exact_retailer_identity_approved
+    if (
+        not retailer_identity_may_be_resolved
+        and any(
+            re.fullmatch(base, wanted) and not re.search(allowed, offered)
+            for base, allowed in bare_identity_forms
+        )
+    ):
         return True
     bare_compound_guards = (
-        (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa)[-\s]*(?:smør|butter)\b"),
-        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b"),
-        (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt[-\s]+(?:kjeks|crackers?|chips?)\b)"),
-        (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding)\b)"),
-        (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\bmilk[-\s]*chocolate\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea)[-\s]*(?:melk|milk|mjölk)\b)"),
-        (r"^(?:hvitløk|garlic|vitlök)$", r"\b(?:hvitløk|garlic|vitlök)s?[-\s]*(?:pulver|powder|paste|puré|puree|saus|sauce)\b"),
-        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*[-\s]*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup)\b"),
+        (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa|cookie)[-\s]*(?:smør|butter)\b"),
+        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"(?:\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b|\bflour\s+tortillas?\b)"),
+        (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt(?:[-\s]+|\s*&\s*)(?:kjeks|crackers?|chips?|pepper\s+mix)\b)"),
+        (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding|flour)\b|\b(?:bygg|konjak|linse)ris\b)"),
+        (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\b(?:chocolate|hemp|potato)[-\s]*milk\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea|hamp|hemp|potet|potato)[-\s]*(?:melk|milk|mjölk)\b)"),
+        (r"^(?:hvitløk|garlic|vitlök)$", r"(?:\b(?:hvitløk|garlic|vitlök)s?\s*[,/-]?\s*(?:pulver|powder|paste|puré|puree|saus|sauce|brød|bread|presset|pressed|knust|crushed|hakket|minced|aioli|dressing|olje|oil)\b|\b(?:presset|pressed|knust|crushed|hakket|minced)\s+(?:hvitløk|garlic|vitlök)\b)"),
+        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*\s*[,/-]?\s*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup|chutney|juice|jus|pesto|salsa)\b"),
     )
     if any(re.fullmatch(base, wanted) and re.search(compound, offered)
            for base, compound in bare_compound_guards):
+        return True
+    # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
+    # prose around a recognizable identity. It cannot turn a prepared product
+    # or a non-food use of that word back into the requested staple.
+    prepared_product_form = re.compile(
+        r"\b(?:juice|jus|pesto|aioli|dressing|saus|sauce|puré|puree|paste|"
+        r"suppe|soup|ketchup|chutney|salsa|brød|bread|pulver|powder|"
+        r"tortillas?|nudler?|noodles?|crackers?|kjeks|mix)\b"
+    )
+    nonfood_context = re.compile(
+        r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
+    )
+    if (
+        (prepared_product_form.search(offered) and not prepared_product_form.search(wanted))
+        or nonfood_context.search(offered)
+    ):
         return True
     for axis in (
         "state", "skin", "salt", "coriander_form", "chili_form",
@@ -388,6 +427,79 @@ def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[s
     if wanted_meat and not offered_meat and re.search(r"\b(?:kjøttdeig|farse|köttfärs|mince|minced meat)\b", offered):
         return True
     return False
+
+
+def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[str, Any]) -> bool:
+    """Reject explicit identity, form and variant contradictions fail-closed."""
+    return _semantic_product_conflict(requirement, product)
+
+
+def _ordinary_retailer_identity_uncertainty(
+    requirement: Mapping[str, Any], product: Mapping[str, Any],
+) -> bool:
+    """Recognize identity plus retail metadata without interpreting food prose."""
+    if _semantic_product_conflict(
+        requirement, product, exact_retailer_identity_approved=True,
+    ):
+        return False
+    wanted = str(requirement.get("item") or "").casefold()
+    title = str(product.get("name") or "")
+    identity_words = {
+        r"(?:smør|butter)": r"(?:[a-zæøåöä]*smør|butter)",
+        r"(?:mel|hvetemel|flour|vetemjöl)": r"(?:mel|hvetemel|flour|vetemjöl)",
+        r"salt": r"[a-zæøåöä]*salt",
+        r"(?:ris|rice)": r"(?:[a-zæøåöä]*ris|rice)",
+        r"(?:melk|milk|mjölk)": r"(?:[a-zæøåöä]*melk|milk|mjölk)",
+        r"(?:hvitløk|garlic|vitlök)": r"(?:hvitløk|garlic|vitlök)",
+        r"(?:tomat|tomato|tomater|tomatoes)": r"(?:[a-zæøåöä]*tomat(?:er)?|tomatoes?)",
+    }
+    identity_pattern = next((
+        pattern for base, pattern in identity_words.items()
+        if re.fullmatch(base, wanted)
+    ), None)
+    if identity_pattern is None:
+        return False
+    word_matches = list(re.finditer(r"[A-Za-zÆØÅæøåÖÄöä]+", title))
+    identity_indexes = {
+        index for index, match in enumerate(word_matches)
+        if re.fullmatch(identity_pattern, match.group(0).casefold())
+    }
+    if not identity_indexes:
+        return False
+    allowed_lower_metadata = {
+        "fersk", "ferske", "fresh", "økologisk", "økologiske", "organic",
+        "norsk", "norske", "klasse", "klase", "løsvekt", "siktet",
+        "fint", "grovt", "lett", "hel", "med", "jod", "stk", "pk",
+        "pakke", "kg", "g", "l", "ml", "cl", "vår", "laveste", "pris",
+        "norge", "norway", "nederland", "netherlands", "spania", "spain",
+        "kina", "china",
+    }
+    display = product.get("display")
+    brand = display.get("brand") if isinstance(display, Mapping) else None
+    brand_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-zÆØÅæøåÖÄöä]+", brand or "")
+    }
+    for index, match in enumerate(word_matches):
+        if index in identity_indexes:
+            continue
+        token = match.group(0)
+        normalized = token.casefold()
+        if (
+            normalized in allowed_lower_metadata
+            or normalized in brand_tokens
+            or "gartneri" in normalized
+        ):
+            continue
+        return False
+    metadata_evidence = bool(
+        re.search(r"\d+(?:[.,-]\d+)?\s*(?:kg|g|l|ml|cl|stk|pk|%)\b", title, re.I)
+        or re.search(r"\b(?:vår\s+laveste\s+pris|økologisk\w*|organic|klasse|klase|løsvekt)\b", title, re.I)
+        or re.search(r"\b(?:norge|norway|nederland|netherlands|spania|spain|kina|china)\b", title, re.I)
+        or re.search(r"gartneri", title, re.I)
+        or "/" in title
+    )
+    return metadata_evidence
 
 
 def _authorized_semantic_difference(
@@ -1391,6 +1503,7 @@ def build_product_plan(
         authority = approval.get("semantic_authorization") if approval else None
         authority_ref = authority.get("candidate_ref") if isinstance(authority, Mapping) else None
         semantic_mismatches = {}
+        identity_unverified = {}
         authority_differences = None
         for product in observation.get("products", []):
             if not isinstance(product, Mapping):
@@ -1399,9 +1512,17 @@ def build_product_plan(
             if product_ref == authority_ref:
                 authority_differences = _authorized_semantic_difference(requirement, product)
             if semantic_product_conflict(requirement, product):
-                semantic_mismatches[product_ref] = _authorized_semantic_difference(
-                    requirement, product
+                exact_identity_only = _ordinary_retailer_identity_uncertainty(
+                    requirement, product,
                 )
+                if exact_identity_only:
+                    identity_unverified[product_ref] = [
+                        "retailer_title_identity_verified_by_exact_candidate_approval"
+                    ]
+                else:
+                    semantic_mismatches[product_ref] = _authorized_semantic_difference(
+                        requirement, product
+                    )
         authorized_semantic_ref = (
             authority_ref
             if isinstance(authority, Mapping)
@@ -1428,6 +1549,10 @@ def build_product_plan(
         if excluded_semantic_refs:
             safe_observation["excluded_candidate_count"] = len(excluded_semantic_refs)
             safe_observation["excluded_candidate_reason"] = "candidate_semantic_mismatch"
+        if identity_unverified:
+            item["identity_unverified_candidate_refs"] = sorted(
+                identity_unverified, key=_ref_sort_key,
+            )
         for product in safe_observation.get("products", []):
             product["candidate_approval"] = {
                 "requirement_id": requirement_id,
@@ -1453,7 +1578,8 @@ def build_product_plan(
         selected_ordinary = [
             {"product_ref": product_ref, "differences": deepcopy(differences)}
             for product_ref, differences in sorted(
-                ordinary_omissions.items(), key=lambda item: _ref_sort_key(item[0])
+                {**ordinary_omissions, **identity_unverified}.items(),
+                key=lambda item: _ref_sort_key(item[0]),
             )
             if product_ref in approval["candidate_refs"]
         ]
