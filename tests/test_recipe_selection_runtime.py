@@ -1442,6 +1442,78 @@ class ProductContinuationContractTests(unittest.TestCase):
         self.assertEqual(rows[yolk_id]["status"], "needs_input")
         self.assertNotIn("candidate_approval", rows[yolk_id])
 
+    def test_full_apply_seed_invalidates_only_changed_internal_shared_allocation(self):
+        from product_planner import menu_requirements
+
+        self.menu["dishes"][0]["shopping_requirements"].extend([{
+            "item": "Fixture Egg", "quantity": 1, "unit": "count", "scalable": True,
+        }, {
+            "item": "Fixture Yolk", "quantity": 2, "unit": "count", "scalable": True,
+        }])
+        with self.store.locked() as state:
+            state["menu"] = deepcopy(self.menu)
+        requirements = {row["item"]: row for row in menu_requirements(self.menu)[0]}
+        flour_id = requirements["Fixture Mel"]["requirement_id"]
+        egg_id = requirements["Fixture Egg"]["requirement_id"]
+        yolk_id = requirements["Fixture Yolk"]["requirement_id"]
+        original_call = self.provider.call
+
+        def shared_candidates(tool_name, arguments, **kwargs):
+            if tool_name != "product_search":
+                return original_call(tool_name, arguments, **kwargs)
+            query = arguments["queries"][0]
+            if "mel" in query.casefold():
+                products = [self.fixtures.product(
+                    "10", "Fixture Mel", 500, "g", [self.fixtures.option(1000)]
+                )]
+            else:
+                products = [
+                    self.fixtures.product(
+                        reference, f"Fixture Egg {reference}", 12, "count",
+                        [self.fixtures.option(price)],
+                    )
+                    for reference, price in (("30", 900), ("31", 1000))
+                ]
+            return self.fixtures.observation(query, products)
+
+        self.provider.call = shared_candidates
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [
+                {"requirement_id": flour_id, "candidate_refs": ["10"]},
+                {"requirement_id": egg_id, "candidate_refs": ["30"]},
+                {"requirement_id": yolk_id, "candidate_refs": ["30"]},
+            ],
+        })
+        applied = self.app.handle({
+            "operation": "products", **prepared["apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertTrue(applied["applied"], applied)
+        authority = self.store.read()["cart_plan"]["product_plan_authority"]
+        self.assertEqual(authority["dependent_groups"], [[egg_id, yolk_id]])
+
+        self.provider.calls.clear()
+        corrected = self.app.handle({
+            "operation": "products", "action": "prepare", "menu_ref": self.menu_ref,
+            "candidate_approvals": [{
+                "requirement_id": egg_id, "candidate_refs": ["31"],
+            }],
+        })
+        rows = {
+            row["requirement_id"]: row
+            for row in corrected["product_plan"]["requirements"]
+        }
+        self.assertEqual(rows[flour_id]["status"], "selected")
+        self.assertEqual(rows[flour_id]["selection"]["products"][0]["product_ref"], "10")
+        self.assertEqual(rows[egg_id]["status"], "selected")
+        self.assertEqual(rows[egg_id]["selection"]["products"][0]["product_ref"], "31")
+        self.assertEqual(rows[yolk_id]["status"], "needs_input")
+        self.assertNotIn("candidate_approval", rows[yolk_id])
+        self.assertNotIn(
+            "manipulate_cart", [name for name, _arguments in self.provider.calls]
+        )
+
     def test_continuation_rejects_changed_requirement_scope(self):
         from core import HouseholdError
         first = self.app.handle({

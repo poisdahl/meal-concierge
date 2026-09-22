@@ -802,10 +802,10 @@ class OrderOperations:
             if not assessment["ready"]:
                 return "menu coverage or explicit ingredient constraints need review"
             plan = state.get("cart_plan") or {}
+            if plan.get("menu_ref") == assessment["menu_ref"] and self._menu_shortfall(plan, summary):
+                return "required menu products are missing; review or restore the incomplete cart before automatic checkout"
             if plan.get("menu_ref") != assessment["menu_ref"] or not plan.get("product_plan_digest"):
                 return "menu ingredients need an applied, exact product plan before automatic checkout"
-            if self._menu_shortfall(plan, summary):
-                return "required menu products are missing; review or restore the incomplete cart before automatic checkout"
         if not schedule.get("enabled") or not schedule.get("auto_checkout"):
             return "scheduled checkout is no longer enabled"
         total = summary.get("total")
