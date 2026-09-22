@@ -263,25 +263,28 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
         "suppe": "soup", "soup": "soup", "ketchup": "ketchup",
         "chutney": "chutney", "salsa": "salsa", "brød": "bread",
         "bread": "bread", "pulver": "powder", "powder": "powder",
-        "tortilla": "tortilla", "tortillas": "tortilla",
-        "nudel": "noodle", "nudler": "noodle",
-        "noodle": "noodle", "noodles": "noodle",
-        "cracker": "cracker", "crackers": "cracker", "kjeks": "cracker",
+        "tortilla": "tortilla", "nudel": "noodle",
+        "noodle": "noodle", "cracker": "cracker", "kjeks": "cracker",
         "mix": "mix", "miks": "mix",
     }
     # Inflected prepared-form words must not fall back to ordinary exact-ref
     # approval merely because their spelling differs from the singular form.
+    english_forms = {"juice", "sauce", "puree", "purée", "paste", "soup", "bread", "powder", "noodle", "cracker", "mix"}
     forms = {}
     for base, category in {**base_forms, "purée": "puree"}.items():
         variants = {base}
-        variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et", "e", "a", "ne"))
-        if base.endswith("e"):
-            variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
+        if base in english_forms:
+            variants.add(base + ("es" if base.endswith("x") else "s"))
+        else:
+            variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et", "e", "a", "ne"))
+            if base.endswith("e"):
+                variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
         if base == "suppe":
             variants.add("suppa")
         if base == "nudel":
-            variants.add("nudlene")
+            variants.update({"nudler", "nudlene"})
         forms.update({variant: category for variant in variants})
+    forms.pop("mikser", None)  # A kitchen mixer is not a prepared food mix.
     compounds = sorted(forms, key=len, reverse=True)
     normalized = unicodedata.normalize("NFC", text).casefold()
     normalized = re.sub(
