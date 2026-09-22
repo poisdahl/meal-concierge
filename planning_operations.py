@@ -2054,6 +2054,68 @@ class PlanningOperations:
                 approval.pop("semantic_authorization", None)
         return [approvals[key] for key in sorted(approvals)]
 
+    @classmethod
+    def _partial_seed_approvals(cls, cart_plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Recover only the exact refs already authorized by a partial apply."""
+        stored = cart_plan.get("partial_product_plan_approvals")
+        authority = cart_plan.get("partial_product_plan_authority")
+        selected = authority.get("selected_requirements") if isinstance(authority, Mapping) else None
+        if (
+            not isinstance(stored, list) or not stored
+            or not isinstance(selected, list) or not selected
+            or any(not isinstance(row, Mapping) for row in stored + selected)
+        ):
+            raise HouseholdError(
+                "persisted partial product selections lack exact digest-bound authority"
+            )
+        stored_by_id = {
+            row.get("requirement_id"): deepcopy(dict(row)) for row in stored
+            if isinstance(row.get("requirement_id"), str)
+        }
+        selected_by_id = {
+            row.get("requirement_id"): row for row in selected
+            if isinstance(row.get("requirement_id"), str)
+        }
+        if (
+            len(stored_by_id) != len(stored)
+            or len(selected_by_id) != len(selected)
+            or set(stored_by_id) != set(selected_by_id)
+        ):
+            raise HouseholdError(
+                "persisted partial product approvals do not match their recorded authority"
+            )
+        selected_plan = {
+            "requirements": [{**dict(row), "status": "selected"} for row in selected]
+        }
+        authority_approvals = {
+            row["requirement_id"]: row
+            for row in cls._plan_approvals(
+                selected_plan, selected_only=True,
+            )
+        }
+        if canonical(stored_by_id) != canonical(authority_approvals):
+            raise HouseholdError(
+                "persisted partial product approvals do not match their recorded authority"
+            )
+        narrowed = cls._continuation_approvals(selected_plan)
+        narrowed_by_id = {row["requirement_id"]: row for row in narrowed}
+        for requirement_id, row in selected_by_id.items():
+            selection = row.get("selection")
+            products = selection.get("products") if isinstance(selection, Mapping) else None
+            selected_refs = {
+                product.get("product_ref")
+                for product in products or [] if isinstance(product, Mapping)
+            }
+            approval = narrowed_by_id.get(requirement_id)
+            if (
+                not selected_refs or not isinstance(approval, Mapping)
+                or set(approval.get("candidate_refs", [])) != selected_refs
+            ):
+                raise HouseholdError(
+                    "persisted partial product selection differs from its recorded approval"
+                )
+        return narrowed
+
     @staticmethod
     def _continuation_dependent_groups(plan: Mapping[str, Any]) -> list[list[str]]:
         groups = set()
@@ -2569,9 +2631,12 @@ class PlanningOperations:
                 if (
                     saved_ref is not None
                     and canonical(cart_plan.get("menu_ref")) == canonical(saved_ref)
-                    and isinstance(cart_plan.get("partial_product_plan_approvals"), list)
+                    and any(key in cart_plan for key in (
+                        "partial_product_plan_digest", "partial_product_plan_approvals",
+                        "partial_product_plan_authority",
+                    ))
                 ):
-                    persisted_seed = cart_plan["partial_product_plan_approvals"]
+                    persisted_seed = self._partial_seed_approvals(cart_plan)
                 approvals = self._merge_product_plan_approvals(
                     persisted_seed, request.get("candidate_approvals") or [], "extend",
                 )

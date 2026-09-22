@@ -252,6 +252,89 @@ class ProductCapacityTests(unittest.TestCase):
         expected = self.assert_totals(full, DINNERS)
         self.assertEqual(self.provider.quantities[candidate["product_ref"]], expected["salmon"])
 
+    def test_partial_seed_keeps_exact_applied_ref_through_unrelated_continuations(self):
+        self.save_week()
+        initial = self.prepare()
+        rows = {row["identity"]: row for row in initial["requirements"]}
+        salmon_candidates = self.provider.entry("salmon")["products"]
+        selected_ref = salmon_candidates[0]["product_ref"]
+        cheaper_later_ref = salmon_candidates[1]["product_ref"]
+        first = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": rows["salmon"]["requirement_id"],
+                "candidate_refs": [selected_ref, cheaper_later_ref],
+            }],
+        })
+        applied = self.app.handle({
+            "operation": "products", **first["partial_apply_arguments"],
+            "cart_change_requested": True,
+        })
+        self.assertTrue(applied["partial_applied"])
+        authority = self.store.read()["cart_plan"]["partial_product_plan_authority"]
+        self.assertEqual(
+            authority["selected_requirements"][0]["selection"]["products"][0]["product_ref"],
+            selected_ref,
+        )
+
+        cheaper_option = salmon_candidates[1]["purchase_options"][0]
+        cheaper_option.update(
+            merchandise_ore=50, mandatory_deposit_ore=0, total_payable_ore=50,
+        )
+        ginger_ref = self.provider.entry("ginger")["products"][0]["product_ref"]
+        prepared_c = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": self.app._cart_menu_ref(self.menu),
+            "candidate_approvals": [{
+                "requirement_id": rows["ginger"]["requirement_id"],
+                "candidate_refs": [ginger_ref],
+            }],
+        })
+        prepared_c_rows = {
+            row["requirement_id"]: row for row in prepared_c["product_plan"]["requirements"]
+        }
+        self.assertEqual(
+            prepared_c_rows[rows["salmon"]["requirement_id"]]["selection"]["products"][0]["product_ref"],
+            selected_ref,
+        )
+
+        cod_ref = self.provider.entry("cod")["products"][0]["product_ref"]
+        prepared_d = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "product_plan_ref": prepared_c["product_plan_ref"],
+            "candidate_approvals": [{
+                "requirement_id": rows["cod"]["requirement_id"],
+                "candidate_refs": [cod_ref],
+            }],
+        })
+        prepared_d_rows = {
+            row["requirement_id"]: row for row in prepared_d["product_plan"]["requirements"]
+        }
+        salmon = prepared_d_rows[rows["salmon"]["requirement_id"]]
+        self.assertEqual(salmon["selection"]["products"][0]["product_ref"], selected_ref)
+        self.assertEqual(salmon["candidate_approval"]["candidate_refs"], [selected_ref])
+
+        with self.store.locked() as state:
+            saved_authority = deepcopy(
+                state["cart_plan"].pop("partial_product_plan_authority")
+            )
+        with self.assertRaisesRegex(HouseholdError, "lack exact digest-bound authority"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "menu_ref": self.app._cart_menu_ref(self.menu),
+            })
+        saved_authority["selected_requirements"][0]["candidate_approval"][
+            "candidate_refs"
+        ] = [cheaper_later_ref]
+        with self.store.locked() as state:
+            state["cart_plan"]["partial_product_plan_authority"] = saved_authority
+        with self.assertRaisesRegex(HouseholdError, "do not match their recorded authority"):
+            self.app.handle({
+                "operation": "products", "action": "prepare",
+                "menu_ref": self.app._cart_menu_ref(self.menu),
+            })
+
     def test_later_partial_revalidates_every_prior_selection(self):
         self.save_week()
         initial = self.prepare()
