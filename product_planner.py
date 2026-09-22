@@ -279,10 +279,13 @@ def _prepared_product_identity_tokens(text: str) -> set[str]:
     expanded = re.sub(r"\b([a-zæøåöä]+)saus\b", r"\1 saus", text)
     expanded = re.sub(r"\bkarripasta\b", "karri paste", expanded)
     equivalents = {
-        "rød": "red", "røde": "red", "karri": "curry",
+        "rød": "red", "røde": "red", "grønn": "green", "grønne": "green",
+        "grön": "green", "brun": "brown", "brune": "brown",
+        "karri": "curry",
         "søt": "sweet", "søte": "sweet", "chilli": "chili",
         "tomat": "tomato", "tomater": "tomato",
         "hvitløk": "garlic", "vitlök": "garlic",
+        "soya": "soy", "soja": "soy", "fisk": "fish", "fiske": "fish",
     }
     form_words = {
         "juice", "jus", "pesto", "aioli", "dressing", "saus", "sauce",
@@ -297,6 +300,24 @@ def _prepared_product_identity_tokens(text: str) -> set[str]:
         for token in re.findall(r"[a-zæøåöä]+", expanded)
         if token not in form_words and token not in connectors
     }
+
+
+def _prepared_product_identity_conflict(wanted: set[str], offered: set[str]) -> bool:
+    """Reject missing anchors and contradictory explicit identity facets."""
+    if not wanted.issubset(offered):
+        return True
+    facet_groups = (
+        {"black", "brown", "green", "red", "white"},
+        {
+            "chili", "curry", "fish", "garlic", "mango", "miso", "onion",
+            "soy", "tamarind", "tomato",
+        },
+    )
+    return any(
+        wanted.intersection(group)
+        and not offered.intersection(group).issubset(wanted.intersection(group))
+        for group in facet_groups
+    )
 
 
 def _semantic_product_conflict(
@@ -385,7 +406,9 @@ def _semantic_product_conflict(
         )
         or (
             wanted_prepared_forms
-            and not wanted_prepared_identity.issubset(offered_prepared_identity)
+            and _prepared_product_identity_conflict(
+                wanted_prepared_identity, offered_prepared_identity,
+            )
         )
         or nonfood_context.search(offered)
     ):

@@ -636,6 +636,9 @@ class ProductPlannerTests(unittest.TestCase):
             ("Rød karripasta", 30238, "Santa Maria Red Curry Paste"),
             ("Søt chilisaus", 68799, "Santa Maria Sweet Chili Sauce Original"),
             ("tomatsaus", 89, "Tomato Sauce"),
+            ("brun saus", 88, "Toro Brown Sauce"),
+            ("soya saus", 87, "Kikkoman Soy Sauce"),
+            ("fiske saus", 86, "Thai Fish Sauce"),
             ("fullkornspasta", 90, "Wholegrain Pasta"),
         )
         for wanted, reference, offered in cases:
@@ -667,10 +670,12 @@ class ProductPlannerTests(unittest.TestCase):
             ("Rød karripasta", "Tomato Paste"),
             ("Rød karripasta", "Garlic Paste"),
             ("Rød karripasta", "Green Curry Paste"),
+            ("Rød karripasta", "Santa Maria Red Green Curry Paste"),
             ("Rød karripasta", "Red Curry Pasta"),
             ("Rød karripasta", "Red Curry-Pasta"),
             ("Søt chilisaus", "Béarnaise Sauce"),
             ("Søt chilisaus", "Tomato Sauce"),
+            ("Søt chilisaus", "Santa Maria Sweet Chili Garlic Sauce"),
             ("hvitløk", "Garlic Paste"),
             ("hvitløk", "Hvitløkspulver"),
         )
