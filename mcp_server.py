@@ -1672,8 +1672,8 @@ def _partial_apply_arguments_projection(result: dict[str, Any]) -> dict[str, Any
             "The exact partial continuation fits, but its remaining issue details exceed "
             "the MCP wire budget. "
             + ("Continue prepare with this exact product_plan_ref. " if continuation else "") +
-            "Keep these partial_apply_arguments unchanged and inspect "
-            "the local service/CLI result before continuing; checkout remains blocked."
+            "Keep these partial_apply_arguments unchanged and report that MCP response limit "
+            "before continuing; checkout remains blocked."
         ),
     }
     text = json.dumps(projected, ensure_ascii=False, separators=(",", ":"))

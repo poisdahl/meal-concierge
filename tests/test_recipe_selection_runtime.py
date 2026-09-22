@@ -1067,6 +1067,8 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertEqual(projected["projection"], "partial_apply_arguments_only")
         self.assertEqual(projected["partial_apply_arguments"], arguments)
         self.assertNotIn("remaining_issues", projected)
+        self.assertNotIn("CLI", projected["next"])
+        self.assertNotIn("local service", projected["next"])
 
     def test_malformed_partial_issue_list_does_not_crash_projection(self):
         module = self.module()
