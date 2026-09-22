@@ -279,6 +279,8 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
             variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
         if base == "suppe":
             variants.add("suppa")
+        if base == "nudel":
+            variants.add("nudlene")
         forms.update({variant: category for variant in variants})
     compounds = sorted(forms, key=len, reverse=True)
     normalized = unicodedata.normalize("NFC", text).casefold()
