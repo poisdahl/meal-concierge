@@ -1633,29 +1633,41 @@ class ProductPlannerTests(unittest.TestCase):
             observations=revalidated_observations,
             candidate_approvals=continuation["candidate_approvals"],
         )
-        final = finalize_product_plan_continuation(continuation, fresh)
+        revalidation = {
+            "continuation_digest": continuation["continuation_digest"],
+            "read_ref": "provider-read-fixture-1",
+            "requirement_ids": continuation["provider_revalidation_requirement_ids"],
+        }
+        final = finalize_product_plan_continuation(
+            continuation, fresh, provider_revalidation=revalidation,
+        )
         self.assertEqual(final["status"], "prepared")
         self.assertNotEqual(final["product_plan_digest"], prior["product_plan_digest"])
         validate_product_plan(final, final["product_plan_digest"])
         self.assertEqual(
             final["continuation"]["invalidated_requirement_ids"], sorted(shared_ids)
         )
+        self.assertEqual(
+            final["continuation"]["provider_revalidation"], revalidation,
+        )
 
-        with self.assertRaisesRegex(HouseholdError, "fresh provider observations"):
-            finalize_product_plan_continuation(continuation, prior)
-
-        partly_revalidated = build_product_plan(
-            provider="oda", binding=binding, menu=value,
-            observations={
-                **revalidated_observations,
-                by_item["mel"]["requirement_id"]: observations[
-                    by_item["mel"]["requirement_id"]
-                ],
-            },
+        unchanged_facts = build_product_plan(
+            provider="oda", binding=binding, menu=value, observations=observations,
             candidate_approvals=continuation["candidate_approvals"],
         )
-        with self.assertRaisesRegex(HouseholdError, "fresh provider observations"):
-            finalize_product_plan_continuation(continuation, partly_revalidated)
+        unchanged_final = finalize_product_plan_continuation(
+            continuation, unchanged_facts,
+            provider_revalidation={**revalidation, "read_ref": "provider-read-fixture-2"},
+        )
+        self.assertEqual(unchanged_final["status"], "prepared")
+        with self.assertRaisesRegex(HouseholdError, "fresh-read provenance"):
+            finalize_product_plan_continuation(
+                continuation, fresh,
+                provider_revalidation={
+                    **revalidation,
+                    "requirement_ids": revalidation["requirement_ids"][:-1],
+                },
+            )
 
         repriced_flour = product(
             110, "Siktet hvetemel", 1000, "g", [option(2300)],
@@ -1676,7 +1688,10 @@ class ProductPlannerTests(unittest.TestCase):
             111,
         )
         with self.assertRaisesRegex(HouseholdError, "unaffected product selection changed"):
-            finalize_product_plan_continuation(continuation, changed_unaffected)
+            finalize_product_plan_continuation(
+                continuation, changed_unaffected,
+                provider_revalidation={**revalidation, "read_ref": "provider-read-fixture-3"},
+            )
 
         unavailable_flour = deepcopy(flour)
         unavailable_flour["availability"] = "unavailable"
@@ -1692,7 +1707,10 @@ class ProductPlannerTests(unittest.TestCase):
         )
         self.assertEqual(stale_facts["status"], "needs_input")
         with self.assertRaisesRegex(HouseholdError, "complete prepared"):
-            finalize_product_plan_continuation(continuation, stale_facts)
+            finalize_product_plan_continuation(
+                continuation, stale_facts,
+                provider_revalidation={**revalidation, "read_ref": "provider-read-fixture-4"},
+            )
 
         with self.assertRaisesRegex(HouseholdError, "menu revision changed"):
             prepare_product_plan_continuation(

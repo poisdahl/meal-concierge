@@ -1367,44 +1367,6 @@ def _selection_decision(requirement: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _provider_observation_digests(
-    plan: Mapping[str, Any], requirement_ids: set[str],
-) -> dict[str, str]:
-    """Bind each selected row's provider facts, including observation time."""
-    rows = {}
-    for requirement in plan.get("requirements", []):
-        if (
-            not isinstance(requirement, Mapping)
-            or requirement.get("requirement_id") not in requirement_ids
-        ):
-            continue
-        selection = requirement.get("selection")
-        observation = requirement.get("observation")
-        if not isinstance(selection, Mapping) or not isinstance(observation, Mapping):
-            raise HouseholdError("continued selection lacks provider observation facts")
-        selected_refs = {
-            product.get("product_ref")
-            for product in selection.get("products", [])
-            if isinstance(product, Mapping)
-        }
-        products = [
-            deepcopy(product)
-            for product in observation.get("products", [])
-            if isinstance(product, Mapping) and product.get("product_ref") in selected_refs
-        ]
-        if {product.get("product_ref") for product in products} != selected_refs:
-            raise HouseholdError("continued selection is missing exact provider facts")
-        row = {
-            "requirement_id": requirement.get("requirement_id"),
-            "observed_at": observation.get("observed_at"),
-            "products": sorted(products, key=lambda product: _ref_sort_key(product["product_ref"])),
-        }
-        rows[row["requirement_id"]] = hashlib.sha256(canonical(row).encode()).hexdigest()
-    if set(rows) != requirement_ids:
-        raise HouseholdError("continued selections were not all observed")
-    return rows
-
-
 def _exact_saved_menu_ref(plan: Mapping[str, Any]) -> dict[str, Any]:
     binding = plan.get("binding")
     reference = binding.get("menu_ref") if isinstance(binding, Mapping) else None
@@ -1530,18 +1492,16 @@ def prepare_product_plan_continuation(
             for requirement_id in sorted(normalized)
         ],
         "provider_revalidation_requirement_ids": sorted(revalidation_ids),
-        "prior_provider_observation_digests": _provider_observation_digests(
-            prior, revalidation_ids,
-        ),
     }
     contract["continuation_digest"] = hashlib.sha256(canonical(contract).encode()).hexdigest()
     return contract
 
 
 def finalize_product_plan_continuation(
-    continuation: Mapping[str, Any], fresh_product_plan: Mapping[str, Any],
+    continuation: Mapping[str, Any], fresh_product_plan: Mapping[str, Any], *,
+    provider_revalidation: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Bind a fully re-observed continuation to a new final product digest."""
+    """Bind a parent-attested fresh provider rebuild to a new final digest."""
     if not isinstance(continuation, Mapping):
         raise HouseholdError("product continuation contract is invalid")
     contract = deepcopy(dict(continuation))
@@ -1551,7 +1511,7 @@ def finalize_product_plan_continuation(
         "invalidated_requirement_ids", "retained_requirement_ids",
         "retained_selections", "candidate_approvals",
         "provider_revalidation_requirement_ids",
-        "prior_provider_observation_digests", "continuation_digest",
+        "continuation_digest",
     }:
         raise HouseholdError("product continuation contract is invalid")
     supplied_digest = contract.pop("continuation_digest", None)
@@ -1589,17 +1549,19 @@ def finalize_product_plan_continuation(
     required_revalidation = set(contract.get("provider_revalidation_requirement_ids", []))
     if required_revalidation != set(fresh_approvals):
         raise HouseholdError("fresh product plan did not revalidate every continued selection")
-    fresh_provider_digests = _provider_observation_digests(fresh, required_revalidation)
-    prior_provider_digests = contract.get("prior_provider_observation_digests")
     if (
-        not isinstance(prior_provider_digests, Mapping)
-        or set(prior_provider_digests) != required_revalidation
-        or any(
-            fresh_provider_digests[requirement_id] == prior_provider_digests[requirement_id]
-            for requirement_id in required_revalidation
-        )
+        not isinstance(provider_revalidation, Mapping)
+        or set(provider_revalidation) != {
+            "continuation_digest", "read_ref", "requirement_ids",
+        }
+        or provider_revalidation.get("continuation_digest") != supplied_digest
+        or not isinstance(provider_revalidation.get("read_ref"), str)
+        or not 1 <= len(provider_revalidation["read_ref"].encode("utf-8")) <= 500
+        or not isinstance(provider_revalidation.get("requirement_ids"), list)
+        or set(provider_revalidation["requirement_ids"]) != required_revalidation
+        or len(provider_revalidation["requirement_ids"]) != len(required_revalidation)
     ):
-        raise HouseholdError("continued product selections need fresh provider observations")
+        raise HouseholdError("continued product selections need exact fresh-read provenance")
     fresh_rows = {
         row.get("requirement_id"): row
         for row in fresh.get("requirements", [])
@@ -1622,6 +1584,9 @@ def finalize_product_plan_continuation(
         )
     }
     fresh["continuation"]["continuation_digest"] = supplied_digest
+    fresh["continuation"]["provider_revalidation"] = deepcopy(
+        dict(provider_revalidation)
+    )
     fresh["product_plan_digest"] = product_plan_digest(fresh)
     if fresh["product_plan_digest"] == prior_digest:
         raise HouseholdError("continued product plan did not produce a new final digest")
