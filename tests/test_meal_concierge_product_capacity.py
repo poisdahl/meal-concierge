@@ -424,19 +424,80 @@ class ProductCapacityTests(unittest.TestCase):
         self.save_week()
         plan = self.complete()
         self.assertTrue(self.apply(plan)["applied"])
-
-        def change_plan_during_read(tool, _arguments):
-            if tool == "get_cart":
+        baseline = self.store.read()
+        cases = {
+            "product plan": lambda cart_plan: cart_plan.update(
+                product_plan_digest="0" * 64
+            ),
+            "last synced cart": lambda cart_plan: cart_plan.update(
+                last_synced_digest="0" * 64
+            ),
+            "reconciliation": lambda cart_plan: cart_plan.update(
+                status="needs_input", pending_cart_digest="0" * 64,
+            ),
+            "requirements": lambda cart_plan: cart_plan.update(
+                menu_required_quantities={"999": 1},
+            ),
+        }
+        for label, mutate in cases.items():
+            with self.subTest(transition=label):
                 with self.store.locked() as state:
-                    state["cart_plan"]["product_plan_digest"] = "0" * 64
+                    state.clear()
+                    state.update(deepcopy(baseline))
 
-        self.provider.on_call = change_plan_during_read
+                def change_plan_during_read(tool, _arguments):
+                    if tool == "get_cart":
+                        with self.store.locked() as state:
+                            mutate(state["cart_plan"])
+
+                self.provider.on_call = change_plan_during_read
+                self.provider.calls.clear()
+                with self.assertRaisesRegex(
+                    HouseholdError, "changed during cart verification",
+                ):
+                    self.app.handle({
+                        "operation": "products", "action": "prepare",
+                        "menu_ref": self.app._cart_menu_ref(self.menu),
+                    })
+                self.assertEqual(
+                    [tool for tool, _arguments, _kwargs in self.provider.calls],
+                    ["get_cart"],
+                )
+
+    def test_full_apply_cart_drift_does_not_overwrite_newer_reconciliation(self):
+        self.save_week()
+        plan = self.complete()
+        self.assertTrue(self.apply(plan)["applied"])
+        selected_ref = next(
+            product["product_ref"]
+            for row in plan["requirements"] for product in row["selection"]["products"]
+        )
+        newer_digest = "c" * 64
+
+        def install_newer_state_and_cart_drift(tool, _arguments):
+            if tool != "get_cart":
+                return
+            self.provider.quantities[selected_ref] += 1
+            with self.store.locked() as state:
+                state["cart_plan"].update({
+                    "status": "needs_input",
+                    "last_synced_digest": newer_digest,
+                    "pending_cart_digest": newer_digest,
+                    "approved_cart_digest": None,
+                })
+
+        self.provider.on_call = install_newer_state_and_cart_drift
         self.provider.calls.clear()
         with self.assertRaisesRegex(HouseholdError, "changed during cart verification"):
             self.app.handle({
                 "operation": "products", "action": "prepare",
                 "menu_ref": self.app._cart_menu_ref(self.menu),
             })
+        current = self.store.read()["cart_plan"]
+        self.assertEqual(current["status"], "needs_input")
+        self.assertEqual(current["last_synced_digest"], newer_digest)
+        self.assertEqual(current["pending_cart_digest"], newer_digest)
+        self.assertIsNone(current["approved_cart_digest"])
         self.assertEqual(
             [tool for tool, _arguments, _kwargs in self.provider.calls],
             ["get_cart"],
