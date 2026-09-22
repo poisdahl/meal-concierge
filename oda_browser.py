@@ -1719,27 +1719,128 @@ class OdaBrowser:
         return result
 
     def _expand_checkout_amount_summary(self) -> None:
-        amounts_expanded = self._eval(r"""
+        script = r"""
 (() => {
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
  const buttons=[...document.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true');
  const show=buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===SHOW_LABEL);
  const hide=buttons.filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===HIDE_LABEL);
- if(show.length===1&&hide.length===0){show[0].click();return JSON.stringify({expanded:true});}
- return JSON.stringify({expanded:show.length===0&&hide.length===1});
+ const counts={show_controls:Math.min(show.length,2),hide_controls:Math.min(hide.length,2)};
+ if(show.length===0&&hide.length===1)return JSON.stringify({state:'ready',...counts});
+ if(show.length===1&&hide.length===0&&!ALREADY_CLICKED){show[0].click();return JSON.stringify({state:'clicked',...counts});}
+ if(show.length===0&&hide.length===0)return JSON.stringify({state:'waiting',...counts});
+ if(show.length===1&&hide.length===0)return JSON.stringify({state:'waiting',...counts});
+ return JSON.stringify({state:'ambiguous',...counts});
 })()
-""".replace("SHOW_LABEL", json.dumps("Visa sammanfattning" if self.checkout_provider == "mathem" else "Vis oppsummering")).replace("HIDE_LABEL", json.dumps("Dölj sammanfattning" if self.checkout_provider == "mathem" else "Skjul oppsummering")))
-        if amounts_expanded != {"expanded": True}:
-            raise HouseholdError("Oda checkout amount summary changed")
-        self._settle(0.25)
+""".replace("SHOW_LABEL", json.dumps("Visa sammanfattning" if self.checkout_provider == "mathem" else "Vis oppsummering")).replace("HIDE_LABEL", json.dumps("Dölj sammanfattning" if self.checkout_provider == "mathem" else "Skjul oppsummering"))
+        last_state = "waiting"
+        clicked = False
+        for attempt in range(3):
+            control = self._eval(script.replace("ALREADY_CLICKED", json.dumps(clicked)))
+            # Retain the exact legacy success shape used by synthetic callers;
+            # the browser script above emits only the structured states below.
+            if (
+                isinstance(control, Mapping)
+                and set(control) == {"expanded"}
+                and control["expanded"] is True
+            ):
+                return
+            if (
+                not isinstance(control, Mapping)
+                or set(control) != {"state", "show_controls", "hide_controls"}
+                or control.get("state") not in {"ready", "clicked", "waiting", "ambiguous"}
+                or any(type(control.get(key)) is not int or not 0 <= control[key] <= 2
+                       for key in ("show_controls", "hide_controls"))
+            ):
+                raise HouseholdError(
+                    'Oda checkout amount summary control cannot be verified '
+                    '{"stage":"summary_control","state":"invalid_response"}'
+                )
+            last_state = control["state"]
+            diagnostic = json.dumps({
+                "stage": "summary_control",
+                "state": last_state,
+                "show_controls": control["show_controls"],
+                "hide_controls": control["hide_controls"],
+            }, sort_keys=True, separators=(",", ":"))
+            if last_state == "ready":
+                return
+            if last_state == "ambiguous":
+                raise HouseholdError("Oda checkout amount summary control is ambiguous " + diagnostic)
+            clicked = clicked or last_state == "clicked"
+            if attempt < 2:
+                self._settle(0.25)
+        raise HouseholdError(
+            "Oda checkout amount summary control did not become ready "
+            + json.dumps({"stage": "summary_control", "state": last_state, "attempts": 3},
+                         sort_keys=True, separators=(",", ":"))
+        )
 
     def _read_checkout_amounts(self, expected_total: int, expected_product_count: int) -> dict[str, Any]:
-        amount_result = self._eval(_oda_checkout_amount_script(
+        amount_script = _oda_checkout_amount_script(
             expected_total, expected_product_count=expected_product_count, provider=self.checkout_provider,
-        ))
-        if not isinstance(amount_result, Mapping) or set(amount_result) != {"amounts", "amounts_valid"} or amount_result["amounts_valid"] is not True:
-            raise OdaCheckoutMismatchError("Oda checkout amount summary changed")
+        )
+        allowed_failures = {
+            "missing_required_row", "invalid_sign", "delivery_discount",
+            "separate_summary_rows", "discounted_subtotal", "row_arithmetic",
+            "unrecognized_amount_row", "original_total_changed",
+            *("ambiguous_" + key for key in (
+                "product_subtotal", "delivery_price", "discounts", "delivery_discount",
+                "discounted_subtotal", "bags", "other_fee", "provider_total",
+            )),
+        }
+        for attempt in range(3):
+            amount_result = self._eval(amount_script)
+            valid_shape = (
+                isinstance(amount_result, Mapping)
+                and set(amount_result) == {"amounts", "amounts_valid"}
+                and amount_result.get("amounts_valid") is True
+            )
+            invalid_shape = (
+                isinstance(amount_result, Mapping)
+                and set(amount_result) == {"amounts", "amounts_valid", "amount_check_failures"}
+                and amount_result.get("amounts_valid") is False
+                and isinstance(amount_result.get("amount_check_failures"), list)
+            )
+            if valid_shape:
+                break
+            failures = amount_result.get("amount_check_failures") if invalid_shape else None
+            if (
+                not failures or len(failures) > 16
+                or any(not isinstance(failure, str) or failure not in allowed_failures for failure in failures)
+            ):
+                raise HouseholdError(
+                    'Oda checkout amount rows cannot be verified '
+                    '{"stage":"amount_rows","failures":["invalid_response"]}'
+                )
+            # A partially rendered summary can produce secondary failures from
+            # absent values. Re-read only while a required row is still missing;
+            # never repeat a UI action or retry a complete invalid summary.
+            readiness_failures = {
+                "missing_required_row", "delivery_discount", "separate_summary_rows",
+                "discounted_subtotal", "row_arithmetic", "unrecognized_amount_row",
+                "original_total_changed",
+            }
+            if (
+                "missing_required_row" in failures
+                and set(failures) <= readiness_failures
+                and attempt < 2
+            ):
+                self._settle(0.25)
+                continue
+            total_drift = failures == ["original_total_changed"]
+            arithmetic_failures = {"delivery_discount", "discounted_subtotal", "row_arithmetic"}
+            stage = (
+                "total" if total_drift else
+                "amount_arithmetic" if set(failures) <= arithmetic_failures | {"original_total_changed"} else
+                "amount_rows"
+            )
+            diagnostic = json.dumps({"stage": stage, "failures": failures},
+                                    sort_keys=True, separators=(",", ":"))
+            if total_drift:
+                raise OdaCheckoutMismatchError("Oda checkout total changed " + diagnostic)
+            raise HouseholdError("Oda checkout amount rows cannot be verified " + diagnostic)
         raw_amounts = amount_result["amounts"]
         keys = set(ODA_CHECKOUT_AMOUNT_KEYS) | ({"discount_breakdown"} if self.checkout_provider == "mathem" else set())
         if not isinstance(raw_amounts, Mapping) or set(raw_amounts) != keys:
