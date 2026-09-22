@@ -608,6 +608,7 @@ class ProductPlannerTests(unittest.TestCase):
             ("ris", "Jasminris 1 kg"),
             ("hvitløk", "Hvitløk Kina"),
             ("hvitløk", "Fersk Hvitløk 2 stk"),
+            ("hvitløk", "Upresset hvitløk 2 stk"),
             ("tomat", "Norske Tomater løsvekt"),
             ("tomat", "Cherrytomater 250 g"),
         ):
@@ -678,6 +679,8 @@ class ProductPlannerTests(unittest.TestCase):
         for name in (
             "Presset hvitløk 100 g", "Hvitløk presset", "Knust hvitløk",
             "Ferskpresset hvitløk 100 g", "Hvitløk ferskpresset 100 g",
+            "Pressad vitlök 100 g", "Vitlök pressad 100 g",
+            "Färskpressad vitlök 100 g", "Vitlök färskpressad 100 g",
             "Garlic Bread", "Hvitløkspulver", "Hvitløk aioli", "Hvitløk majones",
             "Hvitløk Majones Norge", "Gul løk 2 stk",
         ):
