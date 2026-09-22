@@ -677,6 +677,7 @@ class ProductPlannerTests(unittest.TestCase):
     def test_exact_identity_approval_never_overrides_form_or_quantity_conflicts(self):
         for name in (
             "Presset hvitløk 100 g", "Hvitløk presset", "Knust hvitløk",
+            "Ferskpresset hvitløk 100 g", "Hvitløk ferskpresset 100 g",
             "Garlic Bread", "Hvitløkspulver", "Hvitløk aioli", "Hvitløk majones",
             "Hvitløk Majones Norge", "Gul løk 2 stk",
         ):
