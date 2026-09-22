@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 import batch_planning as bp
 import menu_planning as mp
 from core import HouseholdError, StateStore, cart_summary
-from product_planner import ingredient_search
+from product_planner import ingredient_search, partial_product_plan_digest
 from service import Application
 from test_meal_concierge_products import observation, option, product
 
@@ -295,6 +295,13 @@ class ProductCapacityTests(unittest.TestCase):
             "authority digest": lambda state: state["cart_plan"][
                 "product_plan_authority"
             ].update(authority_digest="0" * 64),
+            "mixed partial and full": lambda state: state["cart_plan"].update({
+                "partial_product_plan_digest": partial_product_plan_digest(plan),
+                "partial_product_plan_approvals": self.app._plan_approvals(
+                    plan, selected_only=True,
+                ),
+                "partial_product_plan_authority": self.app._partial_plan_authority(plan),
+            }),
             "scope": lambda state: (
                 state["menu"]["dishes"][0]["ingredients"][0]["quantity"].update(
                     numerator=301
@@ -314,7 +321,7 @@ class ProductCapacityTests(unittest.TestCase):
                 self.provider.calls.clear()
                 with self.assertRaisesRegex(
                     HouseholdError,
-                    "digest-bound authority|authority is invalid|no longer matches|scope or context changed",
+                    "mix partial and full|digest-bound authority|authority is invalid|no longer matches|scope or context changed",
                 ):
                     self.app.handle({
                         "operation": "products", "action": "prepare",

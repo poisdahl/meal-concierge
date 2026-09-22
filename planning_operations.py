@@ -2754,6 +2754,10 @@ class PlanningOperations:
                 full_state = any(key in cart_plan for key in (
                     "product_plan_digest", "product_plan_authority",
                 ))
+                if partial_state and full_state:
+                    raise HouseholdError(
+                        "persisted product selections mix partial and full authority"
+                    )
                 if saved_ref is not None and partial_state:
                     if canonical(cart_plan.get("menu_ref")) != canonical(saved_ref):
                         raise HouseholdError(
