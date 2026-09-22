@@ -1,6 +1,6 @@
 """Cookbook classification and explicit additional meals through Application."""
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 import sys
 import unittest
@@ -20,7 +20,7 @@ from planner import _non_dinner_role
 from product_planner import menu_requirements
 from recipe_delivery import render_menu
 from recipe_quantities import read_quantity
-from recipes import categories_from_tags
+from recipes import RecipeError, categories_from_tags
 from service import Application
 
 
@@ -100,6 +100,156 @@ class CategoryMealTests(unittest.TestCase):
         self.assertEqual(replacement["slots"][1:], current["slots"][1:])
         self.assertEqual(replacement["schedule"][1]["meal_type"], "dessert")
         self.assertEqual(replacement["schedule"][2]["portions"], 4)
+
+    def test_trusted_store_hint_materializes_only_on_service_resolved_path(self):
+        recipe = fixtures.recipe("Trusted Oda detail", "trusted-oda-detail", ingredient="torsk")
+        recipe["ingredients"][0]["_store_product_hint"] = {
+            "provider": "oda", "product_ref": 8420, "name": "Torskefilet 500 g",
+            "url": "https://oda.com/no/products/8420-torskefilet/",
+            "relationship": "source_recipe_association",
+        }
+        value = {"week": "2026-W37", "dishes": [recipe], "salads": []}
+        materialized = self.app._materialize_menu(value, trusted_snapshots=True)
+        self.assertEqual(
+            materialized["dishes"][0]["shopping_requirements"][0]["_store_product_hint"]["product_ref"],
+            8420,
+        )
+        with self.assertRaisesRegex(RecipeError, "service-owned retailer evidence"):
+            self.app._materialize_menu(value, trusted_snapshots=False)
+
+        initial = self.app.handle({
+            "operation": "recipes", "action": "save", "recipe": fixtures.recipe(
+                "Persisted Oda detail", "persisted-oda-detail", ingredient="torsk",
+            ), "idempotency_key": "persisted-oda-detail",
+        })["recipe"]
+        persisted_recipe = fixtures.recipe(
+            "Persisted Oda detail", "persisted-oda-detail", ingredient="torsk",
+        )
+        persisted_recipe["ingredients"][0]["_store_product_hint"] = deepcopy(
+            recipe["ingredients"][0]["_store_product_hint"]
+        )
+        persisted = self.app.recipes.update(
+            initial["id"], initial["revision"], persisted_recipe,
+            idempotency_key="trusted-retailer-detail-update",
+            trusted_store_product_hints=True,
+        )
+        candidate = {"recipe_ref": {"id": persisted["id"], "revision": persisted["revision"]}}
+        planned = self.fixture.plan(self.fixture.request([candidate], dates=["2026-09-10"]))
+        saved_menu = self.app.handle({
+            "operation": "menu", "action": "save", "planner_handoff": planned["save_handoff"],
+        })["menu"]
+
+        def provider_call(tool, arguments, **_kwargs):
+            self.fixture.provider.calls.append((tool, arguments, _kwargs))
+            self.assertEqual(tool, "product_search")
+            query = arguments["queries"][0]
+            observed_at = datetime.now(timezone.utc).isoformat()
+            product = {
+                "provider": "oda", "product_ref": 8420, "product_id": 8420,
+                "name": "Torskefilet 500 g", "availability": "available",
+                "observed_at": observed_at,
+                "package": {
+                    "quantity": {"numerator": 500, "denominator": 1},
+                    "unit": "g", "item_count": 1,
+                },
+                "purchase_options": [{
+                    "package_count": 1, "price_kind": "exact",
+                    "merchandise_ore": 7990, "mandatory_deposit_ore": 0,
+                    "total_payable_ore": 7990, "offer_kind": "regular",
+                    "eligibility": "confirmed",
+                }],
+                "display": {"package": "500 g"},
+            }
+            return {
+                "provider": "oda", "query": query, "observed_at": observed_at,
+                "scope": {
+                    "kind": "provider_search", "page": 1,
+                    "requested_size": arguments["size"], "returned": 1,
+                    "semantics": "bounded_relevance_ranked",
+                },
+                "products": [product],
+            }
+
+        self.fixture.provider.call = provider_call
+        prepared = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "menu_ref": mp.menu_ref(saved_menu),
+        })
+        requirement = prepared["product_plan"]["requirements"][0]
+        self.assertEqual(requirement["observation"]["products"][0]["product_ref"], 8420)
+        self.assertEqual(requirement["observation"]["query"], "Torskefilet 500 g")
+        self.assertEqual(requirement["observation"]["source_product_evidence"], {
+            "relationship": "source_recipe_association",
+            "candidate_refs": [8420], "currently_observed_refs": [8420],
+            "status": "currently_observed",
+        })
+        approved = self.app.handle({
+            "operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"],
+            "candidate_approvals": [{
+                "requirement_id": requirement["requirement_id"], "candidate_refs": [8420],
+            }],
+        })
+        self.assertEqual(approved["product_plan"]["status"], "prepared")
+
+        forged = fixtures.recipe("Forged hint", "forged-hint", ingredient="torsk")
+        forged["ingredients"][0]["_store_product_hint"] = deepcopy(
+            recipe["ingredients"][0]["_store_product_hint"]
+        )
+        with self.assertRaisesRegex(RecipeError, "service-owned retailer evidence"):
+            self.app.handle({
+                "operation": "recipes", "action": "save", "recipe": forged,
+                "idempotency_key": "forged-retailer-hint",
+            })
+
+    def test_replan_prepare_rejects_full_week_minimum_apply_would_reject(self):
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({"dinner_days": 2, "dishes": 2, "batch_dishes": 0})
+            state["profile"]["diet"]["minimum_fish_portions"] = 2
+
+        def candidate(name, identity, ingredient, dietary):
+            saved = self.app.handle({
+                "operation": "recipes", "action": "save",
+                "recipe": fixtures.recipe(name, identity, ingredient=ingredient),
+                "idempotency_key": identity,
+            })["recipe"]
+            return {
+                "recipe_ref": {"id": saved["id"], "revision": saved["revision"]},
+                "facts": fixtures.explicit_facts(dietary=dietary, complete=True),
+            }
+
+        first = candidate("Torsk med urter", "fish-one", "torsk", ["fish"])
+        second = candidate("Laks med potet", "fish-two", "laks", ["fish"])
+        plan = self.fixture.plan(self.fixture.request(
+            [first, second], dates=["2026-09-07", "2026-09-08"],
+        ))
+        current = self.app.handle({
+            "operation": "menu", "action": "save", "planner_handoff": plan["save_handoff"],
+        })["menu"]
+        # The title is intentionally fish-like. Explicit complete facets and the
+        # actual ingredient evidence say otherwise, so title prose must not count.
+        fish_gratin = candidate("Fiskegrateng", "not-fish-gratin", "gulrot", [])
+        rejected = self.app.handle({
+            "operation": "menu", "action": "replan_prepare", "menu_ref": mp.menu_ref(current),
+            "remaining_dates": ["2026-09-08"], "planner_input": {"candidates": [fish_gratin]},
+        })
+        self.assertEqual(rejected["replan"]["status"], "needs_input")
+        self.assertEqual(
+            rejected["replan"]["reason"],
+            "complete_weekly_successor_dietary_minimums_unsatisfied",
+        )
+        self.assertNotEqual(rejected["replan"]["minimum_evaluation"]["status"], "pass")
+        self.assertNotIn("apply_arguments", rejected)
+        self.assertEqual(mp.menu_ref(self.store.read()["menu"]), mp.menu_ref(current))
+
+        replacement = candidate("Sei med grønnsaker", "fish-three", "sei", ["fish"])
+        prepared = self.app.handle({
+            "operation": "menu", "action": "replan_prepare", "menu_ref": mp.menu_ref(current),
+            "remaining_dates": ["2026-09-08"], "planner_input": {"candidates": [replacement]},
+        })
+        self.assertEqual(prepared["replan"]["status"], "prepared", prepared)
+        applied = self.app.handle({"operation": "menu", **prepared["apply_arguments"]})
+        self.assertEqual(applied["menu"]["supersedes"], mp.menu_ref(current))
 
     def test_every_category_and_multiple_sides_scale_and_survive_replanning(self):
         labels = {"breakfast": "Frokost", "brunch": "Brunsj", "lunch": "Lunsj", "dinner": "Middag",

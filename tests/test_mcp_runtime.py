@@ -203,12 +203,51 @@ async def sdk_checks(root, process):
         menu_properties = schemas["meal_concierge_menu"]["properties"]
         assert "menu_ref" in menu_properties
         assert {"menu_id", "expected_revision", "allow_repeat_keys", "override_reason"}.isdisjoint(menu_properties)
+        menu_schema = schemas["meal_concierge_menu"]
+        canonical_ref = menu_schema["$defs"]["MenuRef"]
+        assert canonical_ref["required"] == ["menu_id", "revision", "digest"]
+        assert canonical_ref == product_schema["$defs"]["MenuRef"]
+        assert menu_properties["menu_ref"]["anyOf"][0]["$ref"].endswith("/MenuRef")
+        assert product_schema["properties"]["menu_ref"]["anyOf"][0]["$ref"].endswith("/MenuRef")
+        planner_input = menu_schema["$defs"]["PlannerInput"]["properties"]
+        assert {"week", "dates", "candidates", "cooldown_overrides"} <= set(planner_input)
+        assert planner_input["dates"]["maxItems"] == 7
+        assert planner_input["candidates"]["maxItems"] == 12
+        assert planner_input["available_ingredients"]["maxItems"] == 32
+        candidate_refs = {
+            choice["$ref"].rsplit("/", 1)[-1]
+            for choice in planner_input["candidates"]["items"]["anyOf"]
+        }
+        assert candidate_refs == {"PlannerRecipeCandidate", "PlannerDiscoveryCandidate"}
+        assert menu_schema["$defs"]["PlannerRecipeCandidate"]["required"] == ["recipe_ref"]
+        assert menu_schema["$defs"]["PlannerDiscoveryCandidate"]["required"] == ["discovery_ref"]
+        assert menu_schema["$defs"]["AvailableIngredient"]["required"] == ["item"]
+        assert {"start_date", "end_date", "week_start", "week_end"}.isdisjoint(planner_input)
+        assert "cooldown_overrides" not in menu_properties
+        assert menu_properties["planner_ref"]["anyOf"][0]["$ref"].endswith("/PlannerSaveRef")
+        assert menu_properties["replan"]["anyOf"][0]["$ref"].endswith("/PreparedReplan")
+        assert menu_schema["$defs"]["PreparedReplan"]["properties"]["source"]["$ref"].endswith("/MenuRef")
+        assert product_schema["properties"]["planner_selection_ref"]["anyOf"][0]["$ref"].endswith("/PlannerSelectionRef")
+        assert product_schema["properties"]["continuation_mode"]["enum"] == ["extend", "replace", "reset"]
+        assert product_schema["properties"]["product_plan_ref"]["anyOf"][0]["type"] == "string"
+        assert product_schema["properties"]["candidate_approvals"]["anyOf"][0]["maxItems"] == 64
         approval_schema = product_schema["$defs"]["CandidateApproval"]
         assert approval_schema["required"] == ["requirement_id", "candidate_refs"]
         assert approval_schema["properties"]["semantic_authorization"]["$ref"].endswith("SemanticAuthorization")
         assert approval_schema["properties"]["shared_package"]["$ref"].endswith("SharedPackageAuthorization")
+        assert approval_schema["properties"]["candidate_refs"]["minItems"] == 1
+        assert approval_schema["properties"]["candidate_refs"]["maxItems"] == 5
         assert product_schema["$defs"]["SemanticAuthorization"]["properties"]["authorized_by"]["const"] == "current_user"
-        assert product_schema["$defs"]["SharedPackageAuthorization"]["properties"]["authorized_by"]["const"] == "current_user"
+        shared_schema = product_schema["$defs"]["SharedPackageAuthorization"]
+        assert shared_schema["properties"]["authorized_by"]["const"] == "current_user"
+        assert shared_schema["properties"]["requirement_ids"]["minItems"] == 2
+        assert shared_schema["properties"]["requirement_ids"]["maxItems"] == 64
+        for tool_name in (
+            "meal_concierge_email_sender", "meal_concierge_recipe_delivery", "meal_concierge_cart",
+        ):
+            ref_schema = schemas[tool_name]["properties"]["menu_ref"]
+            assert ref_schema["anyOf"][0]["$ref"].endswith("/MenuRef")
+            assert schemas[tool_name]["$defs"]["MenuRef"] == canonical_ref
         status = await call(client, "status")
         marker = json.loads((root / "config.json").read_text())["household"]
         assert status["household"] == marker
