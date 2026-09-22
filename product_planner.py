@@ -256,7 +256,7 @@ _REVIEWED_EXACT_PREPARED_TITLES = {
 
 def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
     """Keep prepared form and every requested food-identity word distinct."""
-    forms = {
+    base_forms = {
         "juice": "juice", "jus": "juice", "pesto": "pesto", "aioli": "aioli",
         "dressing": "dressing", "saus": "sauce", "sauce": "sauce",
         "puré": "puree", "puree": "puree", "paste": "paste",
@@ -269,6 +269,15 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
         "cracker": "cracker", "crackers": "cracker", "kjeks": "cracker",
         "mix": "mix",
     }
+    # Inflected prepared-form words must not fall back to ordinary exact-ref
+    # approval merely because their spelling differs from the singular form.
+    forms = {}
+    for base, category in {**base_forms, "purée": "puree"}.items():
+        variants = {base}
+        variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et"))
+        if base.endswith("e"):
+            variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
+        forms.update({variant: category for variant in variants})
     compounds = sorted(forms, key=len, reverse=True)
     normalized = unicodedata.normalize("NFC", text).casefold()
     normalized = re.sub(
@@ -277,11 +286,16 @@ def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
     categories: set[str] = set()
     identity: list[str] = []
     for word in re.findall(r"[^\W\d_]+|\d+(?:[.,]\d+)?", normalized):
+        karri_form = next(
+            (form for form in ("karripastaene", "karripastaer", "karripastaen", "karripasta")
+             if word.endswith(form)),
+            None,
+        )
         if word in forms:
             categories.add(forms[word])
-        elif word.endswith("karripasta"):
+        elif karri_form:
             categories.add("paste")
-            identity.append(word[:-len("pasta")])
+            identity.append(word[:-len(karri_form)] + "karri")
         else:
             suffix = next(
                 (part for part in compounds if word.endswith(part) and len(word) > len(part) + 1),
