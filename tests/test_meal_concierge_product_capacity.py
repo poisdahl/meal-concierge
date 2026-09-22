@@ -412,8 +412,15 @@ class ProductCapacityTests(unittest.TestCase):
                 raise HouseholdError("synthetic uncertain mutation")
         self.provider.on_call = advance
         with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
-            with self.assertRaisesRegex(HouseholdError, "deadline"):
-                self.apply(plan)
+            result = self.apply(plan)
+        self.assertFalse(result["applied"])
+        self.assertTrue(result["outcome_unknown"])
+        self.assertTrue(result["cart_write_pending"])
+        self.assertTrue(result["cart_reconciliation_required"])
+        self.assertEqual(result["menu_ref"], self.app._cart_menu_ref(self.menu))
+        self.assertEqual(result["product_plan_digest"], plan["product_plan_digest"])
+        self.assertIsNone(result["synced"])
+        self.assertEqual(result["cart_plan"]["status"], "needs_input")
         self.assertEqual(self.store.read()["cart_plan"]["status"], "needs_input")
         self.provider.on_call = None
         self.provider.calls.clear()
