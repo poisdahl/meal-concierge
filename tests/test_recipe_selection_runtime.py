@@ -74,6 +74,28 @@ def serve(root, empty):
         def call(self, tool, arguments, **kwargs):
             with (root / "provider.jsonl").open("a") as log:
                 log.write(json.dumps({"tool": tool, "arguments": arguments}) + "\n")
+            if tool == "product_search" and (root / "preview-products-enabled").exists():
+                query = arguments["queries"][0]
+                observed_at = datetime.now(ZoneInfo("Europe/Oslo")).isoformat()
+                return {
+                    "provider": "oda", "query": query, "observed_at": observed_at,
+                    "scope": {"kind": "provider_search", "page": 1,
+                              "requested_size": arguments["size"], "returned": 1,
+                              "semantics": "bounded_relevance_ranked"},
+                    "products": [{
+                        "provider": "oda", "product_ref": "101", "product_id": "101",
+                        "name": "Gulrot 1", "availability": "available",
+                        "observed_at": observed_at,
+                        "package": {"quantity": {"numerator": 200, "denominator": 1},
+                                    "unit": "g", "item_count": 1},
+                        "purchase_options": [{"package_count": 1, "price_kind": "exact",
+                                              "merchandise_ore": 1000,
+                                              "mandatory_deposit_ore": 0,
+                                              "total_payable_ore": 1000,
+                                              "offer_kind": "regular",
+                                              "eligibility": "confirmed"}],
+                    }],
+                }
             if tool != "recipe_search":
                 raise AssertionError("unexpected provider operation: " + tool)
             raise HouseholdError("synthetic recipe source unavailable")
@@ -1671,6 +1693,8 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="rt-", dir=SCRATCH)
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        if self._testMethodName == "test_unsaved_planner_ref_previews_exact_products":
+            (self.root / "preview-products-enabled").touch()
         self.sock = self.root / "s.sock"
         self.process = None
         self.addCleanup(self.stop_service)
@@ -2307,6 +2331,58 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("melk", json.dumps(planned["candidate_summary"], ensure_ascii=False))
             self.assertLess(len(self.last_menu_wire), 40000)
             print(json.dumps({"mc41_mcp_blocker_no_plan_wire_chars": len(self.last_menu_wire)}), flush=True)
+
+    async def test_unsaved_planner_ref_previews_exact_products(self):
+        candidate = json.loads((self.root / "manifest.json").read_text())["planner_candidates"][0]
+        monday = datetime.strptime(self.week() + "-1", "%G-W%V-%u").date().isoformat()
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            planned = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "dates": [monday], "selection_mode": "agent",
+                "candidates": [candidate],
+            }))["plan"]
+            self.assertEqual(planned["status"], "planned")
+            planner_ref = planned["save_ref"]
+            preview = await self.call(client, "products", action="prepare", planner_ref=planner_ref)
+            self.assertEqual(preview["product_plan"]["status"], "needs_input")
+            self.assertNotIn("product_plan_ref", preview)
+            self.assertNotIn("partial_apply_arguments", preview)
+            requirement = preview["product_plan"]["requirements"][0]
+            self.assertEqual(requirement["observation"]["products"][0]["product_ref"], "101")
+            prepared = await self.call(client, "products", action="prepare", planner_ref=planner_ref,
+                                       candidate_approvals=[{
+                                           "requirement_id": requirement["requirement_id"],
+                                           "candidate_refs": ["101"],
+                                           "selection_reason": "Exact carrot ingredient and observed 200 g package",
+                                       }])
+            self.assertEqual(prepared["product_plan"]["status"], "prepared")
+            self.assertEqual(prepared["product_plan"]["requirements"][0]["selection"]["products"][0]["product_ref"], "101")
+            self.assertNotIn("apply_arguments", prepared)
+            self.assertIn("save", prepared["next"].lower())
+            self.assertIsNone((await self.call(client, "menu"))["menu"])
+
+            calls_before_rejections = (self.root / "provider.jsonl").read_text().splitlines()
+            changed = deepcopy(planner_ref)
+            changed["selection_digest"] = "0" * 64
+            for arguments, error in (
+                ({"planner_ref": changed}, "stale"),
+                ({"planner_ref": planner_ref, "planner_selection_ref": {
+                    key: planner_ref[key] for key in ("planner_version", "input_digest", "selection_digest")
+                }}, "exactly one"),
+                ({"planner_ref": planner_ref, "planner_input": {"week": self.week()}}, "replaces planner_input"),
+                ({"planner_ref": planner_ref, "action": "apply", "cart_change_requested": True}, "only for product preparation"),
+            ):
+                rejected = await self.call(client, "products", **arguments)
+                self.assertFalse(rejected["ok"], rejected)
+                self.assertIn(error, rejected["error"])
+            self.assertEqual((self.root / "provider.jsonl").read_text().splitlines(), calls_before_rejections)
+            self.assertNotIn("manipulate_cart", (self.root / "provider.jsonl").read_text())
+            await self.call(client, "profile", action="update",
+                            changes={"diet": {"minimum_fish_portions": 1}})
+            stale = await self.call(client, "products", action="prepare", planner_ref=planner_ref)
+            self.assertFalse(stale["ok"], stale)
+            self.assertIn("stale", stale["error"])
+            self.assertEqual((self.root / "provider.jsonl").read_text().splitlines(), calls_before_rejections)
 
     async def test_resolved_handoff_supports_unsaved_products_and_feedback(self):
         async with self.client() as client:

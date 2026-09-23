@@ -84,7 +84,10 @@ when importing or adapting a complex source.
 
 ## Select products and update the cart
 
-Prepare products for the exact saved `menu_ref`. Read the aggregated requirements
+Prepare products for the exact saved `menu_ref`. To preview an unsaved menu,
+pass its unchanged `save_ref` as products `planner_ref`; saving or resolving a
+large handoff is unnecessary. `planner_selection_ref` is only for a saved menu.
+Read the aggregated requirements
 and observations, then choose exact observed `candidate_refs`. You judge whether
 pizza sauce, soy sauce, a substitute or a brand is suitable. Use `selection_reason`
 for a useful explanation and `search_query` for a better localized search. Do not
@@ -105,8 +108,9 @@ old orders and previous carts are not proof that something is at home. Aggregate
 stock once before package rounding. See [selection and stock](https://github.com/poisdahl/meal-concierge/blob/main/docs/recipe-selection.md)
 for bounded inputs and batch layouts.
 
-An incomplete prepare returns `product_plan_ref`; continue with that ref and the
-remaining choices. `extend` retains choices, `replace` replaces them and `reset`
+For a saved menu, an incomplete prepare returns `product_plan_ref`; continue with
+that ref and the remaining choices. For an unsaved preview without that ref,
+repeat the unchanged `planner_ref` with the accumulated candidate choices. `extend` retains choices, `replace` replaces them and `reset`
 starts over. To recover old or unwanted selections for the same saved menu, use
 `menu_ref` plus `continuation_mode="reset"`. This leaves the cart and purchase
 journals untouched. It does not recover an uncertain external write.

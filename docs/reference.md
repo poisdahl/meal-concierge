@@ -379,8 +379,14 @@ the largest decision-bearing quantity; larger quantities stay unresolved. No
 observation is stored as durable price truth.
 
 `meal_concierge_products prepare` binds one read-only proposal to the exact
-active saved-menu identity or one complete deterministic planner handoff and to
-the configured provider. It aggregates only identical, scalable ingredients
+active saved-menu identity, an unchanged menu `save_ref` supplied as `planner_ref`,
+or one complete planner handoff, and to the configured provider. The short
+`planner_ref` is the normal unsaved-preview path; it resolves the existing exact
+handoff server-side without saving a menu. `planner_selection_ref` only identifies
+an already saved selection. Mixing bindings is rejected before provider reads. An unsaved preview continues
+with the same `planner_ref` and accumulated candidate approvals; no new persisted
+menu or continuation cache is needed. Cart apply still requires saving the exact
+selection and a separate authorized cart-change request. It aggregates only identical, scalable ingredients
 with exactly convertible units; raw or non-scalable quantities stay unresolved.
 For a menu saved before shopping requirements carried `scalable`, the flag is
 recovered only when the requirement still exactly matches the same-index frozen
