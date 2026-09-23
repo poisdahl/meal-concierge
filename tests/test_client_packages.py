@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -39,8 +41,15 @@ class ClientPackages(unittest.TestCase):
         with probe.service(self.root) as process:
             plugins = [probe.build(client, self.root, self.root / client) for client in ("codex", "claude-code")]
             for plugin in plugins:
-                self.assertEqual((plugin / "skills/meal-concierge/SKILL.md").read_bytes(),
-                                 (self.root / "code/current/skill/SKILL.md").read_bytes())
+                source_skill = self.root / "code/current/skill/SKILL.md"
+                packaged_skill = plugin / "skills/meal-concierge/SKILL.md"
+                self.assertEqual(packaged_skill.read_bytes(), source_skill.read_bytes())
+                for source in (source_skill.parent / "references").rglob("*.md"):
+                    self.assertEqual((packaged_skill.parent / source.relative_to(source_skill.parent)).read_bytes(),
+                                     source.read_bytes())
+                for reference in re.findall(r"\]\((references/[^)#]+\.md)(?:#[^)]*)?\)",
+                                            source_skill.read_text()):
+                    self.assertTrue((packaged_skill.parent / reference).is_file(), reference)
                 self.assertFalse((plugin / "state").exists())
                 self.assertFalse((plugin / "service.py").exists())
 
@@ -90,6 +99,34 @@ class ClientPackages(unittest.TestCase):
             after = json.loads((second / ".codex-plugin/plugin.json").read_text())
             self.assertNotEqual(before["version"], after["version"])
             self.assertIn("Synthetic updated release instruction.", (second / "skills/meal-concierge/SKILL.md").read_text())
+
+    def test_reference_only_release_change_updates_native_cache_and_copy(self):
+        source_skill = self.root / "code/current/skill/SKILL.md"
+        source_skill.write_text(source_skill.read_text() + "\n[Release reference](references/synthetic.md)\n")
+        reference = source_skill.parent / "references/synthetic.md"
+        reference.parent.mkdir(exist_ok=True)
+        with probe.service(self.root):
+            for client in ("codex", "claude-code"):
+                reference.write_text("First release guidance.\n")
+                first = probe.build(client, self.root, self.root / (client + "-first"))
+                reference.write_text("Changed release guidance.\n")
+                second = probe.build(client, self.root, self.root / (client + "-second"))
+                manifest_dir = ".codex-plugin" if client == "codex" else ".claude-plugin"
+                before = json.loads((first / manifest_dir / "plugin.json").read_text())
+                after = json.loads((second / manifest_dir / "plugin.json").read_text())
+                self.assertNotEqual(before["version"], after["version"])
+                self.assertEqual((second / "skills/meal-concierge/references/synthetic.md").read_bytes(),
+                                 reference.read_bytes())
+
+    def test_older_attached_release_without_references_still_packages(self):
+        skill_dir = self.root / "code/current/skill"
+        shutil.rmtree(skill_dir / "references", ignore_errors=True)
+        (skill_dir / "SKILL.md").write_text("Legacy release instructions.\n")
+        with probe.service(self.root):
+            plugin = probe.build("codex", self.root, self.root / "legacy")
+        self.assertEqual((plugin / "skills/meal-concierge/SKILL.md").read_text(),
+                         "Legacy release instructions.\n")
+        self.assertFalse((plugin / "skills/meal-concierge/references").exists())
 
     def test_packaged_pdf_helper_uses_installation_runtime_without_poppler(self):
         from test_pdf_pages import text_pdf
