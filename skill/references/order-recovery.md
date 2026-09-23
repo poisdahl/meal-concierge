@@ -16,6 +16,7 @@ are not confirmation of a new purchase or order change.
 | Cancel an order | `orders cancel_prepare`, then its exact confirmation/submission; uncertain result uses `cancel_reconcile` |
 | Uncertain checkout/payment | `checkout reconcile` with the original confirmation/idempotency identity |
 | Explicit Oda payment-method switch | `checkout switch_payment` on the current confirmation with the requested Vipps or saved-card override |
+| Explicitly stop an active Oda payment | `checkout abort_payment` with the current dispatched confirmation; observe an uncertain closure without clicking again |
 
 Follow returned arguments and the discovered tool's provider-specific guidance.
 Do not clear unrelated cart goods to start an order edit. Existing-order changes
@@ -86,6 +87,20 @@ passwords or repeat payment because the chooser is unavailable. Owner-reported
 approval may support the documented resume, but the service must still verify
 the exact outcome. Follow `retry_allowed` and the returned recovery action;
 unknown cannot be converted into permission by making a new idempotency key.
+
+When the owner explicitly asks to cancel an Oda order with an unresolved card
+or Vipps payment, `orders cancel_prepare` identifies the current attempt. Use
+`checkout abort_payment` with that exact confirmation only when it returns the
+abort route. It durably fences a single native cancellation and retains the
+checkout journal. An unknown closure remains pending; resume the same abort to
+observe, never click again. A lost card tab may be resolved by read-only native
+status for its retained exact payment ID. If native evidence says paid, reconcile the purchase
+before ordinary cancellation. Only a positively closed payment permits a fresh
+`orders cancel_prepare` for the same order. Confirm that exact cancellation under
+the existing policy; its result is terminal only after verified merchant
+cancellation. Report refund and authorization release as unknown unless separately
+verified. For a requested payment-method change after closure, use the existing
+`switch_payment` review path.
 
 If the response explicitly establishes no dispatch and gives a safe fresh
 prepare path, follow that supported path within the existing mandate. Otherwise
