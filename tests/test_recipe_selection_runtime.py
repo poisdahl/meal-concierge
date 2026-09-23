@@ -487,6 +487,96 @@ class ProductProjectionTests(unittest.TestCase):
         self.assertEqual(chicken["observation"]["candidate_count"], 5)
         self.assertEqual(projected["apply_arguments"], result["apply_arguments"])
 
+    def test_sixteen_selected_unsaved_preview_stays_prepared_under_wire_budget(self):
+        module = self.module()
+        requirements = []
+        for index in range(16):
+            product_ref = 67000 + index
+            findings = [{
+                "product_ref": product_ref, "kind": f"preference-{term}",
+                "term": f"ingredient-{index}-{term}-" + "possible supplier ingredient " * 6,
+                "condition": "unknown", "blocked": False,
+            } for term in range(11)]
+            requirements.append({
+                "requirement_id": f"req:{index}", "item": f"Ingredient {index}",
+                "quantity": {"numerator": 900, "denominator": 1}, "unit": "g",
+                "status": "selected", "dietary_assessments": findings,
+                "product_hints": [{"provider": "oda", "product_ref": product_ref,
+                                   "name": f"Preferred ingredient {index} " + "retailer catalog label " * 12}],
+                "observation": {"provider": "oda", "query": f"ingredient {index}",
+                                "products": [{"product_ref": product_ref,
+                                              "name": f"Observed package {index}",
+                                              "availability": "available",
+                                              "package": {"quantity": {"numerator": 500, "denominator": 1},
+                                                          "unit": "g", "item_count": 1},
+                                              "purchase_options": [{"package_count": 1,
+                                                                    "price_kind": "exact",
+                                                                    "merchandise_ore": 10140,
+                                                                    "total_payable_ore": 10140}],
+                                              "dietary_evidence": {"ingredients": "label " * 100}}]},
+                "selection": {
+                    "coverage_status": "exact", "package_count": 2,
+                    "coverage": {"numerator": 1000, "denominator": 1},
+                    "required": {"numerator": 900, "denominator": 1},
+                    "unit": "g",
+                    "merchandise_ore": 20280, "mandatory_deposit_ore": 0,
+                    "total_payable_ore": 20280,
+                    "products": [{"product_ref": product_ref,
+                                  "name": f"Chosen package {index}", "quantity": 2,
+                                  "merchandise_ore": 20280,
+                                  "mandatory_deposit_ore": 0,
+                                  "total_payable_ore": 20280}],
+                },
+            })
+        result = {
+            "product_plan": {
+                "status": "prepared", "provider": "oda", "product_plan_digest": "a" * 64,
+                "coverage_status": "exact", "cost_status": "exact_product_payable",
+                "budget_status": "not_set",
+                "totals": {"merchandise_ore": 324480, "mandatory_deposit_ore": 0,
+                           "total_payable_ore": 324480, "package_count": 32},
+                "binding": {"kind": "planner_selection", "planner_handoff": {
+                    "planner_version": "v", "input_digest": "b" * 64,
+                    "selection_digest": "c" * 64,
+                }},
+                "requirements": requirements, "unresolved_requirements": [],
+            },
+            "next": "Save this exact menu selection, then prepare products with its menu_ref before cart apply.",
+        }
+        before = deepcopy(result)
+        self.assertGreaterEqual(
+            module._mcp_text_wire_chars(json.dumps(
+                module._product_result_projection(result, candidate_limit=1),
+                ensure_ascii=False, separators=(",", ":"))),
+            module.MCP_PRODUCT_WIRE_BUDGET,
+        )
+        projected = module._bounded_product_result(result)
+        self.assertEqual(projected["product_plan"]["status"], "prepared")
+        self.assertEqual(projected["product_plan"]["projection"], "minimal_actionable")
+        self.assertLess(
+            module._mcp_text_wire_chars(json.dumps(projected, ensure_ascii=False, separators=(",", ":"))),
+            module.MCP_PRODUCT_WIRE_BUDGET,
+        )
+        plan = projected["product_plan"]
+        self.assertEqual(plan["totals"]["total_payable_ore"], 324480)
+        self.assertEqual(len(plan["requirements"]), 16)
+        self.assertEqual(
+            plan["requirements"][0]["selection"]["products"][0]["package"]["quantity"]["numerator"],
+            500,
+        )
+        self.assertTrue(plan["requirements"][0]["dietary_summary"][0]["unknown"])
+        self.assertTrue(all("observation" not in row for row in plan["requirements"]))
+        self.assertEqual(
+            [(row["selection"]["products"][0]["product_ref"],
+              row["selection"]["products"][0]["quantity"],
+              row["selection"]["products"][0]["total_payable_ore"])
+             for row in plan["requirements"]],
+            [(67000 + index, 2, 20280) for index in range(16)],
+        )
+        self.assertNotIn("apply_arguments", projected)
+        self.assertNotIn("partial_apply_arguments", projected)
+        self.assertEqual(result, before)
+
     def test_oversized_committed_apply_stays_truthful_and_reconcilable(self):
         module = self.module()
         menu_ref = {"menu_id": "menu-applied", "revision": 7, "digest": "b" * 64}
