@@ -25,6 +25,11 @@ trees, repository CLIs, invented tool calls or alternate merchant checkout paths
 A structured `rejected` result is a business rejection, not proof of an outage.
 Correct its actual cause; do not repeat it unchanged.
 
+Read a linked reference only when its indicated operation needs detail. Paths
+are relative to this installed skill directory; use the host's skill/file reader
+(on Hermes, `skill_view` with `file_path="references/…"`). Ordinary status,
+meal selection and product preparation need no additional reference loading.
+
 ## Choose and save meals
 
 1. On first interactive use, present setup's single keep-all-or-change question,
@@ -78,9 +83,8 @@ Neutral personal/external recipes work with the selected provider. Oda ingredien
 product hints may suggest a candidate, but fresh observations establish its price,
 size, availability and dietary facts. Mathem and MENY have no invented equivalent
 hints. Never invoke native bulk recipe-to-cart expansion without a supported
-preview. See [recipe contract](https://github.com/poisdahl/meal-concierge/blob/main/docs/recipe-contract.md)
-and [retailer sources](https://github.com/poisdahl/meal-concierge/blob/main/docs/retailer-recipes.md)
-when importing or adapting a complex source.
+preview. Read [recipe sources](references/recipe-sources.md) when importing text,
+photos, PDFs or a complex external source, or checking adaptation provenance.
 
 ## Select products and update the cart
 
@@ -105,7 +109,7 @@ Use only the user's reported stock. `available_ingredients` belongs to this
 planning request; unknown stock quantities do not subtract purchases. Use
 `record_ingredients` for later exact stock/omit/include decisions. Pantry labels,
 old orders and previous carts are not proof that something is at home. Aggregate
-stock once before package rounding. See [selection and stock](https://github.com/poisdahl/meal-concierge/blob/main/docs/recipe-selection.md)
+stock once before package rounding. See [meal adjustments](references/meal-adjustments.md)
 for bounded inputs and batch layouts.
 
 For a saved menu, an incomplete prepare returns `product_plan_ref`; continue with
@@ -157,7 +161,7 @@ Use `delivery_only=true` for a delivery-only request, or supported
 `remove_prepare`/`remove_confirm` for reductions. Cancellation uses its own exact
 order review. Follow returned reconciliation guidance. For these less common
 operations, read the relevant section of the
-[operation reference](https://github.com/poisdahl/meal-concierge/blob/main/docs/reference.md).
+[order recovery](references/order-recovery.md).
 Mathem amounts are SEK; Oda and MENY amounts are NOK.
 
 ## Recipes, delivery and ongoing use
@@ -173,18 +177,20 @@ Record cooking, feedback, favorites and accepted batch settings only from the
 user's actual report or choice. Ordering and silence do not mean cooked, liked,
 or accepted. Use returned menu/slot identities. Batch leftovers need confirmed
 source preparation and enough remaining portions; never infer safe storage life.
-See [batch and dietary behavior](https://github.com/poisdahl/meal-concierge/blob/main/docs/recurring-batch-dietary.md)
+See [meal adjustments](references/meal-adjustments.md#batches-and-reported-cooking)
 for batch changes, actual cooking and dependent slots.
 
 An explicit request to plan and send recipes includes recipe delivery; merely
 reading or saving a menu does not. Use saved channels and exact native recipients.
 Do not turn an optional email outage into a planning blocker or reroute its
-content. For delivery, read [recipe delivery](https://github.com/poisdahl/meal-concierge/blob/main/docs/recipe-delivery.md).
-Use frozen parts and begin/send/ack; a path or digest is not an attachment, and
-an uncertain send must not be repeated. Native sender receipts establish sending,
-not reading. For managed schedules/order emails, use the existing scheduler and
-[email lifecycle](https://github.com/poisdahl/meal-concierge/blob/main/docs/email-scheduler.md);
-retain the original occurrence and pending operation on recovery.
+content. Read [recipe delivery](references/recipe-delivery.md) for sending.
+For managed email use `meal_concierge_email_sender send` with the exact saved
+menu and one stable request ID; that executor owns send and acknowledgment.
+Do not also send manually. Native chat or a supported unmanaged sender uses
+the separate frozen-part `request/begin/send/ack` path. A path or digest is not
+an attachment; receipts establish sending, not reading. For scheduled order
+email, use the existing job and [email lifecycle](references/recipe-delivery.md#scheduled-order-email).
+Retain the original occurrence and pending operation on recovery.
 
 Lead replies with what actually happened and the next real decision, if any.
 Keep tool references and internal checks out of ordinary meal conversation.
