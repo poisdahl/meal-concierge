@@ -53,10 +53,12 @@ def build(output: Path, python_base: Path, site_packages: Path, socket_directory
     }
     template = output / "template"
     (template / "bridge").mkdir(parents=True)
-    (template / "skills/meal-concierge").mkdir(parents=True)
     for name in ("mcp_server.py", "rpc_client.py", "cli.py"):
         shutil.copyfile(SOURCE / name, template / "bridge" / name)
-    shutil.copyfile(SOURCE / "skill/SKILL.md", template / "skills/meal-concierge/SKILL.md")
+    skill = template / "skills/meal-concierge"
+    skill.mkdir(parents=True)
+    shutil.copyfile(SOURCE / "skill/SKILL.md", skill / "SKILL.md")
+    shutil.copytree(SOURCE / "skill/references", skill / "references")
     (template / "plugin.json").write_text(json.dumps({
         "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
         "name": "meal-concierge", "version": "1.0.0",

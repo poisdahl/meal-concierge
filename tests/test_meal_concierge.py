@@ -2003,7 +2003,7 @@ class CoreTestsBase:
         self.assertIsNone(state["delivery_selection"])
         self.assertEqual(state["product_favorites"], [])
         self.assertNotIn("favorites", state)
-        skill = (CORE / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (CORE / "skill" / "references" / "ingredients-and-cart.md").read_text(encoding="utf-8")
         self.assertIn("meal_concierge_product_favorites", skill)
         self.assertIn("Never route “favorite this recipe” to the product tool", skill)
 

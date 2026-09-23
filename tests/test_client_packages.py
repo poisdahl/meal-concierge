@@ -41,6 +41,9 @@ class ClientPackages(unittest.TestCase):
             for plugin in plugins:
                 self.assertEqual((plugin / "skills/meal-concierge/SKILL.md").read_bytes(),
                                  (self.root / "code/current/skill/SKILL.md").read_bytes())
+                for reference in (self.root / "code/current/skill/references").glob("*.md"):
+                    self.assertEqual((plugin / "skills/meal-concierge/references" / reference.name).read_bytes(),
+                                     reference.read_bytes())
                 self.assertFalse((plugin / "state").exists())
                 self.assertFalse((plugin / "service.py").exists())
 
@@ -90,6 +93,21 @@ class ClientPackages(unittest.TestCase):
             after = json.loads((second / ".codex-plugin/plugin.json").read_text())
             self.assertNotEqual(before["version"], after["version"])
             self.assertIn("Synthetic updated release instruction.", (second / "skills/meal-concierge/SKILL.md").read_text())
+
+    def test_reference_only_change_refreshes_both_native_plugin_caches(self):
+        with probe.service(self.root):
+            for client, manifest_dir in (("codex", ".codex-plugin"), ("claude-code", ".claude-plugin")):
+                first = probe.build(client, self.root, self.root / (client + "-before"))
+                source = self.root / "code/current/skill/references/setup-and-payments.md"
+                source.write_text(source.read_text() + "\nSynthetic reference-only change.\n")
+                second = probe.build(client, self.root, self.root / (client + "-after"))
+                before = json.loads((first / manifest_dir / "plugin.json").read_text())
+                after = json.loads((second / manifest_dir / "plugin.json").read_text())
+                self.assertNotEqual(before["version"], after["version"])
+                self.assertEqual((first / "skills/meal-concierge/SKILL.md").read_bytes(),
+                                 (second / "skills/meal-concierge/SKILL.md").read_bytes())
+                self.assertEqual((second / "skills/meal-concierge/references/setup-and-payments.md").read_bytes(),
+                                 source.read_bytes())
 
     def test_packaged_pdf_helper_uses_installation_runtime_without_poppler(self):
         from test_pdf_pages import text_pdf

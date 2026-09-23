@@ -34,6 +34,10 @@ class PackageTests(unittest.TestCase):
                 self.assertEqual({p.name for p in (output / "template/bridge").iterdir()}, {"mcp_server.py", "rpc_client.py", "cli.py"})
                 self.assertEqual((output / "template/bridge/cli.py").read_bytes(), (package.SOURCE / "cli.py").read_bytes())
                 self.assertEqual((output / "template/skills/meal-concierge/SKILL.md").read_bytes(), (package.SOURCE / "skill/SKILL.md").read_bytes())
+                self.assertFalse((output / "template/skills/meal-concierge/scripts").exists())
+                for reference in (package.SOURCE / "skill/references").glob("*.md"):
+                    self.assertEqual((output / "template/skills/meal-concierge/references" / reference.name).read_bytes(),
+                                     reference.read_bytes())
                 server = json.loads((output / "template/mcp.json").read_text())["mcpServers"]["meal_concierge"]
                 self.assertEqual(server["command"], "env")
                 self.assertIn("${PLUGIN_ROOT}/bridge/mcp_server.py", server["args"])

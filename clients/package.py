@@ -34,6 +34,8 @@ def build(client: str, home: Path, output: Path) -> Path:
     skill = Path(attachment["skill"])
     # Read the release's maintained instruction before creating the destination.
     skill_text = skill.read_text()
+    references = {str(path.relative_to(skill.parent)): path.read_bytes()
+                  for path in sorted((skill.parent / "references").rglob("*.md"))}
     server = {key: attachment[key] for key in ("command", "args", "env")}
     if client == "codex":
         server.update(startup_timeout_sec=20, tool_timeout_sec=TOOL_TIMEOUT_SECONDS)
@@ -47,6 +49,8 @@ def build(client: str, home: Path, output: Path) -> Path:
                 'command = str(root / "venv/bin/python")\n'
                 'os.execv(command, [command, "-I", str(root / "pdf_pages.py"), *sys.argv[1:]])\n')
     identity = json.dumps({"server": server, "skill": skill_text, "pdf_launcher": launcher,
+                           "references": {name: hashlib.sha256(data).hexdigest()
+                                          for name, data in references.items()},
                            "pdf_renderer": hashlib.sha256(renderer.read_bytes()).hexdigest()},
                           sort_keys=True).encode()
     manifest = {
@@ -75,6 +79,10 @@ def build(client: str, home: Path, output: Path) -> Path:
     skill_dir = plugin / "skills" / NAME
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(skill_text)
+    for name, data in references.items():
+        target = skill_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
     (skill_dir / "scripts").mkdir()
     (skill_dir / "scripts/read_pdf.py").write_text(launcher)
     if client == "codex":

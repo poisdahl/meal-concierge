@@ -1715,7 +1715,7 @@ class RecipeStoreTests(unittest.TestCase):
 
     def test_reference_docs_cover_selection_confirmation_and_three_ref_types(self):
         reference = (CORE / "docs" / "reference.md").read_text(encoding="utf-8")
-        skill = (CORE / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (CORE / "skill" / "references" / "recipes-and-planning.md").read_text(encoding="utf-8")
         tool = (CORE / "mcp_server.py").read_text(encoding="utf-8")
         for text in (reference, skill, tool):
             self.assertIn("discovery_ref", text)
@@ -3431,7 +3431,7 @@ class RecipeFlowTests(unittest.TestCase):
                 "idempotency_key": favorite_key,
             })
 
-        skill = (CORE / "skill" / "SKILL.md").read_text(encoding="utf-8")
+        skill = (CORE / "skill" / "references" / "recipes-and-planning.md").read_text(encoding="utf-8")
         self.assertIn("saved in builtin; favorite not set", skill)
         self.assertIn("favorite outcome uncertain", skill)
         self.assertIn("reuse the bound discovery ref and both", skill)
