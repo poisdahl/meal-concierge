@@ -67,8 +67,14 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def call(self, client, name, **arguments):
         result = await client.call_tool('meal_concierge_' + name, arguments)
         self.assertFalse(result.is_error, result)
-        self.assertEqual(json.loads(result.content[0].text), result.structured_content)
-        return result.structured_content
+        text = json.loads(result.content[0].text)
+        if name in {"status", "cart", "orders"}:
+            self.assertIsNone(result.structured_content)
+            self.assertEqual(len(result.content), 1)
+            self.assertLess(len(result.model_dump_json(by_alias=True)), 45_000)
+        else:
+            self.assertEqual(text, result.structured_content)
+        return text
 
     async def test_fresh_native_bridge_retains_state_and_uses_actual_http_transport(self):
         async with self.client() as client:
@@ -95,8 +101,8 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
             wrong = await client.call_tool('meal_concierge_orders', {
                 'action': 'cancel_confirm', 'order_id': 'mc09-unrelated-order', 'confirmation_id': confirmation})
             self.assertFalse(wrong.is_error, wrong)
-            self.assertEqual(wrong.structured_content["status"], "rejected")
-            self.assertFalse(wrong.structured_content["ok"])
+            self.assertEqual(json.loads(wrong.content[0].text)["status"], "rejected")
+            self.assertFalse(json.loads(wrong.content[0].text)["ok"])
             self.assertIn('cancellation confirmation does not match the prepared order', wrong.content[0].text)
             self.assertFalse((self.root / 'data/browser.jsonl').exists())
             before = json.loads((self.root / 'data/synthetic-provider.json').read_text())
@@ -120,13 +126,15 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
                     (self.root / 'data/fault').write_text(mode)
                     result = await client.call_tool('meal_concierge_cart', {'action': 'get'})
                     self.assertFalse(result.is_error, result)
-                    self.assertEqual(result.structured_content["status"], "rejected")
-                    self.assertFalse(result.structured_content["ok"])
-            # Read-only cart get intentionally returns the provider document.
-            # A partial document must retain missing totals, never invent zero.
+                    self.assertEqual(json.loads(result.content[0].text)["status"], "rejected")
+                    self.assertFalse(json.loads(result.content[0].text)["ok"])
+            # Missing provider totals remain explicitly unavailable, never zero.
+            # Raw local API compatibility is checked separately.
             (self.root / 'data/fault').write_text('partial')
             partial = await self.call(client, 'cart', action='get')
-            self.assertEqual(partial, {'items': []})
+            self.assertEqual(partial['cart_normalization'], 'unavailable')
+            self.assertNotIn('total', partial)
+            self.assertNotIn('cart_digest', partial)
 
 
 if __name__ == '__main__':

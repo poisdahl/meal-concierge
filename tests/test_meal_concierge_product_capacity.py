@@ -1061,3 +1061,194 @@ class ProductCapacityTests(unittest.TestCase):
             _mcp_text_wire_chars(json.dumps(compact, ensure_ascii=False, separators=(",", ":"))),
             MCP_PRODUCT_WIRE_BUDGET,
         )
+
+    def agent_products(self, action="prepare", **arguments):
+        return self.app.handle({"operation": "products", "action": action,
+                                "response_view": "agent", **arguments})
+
+    def assert_agent_wire(self, value):
+        from mcp_server import _mcp_text_wire_chars
+        self.assertEqual(value["projection"], "agent")
+        self.assertLess(_mcp_text_wire_chars(json.dumps(value, ensure_ascii=False, separators=(",", ":"))), 45_000)
+
+    def read_product_pages(self, first):
+        rows = list(first["requirements"])
+        page = first
+        self.assert_agent_wire(page)
+        while page["next_offset"] is not None:
+            page = self.agent_products("get", product_plan_ref=first["product_plan_ref"],
+                                       offset=page["next_offset"])
+            self.assert_agent_wire(page)
+            rows.extend(page["requirements"])
+        return rows
+
+    def test_agent_large_week_recovers_pages_and_applies_short_handle(self):
+        dinners = [rows + [(f"extra food {day}-{index}", 30) for index in range(3)]
+                   for day, rows in enumerate(DINNERS)]
+        refs = self.save_recipes([recipe(f"Dinner {day}", rows) for day, rows in enumerate(dinners)])
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+            "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
+        menu_ref = self.app._cart_menu_ref(self.menu)
+        original_entry = self.provider.entry
+
+        def large_entry(query):
+            observed = original_entry(query)
+            for candidate in observed["products"]:
+                candidate["dietary_evidence"] = {"ingredients": "Observed retailer ingredient text. " * 220}
+            return observed
+
+        self.provider.entry = large_entry
+        raw = self.prepare()
+        self.assertEqual(len(raw["requirements"]), 58)
+        self.assertGreater(len(json.dumps(raw).encode()), 2 * 1024 * 1024)
+        first = self.agent_products(menu_ref=menu_ref)
+        self.assertEqual(first["progress"]["requirement_count"], 58)
+        snapshot = self.store.read()["menu_planning"]["prepared"][first["product_plan_ref"]]["snapshot"]
+        self.assertLess(len(json.dumps(snapshot).encode()), 300_000)
+        self.assertNotIn("dietary_evidence", json.dumps(snapshot))
+        self.provider.calls.clear()
+        rows = self.read_product_pages(first)
+        exact = self.agent_products("get", product_plan_ref=first["product_plan_ref"],
+                                    requirement_id=rows[19]["requirement_id"])
+        self.assertEqual(exact["requirements"], [rows[19]])
+        self.assertEqual(self.provider.calls, [])
+        approvals = [{"requirement_id": row["requirement_id"],
+                      "candidate_refs": [row["candidates"][0]["product_ref"]]} for row in rows]
+        # Discard a successful continuation response, then recover its exact
+        # newly rotated handle after a service restart without another search.
+        self.agent_products(product_plan_ref=first["product_plan_ref"], candidate_approvals=approvals[:8])
+        self.app = Application(self.store, self.provider, object())
+        self.provider.calls.clear()
+        recovered = self.agent_products("get", menu_ref=menu_ref)
+        self.assertEqual(recovered["progress"]["selected_count"], 8)
+        self.assertEqual(self.provider.calls, [])
+        with self.assertRaisesRegex(HouseholdError, "stale"):
+            self.agent_products("get", product_plan_ref=first["product_plan_ref"])
+        final = self.agent_products(product_plan_ref=recovered["product_plan_ref"], candidate_approvals=approvals[8:])
+        self.assertEqual(final["status"], "prepared")
+        self.assertEqual(set(final["apply_arguments"]), {"action", "product_plan_ref", "product_plan_digest"})
+        applied = self.agent_products(**final["apply_arguments"], cart_change_requested=True)
+        self.assert_agent_wire(applied)
+        self.assertTrue(applied["applied"], applied)
+        self.assertEqual(len(self.provider.quantities), 58)
+
+    def test_agent_unsaved_preview_get_continue_and_apply_boundary(self):
+        references = self.save_recipes([recipe("Unsaved dinner", [("carrots", 100), ("onion", 50)])])
+        plan = self.app.handle({"operation": "menu", "action": "plan", "planner_input": {
+            "selection_mode": "agent", "week": "2026-W37", "dates": ["2026-09-07"],
+            "portions": 2, "candidates": [{"recipe_ref": references[0]["recipe_ref"]}],
+        }})["plan"]
+        planner_ref = plan["save_ref"]
+        first = self.agent_products(planner_ref=planner_ref)
+        self.assertTrue(first["preview"])
+        self.assertIsNone(self.store.read()["menu"])
+        self.provider.calls.clear()
+        read = self.agent_products("get", planner_ref=planner_ref)
+        self.assertEqual(first["product_plan_ref"], read["product_plan_ref"])
+        self.assertEqual(self.provider.calls, [])
+        approvals = [{"requirement_id": row["requirement_id"],
+                      "candidate_refs": [row["candidates"][0]["product_ref"]]} for row in read["requirements"]]
+        complete = self.agent_products(product_plan_ref=read["product_plan_ref"], candidate_approvals=approvals)
+        self.assertEqual(complete["status"], "prepared")
+        self.assertNotIn("apply_arguments", complete)
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(HouseholdError, "preview cannot apply"):
+            self.agent_products("apply", product_plan_ref=complete["product_plan_ref"],
+                product_plan_digest=complete["product_plan_digest"], cart_change_requested=True)
+        self.assertEqual(self.provider.calls, [])
+        self.assertIsNone(self.store.read()["menu"])
+
+    def test_agent_short_apply_rejects_changed_facts_and_stale_menu(self):
+        self.save_week()
+        raw = self.complete()
+        first = self.agent_products("get", menu_ref=self.app._cart_menu_ref(self.menu))
+        self.provider.entry("salmon")["products"][0]["purchase_options"][0].update(
+            merchandise_ore=200, total_payable_ore=200)
+        self.provider.calls.clear()
+        result = self.agent_products(**first["apply_arguments"], cart_change_requested=True)
+        self.assertFalse(result["applied"])
+        self.assertIn("fresh_product_plan", result)
+        self.assert_agent_wire(result)
+        self.assertNotIn("manipulate_cart", [tool for tool, _, _ in self.provider.calls])
+        fresh = self.agent_products("get", product_plan_ref=result["fresh_product_plan"]["product_plan_ref"])
+        self.assertNotEqual(fresh["product_plan_digest"], raw["product_plan_digest"])
+        with self.store.locked() as state:
+            state["menu"]["revision"] += 1
+        self.provider.calls.clear()
+        with self.assertRaisesRegex(HouseholdError, "stale"):
+            self.agent_products(**fresh["apply_arguments"], cart_change_requested=True)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_agent_short_partial_apply_and_uncertain_full_write_keep_outcomes(self):
+        self.save_week()
+        first = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu))
+        row = first["requirements"][0]
+        partial = self.agent_products(product_plan_ref=first["product_plan_ref"], candidate_approvals=[{
+            "requirement_id": row["requirement_id"], "candidate_refs": [row["candidates"][0]["product_ref"]]}])
+        applied = self.agent_products(**partial["partial_apply_arguments"], cart_change_requested=True)
+        self.assert_agent_wire(applied)
+        self.assertTrue(applied["partial_applied"])
+        self.assertEqual(applied["status"], "partial_applied")
+        self.assertEqual(applied["remaining_issue_count"], 36)
+        self.assertIn("partial_product_plan_digest", self.store.read()["cart_plan"])
+        self.complete()
+        complete = self.agent_products("get", menu_ref=self.app._cart_menu_ref(self.menu))
+        clock = [1000.0]
+
+        def uncertain(tool, _arguments):
+            if tool == "manipulate_cart":
+                clock[0] = 1240
+                raise HouseholdError("synthetic uncertain mutation")
+
+        self.provider.on_call = uncertain
+        with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
+            result = self.agent_products(**complete["apply_arguments"], cart_change_requested=True)
+        self.assert_agent_wire(result)
+        self.assertEqual(result["status"], "outcome_unknown")
+        self.assertTrue(result["cart_write_pending"])
+        self.assertTrue(result["cart_reconciliation_required"])
+        self.assertEqual(result["cart_plan"]["menu_ref"], self.app._cart_menu_ref(self.menu))
+        self.assertIn("cart_digest", result["cart_plan"])
+
+    def test_agent_issues_pages_include_unquantified_source_positions(self):
+        refs = self.save_recipes([recipe("Unknown serving input", [("carrots", 100)])])
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+            "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
+        with self.store.locked() as state:
+            state["menu"]["dishes"][0]["shopping_requirements"].append({
+                "item": "unspecified garnish", "scalable": False})
+        result = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu))
+        self.provider.calls.clear()
+        issues = self.agent_products(**result["issues_arguments"], limit=1)
+        self.assert_agent_wire(issues)
+        self.assertEqual(issues["issues"][0]["ingredient_index"], 1)
+        self.assertEqual(issues["issues"][0]["reason"], "non_scalable_quantity_unresolved")
+        self.assertEqual(self.provider.calls, [])
+
+    def test_agent_shared_package_dependency_and_short_apply_count_once(self):
+        refs = self.save_recipes([recipe("Two vegetable cuts", [("carrots", 100), ("onion", 100)])])
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+            "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
+        candidate = product("901", "Mixed vegetables", 500, "g", [option(100)])
+
+        def shared_entry(query):
+            self.provider.catalog[query] = observation(query, [candidate])
+            return self.provider.catalog[query]
+
+        self.provider.entry = shared_entry
+        first = self.agent_products(menu_ref=self.app._cart_menu_ref(self.menu))
+        ids = [row["requirement_id"] for row in first["requirements"]]
+        shared = {"requirement_ids": ids, "package_count": 1,
+                  "quantity_basis": "One 500 g vegetable package covers both 100 g needs."}
+        complete = self.agent_products(product_plan_ref=first["product_plan_ref"], candidate_approvals=[{
+            "requirement_id": member, "candidate_refs": ["901"], "shared_package": shared} for member in ids])
+        self.assertEqual(complete["totals"]["package_count"], 1)
+        changed = self.agent_products(product_plan_ref=complete["product_plan_ref"], candidate_approvals=[{
+            "requirement_id": ids[0], "candidate_refs": ["901"]}])
+        self.assertEqual(changed["progress"]["selected_count"], 1)
+        self.assertNotIn("apply_arguments", changed)
+        restored = self.agent_products(product_plan_ref=changed["product_plan_ref"], candidate_approvals=[{
+            "requirement_id": member, "candidate_refs": ["901"], "shared_package": shared} for member in ids])
+        result = self.agent_products(**restored["apply_arguments"], cart_change_requested=True)
+        self.assertTrue(result["applied"], result)
+        self.assertEqual(self.provider.quantities, {"901": 1})

@@ -48,7 +48,15 @@ meal selection and product preparation need no additional reference loading.
    candidate per cooking date; accepted batch settings derive leftover dates.
    This path validates your order without ranking it again. `ranked` remains
    available when you actually want the service to suggest an ordering.
-4. Numeric dietary targets are visible goals in agent mode. Put a target in
+4. Resolve obvious conflicts with saved preferences before saving. Preferences
+   are your selection responsibility even when the service reports them as
+   advisory. Check ingredients and cooking steps, not only titles or keyword
+   findings. If the user asks to keep a dish, try a suitable ingredient
+   substitution first; replace the dish only when adaptation is unsuitable.
+   Judge taste, cooking behavior and nutrition together. “Plant-based” alone
+   does not establish a healthier choice. Never infer an allergy or ban all
+   dairy from a narrower cream/sour-cream preference.
+   Numeric dietary targets are visible goals in agent mode. Put a target in
    `strict_targets` only when it is an explicit requirement. Allergies and
    never-buy rules remain binding. Do not claim a target was met when evidence
    is unknown. Do not change the profile merely to get a proposal accepted.
@@ -64,13 +72,19 @@ use exact fractions; temperatures and cooking times are not portion multipliers.
 An ordinary product brand/package choice does not change the source recipe.
 A real adaptation must keep its ingredients and method coherent.
 
-For an adaptation, use recipe discovery `adapt` with exactly one original
-`discovery_ref` or `recipe_ref`, its returned `recipe_digest`, its
-`source_schema_version`, and the complete schema-2 adapted recipe. Set
-`source.relationship="adapted"`, retain attribution and store binding, and mark
-changed quantity/serving estimates with concrete assumptions. Use the new frozen
-`discovery_ref` in planning. This does not overwrite the original or create a
-personal bank entry. Save separately only when lasting reuse is wanted.
+For an adaptation, read the selected recipe's ingredient and step pages, then
+use recipe discovery `adapt` with its exact original `discovery_ref` or
+`recipe_ref`, `recipe_digest`, `source_schema_version`, and `changes`. Supply
+`ingredients=[{index,item,assumptions}]` using zero-based indices plus the
+complete coherent `steps`. Optional `quantity` and `unit` change an amount;
+omitting them retains the amount. Optional top-level `portions` scales the
+source first, so quantities in your edits apply to that target serving count.
+The service preserves attribution, rights, provider binding and untouched
+amount evidence. Explain practical replacement assumptions; do not reconstruct
+the recipe's evidence. Use the returned frozen `discovery_ref` in planning.
+This does not overwrite the source or create a personal bank entry; save
+separately when lasting reuse is wanted. Full schema-2 `recipe` remains available
+for complete adaptations, mutually exclusive with `changes`.
 `convert` converts representation while preserving source facts; it is not a
 way to disguise an adaptation. Never fabricate source evidence, calculation
 provenance or user acceptance. Usable labeled estimates need no separate
@@ -112,15 +126,25 @@ old orders and previous carts are not proof that something is at home. Aggregate
 stock once before package rounding. See [meal adjustments](references/meal-adjustments.md)
 for bounded inputs and batch layouts.
 
-For a saved menu, an incomplete prepare returns `product_plan_ref`; continue with
-that ref and the remaining choices. For an unsaved preview without that ref,
-repeat the unchanged `planner_ref` with the accumulated candidate choices. `extend` retains choices, `replace` replaces them and `reset`
-starts over. To recover old or unwanted selections for the same saved menu, use
-`menu_ref` plus `continuation_mode="reset"`. This leaves the cart and purchase
-journals untouched. It does not recover an uncertain external write.
+Every prepare returns a `product_plan_ref`, including unsaved previews. Continue
+with that ref and only the remaining choices. Read `products get` pages with
+`offset`, `limit`, and `section="requirements"` or `"issues"`; use `requirement_id`
+for one exact need. Follow `next_offset` until all relevant requirements and
+issues are reviewed. After a lost reply or context compaction, get with the exact
+`menu_ref` or unsaved `planner_ref` to recover its latest prepared plan without
+repeating provider searches. A snapshot is a review, not a fresh availability
+check; apply rereads provider facts. An unsaved preview cannot apply, even after
+the menu is subsequently saved: prepare against its new saved `menu_ref` first.
+`extend` retains choices, `replace` replaces them and `reset` starts over.
+To recover unwanted selections, use `menu_ref` plus `continuation_mode="reset"`.
+This leaves cart and purchase journals untouched and cannot recover an uncertain
+external write. Normal reads are compact; use their page pointers instead of
+shell commands to recover hidden output.
 
 Apply the returned `apply_arguments` unchanged, adding `cart_change_requested=true`
-only for an authorized cart update. Full apply is the normal path. A partial
+only for an authorized cart update. The short arguments refer to the saved
+review; do not copy product observations, candidate lists or menu context into
+apply. Full apply is the normal path. A partial
 apply leaves checkout incomplete; finish the same menu. If apply reports drift,
 read/reconcile it and prepare again. Never bypass an incomplete menu apply with
 raw additions or by dropping menu requirements.
@@ -147,6 +171,9 @@ When policy requires a fresh confirmation, show the exact current review and use
 its confirmation ID. Stable idempotency keys identify one intent; uncertain
 submit/cancel results are reconciled, never repeated as a new intent.
 
+Read an exact order's current status before describing it as upcoming or active.
+A cancelled order can still appear in order history with a future delivery date;
+that date is not evidence of an active delivery. Unknown status stays unknown.
 Confirm an order only when the matched submit/reconcile returns `confirmed=true`.
 Report payment status separately: an accepted merchant order does not by itself
 prove settled payment. `manual_checkout_required` is a handoff, not a purchase.

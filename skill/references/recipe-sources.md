@@ -60,12 +60,22 @@ Keep schema-2 original text, structured quantities, portions, method, attributio
 rights and amount evidence distinct. Scale amounts as exact fractions, not times
 or temperatures. Ordinary brand/package choices belong in product preparation.
 For a culinary change, use discovery `adapt` with exactly one original
-`recipe_ref={id,revision}` or `discovery_ref`, its `recipe_digest` and
-`source_schema_version`, and a complete coherent schema-2 adaptation. Preserve
-original text and exact attribution/rights; set `source.relationship="adapted"`
-and mark changed quantity/portion estimates with concrete assumptions. The
-returned discovery is separate; it does not overwrite the original or save a
-personal variant. `convert` changes representation while preserving source facts.
+`recipe_ref={id,revision}` or `discovery_ref`, its original `recipe_digest` and
+`source_schema_version`. Prefer bounded `changes`: ingredient edits contain
+zero-based `index`, replacement `item`, and concrete `assumptions`; optional
+`quantity`/`unit` replace the amount. Include the complete coherent `steps` when
+editing ingredients. Optional top-level `portions` scales the original before
+these edits. Read all relevant recipe pages first. The service preserves original
+text, attribution, rights, provider binding and untouched evidence, and labels
+changed amounts as estimates. It removes stale product hints only on changed
+ingredients. The returned discovery is separate from the original; saving a
+personal variant remains a separate choice.
+
+A complete schema-2 `recipe` is still supported instead of `changes`. Preserve
+source attribution/rights and original text, set `source.relationship="adapted"`,
+and retain estimate assumptions. Never copy a scaled display's calculated
+provenance into a reconstructed original. `convert` changes representation while
+preserving source facts; it is not a substitute for adaptation.
 
 Oda, Mathem and MENY snapshots retain their original provider binding, even
 after adaptation. Do not relabel store content as neutral to shop elsewhere.

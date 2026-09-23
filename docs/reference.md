@@ -378,14 +378,28 @@ repetition limits, one discounted unit or one exact multi-buy threshold is
 the largest decision-bearing quantity; larger quantities stay unresolved. No
 observation is stored as durable price truth.
 
+
+### Agent response views
+
+The MCP bridge requests `response_view=agent`. The service projects normal status,
+menu, recipe, cart and order reads before the Unix response-size boundary; the
+raw local API defaults to `full`. MCP emits one textual representation for these
+views. Control references and actual mutation outcomes remain visible first.
+Ordinary detail pages use `view_offset`, `view_limit` (1–20) and `view_section`;
+recipe ingredients/steps/provenance, cart items and menu issues are read through
+the same tools. Follow the returned continuation pointers. Product preparation
+uses its own durable snapshot pages above. Raising the transport limit or reading
+spillover files is unnecessary for these paths. Order history dates never establish
+an active order; cancellation and payment observations remain separate.
+
 `meal_concierge_products prepare` binds one read-only proposal to the exact
 active saved-menu identity, an unchanged menu `save_ref` supplied as `planner_ref`,
 or one complete planner handoff, and to the configured provider. The short
 `planner_ref` is the normal unsaved-preview path; it resolves the existing exact
 handoff server-side without saving a menu. `planner_selection_ref` only identifies
-an already saved selection. Mixing bindings is rejected before provider reads. An unsaved preview continues
-with the same `planner_ref` and accumulated candidate approvals; no new persisted
-menu or continuation cache is needed. Cart apply still requires saving the exact
+an already saved selection. Mixing bindings is rejected before provider reads. Every prepare, including an unsaved preview, persists a compact normalized review
+in the existing prepared-product record and returns `product_plan_ref`. Continue
+with that ref plus delta candidate approvals; no menu is implicitly saved. Cart apply still requires saving the exact
 selection and a separate authorized cart-change request. It aggregates only identical, scalable ingredients
 with exactly convertible units; raw or non-scalable quantities stay unresolved.
 For a menu saved before shopping requirements carried `scalable`, the flag is
@@ -428,8 +442,17 @@ explicitly approved, exactly priced candidates observed in those bounded
 provider searches—never the cheapest item in the store. It excludes delivery,
 bags, cart-level fees and checkout drift. Selection ranks exact payable amount,
 then the rational per-requirement excess score, package count and stable product
-refs. Prepare returns the canonical result, `product_plan_digest` and compact
-`apply_arguments` containing the exact preparation inputs and reviewed digest.
+refs. Agent prepare returns `product_plan_digest` and short `apply_arguments`
+containing the opaque `product_plan_ref` and reviewed digest. The existing record
+retains the exact preparation inputs. `products get` reads this normalized snapshot
+without provider calls: pass the ref, or exactly one saved `menu_ref` / unsaved
+`planner_ref` to recover the latest record after a lost reply. Use `offset`,
+`limit` (default 8, maximum 20), and `section=requirements|issues`; optional
+`requirement_id` reads one exact requirement. Follow `next_offset`. A prepared
+unsaved record stays preview-only even after its selection is saved: prepare
+again against the saved menu before apply. Short apply cannot mix in bindings,
+candidate choices or other preparation context. The raw API retains full results
+and legacy apply arguments by default.
 Display fields and timestamps do not grant freshness or apply authority.
 
 Apply accepts the unchanged `apply_arguments` plus `cart_change_requested=true`
@@ -1064,7 +1087,7 @@ Dietary findings distinguish missing evidence, documented conflicts and preferen
 deviations. Missing generic safety metadata is advisory during planning; actual
 selected products are assessed before checkout. Confirmed allergy and never-buy
 conflicts require alternatives. Legacy ambiguous allergy/sensitivity statements
-and avoid exclusions retain their meaning. See [recurring batches and dietary
+and ordinary avoid preferences retain their meaning. See [recurring batches and dietary
 checkout](recurring-batch-dietary.md) for typed rules, exact retail evidence,
 manual review and notification-conditioned standing permission. Caller-supplied
 `facts.safety` remains unsupported. Cooldown is also hard. Its only bypass is an
