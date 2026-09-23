@@ -536,7 +536,9 @@ global.document=new E('document','',[new E('body','',[item,delivery,new E('p',ch
 if(change==='login'){const old=document.querySelector.bind(document);document.querySelector=s=>s.includes('input[type="password"]')?{}:old(s);}
 const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({result,clicks:pay.clicks||0}));
 """
-        expected={'delivery_address':'Eksempelveien 1','delivery_text':'12. september 09:00–12:00','total_minor':4550,'product_count':1,'lines':[]}
+        expected={'delivery_address':'Eksempelveien 1','delivery_text':'12. september 09:00–12:00',
+                  'total_minor':4550,'product_count':1,
+                  'lines':[{'name':'Pasta','description':'500 g','brand':'Sopps','quantity':1}]}
         amounts={'product_subtotal':26.5,'delivery_price':19,'discounts':None,'deposits':None,'bags':None,'other_fees':None,'provider_total':45.5}
         binding={'account_reference_digest':hashlib.sha256(b'123').hexdigest(),'receipt_address':'Eksempelveien 1'}
         def evaluate(script,url,change=None):
@@ -2703,7 +2705,9 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         native = MathemBrowser.__new__(MathemBrowser)
         expected = native._cart_expectation(self.cart)
         ready = {'url': native.checkout_url, 'authenticated': True, 'available': True,
-            'items': [{'quantity': line['quantity'], 'text': line['identity']} for line in expected['lines']],
+            'items': [{'quantity': line['quantity'], 'title': line['name'],
+                       'subtitle': f"{line['description']}, {line['brand']}"}
+                      for line in expected['lines']],
             'delivery_roots': [expected['delivery_text']], 'address_matches': True,
             'payment_display': '•••• 1234', 'submit_controls': 1}
         native._account_reference = mock.Mock(return_value=123)

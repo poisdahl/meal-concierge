@@ -189,7 +189,7 @@ class PaymentSwitchTests(unittest.TestCase):
         self.switch()
         repeated = self.call('prepare', recovery=True)
         self.assertEqual(repeated['summary']['payment_method'], 'saved_card')
-        with self.assertRaisesRegex(HouseholdError, 'only an existing saved card'):
+        with self.assertRaisesRegex(HouseholdError, 'only its requested method'):
             self.call('prepare', recovery=True, checkout_payment={'method': 'vipps'})
         self.assertEqual((self.cancel_clicks, self.target_reads, self.card_clicks), (1, 1, 0))
 
@@ -253,7 +253,7 @@ class PaymentSwitchTests(unittest.TestCase):
         self.assertTrue(result['authentication_required'])
         self.assertNotIn('payment_request_state', result)
         self.assertEqual(result['confirmation_id'], prepared['confirmation_id'])
-        with self.assertRaisesRegex(HouseholdError, 'current Vipps'):
+        with self.assertRaisesRegex(HouseholdError, 'current payment attempt'):
             self.switch()
         self.assertEqual(self.card_clicks, 1)
 
@@ -301,6 +301,150 @@ class PaymentSwitchTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, 'not retained'):
             self.switch()
         self.assertEqual((self.cancel_clicks, self.target_reads, self.card_clicks), (0, 0, 0))
+
+
+class NativeRetryTabTests(unittest.TestCase):
+    def fixture(self, *, changed_order=False, retry_order='order-1', retry_change=123):
+        from contextlib import nullcontext
+        from oda_browser import OdaBrowser
+
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = 'oda'
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        cart = deepcopy(recovery_fixtures.CART)
+        original = deepcopy(recovery_fixtures.Merchant().order)
+        current_order = deepcopy(original)
+        if changed_order:
+            current_order['grossAmount'] += 1
+        binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Example street 1'}
+        state = {'tab': 'vipps', 'urls': {'vipps': 'https://pay.vipps.no/?token=retained'},
+                 'events': []}
+
+        class Provider:
+            def call(self, name, arguments, *, deadline):
+                self_outer.assertEqual((name, arguments), ('get_order', {'order_number': 'order-1'}))
+                return deepcopy(current_order)
+
+        self_outer = self
+        browser._binding_client = lambda: Provider()
+        browser._checkout_dispatch_tab = lambda: state['tab']
+
+        def invoke(*args):
+            if args == ('tab', 'list'):
+                return {'tabs': [{'tabId': tab, 'label': 'meal-concierge-order-inspection' if tab == 'inspect' else 'payment'}
+                                 for tab in state['urls']]}
+            if args[:2] == ('tab', 'new'):
+                self.assertEqual(args[2:4], ('--label', 'meal-concierge-order-inspection'))
+                state['tab'] = 'inspect'
+                state['urls']['inspect'] = args[4]
+                state['events'].append(('inspection_open', state['tab']))
+                return {'tabId': 'inspect'}
+            if args[0] == 'tab':
+                self.assertIn(args[1], state['urls'])
+                state['tab'] = args[1]
+                state['events'].append(('tab_select', state['tab']))
+                return {}
+            if args == ('get', 'url'):
+                return {'url': state['urls'][state['tab']]}
+            self.fail(f'unexpected browser command: {args}')
+
+        browser._invoke = invoke
+
+        def read_binding(order_id, before_order, *, deadline, expected_binding):
+            self.assertEqual(state['tab'], 'inspect')
+            self.assertEqual((order_id, before_order, expected_binding), ('order-1', original, binding))
+            state['events'].append(('binding_read', state['tab']))
+            return binding
+
+        browser._read_order_binding = read_binding
+
+        def eval_retry(script):
+            self.assertIn('/api/v1/checkout/payment/', script)
+            state['events'].append(('retry_read', state['tab']))
+            return {'retry': {'type': 'checkout-payment-retry', 'params': {
+                'order_number': retry_order, 'order_change_id': retry_change}}}
+
+        browser._eval = eval_retry
+
+        def open_url(url):
+            self.assertEqual(state['tab'], 'vipps')
+            state['events'].append(('retry_open', state['tab']))
+            state['urls'][state['tab']] = url
+
+        browser._open = open_url
+        closure = {'status': 'closed', 'terminal_status': 'TIMEOUT', 'payment_id': '123456'}
+        return browser, cart, original, binding, closure, state
+
+    def test_closed_native_timeout_inspects_then_restores_and_verifies_retry(self):
+        from oda_payment_switch import prepare_oda_addition_retry
+        browser, cart, original, binding, closure, state = self.fixture()
+        target = prepare_oda_addition_retry(
+            browser, 'order-1', cart, original, binding, deadline=None, closure=closure)
+        self.assertEqual({key: target[key] for key in ('order_id', 'order_change_id', 'payment_id')},
+                         {'order_id': 'order-1', 'order_change_id': '123', 'payment_id': '123456'})
+        self.assertEqual(state['events'], [
+            ('inspection_open', 'inspect'), ('binding_read', 'inspect'),
+            ('retry_read', 'inspect'), ('tab_select', 'vipps'),
+            ('retry_open', 'vipps'), ('retry_read', 'vipps')])
+        self.assertEqual(state['urls']['vipps'],
+                         'https://oda.com/no/checkout/retry/?orderNumber=order-1&orderChangeId=123')
+
+    def test_changed_original_order_or_payment_target_never_opens_retry(self):
+        from oda_payment_switch import prepare_oda_addition_retry
+        browser, cart, original, binding, closure, _state = self.fixture()
+        target = prepare_oda_addition_retry(browser, 'order-1', cart, original, binding,
+                                            deadline=None, closure=closure)
+        for changes, message in (({'changed_order': True}, 'original Oda order changed'),
+                                 ({'retry_order': 'other'}, 'exact order addition'),
+                                 ({'retry_change': 124}, 'retry target changed')):
+            with self.subTest(changes=changes):
+                browser, cart, original, binding, closure, state = self.fixture(**changes)
+                with self.assertRaisesRegex(HouseholdError, message):
+                    prepare_oda_addition_retry(browser, 'order-1', cart, original, binding,
+                                               deadline=None, closure=closure,
+                                               retained_target=target if 'retry_change' in changes else None)
+                self.assertEqual(state['tab'], 'vipps')
+                self.assertNotIn(('retry_open', 'vipps'), state['events'])
+
+
+class NativeObservedAdoptionTests(unittest.TestCase):
+    def test_native_validation_amount_fallback_and_retry_order_bind_adoption(self):
+        from contextlib import nullcontext
+        import json
+        from oda_payment_switch import adopt_vipps_request
+
+        browser, validation, _poll = recovery_fixtures.VippsNativeTerminalTests().fixture()
+        source = 'https://pay.vipps.no/?token=source'
+        browser.checkout_provider = 'oda'
+        browser.vipps_phone_number = '90000000'
+        browser._cart_expectation = lambda cart: {'total_minor': 4370}
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        browser._inspection_tab = lambda: nullcontext()
+        browser._select_payment_tab = lambda tab_id: tab_id == 'owned'
+        native_invoke = browser._invoke
+        browser._invoke = lambda *args: (
+            {'tabs': [{'tabId': 'owned', 'url': source}]} if args == ('tab', 'list') else
+            {'url': source} if args == ('get', 'url') else native_invoke(*args))
+        retry_order = ['order-1']
+        browser._eval = lambda script: (
+            {'retry': {'type': 'checkout-payment-retry', 'params': {
+                'order_number': retry_order[0], 'order_change_id': None}}}
+            if '/api/v1/checkout/payment/' in script else
+            {'identity': True, 'sent': True})
+        adopted = adopt_vipps_request(browser, {}, {}, deadline=None, order_id='order-1')
+        self.assertEqual(adopted['tab_id'], 'owned')
+        self.assertEqual(adopted['expected_total'], 4370)
+        self.assertEqual(adopted['order_id'], None)
+
+        claims = json.loads(validation['responseBody'])
+        for changed in ({**claims, 'amount': 4371},
+                        {**claims, 'fallback': 'https://example.org/no/checkout/456/redirect-return/'}):
+            with self.subTest(changed=changed):
+                validation['responseBody'] = json.dumps(changed)
+                self.assertIsNone(adopt_vipps_request(browser, {}, {}, deadline=None, order_id='order-1'))
+        validation['responseBody'] = json.dumps(claims)
+        retry_order[0] = 'other'
+        self.assertIsNone(adopt_vipps_request(browser, {}, {}, deadline=None, order_id='order-1'))
 
 
 class NewOrderPaymentSwitchTests(unittest.TestCase):

@@ -591,3 +591,40 @@ On timeout or an uncertain result, check the original helper and stored-grant
 status before starting another login. Follow the shared
 [session and payment guidance](../skill/SKILL.md#store-setup-and-payment-readiness)
 and [confirmation policy](../skill/SKILL.md#delivery-checkout-and-email).
+
+## Checkout identity and Oda payment attempts
+
+Checkout rows retain product name, description, brand and quantity separately.
+The matcher first uses IDs from the current rendered payable row when its native
+product, quantity and displayed fields agree; it does not infer an ID from a
+category URL or another cart. Without IDs it compares complete field
+presentations with conservative Unicode, whitespace and numeric unit-spacing
+normalization. It preserves raw fields and does not apply generic shared-word
+stripping.
+
+Manual new-checkout preparation can return indexed unresolved rows and a digest.
+The caller may provide `identity_review={"digest": "…", "decisions":
+[{"expected_index": 0, "actual_index": 0, "reason": "specific display evidence"}]}`
+to the next `checkout prepare`. This authorizes only an explained cosmetic
+mapping for the same full checkout/account binding. Proven IDs, automatically
+resolved rows, exact quantities and a complete unique assignment remain fixed.
+Indistinguishable unresolved variants cannot be assigned by row order. The
+accepted review is stored in that confirmation and rechecked before the single
+final click; it is not reusable product metadata. Object key order is irrelevant
+to this comparison; all values and array order remain significant.
+
+Oda journals a verified hosted Vipps form before Next separately from the Next
+dispatch fence and positive request acknowledgement. Source-bound amountless
+forms work for new orders, additions and retries. Read-only order/account
+inspection preserves the payment tab. Explicit `checkout switch_payment` accepts
+Vipps or an existing saved card; prepared reviews can change before dispatch,
+while dispatched attempts require their exact native closure/failure before a
+replacement review. A missing notification, an unpaid order or an expired API
+token is not proof of a terminal payment. Legacy attempts are adopted only when
+retained native evidence binds the same gateway, payment and independently
+verified order; missing evidence remains unresolved.
+
+Oda retry discount labels are descriptive data, not a promotion grammar. The
+parser reads signed itemized amounts from the bound summary, checks full bill
+arithmetic and freezes the exact rows for submission. Unknown/malformed money,
+changed rows and inconsistent totals still reject submission.
