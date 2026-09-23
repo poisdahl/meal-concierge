@@ -59,6 +59,28 @@ label does not establish expiry. An explicit payment switch first reconciles
 that original attempt; only its verified terminal state can unlock the returned
 new review. Do not submit another order to solve a missing notification.
 
+Read `workflow.next_action` against the active payment attempt. A prepared
+recovery child uses its fresh `confirmation_id` and the existing confirmation
+policy; a dispatched or uncertain child must be reconciled under that same ID.
+Tell the user to approve a Vipps request only when that attempt positively
+records a sent request. MENY's acknowledged phone request counts as positive
+evidence; a saved-card attempt or a legacy Oda/Vipps attempt with no request
+evidence needs reconciliation, not a phone-approval instruction.
+
+For an exact Oda order left payment-started by a legacy Vipps attempt with no
+request context or dispatch timestamp, an owner report that no Vipps request or
+manual payment occurred can accompany a read-only same-order recovery review.
+Use `checkout prepare`
+with `recovery=true`, the original `confirmation_id`, the exact `order_id`,
+`vipps_request_not_received=true`, and the requested existing
+`checkout_payment` (`saved_card` or `vipps`). The service must independently
+verify the same order, account, goods, delivery and payable amount before it
+returns a fresh recovery confirmation. The report alone never authorizes a
+retry or a new order. Preserve the original journal and confirm only that fresh
+review if its existing authorization policy permits; reconcile uncertainty.
+`retry_allowed=false` still forbids another payment attempt from the old
+confirmation; it does not forbid this non-submitting review.
+
 For bank/device approval, follow the returned handoff. Never collect BankID
 passwords or repeat payment because the chooser is unavailable. Owner-reported
 approval may support the documented resume, but the service must still verify

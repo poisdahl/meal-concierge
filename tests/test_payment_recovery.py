@@ -332,6 +332,87 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(prepared["order_id"], "order-1")
         self.assertEqual(self.browser.clicks, 0)
 
+    def legacy_original(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["status"] = "awaiting_user_payment"
+            for key in ("vipps_request_status", "unpaid_order_id", "unpaid_order_binding_source"):
+                pending.pop(key, None)
+        self.browser.payment_state = "retry_available"
+
+    def test_legacy_reconcile_exposes_non_submitting_recovery_then_same_order_card_review(self):
+        self.legacy_original()
+        before = deepcopy(self.app.store.read()["pending_checkout"])
+        result = self.call("reconcile", confirmation_id="original")
+        self.assertFalse(result["retry_allowed"])
+        self.assertTrue(result["recovery_review_requires_owner_report"])
+        self.assertEqual(result["payment_request_state"], "unknown")
+        self.assertNotIn("payment_dispatched", result)
+        self.assertNotIn("payment_failed", result)
+        next_action = result["next_action"]
+        self.assertEqual(next_action, {"operation": "checkout", "action": "prepare",
+                         "recovery": True, "order_id": "order-1", "confirmation_id": "original"})
+        self.assertEqual(self.app.store.read()["pending_checkout"], before)
+        with self.assertRaises(HouseholdError):
+            self.app.handle(next_action)
+        prepared = self.app.handle({**next_action, "vipps_request_not_received": True,
+                                   "checkout_payment": {"method": "saved_card"}})
+        self.assertTrue(prepared["recovery"])
+        self.assertEqual(prepared["order_id"], "order-1")
+        self.assertEqual(prepared["summary"]["payment_method"], "saved_card")
+        self.assertEqual(self.browser.clicks, 0)
+        self.assertNotEqual(prepared["confirmation_id"], "original")
+
+    def test_legacy_recovery_hint_does_not_override_request_or_replacement_evidence(self):
+        self.legacy_original()
+        original = deepcopy(self.app.store.read()["pending_checkout"])
+        variants = [{"vipps_request_status": status} for status in
+                    ("prepared", "unknown", "dispatching", "sent", "expired", "not_sent")]
+        variants += [{key: value} for key, value in (
+            ("vipps_request_context", {"tab_id": "retained"}),
+            ("vipps_request_attempted_at", self.now.isoformat()),
+            ("payment_requested_at", self.now.isoformat()),
+            ("owner_vipps_approval_completed_at", self.now.isoformat()),
+            ("automatic_checkout", True),
+            ("payment_failure", {"payment_failed": True}),
+            ("payment_switch", {"status": "unknown"}),
+            ("unpaid_order_binding_source", "oda_checkout_pay_response"),
+        )]
+        for patch in variants:
+            with self.subTest(patch=patch):
+                with self.app.store.locked() as state:
+                    state["pending_checkout"] = {**deepcopy(original), **patch}
+                result = self.call("reconcile", confirmation_id="original")
+                self.assertNotIn("recovery_review_requires_owner_report", result)
+        with self.app.store.locked() as state:
+            state["pending_checkout"] = deepcopy(original)
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+        result = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertNotIn("recovery_review_requires_owner_report", result)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_manual_payment_report_suppresses_legacy_recovery_hint(self):
+        self.legacy_original()
+        with self.app.store.locked() as state:
+            state["pending_checkout"]["unpaid_order_id"] = "order-1"
+            state["pending_checkout"]["unpaid_order_binding_source"] = "oda_retry_available_page"
+        result = self.call("reconcile", confirmation_id="original", owner_payment_completed=True)
+        self.assertFalse(result["confirmed"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertNotIn("recovery_review_requires_owner_report", result)
+        self.assertNotIn("next_action", result)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_legacy_recovery_hint_requires_matching_unpaid_order(self):
+        self.legacy_original()
+        for patch in ({"grossAmount": 247.4}, {"products": []}):
+            before = deepcopy(self.merchant.order)
+            self.merchant.order.update(patch)
+            result = self.call("reconcile", confirmation_id="original")
+            self.assertNotIn("recovery_review_requires_owner_report", result)
+            self.merchant.order = before
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_exact_retry_requires_owner_no_request_report_and_original_confirmation(self):
         request = {
             "operation": "checkout", "action": "prepare", "recovery": True,

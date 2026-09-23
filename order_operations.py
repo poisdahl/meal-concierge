@@ -4523,6 +4523,26 @@ class OrderOperations:
         )
         recovery_target_matches = unpaid_matches or exact_payment_started_matches
         authentication = self._checkout_authentication_wait(pending, deadline) if not confirmed else {}
+        # Offer the existing non-submitting legacy recovery review, not a
+        # payment retry. Its owner report and merchant/browser proof are still
+        # required by prepare and confirm; missing telemetry alone proves nothing.
+        legacy_recovery_review = (
+            self.provider == "oda" and not confirmed and unpaid_matches
+            and not owner_payment_completed
+            and not candidate_ambiguous and not candidate_evidence_unresolved
+            and not pending.get("recovery") and not pending.get("order_change")
+            and not pending.get("automatic_checkout") and not authentication
+            and (pending.get("checkout_payment") or {}).get("method") == "vipps"
+            and pending.get("confirmation_id")
+            and (pending.get("browser_review") or {}).get("account_reference_digest")
+            and pending.get("unpaid_order_binding_source") in {None, "oda_retry_available_page"}
+            and pending.get("unpaid_order_id") in {None, candidate_id}
+            and all(pending.get(key) is None for key in (
+                "vipps_request_status", "vipps_request_context", "vipps_request_attempted_at",
+                "payment_requested_at", "owner_vipps_approval_completed_at",
+                "payment_failure", "payment_switch",
+            ))
+        )
         recovery_failed = bool(
             recovery_dispatched and (
                 pending["recovery"].get("payment_failure")
@@ -4636,6 +4656,12 @@ class OrderOperations:
                 "payment": self._payment_evidence(tracking_status or None),
                 "next": "The original Mathem payment is not yet confirmed. Preserve its payment page and any bank approval; reconcile this same attempt without submitting again."}
                if self.provider == "mathem" and not confirmed and tracking_status != "unpaid_order" and not recovery_dispatched else {}),
+            **({"retry_allowed": False,
+                "recovery_review_requires_owner_report": True,
+                "next_action": {"operation": "checkout", "action": "prepare", "recovery": True,
+                                "order_id": candidate_id, "confirmation_id": pending["confirmation_id"]},
+                "next": "No Vipps request context or dispatch timestamp was recorded for this original attempt. If the owner confirms no Vipps request or manual payment for this exact order, prepare its same-order recovery review with the returned next_action plus vipps_request_not_received=true and the requested checkout_payment. Preparation independently verifies the merchant retry page, account, goods, delivery and amounts without paying. A missing request record or owner report alone does not authorize payment; confirm only the fresh review under the existing authorization. Do not delete the journal, recreate the cart, or treat retry_allowed=false as a ban on this non-submitting review."}
+               if legacy_recovery_review else {}),
             **authentication,
         }
 
