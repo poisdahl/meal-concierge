@@ -23,6 +23,106 @@ class WeeklyFlowTests(unittest.TestCase):
     batch = fixture.RecurringDietaryTests.batch
     shop = fixture.RecurringDietaryTests.shop
 
+    def test_agent_week_survives_save_products_restart_and_checkout(self):
+        from planner import saved_menu_minimum_evaluation
+        self.profile(diet={'minimum_fish_portions': 4})
+        candidates = []
+        for i in range(7):
+            saved = self.app.handle({'operation': 'recipes', 'action': 'save',
+                'recipe': fixture.recipes_fixture.recipe(f'Chosen dinner {i}', f'chosen-{i}'),
+                'idempotency_key': f'chosen-{i}'})['recipe']
+            candidates.append({'recipe_ref': {'id': saved['id'], 'revision': saved['revision']}})
+        request = {'week': '2026-W37', 'selection_mode': 'agent', 'candidates': candidates}
+        plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': request})['plan']
+        self.assertEqual(plan['status'], 'planned')
+        menu, _ = self.shop(plan)
+        self.assertEqual([r['name'] for r in menu['dishes']], [f'Chosen dinner {i}' for i in range(7)])
+        evaluation = saved_menu_minimum_evaluation(menu, self.store.read()['profile'])
+        self.assertNotEqual(evaluation['status'], 'pass')
+        self.assertEqual(evaluation['enforced_status'], 'pass')
+        self.app = Application(self.store, self.provider, self.browser)
+        self.app.confirmation_policy = 'standing'
+        result = self.call('submit', weekly=True, idempotency_key='agent-week')
+        self.assertTrue(result['confirmed'], result)
+        self.assertTrue(self.call('submit', weekly=True, idempotency_key='agent-week')['confirmed'])
+        self.assertEqual(self.browser.checkout_clicks, 1)
+
+    def test_fresh_reset_recovers_legacy_product_authority_without_cart_write(self):
+        menu, _ = self.shop(self.batch())
+        with self.store.locked() as state:
+            state['cart_plan'].pop('product_plan_authority', None)
+        before = deepcopy(self.provider.cart)
+        with self.assertRaises(HouseholdError):
+            self.app.handle({'operation': 'products', 'action': 'prepare', 'menu_ref': mp.menu_ref(menu)})
+        reset = self.app.handle({'operation': 'products', 'action': 'prepare',
+            'menu_ref': mp.menu_ref(menu), 'continuation_mode': 'reset'})
+        self.assertEqual(before, self.provider.cart)
+        prepared = self.app.handle({'operation': 'products', 'action': 'prepare',
+            'menu_ref': mp.menu_ref(menu), 'continuation_mode': 'reset',
+            'candidate_approvals': [{'requirement_id': row['requirement_id'], 'candidate_refs': ['10'],
+                'selection_reason': 'This observed carrot package covers the recipe amount.'}
+                for row in reset['product_plan']['requirements']]})
+        self.assertTrue(self.app.handle({'operation': 'products', **prepared['apply_arguments'],
+            'cart_change_requested': True})['applied'])
+        self.assertEqual(before, self.provider.cart)
+
+    def test_clear_is_digest_bound_preserves_menu_and_invalidates_completion(self):
+        menu, old_plan = self.shop(self.batch())
+        with self.store.locked() as state:
+            state['managed_product_apply_fence'] = {'menu_ref': mp.menu_ref(menu)}
+        before = deepcopy(self.provider.cart)
+        with self.assertRaisesRegex(HouseholdError, 'cart_digest'):
+            self.app.handle({'operation': 'cart', 'action': 'clear', 'cart_digest': 'stale'})
+        self.assertEqual(before, self.provider.cart)
+        read = self.app.handle({'operation': 'cart', 'action': 'get'})
+        cleared = self.app.handle({'operation': 'cart', 'action': 'clear', 'cart_digest': read['cart_digest']})
+        self.assertTrue(cleared['cleared'])
+        self.assertEqual(self.provider.cart['items'], [])
+        state = self.store.read()
+        self.assertEqual(state['menu'], menu)
+        for key in ('cart_plan', 'product_plan_completion', 'managed_product_apply_fence'):
+            self.assertNotIn(key, state)
+        stale = self.app.handle({'operation': 'products', 'action': 'apply', 'product_plan': old_plan,
+            'product_plan_digest': old_plan['product_plan_digest'], 'cart_change_requested': True})
+        self.assertFalse(stale['applied'])
+        self.assertEqual(self.provider.cart['items'], [])
+        self.assertFalse(self.call('prepare', weekly=True).get('confirmed'))
+
+    def test_partial_clear_blocks_checkout_until_a_fresh_apply(self):
+        menu, _ = self.shop(self.batch())
+        quantities, names = self.app._cart_lines(self.provider.cart)
+        pending = {'provider': 'oda', 'before': quantities, 'expected': quantities,
+            'order_change': None, 'operations': [], 'dispatch_finished': True, 'clear_requested': True}
+        with self.store.locked() as state:
+            state['pending_cart_change'] = deepcopy(pending)
+        self.app._complete_cart_write(pending, self.provider.cart)
+        state = self.store.read()
+        self.assertIsNone(state['cart_plan']['approved_cart_digest'])
+        self.assertIn('managed_product_apply_fence', state)
+        self.assertEqual(self.call('prepare')['reason'], 'managed_product_apply_incomplete')
+
+    def test_clear_uncertain_result_reconciles_without_repeat(self):
+        self.shop(self.batch())
+        original = self.provider.call
+        dispatches = []
+        def uncertain(tool, arguments, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == 'manipulate_cart':
+                dispatches.append(arguments)
+                raise HouseholdError('lost response after dispatch')
+            return result
+        read = self.app.handle({'operation': 'cart', 'action': 'get'})
+        with mock.patch.object(self.provider, 'call', side_effect=uncertain):
+            with self.assertRaisesRegex(HouseholdError, 'lost response'):
+                self.app.handle({'operation': 'cart', 'action': 'clear', 'cart_digest': read['cart_digest']})
+        self.app = Application(self.store, self.provider, self.browser)
+        with self.assertRaises(HouseholdError):
+            self.app.handle({'operation': 'cart', 'action': 'clear', 'cart_digest': read['cart_digest']})
+        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})['reconciled'])
+        self.assertEqual(len(dispatches), 1)
+        self.assertNotIn('cart_plan', self.store.read())
+        self.assertEqual(self.provider.cart['items'], [])
+
     def recurring(self, product='10'):
         return self.app.handle({'operation': 'recurring', 'action': 'add', 'item': {
             'product_id': product, 'product_name': 'Fast vare', 'quantity': 1,

@@ -5505,7 +5505,9 @@ class RecipeFlowTests(unittest.TestCase):
             self.app.handle({"operation": "recipes", "action": "search", "week": "2026-W40"})
         catalog = self.app.handle({"operation": "catalog", "action": "products", "query": "fisk"})
         self.assertEqual(catalog["tool"], "product_search")
-        self.assertEqual(self.app.handle({"operation": "cart", "action": "get"}), self.oda.cart)
+        cart = self.app.handle({"operation": "cart", "action": "get"})
+        self.assertIsInstance(cart.pop("cart_digest"), str)
+        self.assertEqual(cart, self.oda.cart)
 
     def test_corrupt_recipe_document_returns_bounded_error(self):
         saved = self.save_bank_recipe()
@@ -5516,7 +5518,9 @@ class RecipeFlowTests(unittest.TestCase):
             connection.close()
             with self.assertRaisesRegex(RecipeError, "recipe bank is unavailable"):
                 self.app.handle({"operation": "recipes", "action": "get", "recipe_id": saved["id"]})
-        self.assertEqual(self.app.handle({"operation": "cart", "action": "get"}), self.oda.cart)
+        cart = self.app.handle({"operation": "cart", "action": "get"})
+        self.assertIsInstance(cart.pop("cart_digest"), str)
+        self.assertEqual(cart, self.oda.cart)
 
     def test_recipe_prompt_injection_is_only_stored_data(self):
         injected = full_recipe("Ubetrodd")

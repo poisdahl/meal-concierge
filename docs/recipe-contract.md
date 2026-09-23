@@ -226,3 +226,22 @@ external dispatch rather than discarding fields. Existing supported schema-1
 text-only write/reconciliation paths remain. Ordinary native JSON imports reject
 privileged evidence/acceptance or unavailable new image references before committing any rows;
 dedicated trusted source import/private restore handles those separately.
+
+## Exact adaptations for planning
+
+`recipes action=adapt` takes exactly one original `discovery_ref` or
+`recipe_ref={id,revision}`, its returned `recipe_digest`, its
+`source_schema_version`, and a complete schema-2 `recipe` with
+`source.relationship="adapted"`. It preserves attribution, rights and effective
+store binding. Changed amount/unit/serving evidence must be an honest estimate
+with assumptions; callers cannot invent source facts, accepted estimates,
+calculation provenance, product hints or original snapshot hashes.
+
+The service derives a content-bound adaptation identity and returns a new frozen
+`discovery_ref`, digest, readiness and shopping requirements. The original stays
+unchanged, including for a URL-less personal recipe. No personal entry/favorite
+is created. The reference can enter the ordinary exact planner, survives restart,
+and can be explicitly saved as a separate bank entry without overwriting its
+source. Repeating the same adaptation deduplicates; later bank edits create
+normal revisions. Schema-1 originals remain readable; adaptation produces schema 2.
+Representation-only conversion remains `convert`.

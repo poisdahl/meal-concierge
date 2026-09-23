@@ -456,122 +456,29 @@ class ProductPlannerTests(unittest.TestCase):
                 self.assertEqual(ingredient_search(ambiguous, "oda"), ambiguous)
                 self.assertEqual(ingredient_search(ambiguous, "mathem"), ambiguous)
 
-    def test_semantic_mismatches_are_excluded_and_cannot_be_approved(self):
-        cases = [
-            ("brokkoli", "Brokkolispirer"),
-            ("brokkoli", "Spirer av brokkoli"),
-            ("broccoli", "Brokkolispirer"),
-            ("fersk torskefilet", "Laksefilet"),
-            ("fersk torskefilet", "Fryst torskefilet"),
-            ("torskefilet uten skinn", "Torskefilet med skinn"),
-            ("skinnfri torskefilet", "Torskefilet med skinn"),
-            ("torskefilet", "Fiskefilet"),
-            ("torsk og laks", "Laksefilet"),
-            ("hvite bønner", "Kikerter"),
-            ("hvite bønner", "Hvite bønner og kikerter"),
-            ("maisstivelse", "Majsmjöl"),
-            ("korianderblader", "Korianderfrön"),
-            ("korianderblader", "Koriander"),
-            ("malt koriander", "Korianderblader"),
-            ("malt koriander", "Koriander hel"),
-            ("ferske korianderblader", "Koriander malt"),
-            ("fersk koriander", "Tørket koriander"),
-            ("fersk gjær", "Tørrgjær"),
-            ("fersk gjær", "Instantgjær"),
-            ("fersk pasta", "Tørket pasta"),
-            ("fersk brokkoli", "Frossen brokkoli"),
-            ("brokkoli, fersk", "Tørket brokkoli"),
-            ("chilipulver", "Chiliflak"),
-            ("finkornet sukker", "Sukker"),
-            ("melis", "Sukker"),
-            ("finkornet sukker", "Florsocker"),
-            ("selvhevende hvetemel", "Vanlig hvetemel"),
-            ("selvhevende hvetemel", "Vetemjöl"),
-            ("kremfløte, minst 48 % fett", "Kremfløte 38 % fett"),
-            ("kremfløte, minst 48 % fett", "Vispgrädde"),
-            ("kremfløte, 38 % fett", "Matfløte 20 % fett"),
-            ("britisk fruktfyll til bakst", "Kjøttdeig"),
-            ("kjøttfarse av storfe og svin", "Kjøttdeig av storfe"),
-            ("kjøttfarse av storfe og svin", "Köttfärs"),
-            ("kjøttdeig av svin", "Svinepølse"),
-            ("kjøttdeig av storfe", "Karbonadedeig av storfe"),
-            ("usaltet smør", "Saltet smør"),
-            ("usaltet smør", "Lettsaltet smør"),
-            ("usaltet smør", "Smør"),
-            ("usaltet smør", "Smør med salt"),
-            ("glutenfri pasta", "Vanlig pasta"),
-            ("vegetarisk kjøttdeig", "Kjøttdeig av storfe"),
-            ("kålrot", "Turnips"),
-            ("britisk fruktfyll til bakst", "Fruktfyll"),
-            ("kyllingbryst", "Kyllinglår"),
-            ("chicken breast", "Chicken thighs"),
-            ("laksefilet", "Hel laks"),
-            ("torskefilet", "Torsk hel"),
-            ("svinefilet", "Svinekoteletter"),
-            ("hakket tomat", "Hele tomater"),
-            ("fullkornspasta", "Vanlig pasta"),
-            ("brun ris", "Hvit ris"),
-            ("fullkornsris", "Jasminris"),
-            ("fullkornstortilla", "Hvetetortilla"),
-            ("grovt brød", "Loff"),
-            ("smør", "Peanøttsmør"),
-            ("hvetemel", "Mandelmel"),
-            ("salt", "Hvitløkssalt"),
-            ("ris", "Blomkålris"),
-            ("melk", "Melkesjokolade"),
-            ("hvitløk", "Hvitløkspulver"),
-            ("tomat", "Tomatsaus"),
-            ("smør", "Cashewsmør"),
-            ("hvetemel", "Kokosmel"),
-            ("salt", "Sellerisalt"),
-            ("ris", "Brokkoliris"),
-            ("mel", "Mandelmel"),
-            ("smør", "Cashew-smør"),
-            ("hvetemel", "Kokos-mel"),
-            ("salt", "Selleri-salt"),
-            ("ris", "Brokkoli-ris"),
-            ("hvitløk", "Hvitløk-pulver"),
-            ("tomat", "Tomat-saus"),
-            ("smør", "Cocoa Butter"),
-            ("salt", "Salt Crackers"),
-            ("ris", "Rice Noodles"),
-            ("melk", "Oat Milk"),
-            ("hvitløk", "Garlic Paste"),
+    def test_selected_observed_ref_uses_agent_food_judgment(self):
+        for wanted, offered in (
+            ("tomatsaus", "Peppes Pizzasaus"),
+            ("soya saus", "Kikkoman Soy Sauce"),
+            ("søt chilisaus", "Go-Tan Sweet Chili Sauce"),
+            ("hermetiske bønner", "Tørkede bønner"),
             ("tomat", "Tomato Paste"),
-            ("smør", "Cookie Butter"),
-            ("salt", "Salt & Pepper Mix"),
-            ("ris", "Rice Flour"),
-            ("melk", "Chocolate Milk"),
-            ("hvitløk", "Garlic Bread"),
-            ("tomat", "Tomato Chutney"),
-            ("hvitløk", "Garlic, Powder"),
-            ("tomat", "Tomato, Paste"),
-            ("ris", "Byggris"),
-            ("ris", "Konjakris"),
-            ("ris", "Linseris"),
-            ("melk", "Hampmelk"),
-            ("melk", "Potetmelk"),
-            ("milk", "Hemp Milk"),
-            ("hvetemel", "Flour Tortillas"),
-        ]
-        for wanted, offered in cases:
+        ):
             with self.subTest(wanted=wanted, offered=offered):
                 value = menu({"item": wanted, "quantity": 200, "unit": "g"})
                 requirement = menu_requirements(value)[0][0]
                 candidate = product("10", offered, 200, "g", [option(1000)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
-                    candidate_approvals=[],
-                )
-                self.assertEqual(plan["requirements"][0]["observation"]["products"], [])
-                self.assertEqual(plan["requirements"][0]["observation"]["excluded_candidate_reason"], "candidate_semantic_mismatch")
-                rejected = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(wanted, [candidate])},
-                    candidate_approvals=[{"requirement_id": requirement["requirement_id"], "candidate_refs": ["10"]}],
-                )
-                self.assertEqual(rejected["unresolved_requirements"][0]["reason"], "candidate_semantic_mismatch")
+                observed = {requirement["requirement_id"]: observation(wanted, [candidate])}
+                unselected = build_product_plan(provider="oda", binding={}, menu=value,
+                                                observations=observed, candidate_approvals=[])
+                self.assertEqual(unselected["status"], "needs_input")
+                self.assertEqual(unselected["requirements"][0]["observation"]["products"][0]["name"], offered)
+                selected = build_product_plan(provider="oda", binding={}, menu=value,
+                                              observations=observed, candidate_approvals=[{
+                    "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                }])
+                self.assertEqual(selected["status"], "prepared")
+                self.assertEqual(cart_requirements(selected)[0]["product_id"], "10")
 
     def test_semantically_exact_provider_names_remain_eligible(self):
         for wanted, offered in (
@@ -631,80 +538,22 @@ class ProductPlannerTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared")
 
-    def test_reviewed_prepared_titles_require_exact_candidate_selection(self):
-        cases = (
-            ("Rød karripasta", 30238, "Santa Maria Red Curry Paste"),
-            ("Søt chilisaus", 68799, "Santa Maria Sweet Chili Sauce Original"),
-        )
-        for wanted, reference, offered in cases:
-            with self.subTest(wanted=wanted, offered=offered):
+    def test_branded_sauces_need_only_exact_observed_selection(self):
+        for wanted, offered in (
+            ("pizzasaus", "Peppes Pizzasaus Original"),
+            ("soya saus", "Kikkoman Soy Sauce"),
+            ("søt chilisaus", "Go-Tan Sweet Chili Sauce"),
+        ):
+            with self.subTest(offered=offered):
                 value = menu({"item": wanted, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(reference, offered, 200, "g", [option(1000)])
-                observations = {
-                    requirement["requirement_id"]: observation(wanted, [candidate])
-                }
-                unapproved = build_product_plan(
+                req = menu_requirements(value)[0][0]
+                selected = build_product_plan(
                     provider="oda", binding={}, menu=value,
-                    observations=observations, candidate_approvals=[],
+                    observations={req["requirement_id"]: observation(wanted, [product("10", offered, 200, "g", [option(1000)])])},
+                    candidate_approvals=[{"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}],
                 )
-                self.assertEqual(unapproved["status"], "needs_input", unapproved)
-                self.assertEqual(
-                    unapproved["unresolved_requirements"][0]["reason"],
-                    "exact_candidate_scope_needs_selection",
-                )
-                self.assertEqual(
-                    unapproved["requirements"][0]["identity_unverified_candidate_refs"],
-                    [reference],
-                )
-
-                approved = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations=observations,
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [reference],
-                    }],
-                )
-                self.assertEqual(approved["status"], "prepared", approved)
-                self.assertEqual(
-                    approved["requirements"][0]["selection"]["products"][0]["product_ref"],
-                    reference,
-                )
-
-    def test_unreviewed_translated_prepared_titles_need_identity_review(self):
-        cases = (
-            ("hvit saus", 89, "White Sauce"),
-            ("brun saus", 88, "Toro Brown Sauce"),
-            ("soya saus", 87, "Kikkoman Soy Sauce"),
-            ("fiske saus", 86, "Thai Fish Sauce"),
-            ("sennep saus", 85, "Mustard Sauce"),
-            ("løk saus", 84, "Onion Sauce"),
-            ("appelsin juice", 83, "Orange Juice"),
-            ("sitron dressing", 82, "Lemon Dressing"),
-            ("eple chutney", 81, "Apple Chutney"),
-            ("gul karri saus", 80, "Yellow Curry Sauce"),
-        )
-        for wanted, reference, offered in cases:
-            with self.subTest(wanted=wanted, offered=offered):
-                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(reference, offered, 200, "g", [option(1000)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={
-                        requirement["requirement_id"]: observation(wanted, [candidate])
-                    },
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [reference],
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input", plan)
-                self.assertEqual(
-                    plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
+                self.assertEqual(selected["status"], "prepared")
+                self.assertNotIn("semantic_authorization", selected["requirements"][0]["candidate_approval"])
 
     def test_matching_prepared_identity_and_ordinary_pasta_remain_preparable(self):
         cases = (
@@ -729,314 +578,65 @@ class ProductPlannerTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared", plan)
 
-    def test_prepared_identity_mismatch_cannot_be_exactly_approved(self):
-        cases = (
-            ("hvit saus", "Apple Juice"),
-            ("hvit saus", "Garlic Sauce"),
-            ("soya saus", "Thai Fish Sauce"),
-            ("appelsin juice", "Garlic Sauce"),
-            ("pesto", "Tomato Soup"),
-            ("tomatsaus", "Chili Sauce"),
-            ("potet", "Potetpuré"),
-            ("curry", "Currypaste"),
-            ("taco", "Tacomix"),
-            ("tomatpuré", "Hvitløkpuré"),
-            ("hvitløksaioli", "Trøffelaioli"),
-            ("rødkarripasta", "Grønnkarripasta"),
-            ("currypaste", "Garlicpaste"),
-            ("tomatsauce", "Garlicsauce"),
-            ("tomatpurée", "Hvitløkpurée"),
-            ("tomatsauser", "Hvitløksauser"),
-            ("tomat sauces", "Garlic sauces"),
-            ("tomatpuréer", "Hvitløkspuréer"),
-            ("tomatpestoer", "Hvitløkspestoer"),
-            ("tomatsuppen", "Hvitløkssuppen"),
-            ("rødkarripastaen", "Grønnkarripastaen"),
-            ("tomatsuppa", "Fiskesuppa"),
-            ("hvitløkspulvere", "Chilipulvere"),
-            ("kryddermiks", "Nøttemiks"),
-            ("risnudlene", "Eggnudlene"),
-            ("apple juice", "Apple Juicer"),
-            ("tomato sauce", "Tomato Saucer"),
-            ("cake mix", "Cake Mixer"),
-            ("kryddermiks", "Kryddermikser"),
-        )
-        for wanted, offered in cases:
-            with self.subTest(wanted=wanted, offered=offered):
-                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(91, offered, 200, "g", [option(1000)])
-                for authority in (False, True):
-                    approval = {
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [91],
-                    }
-                    if authority:
-                        approval["semantic_authorization"] = {
-                            "candidate_ref": 91, "authorized_by": "current_user",
-                            "reason": "requested identity is different",
-                        }
-                    plan = build_product_plan(
-                        provider="oda", binding={}, menu=value,
-                        observations={requirement["requirement_id"]: observation(wanted, [candidate])},
-                        candidate_approvals=[approval],
-                    )
-                    self.assertEqual(plan["status"], "needs_input", plan)
-                    self.assertEqual(
-                        plan["unresolved_requirements"][0]["reason"],
-                        "semantic_authorization_not_applicable" if authority else "candidate_semantic_mismatch",
-                    )
+    def test_legacy_semantic_authorization_is_optional_and_digest_bound(self):
+        value = menu({"item": "soya saus", "quantity": 200, "unit": "g"})
+        req = menu_requirements(value)[0][0]
+        observations = {req["requirement_id"]: observation("soya saus", [product("10", "Kikkoman Soy Sauce", 200, "g", [option(1000)])])}
+        base = {"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}
+        ordinary = build_product_plan(provider="oda", binding={}, menu=value,
+                                      observations=observations, candidate_approvals=[base])
+        legacy = build_product_plan(provider="oda", binding={}, menu=value,
+                                    observations=observations, candidate_approvals=[{**base, "semantic_authorization": {
+            "candidate_ref": "10", "authorized_by": "current_user", "reason": "Historical choice",
+        }}])
+        self.assertEqual(ordinary["status"], "prepared")
+        self.assertEqual(legacy["status"], "prepared")
+        self.assertNotEqual(ordinary["product_plan_digest"], legacy["product_plan_digest"])
+        validate_product_plan(legacy, legacy["product_plan_digest"])
+        with self.assertRaisesRegex(HouseholdError, "semantic_authorization"):
+            build_product_plan(provider="oda", binding={}, menu=value, observations=observations,
+                               candidate_approvals=[{**base, "semantic_authorization": {
+                "candidate_ref": "10", "authorized_by": "agent", "reason": "Invented human approval",
+            }}])
 
-    def test_prepared_form_categories_remain_fail_closed(self):
-        cases = (
-            ("Rød karripasta", "Santa Maria Red Curry Sauce"),
-            ("Rød karripasta", "Santa Maria Red Green Curry Paste"),
-            ("Rød karripasta", "Santa Maria Green Curry Paste"),
-            ("Rød karripasta", "Santa Maria Curry Paste"),
-            ("Rød karripasta", "Santa Maria Red Yellow Curry Paste"),
-            ("Rød karripasta", "Santa Maria Red Curry Mustard Paste"),
-            ("Rød karripasta", "Santa Maria Red Massaman Curry Paste"),
-            ("Rød karripasta", "Santa Maria Red Panang Curry Paste"),
-            ("Rød karripasta", "Red Curry Pasta"),
-            ("Rød karripasta", "Red Curry-Pasta"),
-            ("Søt chilisaus", "Santa Maria Sweet Chili Paste"),
-            ("Søt chilisaus", "Santa Maria Sweet Chili Garlic Sauce"),
-            ("Søt chilisaus", "Santa Maria Sweet Tomato Sauce Original"),
-            ("Søt chilisaus", "Santa Maria Chili Sauce Original"),
-            ("Søt chilisaus", "Santa Maria Sweet Sour Chili Sauce"),
-            ("tomatsaus", "Tomato Paste"),
-            ("Rød karripasta", "Tomato Paste"),
-            ("Rød karripasta", "Garlic Paste"),
-            ("Rød karripasta", "Green Curry Paste"),
-            ("Søt chilisaus", "Béarnaise Sauce"),
-            ("Søt chilisaus", "Tomato Sauce"),
-            ("hvitløk", "Garlic Paste"),
-            ("hvitløk", "Hvitløkspulver"),
-        )
-        for wanted, offered in cases:
-            with self.subTest(wanted=wanted, offered=offered):
-                value = menu({"item": wanted, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(10, offered, 200, "g", [option(1000)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={
-                        requirement["requirement_id"]: observation(wanted, [candidate])
-                    },
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [10],
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(
-                    plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-
-    def test_exact_candidate_approval_resolves_ordinary_retailer_title_identity(self):
-        cases = (
-            (60593, "tomat", "Tomater klase Norge Mijøgartneriet", 500, "g"),
-            (63848, "tomat", "Cherrytomater Vår Laveste Pris Nederland/ Spania", 250, "g"),
-            (26102, "tomat", "Miljøgartneriet Bifftomat Norge, 2 stk", 2, "count"),
-            (23924, "tomat", "Økologiske tomater Norge", 400, "g"),
-            (9371, "hvitløk", "Hvitløk 2-3pk, Kina/Spania", 3, "count"),
-        )
-        for reference, item, name, amount, unit in cases:
-            with self.subTest(reference=reference, name=name):
-                value = menu({"item": item, "quantity": 1, "unit": unit})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(reference, name, amount, unit, [option(1000)])
-                unapproved = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[],
-                )
-                self.assertEqual(unapproved["status"], "needs_input")
-                self.assertEqual(
-                    [row["product_ref"] for row in unapproved["requirements"][0]["observation"]["products"]],
-                    [reference],
-                )
-                self.assertEqual(
-                    unapproved["requirements"][0]["identity_unverified_candidate_refs"],
-                    [reference],
-                )
-
-                approved = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [reference],
-                    }],
-                )
-                self.assertEqual(approved["status"], "prepared")
-                row = approved["requirements"][0]
-                self.assertEqual(
-                    row["semantic_equivalent_differences"],
-                    [{
-                        "product_ref": reference,
-                        "differences": [
-                            "retailer_title_identity_verified_by_exact_candidate_approval"
-                        ],
-                    }],
-                )
-                self.assertNotIn("semantic_authorization", row["candidate_approval"])
-
-    def test_exact_identity_approval_never_overrides_form_or_quantity_conflicts(self):
-        for name in (
-            "Presset hvitløk 100 g", "Hvitløk presset", "Knust hvitløk",
-            "Ferskpresset hvitløk 100 g", "Hvitløk ferskpresset 100 g",
-            "Pressad vitlök 100 g", "Vitlök pressad 100 g",
-            "Färskpressad vitlök 100 g", "Vitlök färskpressad 100 g",
-            "Nypresset hvitløk 100 g", "Nypressad vitlök 100 g",
-            "Kaldpresset hvitløk 100 g", "Håndpresset hvitløk 100 g",
-            "Maskinpresset hvitløk 100 g",
-            "Garlic Bread", "Hvitløkspulver", "Hvitløk aioli", "Hvitløk majones",
-            "Hvitløk Majones Norge", "Gul løk 2 stk",
+    def test_exact_ref_selection_accepts_ordinary_retail_titles(self):
+        for reference, name, amount, unit in (
+            (60593, "Tomater klase Norge Mijøgartneriet", 500, "g"),
+            (63848, "Cherrytomater Vår Laveste Pris", 250, "g"),
+            (26102, "Miljøgartneriet Bifftomat Norge, 2 stk", 2, "count"),
         ):
             with self.subTest(name=name):
-                value = menu({"item": "hvitløk", "quantity": 1, "unit": "count"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(9371, name, 1, "count", [option(1000)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation("hvitløk", [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [9371],
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(
-                    plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
+                value = menu({"item": "tomat", "quantity": 1, "unit": unit})
+                req = menu_requirements(value)[0][0]
+                candidate = product(reference, name, amount, unit, [option(1000)])
+                observed = {req["requirement_id"]: observation("tomat", [candidate])}
+                selected = build_product_plan(provider="oda", binding={}, menu=value,
+                                              observations=observed, candidate_approvals=[{
+                    "requirement_id": req["requirement_id"], "candidate_refs": [reference],
+                }])
+                self.assertEqual(selected["status"], "prepared")
+                self.assertEqual(cart_requirements(selected)[0]["product_id"], reference)
 
-        for name, brand in (
-            ("Nypresset hvitløk 100 g", "Nypresset"),
-            ("Nypressad vitlök 100 g", "Nypressad"),
-            ("Coldpressed garlic 100 g", "Coldpressed"),
-            ("Nypresset-hvitløk 100 g", "Nypresset"),
-            ("Nypresset/hvitløk 100 g", "Nypresset"),
-            ("Nypresset, hvitløk 100 g", "Nypresset"),
-            ("Kaldpresset hvitløk 100 g", "Kaldpresset"),
-            ("Håndpresset hvitløk 100 g", "Håndpresset"),
-            ("Maskinpresset hvitløk 100 g", "Maskinpresset"),
-            ("Gartneripresset hvitløk 100 g", None),
-            ("Gartneripresset-hvitløk 100 g", None),
-            ("Hvitløk X_Presset Norge", "X_Presset"),
-            ("Garlic 3DPressed Norway", "3DPressed"),
-            ("Garlic Überpressed Norway", "Überpressed"),
-            ("Garlic abc123pressed Norway", "abc123pressed"),
-        ):
-            with self.subTest(name=name, brand=brand):
-                value = menu({"item": "hvitløk", "quantity": 1, "unit": "count"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(9371, name, 1, "count", [option(1000)])
-                if brand is not None:
-                    candidate["display"]["brand"] = brand
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation("hvitløk", [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [9371],
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(
-                    plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-
-        tomato_menu = menu({"item": "tomat", "quantity": 1, "unit": "count"})
-        tomato_requirement = menu_requirements(tomato_menu)[0][0]
-        wrong_identity = product(60593, "Bananer Norge", 1, "count", [option(1000)])
-        wrong_plan = build_product_plan(
-            provider="oda", binding={}, menu=tomato_menu,
-            observations={
-                tomato_requirement["requirement_id"]: observation("tomat", [wrong_identity])
-            },
-            candidate_approvals=[{
-                "requirement_id": tomato_requirement["requirement_id"],
-                "candidate_refs": [60593],
-            }],
-        )
-        self.assertEqual(wrong_plan["status"], "needs_input")
-        self.assertEqual(
-            wrong_plan["unresolved_requirements"][0]["reason"],
-            "candidate_semantic_mismatch",
-        )
-
-        for prepared_name in (
-            "Tomatjuice", "Tomatpesto", "Tomatfrø", "Tomato relish",
-            "Tomat Relish Norge", "Tomat Frø Norge",
-        ):
-            with self.subTest(prepared_name=prepared_name):
-                prepared_tomato = product(
-                    60593, prepared_name, 1, "count", [option(1000)],
-                )
-                prepared_plan = build_product_plan(
-                    provider="oda", binding={}, menu=tomato_menu,
-                    observations={
-                        tomato_requirement["requirement_id"]: observation(
-                            "tomat", [prepared_tomato],
-                        )
-                    },
-                    candidate_approvals=[{
-                        "requirement_id": tomato_requirement["requirement_id"],
-                        "candidate_refs": [60593],
-                    }],
-                )
-                self.assertEqual(prepared_plan["status"], "needs_input")
-                self.assertEqual(
-                    prepared_plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-
-        butter_menu = menu({"item": "smør", "quantity": 200, "unit": "g"})
-        butter_requirement = menu_requirements(butter_menu)[0][0]
-        for nonfood_name in ("Body Butter", "Hair Butter", "Hair Butter Norge"):
-            with self.subTest(nonfood_name=nonfood_name):
-                body_butter = product(90, nonfood_name, 200, "g", [option(1000)])
-                butter_plan = build_product_plan(
-                    provider="oda", binding={}, menu=butter_menu,
-                    observations={
-                        butter_requirement["requirement_id"]: observation(
-                            "smør", [body_butter],
-                        )
-                    },
-                    candidate_approvals=[{
-                        "requirement_id": butter_requirement["requirement_id"],
-                        "candidate_refs": [90],
-                    }],
-                )
-                self.assertEqual(butter_plan["status"], "needs_input")
-                self.assertEqual(
-                    butter_plan["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-
-        value = menu({"item": "tomat", "quantity": 3, "unit": "count"})
-        requirement = menu_requirements(value)[0][0]
-        two_pack = product(
-            26102, "Miljøgartneriet Bifftomat Norge, 2 stk", 2, "count", [option(1000)],
-        )
+    def test_known_nonfood_and_package_limits_still_block_selected_ref(self):
+        value = menu({"item": "smør", "quantity": 200, "unit": "g"})
+        req = menu_requirements(value)[0][0]
+        approval = [{"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}]
+        for name in ("Body Butter", "Hair Butter", "Whiskas Cat Food", "Toalettpapir"):
+            with self.subTest(name=name):
+                blocked = build_product_plan(provider="oda", binding={}, menu=value,
+                    observations={req["requirement_id"]: observation("smør", [product("10", name, 200, "g", [option(1000)])])},
+                    candidate_approvals=approval)
+                self.assertEqual(blocked["status"], "needs_input")
+                self.assertEqual(blocked["unresolved_requirements"][0]["reason"], "candidate_nonfood_product")
+        tomato = menu({"item": "tomat", "quantity": 3, "unit": "count"})
+        tomato_req = menu_requirements(tomato)[0][0]
+        two_pack = product("20", "Bifftomat 2 stk", 2, "count", [option(1000)])
         two_pack["package_limit"] = {"count": 1}
-        plan = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation("tomat", [two_pack])},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"],
-                "candidate_refs": [26102],
-            }],
-        )
-        self.assertEqual(plan["status"], "needs_input")
-        self.assertEqual(
-            plan["unresolved_requirements"][0]["reason"],
-            "quantity_or_excess_limit_unmet",
-        )
+        blocked = build_product_plan(provider="oda", binding={}, menu=tomato,
+            observations={tomato_req["requirement_id"]: observation("tomat", [two_pack])},
+            candidate_approvals=[{"requirement_id": tomato_req["requirement_id"], "candidate_refs": ["20"]}])
+        self.assertEqual(blocked["status"], "needs_input")
+        self.assertEqual(blocked["unresolved_requirements"][0]["reason"], "quantity_or_excess_limit_unmet")
 
     def test_fresh_suffix_aggregates_one_requirement_and_one_package_selection(self):
         value = {
@@ -1253,14 +853,18 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(plan['coverage_status'],'practical_estimate')
         self.assertEqual(prepare(1)['status'],'needs_input')
 
-    def test_practical_package_cannot_exchange_dry_and_cooked_forms(self):
+    def test_practical_form_choice_is_agent_decision_and_labeled_estimate(self):
         value = menu({'item': 'hermetiske bønner', 'quantity': 1, 'unit': 'count'})
         req = menu_requirements(value)[0][0]
         result = build_product_plan(provider='oda', binding={}, menu=value,
             observations={req['requirement_id']: observation('bønner', [product('10', 'Tørkede bønner', 500, 'g', [option(2500)])])},
             candidate_approvals=[{'requirement_id': req['requirement_id'], 'candidate_refs': ['10'],
-                                 'package_count': 1, 'quantity_basis': 'Estimate one pack.'}])
-        self.assertEqual(result['status'], 'needs_input')
+                                 'package_count': 1, 'quantity_basis': 'One labeled pack; no count-to-mass conversion.',
+                                 'selection_reason': 'Use dry beans after soaking and cooking.'}])
+        self.assertEqual(result['status'], 'prepared')
+        self.assertEqual(result['coverage_status'], 'practical_estimate')
+        self.assertEqual(result['requirements'][0]['candidate_approval']['selection_reason'],
+                         'Use dry beans after soaking and cooking.')
 
     def test_requirements_aggregate_only_exact_identity_and_dimensions(self):
         requirements, unresolved = menu_requirements(menu(
@@ -1389,337 +993,74 @@ class ProductPlannerTests(unittest.TestCase):
             1,
         )
 
-    def test_current_user_can_authorize_narrow_title_level_semantic_differences(self):
-        cases = (
-            ("rømme 9 % fett", "Lettrømme 10%", "approved nearby fat variant"),
-            ("sour cream 9 % fat", "Sour cream 10%", "approved English nearby fat variant"),
-            ("grädde 36 % fett", "Grädde 37%", "approved Swedish nearby fat variant"),
-        )
-        for item, name, reason in cases:
-            with self.subTest(item=item):
-                value = menu({"item": item, "quantity": 300, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product("10", name, 300, "g", [option(1200)])
-                base = {
-                    "requirement_id": requirement["requirement_id"],
-                    "candidate_refs": ["10"],
-                }
-                def plan(approval):
-                    return build_product_plan(
-                        provider="oda", binding={}, menu=value,
-                        observations={requirement["requirement_id"]: observation(item, [candidate])},
-                        candidate_approvals=[approval],
-                    )
-                self.assertEqual(
-                    plan(base)["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-                authorized = plan({**base, "semantic_authorization": {
-                    "candidate_ref": "10", "authorized_by": "current_user", "reason": reason,
-                }})
-                self.assertEqual(authorized["status"], "prepared")
-                validate_product_plan(authorized, authorized["product_plan_digest"])
-                compact = Application._plan_approvals(authorized)
-                self.assertEqual(plan(compact[0])["product_plan_digest"], authorized["product_plan_digest"])
-                changed = deepcopy(authorized)
-                changed["requirements"][0]["candidate_approval"]["semantic_authorization"]["reason"] += " changed"
-                with self.assertRaisesRegex(HouseholdError, "changed"):
-                    validate_product_plan(changed, authorized["product_plan_digest"])
-
-    def test_selected_ordinary_product_may_omit_qualifier_but_not_contradict_it(self):
-        for item, name, difference in (
-            ("fryst rosenkål", "R Rosenkål", "frozen_not_in_product_title"),
-            ("hermetiske sorte bønner", "Kolonihagen økologiske sorte bønner", "canned_not_in_product_title"),
-            ("fersk brokkoli", "Brokkoli", "fresh_not_in_product_title"),
-            ("onion, finely chopped", "Gul løk", "preparation_not_in_product_title"),
-            ("tørket oregano", "Oregano", "dried_not_in_product_title"),
-        ):
-            with self.subTest(item=item):
-                value = menu({"item": item, "quantity": 300, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product("10", name, 600, "g", [option(1200)])
-                candidate["display"]["brand"] = name.split()[0]
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": ["10"],
-                    }],
-                )
-                self.assertEqual(plan["status"], "prepared", plan)
-                self.assertEqual(
-                    plan["requirements"][0]["semantic_equivalent_differences"],
-                    [{"product_ref": "10", "differences": [difference]}],
-                )
-
-        value = menu({"item": "fryst rosenkål", "quantity": 300, "unit": "g"})
-        requirement = menu_requirements(value)[0][0]
-        contradicted = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation(
-                "rosenkål", [product("10", "Fersk rosenkål", 600, "g", [option(1200)])]
-            )},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-            }],
-        )
-        self.assertEqual(contradicted["status"], "needs_input")
-        self.assertEqual(contradicted["unresolved_requirements"][0]["reason"], "candidate_semantic_mismatch")
-
-        value = menu({"item": "tørket oregano", "quantity": 30, "unit": "g"})
-        requirement = menu_requirements(value)[0][0]
-        contradicted = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation(
-                "oregano", [product("10", "Fersk oregano", 30, "g", [option(1200)])]
-            )},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-            }],
-        )
-        self.assertEqual(contradicted["status"], "needs_input")
-        self.assertEqual(contradicted["unresolved_requirements"][0]["reason"], "candidate_semantic_mismatch")
-
-    def test_unreviewed_fresh_qualifier_omissions_need_explicit_authority(self):
-        for item, name in (
-            ("fersk pasta", "Pasta"),
-            ("fersk gjær", "Gjær"),
-            ("fersk koriander", "Koriander"),
-        ):
-            with self.subTest(item=item):
-                value = menu({"item": item, "quantity": 100, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product("10", name, 100, "g", [option(1200)])
-                planned = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={
-                        requirement["requirement_id"]: observation(item, [candidate]),
-                    },
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": ["10"],
-                    }],
-                )
-                self.assertEqual(planned["status"], "needs_input")
-                self.assertEqual(
-                    planned["unresolved_requirements"][0]["reason"],
-                    "candidate_semantic_mismatch",
-                )
-
-    def test_semantic_authorization_checks_exact_selected_ref_before_broad_scope_filter(self):
-        cases = (
-            (
-                "fryst rosenkål", 8416, "R Rosenkål", "R",
-                "frozen title omission",
-            ),
-            (
-                "hermetiske sorte bønner", 63255,
-                "Kolonihagen økologiske sorte bønner", "Kolonihagen",
-                "canned title omission",
-            ),
-        )
-        for item, selected_ref, name, brand, reason in cases:
-            with self.subTest(item=item):
-                value = menu({"item": item, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                selected = product(selected_ref, name, 600, "g", [option(1200)])
-                selected["display"]["brand"] = brand
-                distractors = [
-                    product(70_000 + index, distractor, 600, "g", [option(1200)])
-                    for index, distractor in enumerate((
-                        "Torskeburger", "Rosenkål med hvitløk",
-                        "Sorte bønner med mais", "Kikerter",
-                    ))
-                ]
-                observed = observation(item.split()[-1], [selected, *distractors])
-                base = {
-                    "requirement_id": requirement["requirement_id"],
-                    "candidate_refs": [selected_ref],
-                    "search_query": item.split()[-1],
-                }
-
-                blocked = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observed},
-                    candidate_approvals=[base],
-                )
-                self.assertEqual(blocked["status"], "prepared")
-                self.assertEqual(
-                    [row["product_ref"] for row in blocked["requirements"][0]["observation"]["products"]],
-                    [selected_ref],
-                )
-
-                authorized = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observed},
-                    candidate_approvals=[{**base, "semantic_authorization": {
-                        "candidate_ref": selected_ref,
-                        "authorized_by": "current_user", "reason": reason,
-                    }}],
-                )
-                self.assertEqual(authorized["status"], "prepared")
-                requirement_plan = authorized["requirements"][0]
-                self.assertEqual(
-                    requirement_plan["selection"]["products"][0]["product_ref"],
-                    selected_ref,
-                )
-                self.assertEqual(
-                    [row["product_ref"] for row in requirement_plan["observation"]["products"]],
-                    [selected_ref],
-                )
-
-        value = menu({"item": "hermetiske sorte bønner", "quantity": 200, "unit": "g"})
-        requirement = menu_requirements(value)[0][0]
-        compound = product(
-            63255, "Kolonihagen økologiske sorte bønner med mais",
-            600, "g", [option(1200)],
-        )
-        compound["display"]["brand"] = "Kolonihagen"
-        invalid = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation("sorte bønner", [compound])},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"],
-                "candidate_refs": [63255], "search_query": "sorte bønner",
-                "semantic_authorization": {
-                    "candidate_ref": 63255, "authorized_by": "current_user",
-                    "reason": "canned title omission",
-                },
-            }],
-        )
-        self.assertEqual(invalid["status"], "needs_input")
-        self.assertEqual(
-            invalid["unresolved_requirements"][0]["reason"],
-            "semantic_authorization_not_applicable",
-        )
-        self.assertEqual(invalid["requirements"][0]["observation"]["products"], [])
-
-        unsafe_brand_cases = (
-            ("fryst rosenkål", "Chili Rosenkål", "Chili"),
-            ("hermetiske sorte bønner", "Chili Sorte bønner", "Chili"),
-            ("rømme 9 % fett", "Hvitløk Lettrømme 10%", "Hvitløk"),
-        )
-        for item, name, brand in unsafe_brand_cases:
-            with self.subTest(unsafe_brand=brand, item=item):
-                value = menu({"item": item, "quantity": 200, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product(10, name, 600, "g", [option(1200)])
-                candidate["display"]["brand"] = brand
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"],
-                        "candidate_refs": [10],
-                        "semantic_authorization": {
-                            "candidate_ref": 10, "authorized_by": "current_user",
-                            "reason": "title omission",
-                        },
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(
-                    plan["unresolved_requirements"][0]["reason"],
-                    "semantic_authorization_not_applicable",
-                )
-
-    def test_semantic_authorization_cannot_bypass_identity_or_allergy_safety(self):
-        cases = (
-            ("fryst torsk", "Laks", "fish species"),
-            ("hermetiske sorte bønner", "Kikerter", "legume identity"),
-            ("fryst torsk", "Torskeburger", "processed fish form"),
-            ("fryst torsk", "Torsk med reker", "compound fish product"),
-            ("fryst torsk", "Torsk i olje", "prepared fish product"),
-            ("hermetiske sorte bønner", "Sorte bønner i chilisaus", "flavoured prepared beans"),
-            ("hermetiske sorte bønner", "Sorte bønner taco mix", "bean mix"),
-            ("hermetiske sorte bønner", "Sorte bønner med mais", "compound bean product"),
-            ("hermetiske sorte bønner", "Sorte bønner med peanøtter", "allergen-bearing bean product"),
-            ("rømme 9 % fett", "TINE Lettrømme 10% med hvitløk", "flavoured sour cream"),
-            ("rømme 9 % fett", "Lettrømme 10% løk og dill", "flavoured sour cream"),
-            ("rømme med hvitløk 9 % fett", "Lettrømme 10%", "dropped requested flavor"),
-            ("rømme løk og dill 9 % fett", "TINE Lettrømme 10%", "dropped requested flavors"),
-            ("yoghurt vanilje 3 % fett", "Yoghurt 4%", "dropped yogurt flavor"),
-            ("seterrømme 9 % fett", "Lettrømme 10%", "changed sour cream subtype"),
-            (
-                "Rød karripasta", "Santa Maria Red Yellow Curry Paste",
-                "changed curry identity",
-            ),
-            (
-                "Søt chilisaus", "Santa Maria Sweet Sour Chili Sauce",
-                "changed sauce identity",
-            ),
-        )
-        for item, name, reason in cases:
-            with self.subTest(item=item):
-                value = menu({"item": item, "quantity": 300, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product("10", name, 300, "g", [option(1200)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-                        "semantic_authorization": {
-                            "candidate_ref": "10", "authorized_by": "current_user", "reason": reason,
-                        },
-                    }],
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(plan["unresolved_requirements"][0]["reason"], "semantic_authorization_not_applicable")
-
+    def test_optional_selection_reason_is_bounded_and_digest_bound(self):
         value = menu({"item": "rømme 9 % fett", "quantity": 300, "unit": "g"})
-        requirement = menu_requirements(value)[0][0]
-        candidate = product("10", "TINE Lettrømme 10%", 300, "g", [option(1200)])
-        candidate["dietary_evidence"] = {"allergens": ["melk"]}
-        plan = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation("rømme", [candidate])},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-                "semantic_authorization": {
-                    "candidate_ref": "10", "authorized_by": "current_user", "reason": "approved fat variant",
-                },
-            }],
-            dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": "melk"}]}},
-        )
-        self.assertEqual(plan["status"], "needs_input")
-        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+        req = menu_requirements(value)[0][0]
+        observed = {req["requirement_id"]: observation("rømme", [product("10", "Lettrømme 10%", 300, "g", [option(1200)])])}
+        base = {"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}
+        def planned(approval):
+            return build_product_plan(provider="oda", binding={}, menu=value,
+                                      observations=observed, candidate_approvals=[approval])
+        plain = planned(base)
+        explained = planned({**base, "selection_reason": "A practical nearby fat variant."})
+        self.assertEqual(plain["status"], "prepared")
+        self.assertEqual(explained["status"], "prepared")
+        self.assertNotEqual(plain["product_plan_digest"], explained["product_plan_digest"])
+        validate_product_plan(explained, explained["product_plan_digest"])
+        compact = Application._plan_approvals(explained)
+        self.assertEqual(compact[0]["selection_reason"], "A practical nearby fat variant.")
+        self.assertEqual(planned(compact[0])["product_plan_digest"], explained["product_plan_digest"])
+        changed = deepcopy(explained)
+        changed["requirements"][0]["candidate_approval"]["selection_reason"] += " changed"
+        with self.assertRaisesRegex(HouseholdError, "changed"):
+            validate_product_plan(changed, explained["product_plan_digest"])
+        with self.assertRaisesRegex(HouseholdError, "selection_reason"):
+            planned({**base, "selection_reason": " "})
 
-        title_allergens = (
-            ("sjokolade", "TINE Melkesjokolade", "melk"),
-            ("pålegg", "Peanøttsmør", "peanøtter"),
-            ("nudler", "Eggnudler", "egg"),
-        )
-        for item, name, allergen in title_allergens:
-            with self.subTest(title_allergen=allergen):
-                value = menu({"item": item, "quantity": 300, "unit": "g"})
-                requirement = menu_requirements(value)[0][0]
-                candidate = product("10", name, 300, "g", [option(1200)])
-                plan = build_product_plan(
-                    provider="oda", binding={}, menu=value,
-                    observations={requirement["requirement_id"]: observation(item, [candidate])},
-                    candidate_approvals=[{
-                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-                    }],
-                    dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": allergen}]}},
-                )
-                self.assertEqual(plan["status"], "needs_input")
-                self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+    def test_title_qualifiers_do_not_override_exact_selected_ref(self):
+        for wanted, offered in (
+            ("fryst rosenkål", "R Rosenkål"),
+            ("hermetiske sorte bønner", "Kolonihagen sorte bønner"),
+            ("fersk brokkoli", "Brokkoli"),
+            ("tørket oregano", "Fersk oregano"),
+        ):
+            with self.subTest(wanted=wanted, offered=offered):
+                value = menu({"item": wanted, "quantity": 300, "unit": "g"})
+                req = menu_requirements(value)[0][0]
+                selected = build_product_plan(provider="oda", binding={}, menu=value,
+                    observations={req["requirement_id"]: observation(wanted, [product("10", offered, 600, "g", [option(1200)])])},
+                    candidate_approvals=[{"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}])
+                self.assertEqual(selected["status"], "prepared")
 
-        value = menu({"item": "sorte bønner", "quantity": 300, "unit": "g"})
-        requirement = menu_requirements(value)[0][0]
-        candidate = product("10", "Sorte bønner med peanøtter", 300, "g", [option(1200)])
-        plan = build_product_plan(
-            provider="oda", binding={}, menu=value,
-            observations={requirement["requirement_id"]: observation("sorte bønner", [candidate])},
-            candidate_approvals=[{
-                "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
-            }],
-            dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": "peanøtter"}]}},
-        )
-        self.assertEqual(plan["status"], "needs_input")
-        self.assertEqual(plan["unresolved_requirements"][0]["reason"], "dietary_conflict_no_compatible_candidate")
+    def test_unselected_distractors_do_not_change_selected_product(self):
+        value = menu({"item": "soya saus", "quantity": 200, "unit": "g"})
+        req = menu_requirements(value)[0][0]
+        selected = product("10", "Kikkoman Soy Sauce", 200, "g", [option(1200)])
+        distractors = [product("20", "Fish Sauce", 200, "g", [option(100)]),
+                       product("30", "Peppes Pizzasaus", 200, "g", [option(200)])]
+        planned = build_product_plan(provider="oda", binding={}, menu=value,
+            observations={req["requirement_id"]: observation("saus", [*distractors, selected])},
+            candidate_approvals=[{"requirement_id": req["requirement_id"], "candidate_refs": ["10"]}])
+        self.assertEqual(planned["status"], "prepared")
+        self.assertEqual(cart_requirements(planned)[0]["product_id"], "10")
+        self.assertEqual(len(planned["requirements"][0]["observation"]["products"]), 3)
+
+    def test_reason_or_legacy_semantic_authorization_cannot_bypass_hard_dietary_rule(self):
+        value = menu({"item": "pålegg", "quantity": 300, "unit": "g"})
+        req = menu_requirements(value)[0][0]
+        candidate = product("10", "Peanøttsmør", 300, "g", [option(1200)])
+        candidate["dietary_evidence"] = {"allergens": ["peanøtter"]}
+        observed = {req["requirement_id"]: observation("pålegg", [candidate])}
+        for extra in ({"selection_reason": "Chosen for the recipe."},
+                      {"semantic_authorization": {"candidate_ref": "10", "authorized_by": "current_user", "reason": "Legacy record"}}):
+            with self.subTest(extra=extra):
+                blocked = build_product_plan(provider="oda", binding={}, menu=value,
+                    observations=observed, candidate_approvals=[{
+                        "requirement_id": req["requirement_id"], "candidate_refs": ["10"], **extra,
+                    }], dietary_profile={"diet": {"rules": [{"kind": "allergy", "term": "peanøtter"}]}})
+                self.assertEqual(blocked["status"], "needs_input")
+                self.assertEqual(blocked["unresolved_requirements"][0]["reason"],
+                                 "dietary_conflict_no_compatible_candidate")
 
     def test_shared_package_is_atomic_and_counted_once(self):
         value = menu(
@@ -1739,7 +1080,6 @@ class ProductPlannerTests(unittest.TestCase):
             "requirement_ids": member_ids,
             "package_count": 1,
             "quantity_basis": "One observed 12-egg package covers the egg and yolk requirements together.",
-            "authorized_by": "current_user",
         }
         approvals = [{
             "requirement_id": requirement["requirement_id"],
@@ -1767,6 +1107,18 @@ class ProductPlannerTests(unittest.TestCase):
             candidate_approvals=compact,
         )
         self.assertEqual(replayed["product_plan_digest"], plan["product_plan_digest"])
+        self.assertTrue(all("authorized_by" not in row["shared_package"] for row in compact))
+        for authorized_by in ("agent", "current_user"):
+            legacy_or_explicit = build_product_plan(
+                provider="oda", binding={}, menu=value, observations=observations,
+                candidate_approvals=[{
+                    **approval,
+                    "shared_package": {**authority, "authorized_by": authorized_by},
+                } for approval in approvals],
+            )
+            self.assertEqual(legacy_or_explicit["status"], "prepared")
+            self.assertEqual(cart_requirements(legacy_or_explicit)[0]["quantity"], 1)
+            self.assertNotEqual(legacy_or_explicit["product_plan_digest"], plan["product_plan_digest"])
 
         insufficient = deepcopy(approvals)
         tiny = product("28866", "Egg enkeltvis", 1, "count", [option(100)])
@@ -1835,7 +1187,6 @@ class ProductPlannerTests(unittest.TestCase):
         potato_share = {
             "requirement_ids": potato_ids, "package_count": 2,
             "quantity_basis": "Two labeled 1 kg bags jointly cover the six-count and 500 g needs.",
-            "authorized_by": "current_user",
         }
         potato_plan = build_product_plan(
             provider="oda", binding={}, menu=potato_menu,
@@ -1873,7 +1224,6 @@ class ProductPlannerTests(unittest.TestCase):
                 shared = {
                     "requirement_ids": member_ids, "package_count": 1,
                     "quantity_basis": "One observed package covers both listed cooking requirements.",
-                    "authorized_by": "current_user",
                 }
                 plan = build_product_plan(
                     provider="oda", binding={}, menu=value,

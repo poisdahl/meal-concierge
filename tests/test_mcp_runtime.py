@@ -209,6 +209,11 @@ async def sdk_checks(root, process):
         assert schemas["meal_concierge_catalog"]["required"] == ["action"]
         assert schemas["meal_concierge_catalog"]["properties"]["action"]["enum"] == ["products", "recipes", "usuals"]
         assert "mathem" in json.dumps(schemas["meal_concierge_email"]["properties"]["provider"])
+        assert "clear" in schemas["meal_concierge_cart"]["properties"]["action"]["enum"]
+        assert schemas["meal_concierge_cart"]["$defs"]["CartOperation"]["required"] == ["product_id", "quantity"]
+        assert "adapt" in schemas["meal_concierge_recipe_discovery"]["properties"]["action"]["enum"]
+        assert "recipe_ref" in schemas["meal_concierge_recipe_discovery"]["properties"]
+        assert "selection_mode" in schemas["meal_concierge_menu"]["$defs"]["PlannerInput"]["properties"]
         product_schema = schemas["meal_concierge_products"]
         menu_properties = schemas["meal_concierge_menu"]["properties"]
         assert "menu_ref" in menu_properties
@@ -249,7 +254,9 @@ async def sdk_checks(root, process):
         assert approval_schema["properties"]["candidate_refs"]["maxItems"] == 5
         assert product_schema["$defs"]["SemanticAuthorization"]["properties"]["authorized_by"]["const"] == "current_user"
         shared_schema = product_schema["$defs"]["SharedPackageAuthorization"]
-        assert shared_schema["properties"]["authorized_by"]["const"] == "current_user"
+        assert shared_schema["properties"]["authorized_by"]["enum"] == ["agent", "current_user"]
+        assert "authorized_by" not in shared_schema["required"]
+        assert approval_schema["properties"]["selection_reason"]["maxLength"] == 600
         assert shared_schema["properties"]["requirement_ids"]["minItems"] == 2
         assert shared_schema["properties"]["requirement_ids"]["maxItems"] == 64
         for tool_name in (
@@ -364,7 +371,9 @@ async def sdk_checks(root, process):
         await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": 2}])
         manual = await call(client, "checkout", action="prepare")
         assert manual["manual_checkout_required"] and not manual["confirmed"] and manual["currency"] == "SEK"
-        await call(client, "cart", action="change", operations=[{"productId": "10", "quantity": -2}])
+        observed = await call(client, "cart", action="get")
+        cleared = await call(client, "cart", action="clear", cart_digest=observed["cart_digest"])
+        assert cleared["cleared"]
         await call(client, "product_favorites", action="remove", product_id="10")
         print(json.dumps({"sdk": "passed", "protocol": initialized.protocol_version, "tools": len(expected), "identity": marker}), flush=True)
 

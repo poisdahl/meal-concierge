@@ -73,3 +73,15 @@ infers dietary compliance, pantry stock or package selection from a recipe page.
 Missing details retain their source link and explicit limitations. Private
 storage preserves original store content without granting redistribution rights
 or permitting its use with another selected store.
+
+## Model-led use and adaptations
+
+The host model chooses among full Oda, Mathem or MENY snapshots and sends their
+exact refs through `menu plan` with `selection_mode="agent"`. All three use the
+same schema-2 adaptation contract: `recipe_discovery adapt` returns a separate
+frozen reference while retaining attribution, rights and effective provider.
+Neither a null `source_provider` nor an edited title removes a binding inferred
+from an original source URL. Adaptations must remain usable at that provider.
+Oda's original product hints remain hints; changed ingredients cannot inherit
+unrelated source mappings. Mathem/MENY do not acquire invented product hints.
+Every chosen product is checked against fresh selected-store observations.

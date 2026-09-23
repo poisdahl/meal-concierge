@@ -164,3 +164,14 @@ Partial replans preserve complete frozen batch components and their original eat
 portions even after household defaults change. Explicit `meal_mode=fresh` requests
 fresh replacements without changing that default. Fractional or unequal batch
 projections need a specific adjustment; they are never rounded silently.
+
+## Agent-selected menus
+
+`selection_mode="agent"` accepts one exact ordered recipe per cooking/source date
+in the accepted batch layout. Leftover slots and quantities still derive from
+that layout, and real cooking outcomes remain separate. Numeric saved dietary
+minima are measured and displayed; only explicit `strict_targets` make them hard
+in agent mode. Saved legacy/ranked menus keep their existing policy. A partial
+replan retains the whole-menu policy in `planning_scope`; a full replacement can
+adopt a new one. This distinction continues through product preparation and
+checkout and does not relax allergies, never-buy rules or retail uncertainty.

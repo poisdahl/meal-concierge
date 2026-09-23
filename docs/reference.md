@@ -387,26 +387,25 @@ recovered only when the requirement still exactly matches the same-index frozen
 ingredient's identity, scaled quantity, unit and option/pantry flags.
 The first call exposes at most five relevance-ranked search
 results per requirement and returns `needs_input`; search order, names and
-promotional text never establish substitution safety. A subsequent current user
-choice must name the exact approved candidate refs for each exact requirement.
-When the product title omits a frozen/canned property or differs only by a
-nearby dairy fat percentage, that approval may carry
-`semantic_authorization={candidate_ref,authorized_by:"current_user",reason}`.
-The authority is transient, appears in the reviewed plan and compact apply
-arguments, and is covered by `product_plan_digest`. It cannot override identity,
-species, explicitly contradictory form/state, allergy, sensitivity or never-buy
-checks. After removing only the authorized qualifier and ordinary package or
-organic-label metadata, the complete product title must still be the exact base
-identity; extra ingredients, flavors and prepared forms fail closed. Literal
-allergens in a product title are positive retailer evidence. A title change that
-makes the authority inapplicable stops apply.
+promotional text never establish substitution safety. The host model chooses exact observed candidate refs for each requirement.
+Culinary equivalence, brands and preparation differences are model decisions,
+not title-regex vetoes. An optional bounded `selection_reason` explains that
+choice and remains covered by the product digest and compact apply arguments.
+The model must adapt ingredients and method coherently when a substitution
+changes cooking. Recognized nonfood patterns, configured dietary conflicts, provider identity,
+availability, quantities, package evidence and cost checks remain enforced.
+Legacy `semantic_authorization` fields remain readable but are not required
+for ordinary choices and never bypass dietary constraints.
+Literal allergens in a product title are positive retailer evidence.
 Common bounded Norwegian, English and Swedish allergen compounds such as
 milk chocolate, peanut butter and egg noodles count as positive title evidence;
 free-from and unrelated near-token words do not.
 
 One observed package may cover two or more requirements only when every member
 repeats the same `shared_package={requirement_ids,package_count,quantity_basis,
-authorized_by:"current_user"}` and selects the same sole candidate ref. The
+authorized_by?:"agent"|"current_user"}` and selects the same sole candidate ref.
+Omission or `agent` represents the model's package allocation; do not fabricate
+current-user approval. The
 group is atomic. Exact compatible dimensions are checked against the combined
 need; other culinary dimensions retain the explicit practical quantity basis.
 The plan shows the allocation on every member, while one deterministic owner
@@ -414,10 +413,9 @@ contributes the SKU, package quantity and cost. Multi-buy offers and cart
 quantities are therefore evaluated once for the shared package.
 Only confirmed availability, package evidence, offer eligibility and complete
 product-level payable amounts enter the bounded combination search.
-Configured allergy/sensitivity and avoid rules are also hard at the product
-boundary. The current provider observations contain no authoritative product
-safety evidence, so a non-empty rule keeps preparation at `needs_input`; an
-exact candidate-ref approval cannot override it.
+Configured dietary conflicts remain enforced at the product boundary.
+Missing relevant safety evidence stays unknown and follows the existing dietary
+review/permission policy; an exact culinary choice cannot assert safety.
 
 The resulting claim is only the lowest verified total payable amount among the
 explicitly approved, exactly priced candidates observed in those bounded
@@ -1012,8 +1010,14 @@ ID and revision even after cleanup or a later explicit recipe update.
 
 ## Deterministic weekly-menu planning
 
-`meal_concierge_menu(action="plan")` is the server-owned whole-week planner.
-Its `planner_input` contains a week and optional exact dates and portions.
+`meal_concierge_menu(action="plan")` validates and materializes exact menus.
+For the ordinary model-led path, use `planner_input.selection_mode="agent"`,
+chronological dates, and exactly one ordered candidate per cooking date. Accepted
+batch layouts determine leftover dates. The service preserves that order without
+permutation ranking; exact references, readiness, configured hard restrictions,
+cooldown and explicit strict targets still apply. Automatic discovery requires
+`selection_mode="ranked"` (also the omitted-field legacy behavior).
+The request contains a week and optional exact dates and portions.
 Omit `candidates` for automatic discovery through the enabled local bank (including
 installed user/imported/bundled/collection entries) and selected enabled retailer. The server
 returns per-source statuses and bounded work counts in `plan.discovery`, loads
@@ -1062,10 +1066,14 @@ exact currently blocked `recipe_key` in this request's `cooldown_overrides`,
 with a non-empty bounded reason. Unneeded, historical or other-recipe overrides
 are rejected.
 
-Time targets and unsupported dietary preferences are soft by default. On a
-complete weekly plan, the saved positive `minimum_fish_portions`,
+Time targets and unsupported dietary preferences are soft by default. In agent
+mode numeric saved minima are advisory unless expressly listed in `strict_targets`;
+the measured results remain visible even when unmet/unknown. This policy is frozen
+through save, replan, products and checkout; whole-menu replans may replace it,
+while partial replans retain the predecessor's whole-menu policy. Legacy/ranked
+complete weekly plans retain the saved positive `minimum_fish_portions`,
 `minimum_legume_dinners`, `minimum_wholegrain_or_potato_dinners` and
-`minimum_vegetable_types` are automatic hard constraints; the planner returns
+`minimum_vegetable_types` as automatic hard constraints; the planner returns
 `needs_input` for missing evidence or `no_plan` for known infeasibility instead
 of saving a noncompliant week. Structured recipe
 `times.active_minutes` is used when valid. The v1 deterministic ingredient
@@ -1097,7 +1105,7 @@ list any supported target in `strict_targets`: `active_minutes`,
 `minimum_wholegrain_or_potato_dinners` and `minimum_vegetable_types`. Missing
 strict evidence returns `needs_input`; complete known infeasibility returns
 `no_plan`. The four saved weekly minimums are included automatically for a
-full-week request. Default unknown or unsupported nutrition, cuisine/format and
+legacy/ranked full-week request; agent mode enforces only explicit strict targets. Default unknown or unsupported nutrition, cuisine/format and
 perishability factors remain named in `soft_relaxations` and are never described
 as compliant.
 
@@ -2069,3 +2077,22 @@ The usual apply path rechecks retailer facts, price and package limits; known
 dietary or dry/cooked form conflicts still fail. These plans make no exact
 lowest-cost comparison claim. Unknown nonmedical preference/never-buy evidence
 is advisory; known exclusions and medical uncertainty retain their checks.
+
+## Restart selections and explicitly empty a cart
+
+A new `products prepare` with exact `menu_ref` and `continuation_mode="reset"`
+starts selections from current observations without requiring old persisted product
+authority. It changes no retailer cart or pending payment journal. Continue and
+apply its freshly returned arguments normally.
+
+`cart get` returns a top-level `cart_digest` when the cart can be verified;
+incomplete retailer reads remain readable without inventing a writable identity. For an explicit request to
+empty that cart, use `cart clear` with this exact digest and no operations or
+requirements. It rejects changed carts, active order edits and uncertain cart,
+checkout or cancellation work. Each signed removal is journaled before dispatch
+and verified by readback. Interrupted writes use `reconcile_change`, never a
+repeated delta. A stopped partial clear blocks checkout until a fresh product
+apply. Clear retains the menu, invalidates old product-plan digests (including
+stale apply arguments), and removes cart completion after verified empty readback.
+`change` uses typed `{product_id,quantity}` signed package deltas; the historical
+`productId` spelling remains accepted. `{op:"clear"}` is not an operation.

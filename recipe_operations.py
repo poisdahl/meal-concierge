@@ -22,7 +22,7 @@ from recipe_import_sources import fetch_public_webpage, read_native_recipe, fetc
 from recipe_assets import RecipeAssetError, sanitize_image
 from urllib.error import HTTPError
 from core import HouseholdError
-from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, recipe_digest, accept_recipe_estimates
+from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, recipe_digest, accept_recipe_estimates
 from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value, normalize_categories, RECIPE_CATEGORIES
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
@@ -2142,10 +2142,12 @@ class RecipeOperations:
             self._recipe_operations_recovered = True
         discovery_ref = request.get("discovery_ref")
         imported_source = False
+        adapted_source = False
         try:
             source_snapshot = self.recipes.resolve_discovery(discovery_ref)
             source_recipe = source_snapshot["recipe"]
             imported_source = str(source_snapshot["source_identity"]).startswith("import:v1:")
+            adapted_source = str(source_snapshot["source_identity"]).startswith("adapt:v1:")
         except RecipeError:
             source_recipe = None  # Existing exact save recovery may outlive the discovery.
         explicit_target = request.get("library_id")
@@ -2154,7 +2156,7 @@ class RecipeOperations:
                 discovery_ref, idempotency_key=request.get("idempotency_key")
             )
             target = bound or self.primary_recipe_library_id
-            if not bound and source_recipe is not None and (imported_source or recipe_source_provider(source_recipe)):
+            if not bound and source_recipe is not None and (imported_source or adapted_source or recipe_source_provider(source_recipe)):
                 target = "builtin"
         else:
             target = validate_library_id(explicit_target)
@@ -2163,8 +2165,8 @@ class RecipeOperations:
         recovering = self.recipes.discovery_save_replay(discovery_ref, target)
         if target != "builtin" and not self.recipes.has_library_save(discovery_ref, target, request.get("idempotency_key")):
             raise RecipeLibraryError("external libraries are import sources; new recipes are saved in the builtin bank")
-        if imported_source and target != "builtin" and not recovering:
-            raise RecipeError("new source imports are saved in the built-in recipe bank")
+        if (imported_source or adapted_source) and target != "builtin" and not recovering:
+            raise RecipeError("new source imports and adaptations are saved in the built-in recipe bank")
         if source_recipe is not None and not recovering:
             self._require_recipe_provider(source_recipe)
         if target != "builtin" and not recovering and source_recipe is not None and recipe_source_provider(source_recipe):
@@ -3149,7 +3151,7 @@ class RecipeOperations:
             if has_discovery:
                 result = self.recipes.persist_discovery(
                     accepted,
-                    source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                    source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith(("import:v1:", "adapt:v1:")) else None),
                     trusted_store_product_hints=True,
                 )
                 self.recipes.remember_discovery_transform(request["discovery_ref"], result["discovery_ref"], "conversion")
@@ -3163,6 +3165,42 @@ class RecipeOperations:
             )}
         if action == "discover":
             return self._discover_recipes(request)
+        if action == "adapt":
+            if "source_identity" in request or (
+                isinstance(request.get("recipe"), Mapping)
+                and "source_identity" in request["recipe"]
+            ):
+                raise RecipeError("adaptation source identity is service-owned")
+            has_discovery = request.get("discovery_ref") is not None
+            has_recipe = request.get("recipe_ref") is not None
+            if has_discovery == has_recipe:
+                raise RecipeError("adaptation requires one exact discovery_ref or recipe_ref")
+            if has_discovery:
+                original = self.recipes.resolve_discovery(request["discovery_ref"])["recipe"]
+            else:
+                reference = request["recipe_ref"]
+                if (not isinstance(reference, Mapping) or set(reference) != {"id", "revision"}
+                        or type(reference["revision"]) is not int):
+                    raise RecipeError("adaptation recipe_ref requires exact id and revision")
+                original = self.recipes.get(reference["id"], reference["revision"])
+            if (request.get("recipe_digest") != recipe_digest(original)
+                    or request.get("source_schema_version") != original["schema_version"]):
+                raise RecipeError("adaptation requires the exact source digest and schema version")
+            adapted = adapt_recipe_input(request.get("recipe"), prior=original)
+            self._require_recipe_provider(adapted)
+            identity = "adapt:v1:" + hashlib.sha256(canonical({
+                "original_digest": recipe_digest(original),
+                "adapted_digest": recipe_digest(adapted),
+            }).encode()).hexdigest()
+            result = self.recipes.persist_discovery(
+                adapted, source_identity=identity, trusted_store_product_hints=True)
+            scaled = scale_recipe(adapted)
+            ready = scaled["readiness"]["scaling_ready"] and all(
+                item.get("scalable") for item in scaled["shopping_requirements"])
+            return {**result, "readiness": scaled["readiness"],
+                    "shopping_requirements": scaled["shopping_requirements"],
+                    "suggested_status": "active" if ready else "draft",
+                    "personal_entry_created": False}
         if action == "convert":
             snapshot = self.recipes.resolve_discovery(request.get("discovery_ref"))
             original = snapshot["recipe"]
@@ -3183,7 +3221,7 @@ class RecipeOperations:
             self._require_recipe_provider(converted)
             result = self.recipes.persist_discovery(
                 converted,
-                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith(("import:v1:", "adapt:v1:")) else None),
                 trusted_store_product_hints=True,
             )
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
