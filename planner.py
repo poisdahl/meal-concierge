@@ -396,7 +396,8 @@ def equipment_conflicts(profile, recipe):
 
 
 def _hard_evaluation(
-    candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], *, meal_type: str = "dinner"
+    candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], *,
+    meal_type: str = "dinner", meal_role_advisory: bool = False,
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     status = "pass"
@@ -404,8 +405,9 @@ def _hard_evaluation(
         status = 'fail'
         reasons.append({'code': 'equipment_unavailable', 'status': 'fail', 'detail': missing})
     if meal_type == "dinner" and (role := _non_dinner_role(candidate["recipe"])):
-        status = "fail"
-        reasons.append({"code": "meal_role:non_dinner", "status": "fail", "detail": role})
+        if not meal_role_advisory:
+            status = "fail"
+        reasons.append({"code": "meal_role:non_dinner", "status": "advisory" if meal_role_advisory else "fail", "detail": role})
     error = candidate.get("materialization_error")
     if error:
         status = "fail"
@@ -443,7 +445,7 @@ def _hard_evaluation(
     return {"status": status, "reasons": reasons}
 
 
-def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], portions: int | None = None, available_ingredients=None) -> dict[str, Any]:
+def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], overrides: Mapping[str, str], portions: int | None = None, available_ingredients=None, *, meal_role_advisory: bool = False) -> dict[str, Any]:
     """Evaluate only a loaded, exact Application candidate; summaries cannot pass."""
     item = deepcopy(dict(candidate))
     recipe = item["recipe"]
@@ -462,7 +464,7 @@ def prepare_candidate(candidate: Mapping[str, Any], profile: Mapping[str, Any], 
     item["facts"] = _effective_facts(recipe, item.get("supplied_facts", item.get("facts")))
     if not item.get("materialization_error"):
         item["facts"]["listed_fish_mass"] = _listed_fish_mass(recipe)
-    item["hard_constraints"] = _hard_evaluation(item, profile, overrides)
+    item["hard_constraints"] = _hard_evaluation(item, profile, overrides, meal_role_advisory=meal_role_advisory)
     item.pop("available_ingredient_matches", None)
     if available_ingredients and not item.get("materialization_error"):
         item["available_ingredient_matches"] = available_ingredient_matches(recipe, available_ingredients)
@@ -611,17 +613,35 @@ def _strict_evaluation(
 
 
 def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict[str, Any]:
-    """Evaluate every saved weekly minimum from frozen menu recipe facts."""
+    """Report saved minima truthfully and separately identify enforced results."""
     diet = profile.get("diet") if isinstance(profile, Mapping) else None
     meals = profile.get("meals") if isinstance(profile, Mapping) else None
     targets = sorted(
         target for target in SAVED_MINIMUM_TARGETS
         if isinstance(diet, Mapping) and type(diet.get(target)) is int and diet[target] > 0
     )
+    planner_selection = menu.get("planner_selection") if isinstance(menu, Mapping) else None
+    planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
+    scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
+    request = scope if isinstance(scope, Mapping) else planner_request
+    agent_mode = isinstance(request, Mapping) and request.get("selection_mode") == "agent"
+    enforced_targets = (
+        set(request.get("strict_targets", [])) & set(targets)
+        if agent_mode and isinstance(request.get("strict_targets"), list) else set(targets)
+    )
+
+    def with_policy(evaluation: dict[str, Any]) -> dict[str, Any]:
+        enforced = [row["status"] for row in evaluation["results"]
+                    if row["target"] in enforced_targets]
+        return {
+            **evaluation,
+            "enforced_status": "fail" if "fail" in enforced else "unknown" if "unknown" in enforced else "pass",
+        }
+
     if not targets:
-        return {"status": "pass", "complete_menu": True, "results": []}
+        return with_policy({"status": "pass", "complete_menu": True, "results": []})
     if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
-        return {"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]}
+        return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]})
     recipes = {
         recipe.get("recipe_key"): recipe
         for recipe in menu["dishes"]
@@ -638,10 +658,10 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     )
     expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
-        return {"status": "unknown", "complete_menu": False, "results": [{
+        return with_policy({"status": "unknown", "complete_menu": False, "results": [{
             "target": target, "status": "unknown",
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
-        } for target in targets]}
+        } for target in targets]})
     planned_facts = {}
     for field in ("planner_selection", "replan_selection"):
         planner_selection = menu.get(field)
@@ -662,7 +682,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     selected = tuple({"facts": {"dietary_facets": deepcopy(
         planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)
     )}} for recipe in selected_recipes)
-    return {"complete_menu": True, **_strict_evaluation(selected, targets, profile)}
+    return with_policy({"complete_menu": True, **_strict_evaluation(selected, targets, profile)})
 
 
 def _reason(code: str, weight: int, detail: Any) -> dict[str, Any]:
@@ -885,9 +905,12 @@ def _selection(
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
         "week", "dates", "portions", "candidates", "strict_targets",
-        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode",
+        "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode", "selection_mode",
     }):
         raise PlannerError("planner input has unknown fields")
+    selection_mode = value.get("selection_mode", "ranked")
+    if not isinstance(selection_mode, str) or selection_mode not in {"agent", "ranked"}:
+        raise PlannerError("selection_mode must be agent or ranked")
     available = normalize_available_ingredients(value.get("available_ingredients"))
     week = str(value.get("week") or "")
     if re.fullmatch(r"\d{4}-W\d{2}", week) is None:
@@ -912,6 +935,8 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         if (iso.year, iso.week) != (week_year, week_number):
             raise PlannerError("every planner date must belong to planner week")
         dates.append(parsed.isoformat())
+    if selection_mode == "agent" and dates != sorted(dates):
+        raise PlannerError("agent selection dates must be chronological")
     dates = sorted(dates)
     if len(set(dates)) != len(dates):
         raise PlannerError("planner dates must be unique")
@@ -919,6 +944,8 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
     if isinstance(portions, bool) or not isinstance(portions, int) or not 1 <= portions <= 100:
         raise PlannerError("planner portions must be an integer from one to 100")
     candidates = value.get("candidates")
+    if selection_mode == "agent" and candidates is None:
+        raise PlannerError("agent selection requires exact candidates")
     if not (allow_discovery and candidates is None) and (not isinstance(candidates, list) or not 1 <= len(candidates) <= MAX_CANDIDATES):
         raise PlannerError(f"planner candidates must contain one to {MAX_CANDIDATES} entries")
     strict = value.get("strict_targets", [])
@@ -940,6 +967,8 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
     alternatives = value.get("alternatives", 1)
     if isinstance(alternatives, bool) or not isinstance(alternatives, int) or not 1 <= alternatives <= MAX_ALTERNATIVES:
         raise PlannerError(f"alternatives must be from one to {MAX_ALTERNATIVES}")
+    if selection_mode == "agent" and alternatives != 1:
+        raise PlannerError("agent selection returns exactly one arrangement")
     as_of_date = value.get("as_of_date")
     if not isinstance(as_of_date, str):
         raise PlannerError("as_of_date must be an ISO date")
@@ -949,6 +978,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError("as_of_date must be an ISO date") from exc
     return {
         "planner_version": PLANNER_VERSION,
+        **({"selection_mode": selection_mode} if "selection_mode" in value else {}),
         **({"recurring_batch": deepcopy(value["recurring_batch"])} if value.get("recurring_batch") else {}),
         **({"prepared_portion_range": deepcopy(value["prepared_portion_range"])} if value.get("prepared_portion_range") is not None else {}),
         **({"meal_mode": value['meal_mode']} if value.get('meal_mode') is not None else {}),
@@ -973,7 +1003,8 @@ def plan_week(
     meals = profile.get("meals") if isinstance(profile, Mapping) else None
     dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     diet = profile.get("diet") if isinstance(profile, Mapping) else None
-    if type(dinner_days) is int and len(checked["dates"]) == dinner_days and isinstance(diet, Mapping):
+    agent_mode = checked.get("selection_mode") == "agent"
+    if not agent_mode and type(dinner_days) is int and len(checked["dates"]) == dinner_days and isinstance(diet, Mapping):
         saved_minima = {
             target for target in SAVED_MINIMUM_TARGETS
             if type(diet.get(target)) is int and diet[target] > 0
@@ -1003,14 +1034,14 @@ def plan_week(
             blocked_by = item["usage"].get("blocked_by")
             if isinstance(blocked_by, list):
                 item["usage"]["blocked_by"] = sorted(blocked_by, key=canonical)
-        item = prepare_candidate(item, profile, checked["cooldown_overrides"], checked["portions"], checked.get("available_ingredients"))
+        item = prepare_candidate(item, profile, checked["cooldown_overrides"], checked["portions"], checked.get("available_ingredients"), meal_role_advisory=agent_mode)
         prepared.append(item)
     status_priority = {"pass": 0, "unknown": 1, "fail": 2}
     for group in candidate_groups(prepared):
         usage = merge_family_usage(group)
         for item in group:
             item["usage"] = deepcopy(usage)
-            item["hard_constraints"] = _hard_evaluation(item, profile, checked["cooldown_overrides"])
+            item["hard_constraints"] = _hard_evaluation(item, profile, checked["cooldown_overrides"], meal_role_advisory=agent_mode)
         ordered = sorted(group, key=lambda candidate: (
             status_priority[candidate["hard_constraints"]["status"]],
             "recipe_ref" not in candidate["reference"],
@@ -1026,7 +1057,8 @@ def plan_week(
                 "status": "fail",
                 "detail": {"same_as_reference_key": ordered[0]["reference_key"]},
             })
-    prepared.sort(key=lambda item: item["reference_key"])
+    if not agent_mode:
+        prepared.sort(key=lambda item: item["reference_key"])
     unknown_override_keys = set(checked["cooldown_overrides"]).difference(
         item["recipe_key"] for item in prepared
     )
@@ -1097,6 +1129,10 @@ def plan_week(
         return {**base_result, 'status': 'needs_input', 'issues': [{'code': 'batch_portion_shortfall', **layout}], 'selections': []}
     source_dates = [s['source_date'] for s in layout['sources']] if layout else checked['dates']
     count = len(source_dates)
+    if agent_mode and source_dates != sorted(source_dates):
+        raise PlannerError("agent selection cooking dates must be chronological")
+    if agent_mode and len(prepared) != count:
+        raise PlannerError("agent selection needs exactly one candidate per cooking date")
     if len(eligible) < count:
         status = "needs_input" if len(eligible) + len(unknown) >= count else "no_plan"
         return {
@@ -1110,20 +1146,24 @@ def plan_week(
             }],
             "selections": [],
         }
-    complete_states = math.perm(len(eligible), count)
+    complete_states = math.perm(len(eligible), count) if not agent_mode else 1
     scope = [{
         "reference": deepcopy(item["reference"]),
         "reference_key": item["reference_key"],
         "content_digest": item["content_digest"],
     } for item in prepared]
+    scored_positions = (
+        ((candidate, index, day) for index, (candidate, day) in enumerate(zip(prepared, source_dates, strict=True)))
+        if agent_mode else
+        ((candidate, index, day) for candidate in eligible for index, day in enumerate(source_dates))
+    )
     slot_scores = {
         (candidate["reference_key"], index): sum(
             reason["weight"] for reason in _slot_reasons(
                 candidate, day, index, len(source_dates), profile
             )
         )
-        for candidate in eligible
-        for index, day in enumerate(source_dates)
+        for candidate, index, day in scored_positions
     }
 
     def strict_prefix_signature(
@@ -1169,7 +1209,11 @@ def plan_week(
                 signature.append((target, min(wanted, observed)))
         return tuple(signature)
 
-    if complete_states <= MAX_EXPLORED_STATES:
+    if agent_mode:
+        explored_states = 1
+        candidate_sequences = iter((tuple(prepared),))
+        search_strategy = "agent_selection"
+    elif complete_states <= MAX_EXPLORED_STATES:
         explored_states = complete_states
         candidate_sequences = permutations(eligible, count)
         search_strategy = "exhaustive"
@@ -1267,8 +1311,9 @@ def plan_week(
         # Exact references are unique within every permutation, so tie_break is
         # itself unique. The selection digest can be computed only for the
         # retained winners without changing the deterministic ordering.
-        ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"]))
-        del ranked[checked["alternatives"]:]
+        if not agent_mode:
+            ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"]))
+            del ranked[checked["alternatives"]:]
     if not ranked:
         if strict_unknowns:
             issues = sorted(strict_unknowns.values(), key=canonical)

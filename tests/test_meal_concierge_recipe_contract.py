@@ -23,6 +23,7 @@ from recipe_library_mealie import MealieAdapter
 from recipe_library_recipesage import RecipeSageAdapter
 from recipe_libraries import RecipeLibraryError
 from recipe_sources import TheMealDBSource, provider_recipe_candidates
+from recipe_portable import export_private_archive, restore_private_archive
 from service import Application
 from service_common import menu_email_html
 from test_meal_concierge_products import FakeProvider, product, option, observation
@@ -818,6 +819,215 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(saved["dishes"][0]["portions_evidence"]["basis"], "source")
         self.assertEqual(len(menu_requirements(saved)[0]), 5)
         self.assertEqual(self.app.recipes.search(), [])
+
+    def test_adapted_discovery_keeps_original_and_enters_planner_after_restart(self):
+        original = authored_recipe()
+        original["source"] = {
+            "kind": "oda", "publisher": "ODA", "url": "https://oda.com/no/recipes/42-soup/",
+            "external_id": "42", "relationship": "original",
+        }
+        original["source_provider"] = "oda"
+        original["portions_evidence"] = {"basis": "source", "input": "12 portions"}
+        for ingredient in original["ingredients"]:
+            ingredient["evidence"] = {
+                field: {"basis": "source", "input": ingredient["raw"]}
+                for field in ("quantity", "unit")
+            }
+        frozen = self.app.recipes.persist_discovery(original)
+        original_document = deepcopy(frozen["recipe"])
+        adapted_input = deepcopy(original_document)
+        adapted_input["source"]["relationship"] = "adapted"
+        adapted_input["ingredients"][2].update(
+            item="havremel", original_text="700 g havremel",
+            evidence={field: {"basis": "estimate", "input": "700 g mel",
+                              "assumptions": "Use the same measured amount of oat flour."}
+                      for field in ("quantity", "unit")},
+        )
+        adapted_input["steps"] = ["Mix the oat flour, then bake at 180 C for 30 minutes."]
+        request = {
+            "operation": "recipes", "action": "adapt", "discovery_ref": frozen["discovery_ref"],
+            "recipe_digest": frozen["recipe_digest"], "source_schema_version": 2,
+            "recipe": adapted_input,
+        }
+        forged = deepcopy(request)
+        forged["recipe"]["ingredients"][2]["evidence"]["quantity"] = {
+            "basis": "source", "input": "700 g havremel"}
+        with self.assertRaisesRegex(RecipeError, "trusted source"):
+            self.app.handle(forged)
+        forged = deepcopy(request)
+        forged["recipe"]["ingredients"][2]["evidence"]["quantity"] = {
+            "basis": "estimate", "input": "700 g mel", "assumptions": "Use oat flour.",
+            "acceptance": {"recipe_digest": frozen["recipe_digest"], "statement": ESTIMATE_CONFIRMATION},
+        }
+        with self.assertRaisesRegex(RecipeError, "service-owned"):
+            self.app.handle(forged)
+        forged = deepcopy(request)
+        forged["recipe"]["source_provider"] = "mathem"
+        with self.assertRaisesRegex(RecipeError, "source_provider|conflicting"):
+            self.app.handle(forged)
+        forged = deepcopy(request)
+        forged["recipe"]["external_snapshot"] = {"content_hash": "0" * 64}
+        with self.assertRaisesRegex(RecipeError, "source snapshot"):
+            self.app.handle(forged)
+        forged = deepcopy(request)
+        forged["recipe"]["ingredients"][2]["_store_product_hint"] = {
+            "provider": "oda", "product_ref": 123, "name": "Oat flour",
+            "url": "https://oda.com/no/products/123-oat-flour/",
+            "relationship": "source_recipe_association",
+        }
+        with self.assertRaisesRegex(RecipeError, "retailer evidence"):
+            self.app.handle(forged)
+        with self.assertRaisesRegex(RecipeError, "digest"):
+            self.app.handle({**request, "recipe_digest": "0" * 64})
+        with self.assertRaisesRegex(RecipeError, "service-owned"):
+            self.app.handle({**request, "source_identity": "adapt:v1:" + "0" * 64})
+
+        result = self.app.handle(request)
+        self.assertEqual(self.app.handle(request)["discovery_ref"], result["discovery_ref"])
+        self.assertFalse(result["personal_entry_created"])
+        self.assertEqual(self.app.recipes.resolve_discovery(frozen["discovery_ref"])["recipe"], original_document)
+        self.assertEqual(self.app.recipes.search(), [])
+        reopened = Application(self.store, self.provider, object())
+        adapted = reopened.recipes.resolve_discovery(result["discovery_ref"])["recipe"]
+        self.assertEqual(adapted["source"]["relationship"], "adapted")
+        self.assertEqual(adapted["source_provider"], "oda")
+        self.assertEqual(adapted["ingredients"][2]["evidence"]["quantity"]["basis"], "estimate")
+        self.assertNotIn("external_snapshot", adapted)
+        planned = reopened.handle({"operation": "menu", "action": "plan", "planner_input": {
+            "week": "2026-W40", "dates": ["2026-09-28"], "portions": 2,
+            "candidates": [{"discovery_ref": result["discovery_ref"]}],
+        }})["plan"]
+        self.assertEqual(planned["status"], "planned", planned)
+        self.assertEqual(reopened.recipes.search(), [])
+        saved_original = reopened.handle({"operation": "recipes", "action": "save",
+            "discovery_ref": frozen["discovery_ref"], "idempotency_key": "save-original"})["recipe"]
+        saved_adapted = reopened.handle({"operation": "recipes", "action": "save",
+            "discovery_ref": result["discovery_ref"], "idempotency_key": "save-adaptation"})["recipe"]
+        self.assertNotEqual(saved_original["id"], saved_adapted["id"])
+        self.assertEqual(reopened.recipes.get(saved_original["id"], 1)["source"]["relationship"], "original")
+        self.assertEqual(reopened.recipes.get(saved_adapted["id"], 1)["source"]["relationship"], "adapted")
+        self.assertEqual(reopened.handle({"operation": "recipes", "action": "save",
+            "discovery_ref": result["discovery_ref"], "idempotency_key": "save-adaptation"})["library_recipe_ref"]["recipe_id"], saved_adapted["id"])
+        revised_input = deepcopy(saved_adapted)
+        revised_input["notes"] = "Keep this adaptation for later."
+        revised = reopened.handle({"operation": "recipes", "action": "update",
+            "recipe_id": saved_adapted["id"], "expected_revision": 1,
+            "recipe": revised_input, "idempotency_key": "revise-adaptation"})["recipe"]
+        self.assertEqual(revised["revision"], 2)
+        self.assertEqual(reopened.recipes.get(saved_original["id"], 1)["source"]["relationship"], "original")
+        self.assertEqual(len(reopened.recipes.search()), 2)
+
+    def test_adaptation_accepts_exact_legacy_bank_revision_without_migrating_it(self):
+        original = json.loads(LEGACY)
+        saved = self.save(original, key="legacy-adaptation-source")
+        estimate = {"basis": "estimate", "input": "700 g mel",
+                    "assumptions": "Use the same measured amount of oat flour."}
+        candidate = {
+            "schema_version": 2, "name": "Adapted legacy bread", "portions": 12,
+            "portions_evidence": {"basis": "estimate", "input": "12 portions",
+                                  "assumptions": "Keep the original serving count."},
+            "source": {**original["source"], "relationship": "adapted"},
+            "rights": original["rights"],
+            "ingredients": [{"item": "havremel", "original_text": "700 g havremel",
+                             "quantity": 700, "unit": "g",
+                             "evidence": {"quantity": estimate, "unit": estimate}}],
+            "steps": ["Mix oat flour, then bake at 180 C for 30 minutes."],
+        }
+        adapted = self.app.handle({
+            "operation": "recipes", "action": "adapt",
+            "recipe_ref": {"id": saved["id"], "revision": saved["revision"]},
+            "recipe_digest": recipe_digest(original), "source_schema_version": 1,
+            "recipe": candidate,
+        })
+        self.assertEqual(adapted["recipe"]["schema_version"], 2)
+        self.assertEqual(adapted["recipe"]["source"]["relationship"], "adapted")
+        self.assertEqual(self.app.recipes.get(saved["id"], 1)["recipe_digest"], LEGACY_DIGEST)
+        self.assertEqual(len(self.app.recipes.search()), 1)
+
+    def test_adaptation_of_url_less_bank_recipe_has_frozen_identity(self):
+        saved = self.save(authored_recipe(), key="url-less-source")
+        candidate = deepcopy(saved)
+        candidate["name"] = "Adapted household recipe"
+        candidate["source"]["relationship"] = "adapted"
+        candidate["steps"] = ["Mix the ingredients, then bake at 180 C for 30 minutes."]
+        request = {"operation": "recipes", "action": "adapt",
+                   "recipe_ref": {"id": saved["id"], "revision": 1},
+                   "recipe_digest": saved["recipe_digest"], "source_schema_version": 2,
+                   "recipe": candidate}
+        adapted = self.app.handle(request)
+        self.assertEqual(adapted["source_identity"][:9], "adapt:v1:")
+        self.assertEqual(adapted["discovery_ref"], self.app.handle(request)["discovery_ref"])
+        reopened = Application(self.store, self.provider, object())
+        self.assertEqual(reopened.recipes.resolve_discovery(adapted["discovery_ref"])["recipe"]["name"], "Adapted household recipe")
+        self.assertEqual(len(reopened.recipes.search()), 1)
+        saved_adapted = reopened.handle({"operation": "recipes", "action": "save",
+            "discovery_ref": adapted["discovery_ref"], "idempotency_key": "save-url-less-adaptation"})["recipe"]
+        self.assertNotEqual(saved_adapted["id"], saved["id"])
+        self.assertEqual(len(reopened.recipes.search()), 2)
+
+    def test_adaptation_transform_and_private_archive_keep_distinct_bank_identity(self):
+        original = authored_recipe()
+        original["source"]["url"] = "https://example.org/household-bread"
+        saved_original = self.save(original, key="archive-original")
+        candidate = deepcopy(saved_original)
+        candidate["source"]["relationship"] = "adapted"
+        candidate["portions"] = 6
+        candidate["portions_evidence"] = {
+            "basis": "estimate", "input": "12 original servings",
+            "assumptions": "Serve twice the original size per person.",
+        }
+        candidate["steps"] = ["Mix, divide into six larger servings, then bake at 180 C for 30 minutes."]
+        adapted = self.app.handle({
+            "operation": "recipes", "action": "adapt",
+            "recipe_ref": {"id": saved_original["id"], "revision": 1},
+            "recipe_digest": saved_original["recipe_digest"], "source_schema_version": 2,
+            "recipe": candidate,
+        })
+        identity = adapted["source_identity"]
+        converted_input = deepcopy(adapted["recipe"])
+        converted_input["notes"] = "Six substantial servings."
+        converted = self.app.handle({
+            "operation": "recipes", "action": "convert",
+            "discovery_ref": adapted["discovery_ref"],
+            "recipe_digest": adapted["recipe_digest"], "source_schema_version": 2,
+            "recipe": converted_input,
+        })
+        self.assertEqual(converted["source_identity"], identity)
+        accepted = self.app.handle({
+            "operation": "recipes", "action": "accept_estimates",
+            "discovery_ref": converted["discovery_ref"],
+            "recipe_digest": converted["recipe_digest"],
+            "estimate_fields": ["portions"],
+            "confirmation_statement": ESTIMATE_CONFIRMATION,
+        })
+        self.assertEqual(accepted["source_identity"], identity)
+        saved_adapted = self.app.handle({
+            "operation": "recipes", "action": "save",
+            "discovery_ref": accepted["discovery_ref"],
+            "idempotency_key": "archive-adaptation",
+        })["recipe"]
+        self.assertNotEqual(saved_original["id"], saved_adapted["id"])
+        self.assertEqual(self.app.recipes.get(saved_original["id"], 1)["source"]["relationship"], "user_supplied")
+        self.assertEqual(self.app.recipes.source_entry(identity)["id"], saved_adapted["id"])
+        revised = deepcopy(saved_adapted)
+        revised["notes"] = "Keep this adaptation."
+        saved_revision = self.app.handle({
+            "operation": "recipes", "action": "update",
+            "recipe_id": saved_adapted["id"], "expected_revision": 1,
+            "recipe": revised, "idempotency_key": "archive-adaptation-update",
+        })["recipe"]
+        self.assertEqual(saved_revision["revision"], 2)
+
+        archive = Path(self.temp.name) / "private-recipes.zip"
+        export_private_archive(archive, self.app.recipes)
+        restored = RecipeStore(Path(self.temp.name) / "restored-recipes.sqlite3", self.app.recipes.household)
+        report = restore_private_archive(archive, restored)
+        self.assertEqual((report["status"], report["created"]), ("complete", 2))
+        self.assertEqual(restored.get(saved_original["id"], 1)["recipe_digest"], saved_original["recipe_digest"])
+        self.assertEqual(restored.get(saved_adapted["id"], 1)["source"]["relationship"], "adapted")
+        self.assertEqual(restored.get(saved_adapted["id"], 2)["notes"], "Keep this adaptation.")
+        self.assertEqual(restored.source_entry(identity)["id"], saved_adapted["id"])
+        self.assertEqual(restore_private_archive(archive, restored)["unchanged"], 2)
 
     def test_native_recipesage_loaves_and_upstream_attribution_need_no_sidecar(self):
         fixture = json.loads((ROOT / "tests/fixtures/recipesage/v4.0.6.json").read_text())["recipe_get"]

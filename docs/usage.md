@@ -136,3 +136,21 @@ If tools disappear, open a new conversation and ask the agent to inspect its
 connection to the existing service. If a store session expires, complete login
 again in the intended account. Preserve your installation and data while
 troubleshooting; do not reset them to resolve a missing tool or an uncertain order.
+
+## Who chooses the food
+
+The host assistant chooses recipes, meal order and suitable observed products.
+The ordinary tool path uses `selection_mode="agent"`; the service checks exact
+references, amounts, configured restrictions and external effects. Saved numeric
+food goals remain visible without blocking a meal because a name classifier
+cannot recognize it; an explicitly strict target remains required. Ordinary
+brands and shared packages do not require another user approval.
+
+Recipe adaptations keep their source and are separate from originals. New
+quantities are labeled estimates with assumptions. Ask to save an adaptation
+when it should become a lasting bank entry. Oda, Mathem and MENY recipes retain
+their store binding and use the existing schema-2 format.
+
+An explicit request to empty the cart uses its freshly observed digest. The menu
+is retained, earlier product completion is invalidated, and an uncertain removal
+is reconciled before another write. An empty cart is not a cancelled order.

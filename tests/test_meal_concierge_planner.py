@@ -252,6 +252,121 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(products["status"], "prepared")
         self.assertEqual(products["requirements"], [])
 
+    def test_agent_selection_keeps_exact_candidate_and_date_order(self):
+        first, second = self.save_candidates(2)
+        chosen = [second, first]
+        dates = ["2026-09-07", "2026-09-08"]
+        result = self.plan(self.request(
+            chosen, dates=dates, selection_mode="agent",
+        ))
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["search_strategy"], "agent_selection")
+        self.assertEqual(result["explored_states"], 1)
+        self.assertEqual(len(result["selections"]), 1)
+        self.assertEqual(
+            [(slot["date"], slot["reference"]) for slot in result["selection"]["slots"]],
+            list(zip(dates, chosen)),
+        )
+        saved = self.app.handle({
+            "operation": "menu", "action": "save", "planner_ref": result["save_ref"],
+        })["menu"]
+        self.assertEqual(saved["planner_selection"]["request"]["selection_mode"], "agent")
+        self.assertEqual(
+            [(slot["date"], slot["reference"]) for slot in saved["planner_selection"]["selection"]["slots"]],
+            list(zip(dates, chosen)),
+        )
+
+    def test_agent_selection_rejects_unsorted_dates_and_candidate_count(self):
+        candidates = self.save_candidates(2)
+        with self.assertRaisesRegex(PlannerError, "chronological"):
+            self.plan(self.request(candidates, dates=["2026-09-08", "2026-09-07"], selection_mode="agent"))
+        with self.assertRaisesRegex(PlannerError, "one candidate per cooking date"):
+            self.plan(self.request(candidates, selection_mode="agent"))
+
+    def test_agent_meal_role_is_advisory_but_equipment_stays_hard(self):
+        side = recipe("Potato side", "agent-side")
+        side["categories"] = ["side"]
+        saved = self.app.handle({
+            "operation": "recipes", "action": "save", "recipe": side,
+            "idempotency_key": "save-agent-side",
+        })["recipe"]
+        candidate = {"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}
+        self.assertEqual(self.plan(self.request([candidate]))["status"], "no_plan")
+        agent = self.plan(self.request([candidate], selection_mode="agent"))
+        self.assertEqual(agent["status"], "planned")
+        role = next(reason for reason in agent["candidate_evaluations"][0]["hard_constraints"]["reasons"]
+                    if reason["code"] == "meal_role:non_dinner")
+        self.assertEqual(role["status"], "advisory")
+
+        equipped = recipe("Potato side with blender", "agent-side-blender")
+        equipped["categories"] = ["side"]
+        equipped["steps"] = ["Use a blender."]
+        blocked = self.app.handle({
+            "operation": "recipes", "action": "save", "recipe": equipped,
+            "idempotency_key": "save-agent-side-blender",
+        })["recipe"]
+        blocked_candidate = {"recipe_ref": {"id": blocked["id"], "revision": blocked["revision"]}}
+        result = self.plan(self.request([blocked_candidate], selection_mode="agent"))
+        self.assertNotEqual(result["status"], "planned")
+        self.assertIn("equipment_unavailable", [
+            reason["code"] for reason in result["candidate_evaluations"][0]["hard_constraints"]["reasons"]
+        ])
+
+    def test_agent_saved_minimum_is_advisory_but_truthfully_reported(self):
+        candidate = self.save_candidates(1)[0]
+        candidate["facts"] = explicit_facts(dietary=[], complete=False)
+        with self.store.locked() as state:
+            state["profile"]["diet"]["minimum_fish_portions"] = 1
+        result = self.plan(self.request([candidate], selection_mode="agent"))
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["request"]["strict_targets"], [])
+        saved = self.app.handle({
+            "operation": "menu", "action": "save", "planner_ref": result["save_ref"],
+        })["menu"]
+        assessment = planner.saved_menu_minimum_evaluation(saved, self.store.read()["profile"])
+        self.assertEqual(assessment["status"], "unknown")
+        self.assertEqual(assessment["enforced_status"], "pass")
+        self.assertEqual(assessment["results"][0]["target"], "minimum_fish_portions")
+        self.assertEqual(assessment["results"][0]["status"], "unknown")
+        explicitly_strict = deepcopy(saved)
+        explicitly_strict["planner_selection"]["request"]["strict_targets"] = ["minimum_fish_portions"]
+        self.assertEqual(
+            planner.saved_menu_minimum_evaluation(explicitly_strict, self.store.read()["profile"])["enforced_status"],
+            "unknown",
+        )
+
+        strict = self.plan(self.request(
+            [candidate], selection_mode="agent", strict_targets=["minimum_fish_portions"],
+        ))
+        self.assertNotEqual(strict["status"], "planned")
+        self.assertIn("minimum_fish_portions", strict["request"]["strict_targets"])
+
+    def test_agent_batch_assigns_candidates_to_chronological_cook_days(self):
+        candidates = self.save_candidates(6)
+        chosen = list(reversed(candidates))
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({
+                "dinner_days": 7,
+                "dishes": 6,
+                "batch_dishes": 1,
+                "meal_mode": "mixed",
+                "cook_days": [
+                    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+                ],
+                "recurring_batch_accepted": True,
+                "prepared_portion_range": [4, 8],
+            })
+        result = self.plan(self.request(
+            chosen, dates=[f"2026-09-{day:02d}" for day in range(7, 14)],
+            selection_mode="agent",
+        ))
+        self.assertEqual(result["status"], "planned")
+        sources = result["selection"]["source_slots"]
+        self.assertEqual(len(sources), 6)
+        self.assertEqual([slot["reference"] for slot in sources], chosen)
+        self.assertEqual([slot["date"] for slot in sources], sorted(slot["date"] for slot in sources))
+        self.assertEqual(len(result["selection"]["slots"]), 7)
+
     def test_explicit_lunch_slots_never_count_as_legacy_dinners(self):
         facts = {
             "values": ["legume"], "vegetable_types": [], "complete": True,
@@ -275,6 +390,32 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(
             planner.saved_menu_minimum_evaluation(legacy, profile)["status"], "pass",
         )
+
+    def test_successor_planning_scope_controls_saved_minimum_enforcement(self):
+        menu = {
+            "dishes": [{"recipe_key": "recipe:one"}],
+            "slots": [{"recipe_key": "recipe:one", "meal_type": "dinner"}],
+            "planner_selection": {
+                "request": {"selection_mode": "ranked"},
+                "selection": {"slots": [{
+                    "recipe_key": "recipe:one",
+                    "dietary_facets": {"values": [], "vegetable_types": [], "complete": True},
+                }]},
+            },
+            "planning_scope": {"selection_mode": "agent", "strict_targets": []},
+        }
+        profile = {"meals": {"dinner_days": 1}, "diet": {"minimum_fish_portions": 1}}
+        advisory = planner.saved_menu_minimum_evaluation(menu, profile)
+        self.assertEqual(advisory["status"], "fail")
+        self.assertEqual(advisory["enforced_status"], "pass")
+
+        menu["planning_scope"]["strict_targets"] = ["minimum_fish_portions"]
+        explicit = planner.saved_menu_minimum_evaluation(menu, profile)
+        self.assertEqual(explicit["enforced_status"], "fail")
+
+        menu["planning_scope"] = {"strict_targets": []}
+        legacy = planner.saved_menu_minimum_evaluation(menu, profile)
+        self.assertEqual(legacy["enforced_status"], "fail")
 
     def test_vegetable_minimum_collapses_spelling_and_fresh_variants(self):
         candidates = []

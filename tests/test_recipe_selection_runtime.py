@@ -2021,6 +2021,49 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.call(client, "menu"))["menu"], saved)
             self.assertEqual(saved["planner_selection"]["selection_digest"], alternative["selection_digest"])
 
+    async def test_agent_exact_order_saves_and_prepares_products_with_advisory_minimum(self):
+        manifest = json.loads((self.root / "manifest.json").read_text())
+        candidates = [{
+            **candidate,
+            "facts": {"dietary_facets": {"source": "explicit", "values": [],
+                                          "complete": True, "vegetable_types": ["gulrot"]}},
+        } for candidate in reversed(manifest["planner_candidates"][:7])]
+        monday = datetime.strptime(self.week() + "-1", "%G-W%V-%u").date()
+        dates = [(monday + timedelta(days=offset)).isoformat() for offset in range(7)]
+        async with self.client() as client:
+            await self.call(client, "setup", action="apply", keep_current=True)
+            await self.call(client, "profile", action="update",
+                            changes={"diet": {"minimum_fish_portions": 1}})
+            planned = (await self.call(client, "menu", action="plan", planner_input={
+                "week": self.week(), "dates": dates, "selection_mode": "agent",
+                "candidates": candidates,
+            }))["plan"]
+            self.assertEqual(planned["status"], "planned")
+            self.assertEqual(
+                [(slot["date"], slot["reference"]) for slot in planned["selection"]["slots"]],
+                [(day, {"recipe_ref": candidate["recipe_ref"]})
+                 for day, candidate in zip(dates, candidates, strict=True)],
+            )
+            saved = (await self.call(client, "menu", action="save",
+                                     planner_ref=planned["save_ref"]))["menu"]
+            self.assertEqual(saved["planner_selection"]["request"]["selection_mode"], "agent")
+            self.assertEqual(
+                [slot["reference"] for slot in saved["planner_selection"]["selection"]["slots"]],
+                [{"recipe_ref": candidate["recipe_ref"]} for candidate in candidates],
+            )
+
+            # Cover each synthetic ingredient from the pantry so the source outage
+            # cannot affect product preparation after the advisory fish minimum.
+            decisions = [{"source": {"collection": "dishes", "recipe_index": index,
+                                     "ingredient_index": 0}, "action": "have_all"}
+                         for index in range(7)]
+            prepared = await self.call(client, "products", action="prepare",
+                                       menu_ref={key: saved[key] for key in ("menu_id", "revision", "digest")},
+                                       ingredient_decisions=decisions)
+            self.assertIn("product_plan", prepared, prepared)
+            self.assertEqual(prepared["product_plan"]["status"], "prepared")
+            self.assertEqual(prepared["product_plan"]["requirements"], [])
+
     async def test_nine_exact_candidates_fit_wire_and_save_after_restart(self):
         manifest = json.loads((self.root / "manifest.json").read_text())
         self.assertEqual(len(manifest["planner_candidates"]), 9)

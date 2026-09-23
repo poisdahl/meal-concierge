@@ -1146,6 +1146,44 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
     return recipe
 
 
+def adapt_recipe_input(value: Any, *, prior: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate an authored adaptation against one exact frozen original."""
+    original = normalize_recipe(prior, trusted_store_product_hints=True)
+    if original["rights"]["storage"] != "full":
+        raise RecipeError("link_only recipes cannot be adapted into full content")
+    if not isinstance(value, Mapping) or value.get("schema_version") != 2:
+        raise RecipeError("adaptation requires a complete schema_version 2 recipe")
+    source = value.get("source")
+    if not isinstance(source, Mapping) or source.get("relationship") != "adapted":
+        raise RecipeError("adaptation source.relationship must be adapted")
+    claimed_source = deepcopy(dict(source))
+    claimed_source["relationship"] = original["source"]["relationship"]
+    if _source(claimed_source, version=2) != original["source"]:
+        raise RecipeError("adaptation must preserve exact source attribution")
+    if "rights" in value and _rights(value["rights"], version=2) != original["rights"]:
+        raise RecipeError("adaptation must preserve source storage rights")
+    if (value.get("external_snapshot") is not None
+            and value["external_snapshot"] != original.get("external_snapshot")):
+        raise RecipeError("adaptation cannot replace the original source snapshot")
+
+    candidate = deepcopy(dict(value))
+    candidate["source"] = deepcopy(original["source"])
+    candidate["rights"] = deepcopy(original["rights"])
+    # The original fetch hash describes the source page, not the authored dish.
+    candidate.pop("external_snapshot", None)
+    adapted = prepare_recipe_input(candidate, prior=original)
+    for path, evidence in recipe_evidence_fields(adapted).items():
+        current = _evidence_value(adapted, path)
+        previous = [_evidence_value(original, old_path)
+                    for old_path in _prior_evidence_paths(adapted, original, path)]
+        if current in previous or current["value"] is None:
+            continue
+        if evidence["basis"] != "estimate" or not evidence.get("assumptions"):
+            raise RecipeError(f"{path}: changed adaptation quantities need an estimate with assumptions")
+    adapted["source"]["relationship"] = "adapted"
+    return normalize_recipe(adapted, trusted_store_product_hints=True)
+
+
 def validate_recipe_image(recipe: Mapping[str, Any], assets: Any, *, prior: Mapping[str, Any] | None = None) -> None:
     """Validate a newly attached cover; existing text remains usable without it."""
     image = recipe.get("image") or {}
@@ -2141,7 +2179,7 @@ class RecipeStore:
             raise RecipeError("discovery reference was not found")
         recipe = _stored_recipe_document(row["document"])
         identity = row["source_identity"]
-        qualified = identity if isinstance(identity, str) and identity.startswith("import:v1:") else None
+        qualified = identity if isinstance(identity, str) and identity.startswith(("import:v1:", "adapt:v1:")) else None
         _, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(
             recipe, qualified, trusted_store_product_hints=True,
         )
@@ -4220,8 +4258,8 @@ class RecipeStore:
         trusted_store_product_hints: bool = False,
     ) -> dict[str, Any]:
         """Store a trusted source projection; import identity is service-derived."""
-        if source_identity is not None and re.fullmatch(r"import:v1:[a-f0-9]{64}", source_identity) is None:
-            raise RecipeError("qualified import identity is invalid")
+        if source_identity is not None and re.fullmatch(r"(?:import|adapt):v1:[a-f0-9]{64}", source_identity) is None:
+            raise RecipeError("qualified discovery identity is invalid")
         document, snapshot_key, content_hash, attribution_digest = self._snapshot_parts(
             value, source_identity,
             trusted_store_product_hints=trusted_store_product_hints,
@@ -4401,10 +4439,10 @@ class RecipeStore:
                 resolved = self._resolved_snapshot(connection, ref)
                 recipe = resolved["recipe"]
                 source_identity = resolved["source_identity"]
-                qualified = source_identity if str(source_identity).startswith("import:v1:") else None
+                qualified = source_identity if str(source_identity).startswith(("import:v1:", "adapt:v1:")) else None
                 existing = (connection.execute("SELECT * FROM recipes WHERE source_key=?", (qualified,)).fetchone()
                             if qualified else self._source_duplicate(connection, recipe))
-                if qualified and existing is None:
+                if str(source_identity).startswith("import:v1:") and existing is None:
                     legacy = self._source_duplicate(connection, recipe)
                     if legacy is not None:
                         return {**self._record(connection, legacy, created=False), "conflict": {
@@ -4468,7 +4506,7 @@ class RecipeStore:
         rows = connection.execute("SELECT * FROM recipes WHERE source_key IN (?,?)", (identity, legacy)).fetchall()
         match = None
         for row in rows:
-            if str(row["source_key"]).startswith(("import:v1:", "migration:")):
+            if str(row["source_key"]).startswith(("import:v1:", "adapt:v1:", "migration:")):
                 continue  # Qualified internal identities are not attribution keys.
             stored_identity = source_key(_stored_recipe_document(row["document"]))
             if stored_identity != row["source_key"]:
@@ -5157,7 +5195,7 @@ class RecipeStore:
                     bind_recipe_source(recipe, prior=previous)
                 validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(current["document"]))
                 retained_identity = current["source_key"]
-                qualified = isinstance(retained_identity, str) and retained_identity.startswith(("import:v1:", "migration:"))
+                qualified = isinstance(retained_identity, str) and retained_identity.startswith(("import:v1:", "adapt:v1:", "migration:"))
                 identity = retained_identity if qualified else source_key(recipe)
                 collision = (connection.execute("SELECT * FROM recipes WHERE source_key=?", (identity,)).fetchone()
                              if qualified else self._source_duplicate(connection, recipe))

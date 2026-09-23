@@ -143,593 +143,7 @@ def ingredient_search(identity, provider):
 
 def nonfood_candidate(product):
     name = str(product.get('name') or '').casefold()
-    return bool(re.search(r'\b(?:cat food|dog food|pet food|kattemat|hundemat|våtfôr|tørrfôr|whiskas|ansiktsservietter|lommetørklær|lommetørkler|tørkepapir|toalettpapir)\b', name))
-
-
-def _semantic_features(text: str) -> dict[str, Any]:
-    def one(patterns: Mapping[str, str]) -> str | None:
-        matches = [name for name, pattern in patterns.items() if re.search(pattern, text)]
-        return matches[0] if len(matches) == 1 else "conflicting" if matches else None
-
-    dietary = {
-        name for name, pattern in {
-            "gluten_free": r"\b(?:glutenfri|gluten[- ]free)\b",
-            "lactose_free": r"\b(?:laktosefri|lactose[- ]free)\b",
-            "dairy_free": r"\b(?:melkefri|mælkefri|dairy[- ]free)\b",
-            "vegetarian": r"\b(?:vegetarisk|vegetarian|plantebasert|plant[- ]based)\b",
-            "vegan": r"\b(?:vegansk|vegan)\b",
-            "nut_free": r"\b(?:nøttefri|nut[- ]free)\b",
-            "peanut_free": r"\b(?:peanøttfri|peanut[- ]free)\b",
-            "egg_free": r"\b(?:eggfri|egg[- ]free)\b",
-            "soy_free": r"\b(?:soyafri|soya[- ]free|soy[- ]free)\b",
-        }.items() if re.search(pattern, text)
-    }
-    return {
-        "state": one({
-            "fresh": r"\b(?:fersk(?:e)?|färsk(?:a)?|fresh)\b",
-            "frozen": r"\b(?:fryst|frossen|fryst(?:a)?|frozen)\b",
-            "dried": r"(?:tørr|tørket|torkad|dry|dried)",
-            "instant": r"\b(?:instant|hurtig)\w*",
-        }),
-        "skin": one({
-            "skinless": r"(?:uten\s+skinn|skinnfri|u\s*/\s*skinn|skinless)",
-            "skin_on": r"(?:med\s+skinn|skin[- ]on|with\s+skin)",
-        }),
-        "salt": one({
-            "unsalted": r"\b(?:usaltet|unsalted|osaltat)\b",
-            "salted": r"\b(?:lettsaltet|saltet|salted|saltat)\b|med\s+salt|with\s+salt",
-        }),
-        "coriander_form": one({
-            "leaf": r"(?:korianderblad\w*|coriander\s+lea(?:f|ves))",
-            "seed": r"(?:korianderfrø\w*|korianderfrön|coriander\s+seeds?)",
-            "ground": r"(?:malt\s+koriander|koriander\s+malt|ground\s+coriander|coriander\s+ground)",
-            "whole": r"(?:hel\s+koriander|koriander\s+hel|whole\s+coriander|coriander\s+whole)",
-        }),
-        "chili_form": one({
-            "powder": r"(?:chili|chilli)\s*(?:pulver|powder)|chilipulver",
-            "flakes": r"(?:chili|chilli)\s*(?:flak|flakes)",
-        }),
-        "sugar_form": one({
-            "caster": r"(?:finkornet\s+sukker|caster\s+sugar|finkornigt\s+strösocker)",
-            "icing": r"\b(?:melis|icing\s+sugar|florsocker)\b",
-        }),
-        "flour_leavening": one({
-            "self_raising": r"\b(?:selvhevende|self[- ]rais(?:ing|ed)|self[- ]rising|självjäsande)\b",
-            "plain": r"\b(?:plain|vanlig)\s+(?:hvetemel|flour|vetemjöl)\b",
-        }),
-        "milk_type": one({
-            "whole": r"\b(?:helmelk|whole\s+milk|standardmjölk)\b",
-            "skim": r"\b(?:skummet\s+melk|skimmed\s+milk|skummjölk)\b",
-            "low_fat": r"\b(?:lettmelk|semi[- ]skimmed\s+milk|lättmjölk)\b",
-        }),
-        "meat_form": one({
-            "mince": r"\b(?:kjøttdeig|hakket\s+kjøtt|minced\s+meat|mince|nötfärs|fläskfärs|kycklingfärs)\b",
-            "lean_mince": r"\b(?:karbonadedeig|lean\s+mince)\b",
-            "forcemeat": r"\b(?:kjøttfarse|köttfärs|farse|forcemeat)\b",
-            "sausage": r"\b(?:pølse|pølser|sausage|korv)\b",
-        }),
-        "cut": one({
-            "breast": r"\b(?:kylling(?:bryst|filet)|chicken\s+(?:breast|fillet))s?\b",
-            "thigh": r"\b(?:kyllinglår|chicken\s+thigh)s?\b",
-            "wing": r"\b(?:kyllingvinge|chicken\s+wing)s?\b",
-            "fillet": r"\b(?:(?!kyllingfilet\b)[a-zæøåöä]*filet|[a-zæøåöä]*filé|(?<!chicken\s)fillet|[a-zæøåöä]*loin)s?\b",
-            "chop": r"\b(?:kotelett|chop)s?\b",
-            "whole_fish": r"\b(?:(?:hel|whole)\s+(?:laks|salmon|torsk|cod)|(?:laks|salmon|torsk|cod)\s+(?:hel|whole))\b",
-        }),
-        "produce_form": one({
-            "minced": r"\b(?:hakket|finhakket|minced|chopped|finely\s+chopped)\b",
-            "diced": r"\b(?:terninger|diced)\b",
-            "whole_tomato": r"\b(?:hele?\s+tomater?|whole\s+tomatoes?)\b",
-        }),
-        "grain_grade": one({
-            "wholegrain": r"\b(?:fullkorn\w*|helkorn\w*|whole[- ]?grain\w*|brun\s+ris|brown\s+rice|grovt\s+brød)\b",
-            "refined": r"\b(?:vanlig\s+pasta|hvit\s+ris|white\s+rice|jasminris|hvetetortilla|loff)\b",
-        }),
-        "root_variant": one({
-            "swede": r"\b(?:kålrot|swede|rutabaga)\b",
-            "turnip": r"\b(?:nepe|turnip)\b",
-        }),
-        "fruit_filling": one({
-            "british_mincemeat": r"(?:britisk\s+fruktfyll|mincemeat[- ]frukt|fruit\s+mincemeat|\bmincemeat\b)",
-        }),
-        "treatment": one({
-            "smoked": r"\b(?:røkt|rökt|smoked)\b",
-            "cured": r"\b(?:gravet|gravad|cured)\b",
-            "cooked": r"\b(?:kokt|kokte|cooked)\b",
-            "raw": r"\b(?:rå|raw)\b",
-            "roasted": r"\b(?:ristet|ristede|roasted)\b",
-            "canned": r"\b(?:hermetisk|hermetiske|canned|tinned)\b",
-        }),
-        "bone": one({
-            "boneless": r"\b(?:benfri|beinløs|boneless)\b",
-            "bone_in": r"(?:med\s+(?:bein|ben)|bone[- ]in|with\s+bone)",
-        }),
-        "dietary": dietary,
-    }
-
-
-_REVIEWED_EXACT_PREPARED_TITLES = {
-    "rød karripasta": "santa maria red curry paste",
-    "søt chilisaus": "santa maria sweet chili sauce original",
-}
-
-
-def _prepared_signature(text: str) -> tuple[set[str], list[str]]:
-    """Keep prepared form and every requested food-identity word distinct."""
-    base_forms = {
-        "juice": "juice", "jus": "juice", "pesto": "pesto", "aioli": "aioli",
-        "dressing": "dressing", "saus": "sauce", "sauce": "sauce",
-        "puré": "puree", "puree": "puree", "paste": "paste",
-        "suppe": "soup", "soup": "soup", "ketchup": "ketchup",
-        "chutney": "chutney", "salsa": "salsa", "brød": "bread",
-        "bread": "bread", "pulver": "powder", "powder": "powder",
-        "tortilla": "tortilla", "nudel": "noodle",
-        "noodle": "noodle", "cracker": "cracker", "kjeks": "cracker",
-        "mix": "mix", "miks": "mix",
-    }
-    # Inflected prepared-form words must not fall back to ordinary exact-ref
-    # approval merely because their spelling differs from the singular form.
-    english_forms = {"juice", "sauce", "puree", "purée", "paste", "soup", "bread", "powder", "noodle", "cracker", "mix"}
-    forms = {}
-    for base, category in {**base_forms, "purée": "puree"}.items():
-        variants = {base}
-        if base in english_forms:
-            variants.add(base + ("es" if base.endswith("x") else "s"))
-        else:
-            variants.update(base + ending for ending in ("s", "es", "r", "er", "en", "ene", "et", "e", "a", "ne"))
-            if base.endswith("e"):
-                variants.update(base[:-1] + ending for ending in ("r", "er", "en", "ene"))
-        if base == "suppe":
-            variants.add("suppa")
-        if base == "nudel":
-            variants.update({"nudler", "nudlene"})
-        forms.update({variant: category for variant in variants})
-    forms.pop("mikser", None)  # A kitchen mixer is not a prepared food mix.
-    compounds = sorted(forms, key=len, reverse=True)
-    normalized = unicodedata.normalize("NFC", text).casefold()
-    normalized = re.sub(
-        r"(?:\s+\d+(?:[.,]\d+)?\s*(?:kg|g|ml|cl|l|stk|pk))+$", "", normalized,
-    )
-    categories: set[str] = set()
-    identity: list[str] = []
-    for word in re.findall(r"[^\W\d_]+|\d+(?:[.,]\d+)?", normalized):
-        karri_form = next(
-            (form for form in ("karripastaene", "karripastaer", "karripastaen", "karripasta")
-             if word.endswith(form)),
-            None,
-        )
-        if word in forms:
-            categories.add(forms[word])
-        elif karri_form:
-            categories.add("paste")
-            identity.append(word[:-len(karri_form)] + "karri")
-        else:
-            suffix = next(
-                (part for part in compounds if word.endswith(part) and len(word) > len(part) + 1),
-                None,
-            )
-            if suffix:
-                categories.add(forms[suffix])
-                identity.append(word[:-len(suffix)])
-            elif word not in {"av", "of", "med", "with", "og", "and", "i", "in", "til", "to"}:
-                identity.append(word)
-    return categories, sorted(identity)
-
-
-def _reviewed_exact_prepared_title_match(
-    requirement: Mapping[str, Any], product: Mapping[str, Any],
-) -> bool:
-    wanted = _identity(requirement.get("item"))
-    offered = _identity(product.get("name"))
-    return bool(wanted and offered == _REVIEWED_EXACT_PREPARED_TITLES.get(wanted))
-
-
-def _semantic_product_conflict(
-    requirement: Mapping[str, Any], product: Mapping[str, Any], *,
-    exact_retailer_identity_approved: bool = False,
-    reviewed_prepared_title_approved: bool = False,
-) -> bool:
-    """Reject explicit identity, form and variant contradictions fail-closed."""
-    def semantic_text(value: Any) -> str:
-        if not isinstance(value, str):
-            return ""
-        return " ".join(unicodedata.normalize("NFC", value).split()).casefold()
-
-    wanted = semantic_text(requirement.get("item"))
-    offered = semantic_text(product.get("name"))
-    if not wanted or not offered:
-        return False
-    reviewed_offered = _REVIEWED_EXACT_PREPARED_TITLES.get(wanted)
-    if reviewed_offered is not None:
-        if not reviewed_prepared_title_approved or offered != reviewed_offered:
-            return True
-        return False
-    wanted_features = _semantic_features(wanted)
-    offered_features = _semantic_features(offered)
-    # Generic staples are a semantic trust boundary: a search hit containing
-    # the word is not necessarily the ingredient (rice flour, garlic bread,
-    # cookie butter). Accept only reviewed whole-identity forms. Product names
-    # that do not expose one of these forms remain unresolved for manual choice.
-    package_tail = r"(?:\s+\d+(?:[.,]\d+)?\s*(?:%|kg|g|l|ml|stk|pk))?"
-    bare_identity_forms = (
-        (r"^(?:smør|butter)$", rf"(?:^|\s)(?:(?:meieri|ekte|saltet|usaltet|lettsaltet)smør|smør){package_tail}$|^(?:(?:salted|unsalted|cultured|dairy)\s+)?butter{package_tail}$"),
-        (r"^(?:mel|hvetemel|flour|vetemjöl)$", rf"(?:^|\s)(?:siktet\s+)?hvetemel(?:\s+siktet)?{package_tail}$|^(?:mel|flour){package_tail}$|(?:^|\s)(?:plain|wheat)\s+flour{package_tail}$|(?:^|\s)vetemjöl{package_tail}$"),
-        (r"^salt$", rf"(?:^|\s)(?:(?:fint|grovt)\s+salt|havsalt|flaksalt|bordsalt|finsalt|grovsalt|salt)(?:\s+(?:fint|grovt|flak|med\s+jod))?{package_tail}$|^(?:sea\s+salt|table\s+salt){package_tail}$"),
-        (r"^(?:ris|rice)$", rf"(?:^|\s)(?:jasminris|basmatiris|fullkornsris|villris|sushiris|grøtris|risottoris|ris){package_tail}$|(?:^|\s)(?:(?:jasmine|basmati|brown|white|wild|sushi|arborio|risotto|long[-\s]grain)\s+rice|rice){package_tail}$"),
-        (r"^(?:melk|milk|mjölk)$", rf"(?:^|\s)(?:helmelk|lettmelk|skummet\s+melk|standardmjölk|lättmjölk|skummjölk|melk|mjölk)(?:\s+(?:lett|hel))?{package_tail}$|^(?:(?:whole|skimmed|semi[-\s]skimmed|dairy)\s+milk|milk){package_tail}$"),
-        (r"^(?:hvitløk|garlic|vitlök)$", rf"^(?:(?:fersk|fresh)\s+|(?:upresset|opressad|unpressed)[-\s]+)?(?:hvitløk|garlic|vitlök)(?:\s+(?:kina|norsk|økologisk|løsvekt))?{package_tail}$"),
-        (r"^(?:tomat|tomato|tomater|tomatoes)$", rf"(?:^|\s)(?:(?:ferske?|fresh|økologiske?|organic|norske?)\s+)?(?:tomat(?:er)?|(?:cherry|plomme|cocktail|klase)tomat(?:er)?)(?:\s+løsvekt)?{package_tail}$|(?:^|\s)(?:(?:cherry|plum|cocktail|cluster|vine)\s+)?tomato(?:es)?{package_tail}$"),
-    )
-    bare_identity_presence = (
-        (r"^(?:smør|butter)$", r"\b(?:[a-zæøåöä]*smør|butter)\b"),
-        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"\b(?:mel|hvetemel|flour|vetemjöl)\b"),
-        (r"^salt$", r"\b[a-zæøåöä]*salt\b"),
-        (r"^(?:ris|rice)$", r"\b(?:[a-zæøåöä]*ris|rice)\b"),
-        (r"^(?:melk|milk|mjölk)$", r"\b(?:[a-zæøåöä]*melk|milk|mjölk)\b"),
-        (r"^(?:hvitløk|garlic|vitlök)$", r"\b(?:hvitløk|garlic|vitlök)\b"),
-        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:[a-zæøåöä]*tomat\w*|tomatoes?)\b"),
-    )
-    if any(
-        re.fullmatch(base, wanted) and not re.search(identity, offered)
-        for base, identity in bare_identity_presence
-    ):
-        return True
-    retailer_identity_may_be_resolved = exact_retailer_identity_approved
-    if (
-        not retailer_identity_may_be_resolved
-        and any(
-            re.fullmatch(base, wanted) and not re.search(allowed, offered)
-            for base, allowed in bare_identity_forms
-        )
-    ):
-        return True
-    pressed_garlic_form = (
-        r"(?!(?:upresset|opressad|unpressed)\b)"
-        r"\w*(?:presset|pressad|pressed)"
-    )
-    bare_compound_guards = (
-        (r"^(?:smør|butter)$", r"\b(?:peanøtt|peanut|mandel|almond|cashew|hasselnøtt|hazelnut|pistasj|pistachio|sesam|sesame|solsikke|sunflower|kakao|cacao|cocoa|cookie)[-\s]*(?:smør|butter)\b"),
-        (r"^(?:mel|hvetemel|flour|vetemjöl)$", r"(?:\b(?:mandel|almond|kokos|coconut|havre|oat|kikert|chickpea|mais|corn|ris|rice)[-\s]*(?:mel|flour|mjöl)\b|\bflour\s+tortillas?\b)"),
-        (r"^(?:salt)$", r"(?:\b(?:hvitløk|garlic|vitlök|selleri|celery|løk|onion)s?[-\s]*salt\b|\bsalt(?:[-\s]+|\s*&\s*)(?:kjeks|crackers?|chips?|pepper\s+mix)\b)"),
-        (r"^(?:ris|rice)$", r"(?:\b(?:blomkål|cauliflower|brokkoli|broccoli)[-\s]*(?:ris|rice)\b|\b(?:ris|rice)[-\s]*(?:nudler?|noodles?|kaker?|cakes?|grøt|pudding|flour)\b|\b(?:bygg|konjak|linse)ris\b)"),
-        (r"^(?:melk|milk|mjölk)$", r"(?:\b(?:melke?|milk|mjölk)[-\s]*sjokolade|\b(?:chocolate|hemp|potato)[-\s]*milk\b|\b(?:havre|oat|soya?|soy|mandel|almond|kokos|coconut|ris|rice|ert|pea|hamp|hemp|potet|potato)[-\s]*(?:melk|milk|mjölk)\b)"),
-        (r"^(?:hvitløk|garlic|vitlök)$", rf"(?:\b{pressed_garlic_form}\b|\b(?:hvitløk|garlic|vitlök)s?\s*[,/-]?\s*(?:pulver|powder|paste|puré|puree|saus|sauce|brød|bread|knust|crushed|hakket|minced|aioli|dressing|olje|oil)\b|\b(?:knust|crushed|hakket|minced)\s+(?:hvitløk|garlic|vitlök)\b)"),
-        (r"^(?:tomat|tomato|tomater|tomatoes)$", r"\b(?:tomat|tomato)\w*\s*[,/-]?\s*(?:saus|sauce|puré|puree|paste|suppe|soup|ketchup|chutney|juice|jus|pesto|salsa)\b"),
-    )
-    if any(re.fullmatch(base, wanted) and re.search(compound, offered)
-           for base, compound in bare_compound_guards):
-        return True
-    # Exact-ref selection can resolve arbitrary retailer brand/origin/packaging
-    # prose around a recognizable identity. It cannot turn a prepared product
-    # or a non-food use of that word back into the requested staple.
-    wanted_forms, wanted_identity = _prepared_signature(wanted)
-    offered_forms, offered_identity = _prepared_signature(offered)
-    nonfood_context = re.compile(
-        r"\b(?:body|kropps|cosmetic|kosmetisk|lotion|shampoo|sjampo|soap|såpe)\b"
-    )
-    if (
-        (
-            (wanted_forms or offered_forms)
-            and (
-                wanted_forms != offered_forms
-                or bool(wanted_identity and wanted_identity != offered_identity)
-            )
-        )
-        or nonfood_context.search(offered)
-    ):
-        return True
-    for axis in (
-        "state", "skin", "salt", "coriander_form", "chili_form",
-        "sugar_form", "flour_leavening", "milk_type", "meat_form",
-        "cut", "produce_form", "grain_grade", "root_variant",
-        "fruit_filling", "treatment", "bone",
-    ):
-        required = wanted_features[axis]
-        if required is not None and offered_features[axis] != required:
-            return True
-    if not wanted_features["dietary"].issubset(offered_features["dietary"]):
-        return True
-    wanted_broccoli = re.search(r"\b(?:brokkoli|broccoli)\b", wanted)
-    wanted_sprouts = re.search(r"\b(?:spire|spirer|sprout|sprouts)\b", wanted)
-    offered_broccoli_sprouts = re.search(
-        r"\b(?:(?:brokkoli|broccoli)\s*(?:spire|spirer|sprout|sprouts)|"
-        r"(?:spire|spirer|sprout|sprouts)\s*(?:av|of)?\s*(?:brokkoli|broccoli))\b", offered
-    )
-    if wanted_broccoli and not wanted_sprouts and offered_broccoli_sprouts:
-        return True
-    species = {
-        "torsk": r"\b(?:torsk|cod)\w*", "laks": r"\b(?:laks|salmon)\w*",
-        "sei": r"\b(?:sei|saithe)\w*", "ørret": r"\b(?:ørret|trout)\w*",
-        "hyse": r"\b(?:hyse|haddock)\w*", "makrell": r"\b(?:makrell|mackerel)\w*",
-    }
-    wanted_species = {key for key, pattern in species.items() if re.search(pattern, wanted)}
-    offered_species = {key for key, pattern in species.items() if re.search(pattern, offered)}
-    if wanted_species and offered_species and wanted_species != offered_species:
-        return True
-    if wanted_species and not offered_species and re.search(r"\b(?:fiske?|fish)\s*(?:filet|fillet)\b", offered):
-        return True
-    legumes = {
-        "chickpea": r"\b(?:kikert|kikerter|chickpea|chickpeas)\b",
-        "white_bean": r"\b(?:hvite?\s+bønner?|white\s+beans?)\b",
-        "black_bean": r"\b(?:(?:svarte?|sorte?)\s+bønner?|black\s+beans?)\b",
-        "kidney_bean": r"\b(?:kidneybønner?|kidney\s+beans?)\b",
-        "lentil": r"\b(?:linse|linser|lentil|lentils)\b",
-    }
-    wanted_legume = {key for key, pattern in legumes.items() if re.search(pattern, wanted)}
-    offered_legume = {key for key, pattern in legumes.items() if re.search(pattern, offered)}
-    if wanted_legume and offered_legume and wanted_legume != offered_legume:
-        return True
-    if re.search(r"\b(?:filet|loin)\w*", wanted) and re.search(
-        r"\b(?:burger|glaze|krydder|sprøbakt|panert)\w*", offered
-    ):
-        return True
-    contradictions = (
-        (r"\b(?:maisstivelse|cornstarch|cornflour|majsstärkelse)\b", r"\b(?:maismel|corn flour|majsmjöl)\b"),
-        (r"\b(?:maismel|corn flour|majsmjöl)\b", r"\b(?:maisstivelse|cornstarch|cornflour|majsstärkelse)\b"),
-        (r"\b(?:korianderblader?|coriander leaves|korianderblad)\b", r"\b(?:korianderfrø|coriander seeds?|korianderfrön|malt koriander|ground coriander)\b"),
-        (r"\b(?:korianderfrø|coriander seeds?|korianderfrön)\b", r"\b(?:korianderblader?|coriander leaves|korianderblad|malt koriander|ground coriander)\b"),
-        (r"\b(?:malt koriander|ground coriander)\b", r"\b(?:korianderblader?|coriander leaves|korianderblad|korianderfrø|coriander seeds?|korianderfrön)\b"),
-        (r"\b(?:finkornet sukker|caster sugar|strösocker)\b", r"\b(?:melis|icing sugar|florsocker)\b"),
-        (r"\b(?:melis|icing sugar|florsocker)\b", r"\b(?:finkornet sukker|caster sugar|strösocker)\b"),
-        (r"\b(?:selvhevende|self[- ]rais(?:ing|ed)|self[- ]rising|självjäsande)\b", r"\b(?:plain|vanlig)\s+(?:hvetemel|flour|vetemjöl)\b"),
-        (r"\b(?:britisk fruktfyll|mincemeat-frukt|fruit mincemeat)\b", r"\b(?:kjøtt\w*|kött\w*|meat|minced meat|köttfärs)\b"),
-        (r"\b(?:fersk|fresh)\b", r"(?:tørr|tørket|fryst|frossen|dry|dried|frozen)"),
-        (r"(?:tørr|tørket|fryst|frossen|dry|dried|frozen)", r"\b(?:fersk|fresh)\b"),
-        (r"\b(?:uten skinn|skinnfri|skinless)\b", r"\b(?:med skinn|skin[- ]on|with skin)\b"),
-        (r"\b(?:med skinn|skin[- ]on|with skin)\b", r"\b(?:uten skinn|skinnfri|skinless)\b"),
-    )
-    if any(re.search(left, wanted) and re.search(right, offered) for left, right in contradictions):
-        return True
-    wanted_unsalted = bool(re.search(r"\b(?:usaltet|unsalted|osaltat)\b", wanted))
-    offered_unsalted = bool(re.search(r"\b(?:usaltet|unsalted|osaltat)\b", offered))
-    wanted_salted = not wanted_unsalted and bool(re.search(r"(?:lett)?saltet|salted|saltat", wanted))
-    offered_salted = not offered_unsalted and bool(re.search(r"(?:lett)?saltet|salted|saltat", offered))
-    if (wanted_unsalted and offered_salted) or (wanted_salted and offered_unsalted):
-        return True
-    raising = r"\b(?:selvhevende|self[- ]rais(?:ing|ed)|self[- ]rising|självjäsande)\b"
-    if re.search(raising, wanted) and re.search(r"\b(?:hvetemel|flour|vetemjöl)\b", offered) and not re.search(raising, offered):
-        return True
-    wanted_minimum_percent = re.search(r"(?:minst|at least)\s*(\d+(?:[.,]\d+)?)\s*%", wanted)
-    wanted_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%\s*(?:fett|fat)?", wanted)
-    offered_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", offered)
-    wanted_explicit_fat = wanted_percent and (
-        re.search(r"%\s*(?:fett|fat)\b", wanted)
-        or re.search(r"(?:fløte|cream|grädde|yoghurt|yogurt|melk|milk)", wanted)
-    )
-    if wanted_explicit_fat:
-        wanted_fat = float(wanted_percent.group(1).replace(",", "."))
-        offered_fat = float(offered_percent.group(1).replace(",", ".")) if offered_percent else None
-        if offered_fat is None or (
-            offered_fat < wanted_fat if wanted_minimum_percent else offered_fat != wanted_fat
-        ):
-            return True
-    meat_species = {
-        "beef": r"\b(?:storfe|okse|beef|nöt)\b",
-        "pork": r"\b(?:svin|pork|fläsk)\b",
-        "chicken": r"\b(?:kylling|chicken|kyckling)\b",
-        "turkey": r"\b(?:kalkun|turkey)\b",
-    }
-    wanted_meat = {key for key, pattern in meat_species.items() if re.search(pattern, wanted)}
-    offered_meat = {key for key, pattern in meat_species.items() if re.search(pattern, offered)}
-    if wanted_meat and offered_meat and wanted_meat != offered_meat:
-        return True
-    if wanted_meat and not offered_meat and re.search(r"\b(?:kjøttdeig|farse|köttfärs|mince|minced meat)\b", offered):
-        return True
-    return False
-
-
-def semantic_product_conflict(requirement: Mapping[str, Any], product: Mapping[str, Any]) -> bool:
-    """Reject explicit identity, form and variant contradictions fail-closed."""
-    return _semantic_product_conflict(requirement, product)
-
-
-def _ordinary_retailer_identity_uncertainty(
-    requirement: Mapping[str, Any], product: Mapping[str, Any],
-) -> bool:
-    """Recognize identity plus retail metadata without interpreting food prose."""
-    if _semantic_product_conflict(
-        requirement, product,
-        exact_retailer_identity_approved=True,
-        reviewed_prepared_title_approved=True,
-    ):
-        return False
-    if _reviewed_exact_prepared_title_match(requirement, product):
-        return True
-    wanted = str(requirement.get("item") or "").casefold()
-    title = str(product.get("name") or "")
-    identity_words = {
-        r"(?:smør|butter)": r"(?:[a-zæøåöä]*smør|butter)",
-        r"(?:mel|hvetemel|flour|vetemjöl)": r"(?:mel|hvetemel|flour|vetemjöl)",
-        r"salt": r"[a-zæøåöä]*salt",
-        r"(?:ris|rice)": r"(?:[a-zæøåöä]*ris|rice)",
-        r"(?:melk|milk|mjölk)": r"(?:[a-zæøåöä]*melk|milk|mjölk)",
-        r"(?:hvitløk|garlic|vitlök)": r"(?:hvitløk|garlic|vitlök)",
-        r"(?:tomat|tomato|tomater|tomatoes)": r"(?:[a-zæøåöä]*tomat(?:er)?|tomatoes?)",
-    }
-    identity_pattern = next((
-        pattern for base, pattern in identity_words.items()
-        if re.fullmatch(base, wanted)
-    ), None)
-    if identity_pattern is None:
-        return False
-    word_matches = list(re.finditer(r"[A-Za-zÆØÅæøåÖÄöä]+", title))
-    identity_indexes = {
-        index for index, match in enumerate(word_matches)
-        if re.fullmatch(identity_pattern, match.group(0).casefold())
-    }
-    if not identity_indexes:
-        return False
-    allowed_lower_metadata = {
-        "fersk", "ferske", "fresh", "økologisk", "økologiske", "organic",
-        "norsk", "norske", "klasse", "klase", "løsvekt", "siktet",
-        "fint", "grovt", "lett", "hel", "med", "jod", "stk", "pk",
-        "pakke", "kg", "g", "l", "ml", "cl", "vår", "laveste", "pris",
-        "norge", "norway", "nederland", "netherlands", "spania", "spain",
-        "kina", "china",
-    }
-    display = product.get("display")
-    brand = display.get("brand") if isinstance(display, Mapping) else None
-    brand_tokens = {
-        token.casefold()
-        for token in re.findall(r"[A-Za-zÆØÅæøåÖÄöä]+", brand or "")
-    }
-    for index, match in enumerate(word_matches):
-        if index in identity_indexes:
-            continue
-        token = match.group(0)
-        normalized = token.casefold()
-        if (
-            normalized in allowed_lower_metadata
-            or normalized in brand_tokens
-            or "gartneri" in normalized
-        ):
-            continue
-        return False
-    metadata_evidence = bool(
-        re.search(r"\d+(?:[.,-]\d+)?\s*(?:kg|g|l|ml|cl|stk|pk|%)\b", title, re.I)
-        or re.search(r"\b(?:vår\s+laveste\s+pris|økologisk\w*|organic|klasse|klase|løsvekt)\b", title, re.I)
-        or re.search(r"\b(?:norge|norway|nederland|netherlands|spania|spain|kina|china)\b", title, re.I)
-        or re.search(r"gartneri", title, re.I)
-        or "/" in title
-    )
-    return metadata_evidence
-
-
-def _authorized_semantic_difference(
-    requirement: Mapping[str, Any], product: Mapping[str, Any]
-) -> list[str] | None:
-    """Return the narrow title-level differences a current user may authorize.
-
-    Identity, form, explicit contradictory state, dietary and species checks
-    remain in ``semantic_product_conflict`` and cannot be bypassed here.
-    """
-    wanted = str(requirement.get("item") or "").casefold()
-    offered = str(product.get("name") or "").casefold()
-    if not wanted or not offered:
-        return None
-    wanted_features = _semantic_features(wanted)
-    offered_features = _semantic_features(offered)
-    stripped = wanted
-    differences: list[str] = []
-    state_qualifiers = {
-        "fresh": (r"\b(?:fersk(?:e)?|färsk(?:a)?|fresh)\b", "fresh_not_in_product_title"),
-        "frozen": (r"\b(?:fryst|frossen|frysta|frozen)\b", "frozen_not_in_product_title"),
-        "dried": (r"\b(?:tørr|tørket|torkad|dry|dried)\b", "dried_not_in_product_title"),
-    }
-    wanted_state = wanted_features["state"]
-    if wanted_state in state_qualifiers and offered_features["state"] is None:
-        pattern, difference = state_qualifiers[wanted_state]
-        stripped = re.sub(pattern, " ", stripped)
-        differences.append(difference)
-    if wanted_features["treatment"] == "canned" and offered_features["treatment"] is None:
-        stripped = re.sub(r"\b(?:hermetisk|hermetiske|canned|tinned)\b", " ", stripped)
-        differences.append("canned_not_in_product_title")
-    if wanted_features["produce_form"] == "minced" and offered_features["produce_form"] is None:
-        stripped = re.sub(
-            r"\b(?:hakket|finhakket|minced|chopped|finely\s+chopped)\b", " ", stripped,
-        )
-        differences.append("preparation_not_in_product_title")
-
-    wanted_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", wanted)
-    offered_percent = re.search(r"(\d+(?:[.,]\d+)?)\s*%", offered)
-    dairy_classes = {
-        "sour_cream": r"\b(?:rømme|lettrømme|seterrømme|sour\s+cream)\b",
-        "cream": r"\b(?:fløte|cream|grädde)\b",
-        "milk": r"\b(?:melk|milk|mjölk)\b",
-        "yogurt": r"\b(?:yoghurt|yogurt)\b",
-    }
-    wanted_dairy = next((name for name, pattern in dairy_classes.items() if re.search(pattern, wanted)), None)
-    offered_dairy = next((name for name, pattern in dairy_classes.items() if re.search(pattern, offered)), None)
-    if wanted_percent and offered_percent and wanted_dairy and wanted_dairy == offered_dairy:
-        wanted_fat = float(wanted_percent.group(1).replace(",", "."))
-        offered_fat = float(offered_percent.group(1).replace(",", "."))
-        if wanted_fat != offered_fat and abs(wanted_fat - offered_fat) <= 2:
-            stripped = re.sub(r"(?:minst|at\s+least)?\s*\d+(?:[.,]\d+)?\s*%\s*(?:fett|fat)?", " ", stripped)
-            differences.append("nearby_dairy_fat_percentage")
-    if not differences:
-        return None
-    def title_tokens(value: str) -> list[str]:
-        tokens = re.findall(r"[a-zæøåöä]+|\d+(?:[.,]\d+)?|%", value)
-        metadata = {
-            "%", "g", "kg", "ml", "l", "cl", "stk", "pk", "pakke",
-            "økologisk", "økologiske", "organic", "norsk", "norske",
-        }
-        return [token for token in tokens if token not in metadata and not token[0].isdigit()]
-
-    def product_title_tokens() -> list[str]:
-        tokens = title_tokens(offered)
-        display = product.get("display")
-        brand = display.get("brand") if isinstance(display, Mapping) else None
-        brand_tokens = title_tokens(brand.casefold()) if isinstance(brand, str) else []
-        # Brand metadata is presentation data, so only the exact audited
-        # prefixes needed by observed safe candidates may be ignored here.
-        # An arbitrary "brand" such as Chili or Hvitløk must remain part of
-        # the semantic title and fail the whole-title comparison below.
-        allowed_brand_prefixes = {("r",), ("kolonihagen",), ("tine",)}
-        if (
-            tuple(brand_tokens) in allowed_brand_prefixes
-            and tokens[:len(brand_tokens)] == brand_tokens
-        ):
-            return tokens[len(brand_tokens):]
-        return tokens
-
-    # Fail closed on every residual title token. This makes the authority about
-    # exactly one omitted qualifier or nearby fat value, never a prepared,
-    # flavoured, compound or allergen-bearing addition.
-    if any(name in differences for name in (
-        "fresh_not_in_product_title", "frozen_not_in_product_title",
-        "dried_not_in_product_title", "canned_not_in_product_title",
-        "preparation_not_in_product_title",
-    )):
-        offered_title = product_title_tokens()
-        wanted_title = title_tokens(stripped)
-        offered_identity = _aggregation_identity(" ".join(offered_title))
-        wanted_identity = _aggregation_identity(" ".join(wanted_title))
-        if offered_title != wanted_title and (
-            offered_identity is None or offered_identity != wanted_identity
-        ):
-            return None
-    if "nearby_dairy_fat_percentage" in differences:
-        allowed_dairy_titles = {
-            "sour_cream": {("rømme",), ("lettrømme",), ("seterrømme",), ("sour", "cream")},
-            "cream": {("fløte",), ("kremfløte",), ("matfløte",), ("vispgrädde",), ("grädde",), ("cream",)},
-            "milk": {("melk",), ("lettmelk",), ("helmelk",), ("skummet", "melk"), ("milk",), ("mjölk",)},
-            "yogurt": {("yoghurt",), ("yogurt",)},
-        }
-        dairy_class = wanted_dairy
-        offered_title = product_title_tokens()
-        if offered_title and offered_title[0] == "tine":
-            offered_title = offered_title[1:]
-        if tuple(offered_title) not in allowed_dairy_titles[dairy_class]:
-            return None
-        wanted_title = title_tokens(stripped)
-        # The one reviewed subtype substitution is ordinary rømme to
-        # lettrømme. Every other residual title, including flavors and named
-        # dairy subtypes, must remain exact after removing the fat percentage.
-        if wanted_title != offered_title and not (
-            wanted_title == ["rømme"] and offered_title == ["lettrømme"]
-        ):
-            return None
-    stripped_requirement = {**requirement, "item": " ".join(stripped.split())}
-    return differences if not semantic_product_conflict(stripped_requirement, product) else None
-
-
-def _ordinary_qualifier_omission(
-    requirement: Mapping[str, Any], differences: list[str],
-) -> bool:
-    """Allow only reviewed, identity-specific title omissions without authority."""
-    wanted = str(requirement.get("item") or "").casefold()
-    reviewed = {
-        "fresh_not_in_product_title": r"\b(?:brokkoli|broccoli)\b",
-        "frozen_not_in_product_title": r"\b(?:rosenkål|brysselkål|brussels\s+sprouts?)\b",
-        "dried_not_in_product_title": r"\boregano\b",
-        "canned_not_in_product_title": r"\b(?:sorte\s+bønner|black\s+beans?)\b",
-        "preparation_not_in_product_title": r"\b(?:gul\s+løk|løk|onions?)\b",
-    }
-    return bool(differences) and all(
-        difference in reviewed and re.search(reviewed[difference], wanted)
-        for difference in differences
-    )
+    return bool(re.search(r'\b(?:cat food|dog food|pet food|kattemat|hundemat|våtfôr|tørrfôr|whiskas|ansiktsservietter|lommetørklær|lommetørkler|tørkepapir|toalettpapir|body butter|hair butter)\b', name))
 
 
 def _positive_fraction(value: Any) -> Fraction | None:
@@ -1003,6 +417,7 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         if not isinstance(raw, Mapping) or set(raw).difference({
             "requirement_id", "candidate_refs", "max_excess", "search_query",
             "package_count", "quantity_basis", "semantic_authorization", "shared_package",
+            "selection_reason",
         }):
             raise HouseholdError("candidate approval has unknown fields")
         requirement_id = raw.get("requirement_id")
@@ -1027,6 +442,11 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             if not isinstance(query, str) or not 1 <= len(query.strip()) <= 150:
                 raise HouseholdError("search_query must be a short ingredient search")
             approval["search_query"] = query.strip()
+        if raw.get("selection_reason") is not None:
+            reason = raw["selection_reason"]
+            if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 600:
+                raise HouseholdError("selection_reason must be a bounded explanation")
+            approval["selection_reason"] = reason.strip()
         if "package_count" in raw or "quantity_basis" in raw:
             count, basis = raw.get("package_count"), raw.get("quantity_basis")
             if len(refs) != 1 or type(count) is not int or not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT or not isinstance(basis, str) or not 1 <= len(basis.strip()) <= 600:
@@ -1061,8 +481,9 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             shared = raw["shared_package"]
             if (
                 not isinstance(shared, Mapping)
-                or set(shared) != {"requirement_ids", "package_count", "quantity_basis", "authorized_by"}
-                or shared.get("authorized_by") != "current_user"
+                or set(shared).difference({"requirement_ids", "package_count", "quantity_basis", "authorized_by"})
+                or not {"requirement_ids", "package_count", "quantity_basis"}.issubset(shared)
+                or shared.get("authorized_by") not in (None, "agent", "current_user")
                 or not isinstance(shared.get("requirement_ids"), list)
                 or not 2 <= len(shared["requirement_ids"]) <= MAX_REQUIREMENTS
                 or any(member not in requirement_ids for member in shared["requirement_ids"])
@@ -1076,13 +497,13 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
                 or "package_count" in raw or "quantity_basis" in raw or "max_excess" in raw
             ):
                 raise HouseholdError(
-                    "shared_package needs every exact requirement_id, one candidate, authorized_by=current_user, package_count and quantity_basis"
+                    "shared_package needs every exact requirement_id, one candidate, package_count and quantity_basis"
                 )
             approval["shared_package"] = {
                 "requirement_ids": sorted(shared["requirement_ids"]),
                 "package_count": shared["package_count"],
                 "quantity_basis": shared["quantity_basis"].strip(),
-                "authorized_by": "current_user",
+                **({"authorized_by": shared["authorized_by"]} if "authorized_by" in shared else {}),
             }
             # Reuse the established practical-package path, but the allocation
             # is validated and counted atomically below across every member.
@@ -1098,7 +519,7 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
         if len(group) != len(members) or {approval["requirement_id"] for approval in group} != set(members):
             raise HouseholdError("shared_package must be repeated unchanged by every member requirement")
         if len({canonical(approval["shared_package"]) for approval in group}) != 1:
-            raise HouseholdError("shared_package member authority differs")
+            raise HouseholdError("shared_package member selections differ")
         if len({canonical(approval["candidate_refs"]) for approval in group}) != 1:
             raise HouseholdError("shared_package members must select the same exact candidate")
     return approvals
@@ -1468,15 +889,6 @@ def _estimated_single_product(requirement, observation, approval):
             "merchandise_ore": merchandise, "mandatory_deposit_ore": None, "total_payable_ore": None}
 
 
-def _form_conflict(requirement, product):
-    # Never use a package estimate as a dry/cooked legume substitution.
-    dry = r"\b(?:dry|dried|tørre|tørket|tørkede)\b"
-    cooked = r"\b(?:cooked|canned|jarred|kokte|ferdigkokte|hermetiske|hermetisk|avrent|drained)\b"
-    wanted, offered = str(requirement['item']).casefold(), str(product.get('name', '')).casefold()
-    return bool((re.search(dry, wanted) and re.search(cooked, offered)) or
-                (re.search(cooked, wanted) and re.search(dry, offered)))
-
-
 def _practical_packages(requirement, observation, approval, price_mode):
     """Select observed whole packages without claiming a physical conversion."""
     refs = approval['candidate_refs']
@@ -1489,7 +901,6 @@ def _practical_packages(requirement, observation, approval, price_mode):
     count = approval['package_count']
     package = product.get('package')
     if (product.get('availability') != 'available'
-            or _form_conflict(requirement, product)
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
     size = _package_quantity(package, requirement['unit'])
@@ -1593,66 +1004,7 @@ def build_product_plan(
             planned.append(item)
             continue
         approval = approvals.get(requirement_id)
-        authority = approval.get("semantic_authorization") if approval else None
-        authority_ref = authority.get("candidate_ref") if isinstance(authority, Mapping) else None
-        semantic_mismatches = {}
-        identity_unverified = {}
-        authority_differences = None
-        for product in observation.get("products", []):
-            if not isinstance(product, Mapping):
-                continue
-            product_ref = product.get("product_ref")
-            if product_ref == authority_ref:
-                authority_differences = _authorized_semantic_difference(requirement, product)
-            exact_candidate_approved = bool(
-                approval is not None
-                and product_ref in approval["candidate_refs"]
-            )
-            if _semantic_product_conflict(
-                requirement, product,
-                reviewed_prepared_title_approved=exact_candidate_approved,
-            ):
-                exact_identity_only = _ordinary_retailer_identity_uncertainty(
-                    requirement, product,
-                )
-                if exact_identity_only:
-                    identity_unverified[product_ref] = [
-                        "retailer_title_identity_verified_by_exact_candidate_approval"
-                    ]
-                else:
-                    semantic_mismatches[product_ref] = _authorized_semantic_difference(
-                        requirement, product
-                    )
-        authorized_semantic_ref = (
-            authority_ref
-            if isinstance(authority, Mapping)
-            and authority_differences
-            else None
-        )
-        ordinary_omissions = {
-            product_ref: differences
-            for product_ref, differences in semantic_mismatches.items()
-            if approval is not None
-            and product_ref in approval["candidate_refs"]
-            and differences
-            and _ordinary_qualifier_omission(requirement, differences)
-        }
-        allowed_semantic_refs = set(ordinary_omissions)
-        if authorized_semantic_ref is not None:
-            allowed_semantic_refs.add(authorized_semantic_ref)
-        excluded_semantic_refs = set(semantic_mismatches) - allowed_semantic_refs
         safe_observation = deepcopy(dict(observation))
-        safe_observation["products"] = [
-            product for product in safe_observation.get("products", [])
-            if product.get("product_ref") not in excluded_semantic_refs
-        ]
-        if excluded_semantic_refs:
-            safe_observation["excluded_candidate_count"] = len(excluded_semantic_refs)
-            safe_observation["excluded_candidate_reason"] = "candidate_semantic_mismatch"
-        if identity_unverified:
-            item["identity_unverified_candidate_refs"] = sorted(
-                identity_unverified, key=_ref_sort_key,
-            )
         for product in safe_observation.get("products", []):
             product["candidate_approval"] = {
                 "requirement_id": requirement_id,
@@ -1671,53 +1023,19 @@ def build_product_plan(
             planned.append(item)
             continue
         item["candidate_approval"] = deepcopy(approval)
-        if authorized_semantic_ref is not None:
-            item["semantic_authorized_differences"] = deepcopy(
-                semantic_mismatches[authorized_semantic_ref]
-            )
-        selected_ordinary = [
-            {"product_ref": product_ref, "differences": deepcopy(differences)}
-            for product_ref, differences in sorted(
-                {**ordinary_omissions, **identity_unverified}.items(),
-                key=lambda item: _ref_sort_key(item[0]),
-            )
-            if product_ref in approval["candidate_refs"]
-        ]
-        if authority is not None and authorized_semantic_ref is None:
-            unresolved.append({
-                "requirement_id": requirement_id,
-                "item": requirement["item"],
-                "reason": "semantic_authorization_not_applicable",
-                "candidate_refs": [authority["candidate_ref"]],
-            })
-            item["status"] = "needs_input"
-            planned.append(item)
-            continue
-        if excluded_semantic_refs.intersection(approval["candidate_refs"]):
-            unresolved.append({
-                "requirement_id": requirement_id,
-                "item": requirement["item"],
-                "reason": "candidate_semantic_mismatch",
-                "candidate_refs": sorted(
-                    excluded_semantic_refs.intersection(approval["candidate_refs"]),
-                    key=_ref_sort_key,
-                ),
-            })
-            item["status"] = "needs_input"
-            planned.append(item)
-            continue
         from dietary_assessment import assess
         product_findings = {p['product_ref']: assess(dietary_profile or {'diet': hard_constraints}, p) for p in safe_observation['products']}
         item['dietary_assessments'] = [f for values in product_findings.values() for f in values]
         filtered = deepcopy(approval)
-        nonfood = {p['product_ref'] for p in safe_observation['products'] if nonfood_candidate(p) or _form_conflict(requirement, p)}
+        nonfood = {p['product_ref'] for p in safe_observation['products'] if nonfood_candidate(p)}
         filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if ref not in nonfood and not any(f['blocked'] for f in product_findings.get(ref, []))]
         evaluated_observation = deepcopy(safe_observation)
         for product in evaluated_observation['products']:
             product['dietary_findings'] = product_findings[product['product_ref']]
         selection, reason, eligible_count = _select_requirement(requirement, evaluated_observation, filtered)
         if not filtered['candidate_refs']:
-            reason = 'dietary_conflict_no_compatible_candidate'
+            reason = ('candidate_nonfood_product' if set(approval['candidate_refs']) <= nonfood
+                      else 'dietary_conflict_no_compatible_candidate')
 
         if reason == "candidate_price_or_eligibility_unresolved" and price_mode == "estimate":
             estimated = _estimated_single_product(requirement, evaluated_observation, filtered)
@@ -1738,13 +1056,6 @@ def build_product_plan(
             item["status"] = "selected"
             item["selection"] = selection
             selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
-            selected_refs = {product["product_ref"] for product in selection.get("products", [])}
-            selected_differences = [
-                difference for difference in selected_ordinary
-                if difference["product_ref"] in selected_refs
-            ]
-            if selected_differences:
-                item["semantic_equivalent_differences"] = selected_differences
         planned.append(item)
     planned_by_id = {item.get("requirement_id"): item for item in planned}
     allocated_refs: set[str | int] = set()
@@ -1815,7 +1126,7 @@ def build_product_plan(
     # An exact SKU selected for several compatible requirements is one stock
     # allocation. Recalculate against their combined quantity so per-line
     # rounding cannot overbuy it. Explicit cross-unit culinary allocations
-    # remain on the current-user shared_package path above.
+    # use the shared_package path above.
     selected_ref_owners: dict[str | int, list[dict[str, Any]]] = {}
     for row in planned:
         selection = row.get("selection") if isinstance(row, Mapping) else None
@@ -1973,7 +1284,7 @@ def build_product_plan(
         "status": status,
         "scope": {
             "search_semantics": "bounded_relevance_ranked",
-            "candidate_semantics": "exact_current_user_approved_refs_per_requirement",
+            "candidate_semantics": "exact_selected_refs_per_requirement",
             "maximum_requirements": MAX_REQUIREMENTS,
             "maximum_candidates_per_requirement": MAX_CANDIDATES_PER_REQUIREMENT,
             "maximum_combinations_per_requirement": MAX_COMBINATIONS,

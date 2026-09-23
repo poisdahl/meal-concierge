@@ -1,5 +1,14 @@
 # Bounded recipe selection
 
+For ordinary use, the host model reads exact full recipes and chooses them.
+Send `selection_mode="agent"`, chronological dates and ordered exact references
+to menu `plan`; this retains the model's order through the existing save handoff.
+Use one recipe per cooking date, with leftover dates supplied by accepted batch
+settings. Numeric goals are assessed but advisory unless named in `strict_targets`.
+Dietary hard rules, cooldown, source binding and readiness remain enforced.
+The automatic collection/ranking behavior below remains available in `ranked`
+mode and to clients that omit `selection_mode`.
+
 `recipe_selection.py` supplies the compact projection, source-family grouping,
 context queries, bounded retrieval and shortlist used by automatic selection.
 Application owns source reads, trusted normalization, immutable references and
@@ -85,7 +94,8 @@ Planner version `weekly-menu-v4` adds category-aware dinner selection and retain
 food-category matches for `diet.prioritise`, and positive leafy-green evidence
 on requested ISO weekdays or English weekday names. Whole grains and potatoes
 are distinct for whole-grain preference scoring. Existing time, feedback,
-variety and minimum dinner/vegetable targets remain active.
+variety and dinner/vegetable targets remain assessed; agent-mode numerical
+goals are advisory unless explicitly strict.
 
 Recognized plain fish ingredients with usable mass/serving evidence contribute
 listed grams per serving toward the weekly fish range. Mixed products and
