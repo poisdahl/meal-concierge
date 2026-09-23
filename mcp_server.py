@@ -1304,7 +1304,7 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
             if "sources" in requirement:
                 row["sources"] = requirement["sources"]
         observation = requirement.get("observation")
-        if isinstance(observation, dict):
+        if isinstance(observation, dict) and requirement.get("status") != "selected":
             products = observation.get("products") if isinstance(observation.get("products"), list) else []
             more_product_options = more_product_options or len(products) > candidate_limit
             row["observation"] = {
@@ -1321,6 +1321,16 @@ def _minimal_product_plan(plan: Any, *, candidate_limit: int) -> Any:
             }
         if "selection" in requirement:
             row["selection"] = _compact_product_selection(requirement["selection"])
+            observed_products = observation.get("products") if isinstance(observation, dict) else None
+            if isinstance(observed_products, list):
+                packages = {
+                    product.get("product_ref"): product.get("package")
+                    for product in observed_products if isinstance(product, dict)
+                }
+                for product in row["selection"]["products"]:
+                    package = packages.get(product.get("product_ref"))
+                    if "package" not in product and isinstance(package, dict):
+                        product["package"] = package
         dietary = _compact_dietary_findings(requirement.get("dietary_assessments"))
         if dietary:
             row["dietary_summary"] = dietary
