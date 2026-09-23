@@ -230,12 +230,25 @@ dedicated trusted source import/private restore handles those separately.
 ## Exact adaptations for planning
 
 `recipes action=adapt` takes exactly one original `discovery_ref` or
-`recipe_ref={id,revision}`, its returned `recipe_digest`, its
-`source_schema_version`, and a complete schema-2 `recipe` with
-`source.relationship="adapted"`. It preserves attribution, rights and effective
-store binding. Changed amount/unit/serving evidence must be an honest estimate
-with assumptions; callers cannot invent source facts, accepted estimates,
-calculation provenance, product hints or original snapshot hashes.
+`recipe_ref={id,revision}`, its returned original `recipe_digest` and
+`source_schema_version`, plus exactly one of `changes` or a complete schema-2
+`recipe`. The normal schema-2 changes path accepts optional `name`/`notes`,
+`ingredients=[{index,item,assumptions,quantity?,unit?}]` and complete `steps`.
+Indices are zero-based; ingredient edits require the complete coherent method.
+Optional top-level `portions` scales the exact original before edits; omitted
+amount/unit keeps the scaled value. The service preserves source text,
+attribution, rights, provider binding and untouched estimate/calculation evidence.
+Changed ingredients receive honest estimate evidence with the supplied assumptions;
+old product hints, acceptance and calculated provenance are removed only there.
+Original versus displayed portions and the original digest remain visible in
+agent reads. Read every ingredient/step page before adapting.
+
+The full `recipe` alternative retains the existing strict provenance checks and
+requires `source.relationship="adapted"`. It cannot be combined with top-level
+`portions`. Changed amount/unit/serving evidence must be an honest estimate with
+assumptions; callers cannot invent source facts, accepted estimates, calculation
+provenance, product hints or original snapshot hashes. Schema-1 originals require
+this full schema-2 adaptation path.
 
 The service derives a content-bound adaptation identity and returns a new frozen
 `discovery_ref`, digest, readiness and shopping requirements. The original stays

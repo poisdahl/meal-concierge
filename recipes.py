@@ -1184,6 +1184,60 @@ def adapt_recipe_input(value: Any, *, prior: Mapping[str, Any]) -> dict[str, Any
     return normalize_recipe(adapted, trusted_store_product_hints=True)
 
 
+def adapt_recipe_changes(changes: Any, *, prior: Mapping[str, Any], portions: Any = None) -> dict[str, Any]:
+    """Apply bounded authored changes to a service-owned exact source recipe."""
+    original = normalize_recipe(prior, trusted_store_product_hints=True)
+    if original["schema_version"] != 2:
+        raise RecipeError("change-based adaptation requires a schema_version 2 source")
+    if original["rights"]["storage"] != "full":
+        raise RecipeError("link_only recipes cannot be adapted into full content")
+    if not isinstance(changes, Mapping) or not changes or set(changes) - {"name", "notes", "ingredients", "steps"}:
+        raise RecipeError("adaptation changes support only name, notes, ingredients and steps")
+    target = _finite_positive(portions, "target portions") if portions is not None else None
+    candidate = (scale_recipe(original, target)
+                 if target is not None and target != original.get("portions") else deepcopy(original))
+    candidate["source"]["relationship"] = "adapted"
+    # The source snapshot describes the fetched original, not the authored dish.
+    candidate.pop("external_snapshot", None)
+    for field in ("name", "notes"):
+        if field in changes:
+            candidate[field] = changes[field]
+    if "steps" in changes:
+        candidate["steps"] = changes["steps"]
+    if "ingredients" in changes:
+        edits = changes["ingredients"]
+        if not isinstance(edits, list) or not edits or len(edits) > len(candidate["ingredients"]):
+            raise RecipeError("adaptation ingredients must be a nonempty bounded list")
+        if "steps" not in changes:
+            raise RecipeError("ingredient changes require complete adapted steps")
+        seen = set()
+        for edit in edits:
+            if (not isinstance(edit, Mapping) or set(edit) - {"index", "item", "assumptions", "quantity", "unit"}
+                    or not {"index", "item", "assumptions"} <= set(edit)):
+                raise RecipeError("adaptation ingredient change requires index, item and assumptions only")
+            index = edit["index"]
+            if type(index) is not int or not 0 <= index < len(candidate["ingredients"]) or index in seen:
+                raise RecipeError("adaptation ingredient index must be unique and in range")
+            seen.add(index)
+            ingredient = candidate["ingredients"][index]
+            source_text = ingredient.get("original_text") or ingredient.get("raw")
+            ingredient["item"] = _bounded_text(edit["item"], f"ingredients[{index}].item", required=True, maximum=300)
+            assumptions = _bounded_text(edit["assumptions"], f"ingredients[{index}].assumptions", required=True, maximum=1000)
+            for field in ("quantity", "unit"):
+                if field in edit:
+                    ingredient[field] = edit[field]
+            if ingredient.get("quantity") is not None and ingredient.get("unit") is not None:
+                ingredient["scalable"] = True
+            ingredient["raw"] = ingredient["item"]
+            ingredient["evidence"] = {
+                field: {"basis": "estimate" if ingredient.get(field) is not None else "unknown",
+                        "input": source_text, "assumptions": assumptions}
+                for field in ("quantity", "unit")
+            }
+            ingredient.pop("_store_product_hint", None)
+    return normalize_recipe(candidate, trusted_store_product_hints=True)
+
+
 def validate_recipe_image(recipe: Mapping[str, Any], assets: Any, *, prior: Mapping[str, Any] | None = None) -> None:
     """Validate a newly attached cover; existing text remains usable without it."""
     image = recipe.get("image") or {}

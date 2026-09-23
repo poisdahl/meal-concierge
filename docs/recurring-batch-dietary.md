@@ -42,7 +42,7 @@ New `diet.rules` entries specify an ingredient/allergen `term` and a `kind`:
 `allergy`, `sensitivity`, `preference`, `never_buy`, or ambiguous
 `allergy_or_sensitivity`. Do not infer diagnoses. Existing
 `allergies_or_sensitivities` strings stay ambiguous; existing `avoid` strings
-remain exclusions. Do not delete or soften a rule merely to proceed.
+remain ordinary preferences. Do not delete or soften a rule merely to proceed.
 
 Missing generic safety metadata no longer rejects every recipe. Recipes expose
 item-specific unknowns and deviations and can proceed to product selection.
@@ -175,3 +175,11 @@ in agent mode. Saved legacy/ranked menus keep their existing policy. A partial
 replan retains the whole-menu policy in `planning_scope`; a full replacement can
 adopt a new one. This distinction continues through product preparation and
 checkout and does not relax allergies, never-buy rules or retail uncertainty.
+
+Ordinary preferences remain advisory to the deterministic planner, but the host
+model must resolve obvious conflicts before saving a menu. It reads ingredients
+and method, adapts a dish first when requested, and verifies current replacement
+products during preparation. Plant-based is not a nutritional guarantee. Narrow
+cream/sour-cream preferences do not imply a milk allergy or a ban on all dairy;
+only explicit user intent changes stored rules. Numeric goals with missing
+evidence stay visibly unverified rather than being silently certified.

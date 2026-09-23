@@ -54,7 +54,7 @@ def build(output: Path, python_base: Path, site_packages: Path, socket_directory
     template = output / "template"
     (template / "bridge").mkdir(parents=True)
     (template / "skills/meal-concierge").mkdir(parents=True)
-    for name in ("mcp_server.py", "rpc_client.py", "cli.py"):
+    for name in ("mcp_server.py", "rpc_client.py", "cli.py", "agent_views.py"):
         shutil.copyfile(SOURCE / name, template / "bridge" / name)
     shutil.copyfile(SOURCE / "skill/SKILL.md", template / "skills/meal-concierge/SKILL.md")
     references = SOURCE / "skill/references"

@@ -1842,7 +1842,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool("meal_concierge_" + tool, arguments)
         self.assertFalse(result.is_error, result)
         text = json.loads(result.content[0].text)
-        if tool in {"menu", "products"}:
+        if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders"}:
             self.assertEqual(len(result.content), 1)
             self.assertEqual(result.content[0].type, "text")
             self.assertIsNone(result.structured_content)
@@ -1966,8 +1966,9 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             setup_gate = await self.call(client, "menu", action="plan", planner_input={"week": self.week()})
             self.assertNotIn("plan", setup_gate)
             self.assertTrue(setup_gate["configuration_required"])
-            self.assertEqual(setup_gate, await self.cli({"operation": "menu", "action": "plan", "interactive": True,
-                                                       "planner_input": {"week": self.week()}}))
+            self.assertEqual({key: value for key, value in setup_gate.items() if key != "projection"},
+                             await self.cli({"operation": "menu", "action": "plan", "interactive": True,
+                                             "planner_input": {"week": self.week()}}))
             await self.call(client, "setup", action="apply", keep_current=True)
             page = await self.call(client, "recipe_discovery", projection="summary", source="internal", limit=3)
             self.assertIsNotNone(page["next_cursor"])
@@ -1981,8 +1982,14 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("ingredients", summary)
                 self.assertEqual(summary["detail_fields"]["ingredients"], "not_loaded")
                 ref = summary["recipe_ref"]
-                detail = (await self.call(client, "recipes", action="get", recipe_id=ref["id"], revision=ref["revision"]))["recipe"]
+                compact_detail = await self.call(client, "recipes", action="get", recipe_id=ref["id"], revision=ref["revision"])
+                self.assertEqual(compact_detail["recipe_ref"], ref)
+                detail = (await self.cli({"operation": "recipes", "action": "get",
+                                         "recipe_id": ref["id"], "revision": ref["revision"]}))["recipe"]
                 self.assertEqual((detail["id"], detail["revision"]), (ref["id"], ref["revision"]))
+                self.assertEqual(compact_detail["name"], detail["name"])
+                self.assertEqual(compact_detail["ingredient_count"], len(detail["ingredients"]))
+                self.assertEqual(compact_detail["step_count"], len(detail["steps"]))
                 full.append(detail)
             summary_bytes = len(json.dumps(page["recipes"]).encode())
             full_bytes = len(json.dumps(full).encode())
@@ -2133,7 +2140,9 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             alternative = fresh["alternatives"][1]["save_ref"]
             saved = (await self.call(client, "menu", action="save", planner_ref=alternative))["menu"]
             self.assertEqual((await self.call(client, "menu"))["menu"], saved)
-            self.assertEqual(saved["planner_selection"]["selection_digest"], alternative["selection_digest"])
+            durable = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
+            self.assertEqual({key: durable[key] for key in saved}, saved)
+            self.assertEqual(durable["planner_selection"]["selection_digest"], alternative["selection_digest"])
 
     async def test_agent_exact_order_saves_and_prepares_products_with_advisory_minimum(self):
         manifest = json.loads((self.root / "manifest.json").read_text())
@@ -2160,9 +2169,11 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             saved = (await self.call(client, "menu", action="save",
                                      planner_ref=planned["save_ref"]))["menu"]
-            self.assertEqual(saved["planner_selection"]["request"]["selection_mode"], "agent")
+            durable = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
+            self.assertEqual({key: durable[key] for key in saved}, saved)
+            self.assertEqual(durable["planner_selection"]["request"]["selection_mode"], "agent")
             self.assertEqual(
-                [slot["reference"] for slot in saved["planner_selection"]["selection"]["slots"]],
+                [slot["reference"] for slot in durable["planner_selection"]["selection"]["slots"]],
                 [{"recipe_ref": candidate["recipe_ref"]} for candidate in candidates],
             )
 
@@ -2174,9 +2185,10 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             prepared = await self.call(client, "products", action="prepare",
                                        menu_ref={key: saved[key] for key in ("menu_id", "revision", "digest")},
                                        ingredient_decisions=decisions)
-            self.assertIn("product_plan", prepared, prepared)
-            self.assertEqual(prepared["product_plan"]["status"], "prepared")
-            self.assertEqual(prepared["product_plan"]["requirements"], [])
+            self.assertEqual(prepared["projection"], "agent")
+            self.assertEqual(prepared["status"], "prepared")
+            self.assertEqual(prepared["requirements"], [])
+            self.assertEqual(prepared["apply_arguments"]["product_plan_ref"], prepared["product_plan_ref"])
 
     async def test_nine_exact_candidates_fit_wire_and_save_after_restart(self):
         manifest = json.loads((self.root / "manifest.json").read_text())
@@ -2268,9 +2280,13 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                           planned["selection"]["batches"][0]["guidance"]["storage"])
             saved = (await self.call(client, "menu", action="save",
                                      planner_ref=choices[1]["save_ref"]))["menu"]
-            self.assertEqual(len(saved["slots"]), 7)
-            self.assertEqual(len(saved["batches"]), 3)
-            self.assertEqual(saved["planner_selection"]["selection_digest"],
+            durable = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
+            self.assertEqual({key: durable[key] for key in saved}, saved)
+            compact = await self.call(client, "menu")
+            self.assertEqual(compact["slots"]["total"], 7)
+            self.assertEqual(len(durable["slots"]), 7)
+            self.assertEqual(len(durable["batches"]), 3)
+            self.assertEqual(durable["planner_selection"]["selection_digest"],
                              choices[1]["save_ref"]["selection_digest"])
 
     async def test_oversized_exact_action_refs_return_compact_needs_input(self):
@@ -2321,9 +2337,11 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             planned = (await self.call(client, "menu", action="plan", planner_input={
                 "week": self.week(), "candidates": manifest["planner_candidates"][:7],
             }))["plan"]
-            current = (await self.call(
+            saved_menu = (await self.call(
                 client, "menu", action="save", planner_ref=planned["save_ref"]
             ))["menu"]
+            current = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
+            self.assertEqual({key: current[key] for key in saved_menu}, saved_menu)
 
             oversized = synthetic_recipe(900)
             oversized["name"] = "Syntetisk stor erstatningsmiddag"
@@ -2367,11 +2385,12 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.start_service()
         async with self.client() as client:
             applied = await self.call(client, "menu", **compact["apply_arguments"])
-            self.assertEqual(applied["status"], "applied")
-            self.assertEqual(applied["projection"], "committed_menu_ref")
+            self.assertEqual(applied["projection"], "agent")
+            self.assertNotEqual(applied["menu_ref"], request["menu_ref"])
+            self.assertEqual(applied["supersedes"], request["menu_ref"])
             self.assertLess(len(self.last_menu_wire), 45_000)
             self.assertEqual(
-                next(slot for slot in applied["menu_summary"]["slots"] if slot["date"] == replacement_date)["reference"],
+                next(slot for slot in applied["slots"]["items"] if slot["date"] == replacement_date)["reference"],
                 candidate,
             )
             current = (await self.cli({"operation": "menu", "action": "get"}))["menu"]
@@ -2434,19 +2453,27 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(planned["status"], "planned")
             planner_ref = planned["save_ref"]
             preview = await self.call(client, "products", action="prepare", planner_ref=planner_ref)
-            self.assertEqual(preview["product_plan"]["status"], "needs_input")
-            self.assertNotIn("product_plan_ref", preview)
+            self.assertEqual(preview["status"], "needs_input")
+            self.assertTrue(preview["preview"])
+            self.assertTrue(preview["product_plan_ref"].startswith("productplan_"))
+            self.assertNotIn("apply_arguments", preview)
             self.assertNotIn("partial_apply_arguments", preview)
-            requirement = preview["product_plan"]["requirements"][0]
-            self.assertEqual(requirement["observation"]["products"][0]["product_ref"], "101")
-            prepared = await self.call(client, "products", action="prepare", planner_ref=planner_ref,
+            requirement = preview["requirements"][0]
+            self.assertEqual(requirement["candidates"][0]["product_ref"], "101")
+            calls_before_get = (self.root / "provider.jsonl").read_text().splitlines()
+            recovered = await self.call(client, "products", action="get", planner_ref=planner_ref)
+            self.assertEqual(recovered["product_plan_ref"], preview["product_plan_ref"])
+            self.assertEqual(recovered["requirements"], preview["requirements"])
+            self.assertEqual((self.root / "provider.jsonl").read_text().splitlines(), calls_before_get)
+            prepared = await self.call(client, "products", action="prepare",
+                                       product_plan_ref=preview["product_plan_ref"],
                                        candidate_approvals=[{
                                            "requirement_id": requirement["requirement_id"],
                                            "candidate_refs": ["101"],
                                            "selection_reason": "Exact carrot ingredient and observed 200 g package",
                                        }])
-            self.assertEqual(prepared["product_plan"]["status"], "prepared")
-            self.assertEqual(prepared["product_plan"]["requirements"][0]["selection"]["products"][0]["product_ref"], "101")
+            self.assertEqual(prepared["status"], "prepared")
+            self.assertEqual(prepared["requirements"][0]["selection"]["products"][0]["product_ref"], "101")
             self.assertNotIn("apply_arguments", prepared)
             self.assertIn("save", prepared["next"].lower())
             self.assertIsNone((await self.call(client, "menu"))["menu"])
@@ -2496,13 +2523,20 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                          for i in range(7)]
             prepared = await self.call(client, "products", action="prepare",
                                        planner_handoff=handoff, ingredient_decisions=decisions)
-            self.assertEqual(prepared["apply_arguments"]["planner_selection_ref"], {
+            self.assertEqual(prepared["status"], "prepared")
+            self.assertTrue(prepared["preview"])
+            self.assertEqual(prepared["requirements"], [])
+            self.assertNotIn("apply_arguments", prepared)
+            self.assertIsNone((await self.call(client, "menu"))["menu"])
+            # The legacy raw handoff contract remains available to full API clients.
+            raw_prepared = await self.cli({"operation": "products", "action": "prepare",
+                                          "planner_handoff": handoff, "ingredient_decisions": decisions})
+            self.assertEqual(raw_prepared["apply_arguments"]["planner_selection_ref"], {
                 key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest")
             })
-            self.assertEqual(prepared["product_plan"]["binding"]["planner_selection"], {
-                key: handoff[key] for key in ("planner_version", "input_digest", "selection_digest")
-            })
-            self.assertEqual(prepared["product_plan"]["requirements"], [])
+            self.assertEqual(raw_prepared["product_plan"]["binding"]["kind"], "planner_selection")
+            self.assertEqual(raw_prepared["product_plan"]["binding"]["planner_handoff"], handoff)
+            self.assertEqual(raw_prepared["product_plan"]["requirements"], [])
             accepted = await self.call(client, "feedback", action="accept",
                                       planner_handoff=handoff, idempotency_key="accept-resolved")
             replay = await self.call(client, "feedback", action="accept",

@@ -63,6 +63,7 @@ from retail_mcp import (
     retail_delivery_slot_date,
 )
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MENY_ORDER_TIMEOUT, MENY_READ_TIMEOUT, MenyClient, MenyOrderChangeDispatchError, meny_checkout_reviews_match, normalize_product_ref
+from agent_views import project_agent_result
 from recipes import RecipeError, RecipeStore, normalize_recipe, normalize_source_url, recipe_key, scale_recipe, validate_week
 from planner import (
     MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week,
@@ -478,6 +479,23 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("operation must be bounded text")
         if action is not None and (not isinstance(action, str) or not 1 <= len(action) <= 40):
             raise HouseholdError("action must be bounded text")
+        response_view = request.get("response_view", "full")
+        if not isinstance(response_view, str) or response_view not in {"full", "agent"}:
+            raise HouseholdError("response_view must be full or agent")
+        view_offset = request.get("view_offset", 0)
+        view_limit = request.get("view_limit", 10)
+        view_section = request.get("view_section", "summary")
+        if type(view_offset) is not int or view_offset < 0:
+            raise HouseholdError("view_offset must be a nonnegative integer")
+        if type(view_limit) is not int or not 1 <= view_limit <= 20:
+            raise HouseholdError("view_limit must be between 1 and 20")
+        if not isinstance(view_section, str) or view_section not in {"summary", "ingredients", "steps", "provenance", "items", "issues"}:
+            raise HouseholdError("unknown view_section")
+        view_fields = {"view_offset", "view_limit", "view_section"}
+        if operation != "products":
+            view_fields.add("response_view")
+        if view_fields.intersection(request):
+            request = {key: value for key, value in request.items() if key not in view_fields}
         try:
             if operation == "products" and action == "lowest_cost":
                 with self._recipe_planner_operation(), self.product_plan_lock:
@@ -531,7 +549,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "message": str(exc),
                 }
             raise
-        if self.provider == "meny" and request.get("operation") in {"catalog", "products", "cart", "delivery", "orders", "checkout"}:
+        if self.provider == "meny" and request.get("operation") in {"catalog", "products", "cart", "delivery", "orders", "checkout"} and not (operation == "products" and action == "get"):
             self.integration = {
                 "status": "ready",
                 "provider": "meny",
@@ -539,6 +557,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 "server": {"name": "MENY website"},
                 "tool_count": 11,
             }
+        if response_view == "agent" and operation != "products":
+            result = project_agent_result(
+                operation, action, result, offset=view_offset,
+                limit=view_limit, section=view_section,
+            )
         return result
 
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -609,7 +632,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         )
         meny_read = self.provider == "meny" and (
             operation == "catalog"
-            or (operation == "products" and action != "record_ingredients")
+            or (operation == "products" and action not in {"record_ingredients", "get"})
             or (operation == "cart" and action in {None, "get"})
             or (operation == "delivery" and action in {None, "list"})
             or (operation == "orders" and action in {None, "list", "get"})
@@ -635,7 +658,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 if operation == "orders":
                     return self._orders(guarded)
                 return self._email(guarded)
-        if self.provider == "meny" and operation in {"catalog", "products", "cart", "delivery", "orders"}:
+        if self.provider == "meny" and operation in {"catalog", "products", "cart", "delivery", "orders"} and not (operation == "products" and action == "get"):
             pending_status = (self.store.read().get("pending_checkout") or {}).get("status")
             if pending_status in UNRESOLVED_CHECKOUT_STATUSES:
                 raise HouseholdError("reconcile the pending MENY checkout before using another browser operation")

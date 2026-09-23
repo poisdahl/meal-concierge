@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+from copy import deepcopy
 from contextlib import asynccontextmanager, contextmanager
 import importlib.metadata
 import importlib.util
@@ -79,14 +80,27 @@ def serve(root):
                 query = arguments["queries"][0]
                 if query.startswith("wire-continuation-"):
                     index = int(query.removeprefix("wire-continuation-").split(" ", 1)[0])
-                    for product in result["products"]:
-                        product["product_ref"] = 20_000 + index
-                        product["product_id"] = 20_000 + index
+                    original = result["products"][0]
+                    result["products"] = []
+                    for variant in range(5):
+                        product = deepcopy(original)
+                        product["product_ref"] = 20_000 + index * 10 + variant
+                        product["product_id"] = product["product_ref"]
+                        product["name"] = query
+                        product["dietary_evidence"] = {"ingredients": "Observed retailer ingredient text. " * 220}
+                        result["products"].append(product)
+                    result["scope"]["returned"] = len(result["products"])
             with (root / "provider.jsonl").open("a") as log:
                 log.write(json.dumps({"tool": tool, "arguments": arguments}) + "\n")
             return result
 
     class ObservedApplication(Application):
+        def _products_operation(self, request):
+            result = super()._products_operation(request)
+            with (root / "internal-plan-sizes.jsonl").open("a") as log:
+                log.write(json.dumps({"bytes": len(json.dumps(result).encode())}) + "\n")
+            return result
+
         def handle(self, request):
             result = super().handle(request)
             with (root / "application.jsonl").open("a") as log:
@@ -152,10 +166,11 @@ async def call(client, tool, **args):
     result = await client.call_tool("meal_concierge_" + tool, args)
     assert not result.is_error, result
     text = json.loads(result.content[0].text)
-    if tool in {"menu", "products"}:
+    if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders"}:
         assert len(result.content) == 1 and result.content[0].type == "text", result
         assert result.structured_content is None, result
         assert isinstance(text, dict), result
+        assert len(result.model_dump_json(by_alias=True)) < 45_000, "actual MCP envelope exceeded agent budget"
     else:
         assert isinstance(result.structured_content, dict), result
         assert text == result.structured_content, "text/structured output diverged"
@@ -195,7 +210,7 @@ async def sdk_checks(root, process):
             assert tool.input_schema["type"] == "object"
             description = (tool.description or "").casefold()
             assert "cli.py" not in description and "local cli" not in description, tool.name
-            if tool.name in {"meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products"}:
+            if tool.name in {"meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products", "meal_concierge_status", "meal_concierge_recipes", "meal_concierge_recipe_discovery", "meal_concierge_cart", "meal_concierge_orders"}:
                 assert tool.output_schema is None
             else:
                 assert tool.output_schema["type"] == "object"
@@ -213,6 +228,9 @@ async def sdk_checks(root, process):
         assert schemas["meal_concierge_cart"]["$defs"]["CartOperation"]["required"] == ["product_id", "quantity"]
         assert "adapt" in schemas["meal_concierge_recipe_discovery"]["properties"]["action"]["enum"]
         assert "recipe_ref" in schemas["meal_concierge_recipe_discovery"]["properties"]
+        assert "changes" in schemas["meal_concierge_recipe_discovery"]["properties"]
+        assert schemas["meal_concierge_recipes"]["properties"]["view_limit"]["maximum"] == 20
+        assert "get" in schemas["meal_concierge_products"]["properties"]["action"]["enum"]
         assert "selection_mode" in schemas["meal_concierge_menu"]["$defs"]["PlannerInput"]["properties"]
         product_schema = schemas["meal_concierge_products"]
         menu_properties = schemas["meal_concierge_menu"]["properties"]
@@ -279,6 +297,35 @@ async def sdk_checks(root, process):
         await call(client, "product_favorites", action="add", product_id=str(product["product_id"]), product_name=product["name"], quantity=2)
         favorite = (await call(client, "product_favorites"))["product_favorites"][0]
         assert (favorite["product_id"], favorite["product_name"], favorite["quantity"]) == ("10", "Ägg", 2)
+        adaptation_source = {
+            "schema_version": 2, "name": "Synthetic cream and beans", "portions": 1,
+            "ingredients": [
+                {"item": "beans", "quantity": 100, "unit": "g",
+                 "evidence": {key: {"basis": "estimate", "assumptions": "Measured drained beans."}
+                              for key in ("quantity", "unit")}},
+                {"item": "cream", "quantity": 100, "unit": "ml"},
+            ],
+            "steps": ["Simmer beans, then stir in cream."],
+            "source": {"kind": "user", "relationship": "user_supplied"},
+            "rights": {"storage": "full"},
+        }
+        source_saved = await call(client, "recipe_write", recipe=adaptation_source,
+                                  idempotency_key="mc01-adapt-source")
+        source_ref = {key: source_saved["recipe"][key] for key in ("id", "revision")}
+        source_view = await call(client, "recipes", action="get", recipe_id=source_ref["id"],
+                                 revision=source_ref["revision"], portions=2)
+        assert source_view["original_portions"] == 1 and source_view["display_portions"] == 2
+        adapted = await call(client, "recipe_discovery", action="adapt", recipe_ref=source_ref,
+            recipe_digest=source_view["recipe_digest"], source_schema_version=source_view["source_schema_version"],
+            portions=2, changes={"ingredients": [{"index": 1, "item": "unsweetened soy yogurt",
+                "assumptions": "Use the same volume; stir in off heat to prevent splitting."}],
+                "steps": ["Simmer beans; remove from heat and fold in soy yogurt."]})
+        assert adapted["discovery_ref"]
+        assert adapted["ingredients"]["items"][1]["item"] == "unsweetened soy yogurt"
+        assert adapted["ingredients"]["items"][1]["quantity"] == {"numerator": 200, "denominator": 1}
+        original_again = await call(client, "recipes", action="get", recipe_id=source_ref["id"])
+        assert original_again["recipe_digest"] == source_view["recipe_digest"]
+        assert original_again["ingredients"]["items"][1]["item"] == "cream"
         recipe = full_recipe("Synthetic ägg middag")
         recipe["ingredients"] = [{"raw": "8 stk ägg", "quantity": 8, "unit": "stk", "item": "ägg", "scalable": True}]
         saved = await call(client, "recipe_write", recipe=recipe, idempotency_key="mc01-recipe")
@@ -286,73 +333,67 @@ async def sdk_checks(root, process):
         same = await call(client, "recipe_write", recipe=recipe, idempotency_key="mc01-recipe")
         assert same["recipe"]["id"] == ref["id"]
         fetched = await call(client, "recipes", action="get", recipe_id=ref["id"], revision=ref["revision"])
-        assert fetched["recipe"]["id"] == ref["id"]
-        saved_menu = (await call(client, "menu", action="save", menu=menu("2026-W40", {"recipe_ref": ref})))["menu"]
+        assert fetched["recipe_ref"] == ref
+        saved_menu = (await call(client, "menu", action="save", menu=menu("2026-W40", {"recipe_ref": ref})))["menu_ref"]
         menu_ref = {key: saved_menu[key] for key in ("menu_id", "revision", "digest")}
-        plan = (await call(client, "products", menu_ref=menu_ref))["product_plan"]
-        assert plan["binding"]["menu_ref"] == menu_ref and plan["status"] == "needs_input"
-        assert any(r["reason"] == "exact_candidate_scope_needs_selection" for r in plan["unresolved_requirements"]), plan
+        plan = await call(client, "products", menu_ref=menu_ref)
+        assert plan["menu_ref"] == menu_ref and plan["status"] == "needs_input"
+        assert plan["progress"]["issue_count"] == 1, plan
         approval = {"requirement_id": plan["requirements"][0]["requirement_id"], "candidate_refs": [product["product_ref"]]}
-        approved_plan = (await call(client, "products", menu_ref=menu_ref, candidate_approvals=[approval]))["product_plan"]
-        assert approved_plan["binding"]["menu_ref"] == menu_ref
+        approved_plan = await call(client, "products", menu_ref=menu_ref, candidate_approvals=[approval])
+        assert approved_plan["menu_ref"] == menu_ref
         assert approved_plan["requirements"][0]["candidate_approval"]["candidate_refs"] == [10]
 
-        # Force the exact maximum-size incomplete-continuation wire path. The
-        # Application rotates the opaque ref before mcp_server projects the
-        # large response, so the projection must carry the replacement pair.
+        # A full 64-need internal plan exceeds the RPC cap. Only bounded
+        # service-side pages cross the Unix and MCP transports.
         oversized_recipe = full_recipe("Oversized continuation transport")
         oversized_recipe["ingredients"] = [{
             "quantity": 6, "unit": "stk", "scalable": True,
             "item": f"wire-continuation-{index:02d} ägg " + "x" * 80,
         } for index in range(64)]
-        oversized_saved = await call(
-            client, "recipe_write", recipe=oversized_recipe,
-            idempotency_key="mc01-oversized-continuation",
-        )
-        oversized_ref = {
-            "id": oversized_saved["recipe"]["id"],
-            "revision": oversized_saved["recipe"]["revision"],
-        }
-        oversized_menu = (await call(
-            client, "menu", action="save",
-            menu=menu("2026-W41", {"recipe_ref": oversized_ref}), menu_ref=menu_ref,
-        ))["menu"]
-        menu_ref = {
-            key: oversized_menu[key] for key in ("menu_id", "revision", "digest")
-        }
-        first_projection = await call(client, "products", menu_ref=menu_ref)
-        first_product_ref = first_projection["product_plan_ref"]
-        assert first_projection["product_selection_digest"]
-        approvals = [{
-            "requirement_id": row["requirement_id"],
-            "candidate_refs": [20_000 + int(row["item"].split("-", 2)[2].split(" ", 1)[0])],
-            "package_count": 1,
-            "quantity_basis": "one exact observed package; " + "reviewed " * 63,
-        } for row in first_projection["product_plan"]["requirements"][:48]]
-        continued_projection = await call(
-            client, "products", product_plan_ref=first_product_ref,
-            candidate_approvals=approvals,
-        )
-        continued_raw = next(
-            row["result"] for row in reversed([
-                json.loads(line) for line in (root / "application.jsonl").read_text().splitlines()
-            ]) if row["request"].get("product_plan_ref") == first_product_ref
-        )
-        raw_text = json.dumps(continued_raw, ensure_ascii=False, separators=(",", ":"))
-        projected_text = json.dumps(
-            continued_projection, ensure_ascii=False, separators=(",", ":"),
-        )
-        assert _mcp_text_wire_chars(raw_text) >= MCP_PRODUCT_WIRE_BUDGET
-        assert _mcp_text_wire_chars(projected_text) < MCP_PRODUCT_WIRE_BUDGET
-        assert continued_projection["projection"] == "partial_apply_arguments_with_issues"
-        replacement_ref = continued_projection["product_plan_ref"]
-        assert replacement_ref != first_product_ref
-        assert continued_raw["product_plan_ref"] == replacement_ref
-        assert continued_projection["product_selection_digest"]
-        assert continued_projection["partial_product_plan_digest"]
-        assert continued_projection["remaining_issue_count"] == 16
+        oversized_saved = await call(client, "recipe_write", recipe=oversized_recipe,
+                                      idempotency_key="mc01-oversized-continuation")
+        oversized_ref = {key: oversized_saved["recipe"][key] for key in ("id", "revision")}
+        oversized_menu = (await call(client, "menu", action="save",
+            menu=menu("2026-W41", {"recipe_ref": oversized_ref}), menu_ref=menu_ref))["menu_ref"]
+        menu_ref = {key: oversized_menu[key] for key in ("menu_id", "revision", "digest")}
+        first = await call(client, "products", menu_ref=menu_ref)
+        first_product_ref = first["product_plan_ref"]
+        rows = list(first["requirements"])
+        page = first
+        while page["next_offset"] is not None:
+            page = await call(client, "products", action="get", product_plan_ref=first_product_ref,
+                              offset=page["next_offset"])
+            rows.extend(page["requirements"])
+        assert len(rows) == 64
+        assert rows[0]["candidates"], rows[0]
+        assert max(json.loads(line)["bytes"] for line in
+                   (root / "internal-plan-sizes.jsonl").read_text().splitlines()) > 2 * 1024 * 1024, (root / "internal-plan-sizes.jsonl").read_text()
+        approvals = [{"requirement_id": row["requirement_id"],
+                      "candidate_refs": [row["candidates"][0]["product_ref"]],
+                      "search_query": row["search_query"],
+                      "package_count": 1, "quantity_basis": "One exact observed six-piece package."}
+                     for row in rows]
+        # Intentionally ignore a completed prepare response, as after lost
+        # output/compaction; recover the rotated handle without provider calls.
+        await call(client, "products", product_plan_ref=first_product_ref,
+                   candidate_approvals=approvals[:48])
+        before_get = (root / "provider.jsonl").read_text()
+        recovered = await call(client, "products", action="get", menu_ref=menu_ref)
+        assert recovered["product_plan_ref"] != first_product_ref
+        assert recovered["progress"]["selected_count"] == 48
+        assert (root / "provider.jsonl").read_text() == before_get
         stale = await call(client, "products", product_plan_ref=first_product_ref)
         assert stale["ok"] is False and "stale, unknown" in stale["error"], stale
+        final = await call(client, "products", product_plan_ref=recovered["product_plan_ref"],
+                           candidate_approvals=approvals[48:])
+        assert final["status"] == "prepared", final
+        applied = await call(client, "products", **final["apply_arguments"], cart_change_requested=True)
+        assert applied["applied"], applied
+        cart = await call(client, "cart")
+        assert cart["cart_digest"]
+        cleared_large = await call(client, "cart", action="clear", cart_digest=cart["cart_digest"])
+        assert cleared_large["cleared"], cleared_large
         # Three ordinary domain rejections must not look like three broken MCP
         # calls to clients that disable a server after repeated tool errors.
         for tool, arguments, message in (
@@ -380,7 +421,7 @@ async def sdk_checks(root, process):
 
     async with session(root, killable=True) as (client, _):
         reconnected = await call(client, "menu")
-        assert {key: reconnected["menu"][key] for key in menu_ref} == menu_ref
+        assert reconnected["menu_ref"] == menu_ref
         profile = await call(client, "profile")
         assert profile["profile"]["meals"]["portions"] == 3
         (root / "hold").touch()
@@ -411,10 +452,10 @@ async def sdk_checks(root, process):
                 await asyncio.sleep(0.02)
         assert process.poll() is None
         cart = await call(client, "cart")
-        assert cart_summary(cart)["items"][0]["quantity"] == 1
+        assert cart["lines"]["items"][0]["quantity"] == 1
         await call(client, "cart", action="reconcile_change")
         writes = [json.loads(line) for line in (root / "provider.jsonl").read_text().splitlines() if json.loads(line)["tool"] == "manipulate_cart"]
-        assert len(writes) == 3, writes
+        assert len(writes) == 5, writes
         assert (await call(client, "status"))["household"] == marker
         await call(client, "profile", action="reset", paths=["meals.portions"])
         print(json.dumps({"reconnect": "same service/menu/profile", "interruption": "bridge killed after dispatch; Application completed once; no retry", "provider_writes": len(writes)}), flush=True)
@@ -515,7 +556,7 @@ def codex_check(root, executable):
     for entry in completed:
         assert entry["server"] == "mc01" and entry["error"] is None
         assert any(r["request"]["operation"] == entry["tool"].removeprefix("meal_concierge_")
-                   and r["result"] == entry["result"]["structured_content"] for r in recorded), entry
+                   and r["result"] == (entry["result"].get("structured_content") or json.loads(entry["result"]["content"][0]["text"])) for r in recorded), entry
     print(json.dumps({"client": version, "command": args[:-1], "mcp_calls": completed, "test_instance": marker}), flush=True)
 
 

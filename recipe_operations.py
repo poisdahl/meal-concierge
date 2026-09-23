@@ -22,7 +22,7 @@ from recipe_import_sources import fetch_public_webpage, read_native_recipe, fetc
 from recipe_assets import RecipeAssetError, sanitize_image
 from urllib.error import HTTPError
 from core import HouseholdError
-from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, recipe_digest, accept_recipe_estimates
+from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, adapt_recipe_changes, recipe_digest, accept_recipe_estimates
 from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value, normalize_categories, RECIPE_CATEGORIES
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
@@ -3186,7 +3186,16 @@ class RecipeOperations:
             if (request.get("recipe_digest") != recipe_digest(original)
                     or request.get("source_schema_version") != original["schema_version"]):
                 raise RecipeError("adaptation requires the exact source digest and schema version")
-            adapted = adapt_recipe_input(request.get("recipe"), prior=original)
+            has_recipe = request.get("recipe") is not None
+            has_changes = request.get("changes") is not None
+            if has_recipe == has_changes:
+                raise RecipeError("adaptation requires exactly one recipe or changes")
+            if has_recipe:
+                if request.get("portions") is not None:
+                    raise RecipeError("adaptation portions apply only to changes")
+                adapted = adapt_recipe_input(request["recipe"], prior=original)
+            else:
+                adapted = adapt_recipe_changes(request["changes"], prior=original, portions=request.get("portions"))
             self._require_recipe_provider(adapted)
             identity = "adapt:v1:" + hashlib.sha256(canonical({
                 "original_digest": recipe_digest(original),
