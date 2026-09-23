@@ -115,6 +115,13 @@ def workflow_status(state):
                       if legacy_child else "This same-order recovery review expired without payment. Prepare a fresh review with the same checkout_payment; preserve the original journal.")
         elif action == "confirm":
             reason = "Review and confirm this exact prepared recovery under the existing confirmation policy." if attempt is child else "Continue the exact prepared checkout under the existing confirmation policy."
+        elif (attempt.get("payment_abort") or {}).get("status") == "closed":
+            reason = ("The exact payment is closed. For an explicit order cancellation, "
+                      "use orders cancel_prepare for this same order; a different payment method needs a fresh reviewed switch.")
+        elif (attempt.get("payment_abort") or {}).get("status") in {"observing", "closing", "unknown"}:
+            action = "abort_payment"
+            reason = ("Observe the already started exact payment abort with this confirmation. "
+                      "An unknown result remains pending; do not cancel or pay again.")
         elif (method == "vipps" and attempt.get("vipps_request_status") == "sent"
               and isinstance(attempt.get("vipps_request_context"), Mapping)
               and bool(attempt["vipps_request_context"])
@@ -139,6 +146,10 @@ def workflow_status(state):
                       "The service must independently verify it before any confirmation. Do not erase the journal or retry from the report alone.")
         else:
             reason = "Reconcile this exact payment attempt before any further payment; its outcome is not established."
+            if (state.get("provider") == "oda" and method == "saved_card"
+                    and isinstance(attempt.get("authentication_context"), Mapping)):
+                reason += (" For an explicit cancellation or method change, abort_payment with this active "
+                           "confirmation can close the retained 3D Secure payment; an unknown closure stays pending.")
         next_action = {"operation": "checkout", "action": action, "reason": reason}
         if expired_child:
             next_action["recovery"] = True
@@ -152,6 +163,16 @@ def workflow_status(state):
             next_action["payment_method"] = method
         if not expired_child and isinstance(attempt.get("confirmation_id"), str) and attempt["confirmation_id"]:
             next_action["confirmation_id"] = attempt["confirmation_id"]
+        if (state.get("provider") == "oda" and method == "saved_card"
+                and isinstance(attempt.get("authentication_context"), Mapping)
+                and action == "reconcile" and not cancellation):
+            next_action["on_explicit_cancellation"] = {
+                "operation": "checkout", "action": "abort_payment",
+                "confirmation_id": attempt["confirmation_id"]}
+        if cancellation:
+            next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm",
+                           "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id"),
+                           "reason": "Finish the exact prepared order cancellation; do not start another payment."}
     elif cancellation:
         next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation."}
     elif change:

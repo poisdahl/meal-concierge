@@ -2396,6 +2396,12 @@ class OdaBrowser:
         except HouseholdError:
             return None
 
+    def abort_card_payment(self, context, before_abort, *, order_id,
+                           order_change_id=None, deadline=None, prior=None):
+        from oda_payment_abort import abort_card_payment
+        return abort_card_payment(self, context, before_abort, order_id=order_id,
+                                  order_change_id=order_change_id, deadline=deadline, prior=prior)
+
     def choose_checkout_bank_app(self, context, before_choice, *, deadline=None):
         """Choose the observed issuer's app method once, without reading inputs."""
         node = shutil.which("node")

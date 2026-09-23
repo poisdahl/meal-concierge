@@ -9422,8 +9422,10 @@ class FlowTests(unittest.TestCase):
         self.assertFalse(result["retry_allowed"])
         self.assertNotIn("recovery_preparation_available", result)
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "awaiting_user_payment")
-        with self.assertRaisesRegex(HouseholdError, "reconcile the pending checkout"):
-            self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        blocked = self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        self.assertFalse(blocked["available"])
+        self.assertEqual(blocked["next_action"]["confirmation_id"], prepared["confirmation_id"])
+        self.assertEqual(blocked["next_action"]["action"], "abort_payment")
         self.assertEqual(self.browser.checkout_clicks, 1)
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
@@ -9439,15 +9441,19 @@ class FlowTests(unittest.TestCase):
         result = self.app.handle({"operation": "checkout", "action": "reconcile"})
         self.assertEqual(result["unpaid_order_id"], "new-order")
         self.assertNotIn("recovery_preparation_available", result)
-        with self.assertRaisesRegex(HouseholdError, "reconcile the pending checkout"):
-            self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        blocked = self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        self.assertFalse(blocked["available"])
+        self.assertEqual(blocked["next_action"]["confirmation_id"], prepared["confirmation_id"])
+        self.assertEqual(blocked["next_action"]["action"], "abort_payment")
         self.assertEqual(result["payment"], {
             "provider_status": "unpaid_order", "source": "order_tracking",
             "authorization": "unknown", "charge": "unknown",
         })
-        for order_id in ("old-unpaid", "new-order"):
-            with self.assertRaisesRegex(HouseholdError, "reconcile the pending checkout"):
-                self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": order_id})
+        with self.assertRaisesRegex(HouseholdError, "reconcile the pending checkout"):
+            self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "old-unpaid"})
+        blocked_again = self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        self.assertFalse(blocked_again["available"])
+        self.assertEqual(blocked_again["next_action"]["action"], "abort_payment")
         self.browser.vipps_request_state = "expired"
         expired = self.app.handle({"operation": "checkout", "action": "reconcile"})
         self.assertTrue(expired["payment_failed"])

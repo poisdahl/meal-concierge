@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+import hashlib
 import math
 import re
 import secrets
@@ -57,6 +58,152 @@ ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
 
 
 class OrderOperations:
+    @staticmethod
+    def _checkout_cancellation_digest(pending):
+        return hashlib.sha256(canonical(pending).encode()).hexdigest()
+
+    def _exact_checkout_order_for_cancellation(self, pending, order_id, deadline):
+        """Bind an order to the frozen checkout, regardless of payment status."""
+        if (self.provider != "oda" or not isinstance(pending, Mapping)
+                or pending.get("order_change") or pending.get("automatic_checkout")
+                or pending.get("unpaid_order_id") != order_id):
+            raise HouseholdError("Cancellation requires the exact pending Oda order")
+        child = pending.get("recovery")
+        if isinstance(child, Mapping) and child.get("order_id") != order_id:
+            raise HouseholdError("The recovery belongs to another order")
+        current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
+        order = current["order"]
+        require_provider_identity(order, order_id)
+        require_provider_identity(current["tracking"], order_id, tracking=True)
+        delivery = pending["summary"]["delivery"]
+        expected_binding = require_order_binding({
+            "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
+            "receipt_address": delivery["address"],
+        })
+        addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
+            **order, "deliveryAddress": delivery["address"]}
+        if not order_matches_checkout(addressed, pending["summary"], provider="oda"):
+            raise HouseholdError("The merchant order differs from the pending checkout")
+        observed_binding = self.browser.read_order_binding(
+            order_id, order, deadline=deadline, expected_binding=expected_binding)
+        if canonical(require_order_binding(observed_binding)) != canonical(expected_binding):
+            raise HouseholdError("The merchant account differs from the pending checkout")
+        return current
+
+    @staticmethod
+    def _checkout_attempt_for_abort(pending, confirmation_id):
+        child = pending.get("recovery")
+        attempt = child if isinstance(child, Mapping) else pending
+        if (attempt.get("confirmation_id") != confirmation_id
+                or attempt.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}):
+            raise HouseholdError("Use the exact current dispatched checkout confirmation")
+        return attempt
+
+    @staticmethod
+    def _checkout_payment_closed(pending):
+        child = pending.get("recovery")
+        attempt = child if isinstance(child, Mapping) else pending
+        closure = (attempt.get("payment_abort") or {}).get("closure") or {}
+        failure = attempt.get("payment_failure") or {}
+        order_id = child.get("order_id") if isinstance(child, Mapping) else pending.get("unpaid_order_id")
+        if isinstance(child, Mapping) and child.get("status") == "awaiting_confirmation":
+            retained_source = child.get("closed_source")
+            if (isinstance(retained_source, Mapping)
+                    and retained_source.get("confirmation_id") != child.get("confirmation_id")
+                    and retained_source.get("order_id") == pending.get("unpaid_order_id")
+                    and OrderOperations._checkout_payment_closed({**pending, "recovery": retained_source})):
+                return True
+            switch = child.get("payment_switch") or {}
+            source = switch.get("closure") or {}
+            untouched = not any(child.get(key) for key in (
+                "authentication_context", "vipps_request_context", "payment_requested_at",
+                "vipps_request_attempted_at", "payment_failure", "payment_abort"))
+            card_source_closed = (
+                source.get("source") in {"oda_three_ds", "native_payment_failure"}
+                and source.get("terminal_status") == ("checkout-payment-retry" if source.get("source") == "oda_three_ds" else "FAILED")
+                and source.get("order_id") == order_id
+                and (isinstance(source.get("payment_id"), str) and bool(source["payment_id"])
+                     or isinstance(source.get("card_failure_context"), Mapping)
+                     and isinstance(source["card_failure_context"].get("checkout_request_digest"), str)
+                     and re.fullmatch(r"[0-9a-f]{64}", source["card_failure_context"]["checkout_request_digest"])))
+            vipps_source_closed = (
+                source.get("terminal_status") in {"REJECTED", "FAILED", "TIMEOUT"}
+                and isinstance(source.get("gateway_url_digest"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", source["gateway_url_digest"]))
+            source_closed = (switch.get("status") == "closed"
+                and isinstance(switch.get("source_confirmation_id"), str)
+                and switch["source_confirmation_id"] != child.get("confirmation_id")
+                and switch.get("checkout_payment") == (child.get("browser_review") or {}).get("payment_choice")
+                and child.get("order_id") == pending.get("unpaid_order_id")
+                and untouched and source.get("status") == "closed"
+                and (card_source_closed or vipps_source_closed))
+            return bool(source_closed)
+        method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if isinstance(child, Mapping) else (pending.get("checkout_payment") or {}).get("method")
+        if method == "saved_card":
+            context = attempt.get("authentication_context") or {}
+            positively_closed = (closure.get("status") == "closed"
+                and closure.get("order_id") == order_id
+                and closure.get("payment_id") == context.get("payment_id")
+                and (closure.get("source"), closure.get("terminal_status")) in {
+                    ("oda_three_ds", "checkout-payment-retry"),
+                    ("native_payment_failure", "FAILED")})
+        elif method == "vipps":
+            context = attempt.get("vipps_request_context") or {}
+            positively_closed = (closure.get("status") == "closed"
+                and closure.get("gateway_url_digest") == context.get("gateway_url_digest")
+                and closure.get("terminal_status") in {"REJECTED", "FAILED", "TIMEOUT"})
+        else:
+            positively_closed = False
+        card_context = attempt.get("authentication_context") or {}
+        card_identity = (isinstance(card_context, Mapping)
+                         and isinstance(card_context.get("tab_id"), str) and bool(card_context["tab_id"])
+                         and (isinstance(card_context.get("payment_id"), str) and bool(card_context["payment_id"])
+                              or isinstance(card_context.get("checkout_request_id"), str)
+                              and bool(card_context["checkout_request_id"])
+                              and isinstance(card_context.get("checkout_request_digest"), str)
+                              and re.fullmatch(r"[0-9a-f]{64}", card_context["checkout_request_digest"])))
+        native_failure = (method == "saved_card" and card_identity
+                          and failure == {"payment_failed": True, "order_id": order_id})
+        vipps_failure = (method == "vipps" and failure == {
+            "payment_failed": True, "order_id": order_id, "reason": "vipps_request_expired"}
+            and isinstance(attempt.get("vipps_request_context"), Mapping))
+        return positively_closed or native_failure or vipps_failure
+
+    def _archive_cancelled_checkout(self, state, pending, order_id):
+        """Close both confirmation IDs only after exact merchant cancellation."""
+        if canonical(state.get("pending_checkout")) != canonical(pending):
+            raise HouseholdError("The checkout changed while closing the cancelled order")
+        for attempt in (pending, pending.get("recovery")):
+            if not isinstance(attempt, Mapping):
+                continue
+            confirmation_id = attempt["confirmation_id"]
+            terminal = {
+                "confirmed": False, "cancelled": True, "order_id": order_id,
+                "confirmation_id": confirmation_id, "retry_allowed": False,
+                "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
+                "next": "The exact merchant order is cancelled. Do not confirm or retry this payment.",
+            }
+            self._store_protected_result(state, confirmation_id, "checkout", terminal,
+                                         target_id=order_id,
+                                         intent_signature=checkout_intent_signature(pending["summary"]))
+            state["protected_results"][confirmation_id]["cancelled_attempt"] = deepcopy(attempt)
+        state["pending_checkout"] = None
+
+    def _cancellation_checkout_guard(self, state, cancellation):
+        checkout = state.get("pending_checkout")
+        digest = cancellation.get("checkout_digest")
+        if digest is None:
+            if (checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
+                raise HouseholdError("reconcile the pending checkout before cancelling an order")
+            return None
+        if (not isinstance(checkout, Mapping)
+                or self._checkout_cancellation_digest(checkout) != digest
+                or (checkout.get("recovery") or checkout).get("confirmation_id") != cancellation.get("checkout_confirmation_id")
+                or checkout.get("unpaid_order_id") != cancellation.get("order_id")
+                or not self._checkout_payment_closed(checkout)):
+            raise HouseholdError("the bound payment changed before order cancellation")
+        return checkout
+
     def _delivery_price_review(self, summary, change):
         """One authorization rule; adapters supply actual full-order totals."""
         requested = change.get("requested_delivery") if change else None
@@ -1363,11 +1510,47 @@ class OrderOperations:
                     raise HouseholdError("reconcile the pending cancellation before preparing another")
                 if state.get("order_change"):
                     raise HouseholdError("finish or abort the active order change before cancellation")
+                pending_checkout = deepcopy(state.get("pending_checkout"))
+            if (pending_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
+                if (self.provider != "oda" or pending_checkout.get("order_change")
+                        or pending_checkout.get("unpaid_order_id") != order_id
+                        or (pending_checkout.get("recovery") or {}).get("order_id", order_id) != order_id):
+                    raise HouseholdError("reconcile the pending checkout before preparing cancellation")
+                attempt = pending_checkout.get("recovery") or pending_checkout
+                confirmation_id = attempt.get("confirmation_id")
+                abort = attempt.get("payment_abort") or {}
+                if (abort.get("closure") or {}).get("status") == "paid":
+                    return {"available": False, "order_id": order_id, "retry_allowed": False,
+                            "next_action": {"operation": "checkout", "action": "reconcile",
+                                            "confirmation_id": confirmation_id},
+                            "next": "The exact payment reports acceptance. Reconcile it before any order cancellation."}
+                if not self._checkout_payment_closed(pending_checkout):
+                    method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is not pending_checkout else (pending_checkout.get("checkout_payment") or {}).get("method")
+                    context = attempt.get("authentication_context") if method == "saved_card" else attempt.get("vipps_request_context")
+                    next_action = {"operation": "checkout", "action": "abort_payment" if isinstance(context, Mapping) else "reconcile",
+                                   "confirmation_id": confirmation_id}
+                    return {"available": False, "order_id": order_id, "retry_allowed": False,
+                            "next_action": next_action,
+                            "next": "Close or observe this exact pending payment before preparing cancellation; preserve its checkout journal. A missing bank approval is not proof of failure."}
             current = self._orders({"action": "get", "order_id": order_id, "_deadline": cancellation_deadline})
             with self._browser_operation(cancellation_deadline):
                 state = self.store.read()
-                if (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                    raise HouseholdError("reconcile the pending checkout before preparing cancellation")
+                active_checkout = deepcopy(state.get("pending_checkout"))
+                if (active_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
+                    if (canonical(active_checkout) != canonical(pending_checkout)
+                            or not self._checkout_payment_closed(active_checkout)):
+                        raise HouseholdError("the pending payment changed before cancellation review")
+                    current = self._exact_checkout_order_for_cancellation(
+                        active_checkout, order_id, cancellation_deadline)
+                    if str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}:
+                        with self.store.locked() as locked:
+                            if canonical(locked.get("pending_checkout")) != canonical(active_checkout):
+                                raise HouseholdError("the checkout changed before cancellation closure")
+                            self._mark_order_cancelled(locked, order_id, provider=self.provider,
+                                                       active_provider=self.provider)
+                            self._archive_cancelled_checkout(locked, active_checkout, order_id)
+                        return {"cancelled": True, "order_id": order_id, "retry_allowed": False,
+                                "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"}}
                 if state.get("order_change"):
                     raise HouseholdError("finish or abort the active order change before cancellation")
                 browser = self.browser.review_cancellation(order_id, current["order"], deadline=cancellation_deadline)
@@ -1377,7 +1560,10 @@ class OrderOperations:
                 with self.store.locked() as state:
                     if canonical(state.get("pending_cancellation")) != canonical(baseline):
                         raise HouseholdError("cancellation state changed while preparing the summary")
-                    state["pending_cancellation"] = {"order_id": order_id, "confirmation_id": confirmation_id, "before": current, "browser": browser, "expires_at": (self._now() + timedelta(minutes=30)).isoformat(), "status": "awaiting_confirmation"}
+                    state["pending_cancellation"] = {"order_id": order_id, "confirmation_id": confirmation_id, "before": current, "browser": browser, "expires_at": (self._now() + timedelta(minutes=30)).isoformat(), "status": "awaiting_confirmation",
+                                                     **({"checkout_digest": self._checkout_cancellation_digest(active_checkout),
+                                                         "checkout_confirmation_id": (active_checkout.get("recovery") or active_checkout)["confirmation_id"]}
+                                                        if (active_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES else {})}
                 return {
                     "available": True,
                     "confirmation_id": confirmation_id,
@@ -1474,8 +1660,7 @@ class OrderOperations:
                 current_pending = state.get("pending_cancellation")
                 if not current_pending or current_pending.get("status") != "awaiting_confirmation" or canonical(current_pending) != canonical(pending):
                     raise HouseholdError("no fresh cancellation confirmation is pending")
-                if (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                    raise HouseholdError("reconcile the pending checkout before cancelling an order")
+                self._cancellation_checkout_guard(state, pending)
                 state["pending_cancellation"]["status"] = "clicking"
             pending["status"] = "clicking"
 
@@ -1489,6 +1674,10 @@ class OrderOperations:
                     expected = {**pending, "status": "clicking"}
                     if canonical(current_pending) != canonical(expected):
                         raise CancellationPreconditionError("cancellation confirmation changed before the final click")
+                    try:
+                        self._cancellation_checkout_guard(state, pending)
+                    except HouseholdError as exc:
+                        raise CancellationPreconditionError(str(exc)) from exc
             try:
                 self.browser.submit_cancellation(
                     order_id,
@@ -1520,10 +1709,13 @@ class OrderOperations:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
                     raise HouseholdError("cancellation state changed while reconciling the order")
                 if cancelled:
+                    bound_checkout = self._cancellation_checkout_guard(state, pending)
                     state["pending_cancellation"] = None
                     self._mark_order_cancelled(
                         state, order_id, provider=self.provider, active_provider=self.provider,
                     )
+                    if bound_checkout is not None:
+                        self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
                         "tracking_status": str(tracking.get("status") or "").casefold(),
@@ -1623,10 +1815,13 @@ class OrderOperations:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
                     raise HouseholdError("cancellation state changed while reconciling the order")
                 if cancelled:
+                    bound_checkout = self._cancellation_checkout_guard(state, pending)
                     state["pending_cancellation"] = None
                     self._mark_order_cancelled(
                         state, order_id, provider=self.provider, active_provider=self.provider,
                     )
+                    if bound_checkout is not None:
+                        self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
                         "tracking_status": str((current.get("tracking") or {}).get("status") or "").casefold(),
@@ -1927,6 +2122,8 @@ class OrderOperations:
                 raise HouseholdError("order_id is available only for exact-order recovery preparation")
         if action == "switch_payment":
             return self._checkout_switch_payment(deadline, request.get("confirmation_id"), request.get("checkout_payment"))
+        if action == "abort_payment":
+            return self._checkout_abort_payment(deadline, request.get("confirmation_id"))
         if action == "abandon_unpaid":
             return self._checkout_abandon_unpaid(
                 deadline,
@@ -2837,6 +3034,8 @@ class OrderOperations:
         confirmation_id = child["confirmation_id"]
         if self._read_protected_result(state, confirmation_id, "checkout"):
             raise CheckoutPreconditionError("Recovery confirmation already has a protected result")
+        if state.get("pending_cancellation"):
+            raise CheckoutPreconditionError("The exact order has a pending cancellation; do not send another payment")
         current = state.get("pending_checkout")
         current_child = (current or {}).get("recovery")
         if (not isinstance(current, Mapping)
@@ -2892,6 +3091,127 @@ class OrderOperations:
                 "summary": self._recovery_summary(pending, child["browser_review"], child["dietary_assessment"]),
                 "next": "Review this same merchant payment. Confirm only this fresh recovery confirmation after authorization; no replacement payment has been sent."}
 
+    def _checkout_abort_payment(self, deadline, confirmation_id):
+        """Close only the exact active provider payment, retaining its checkout."""
+        if self.provider != "oda" or self.browser is None or not confirmation_id:
+            raise HouseholdError("Payment abort requires the exact active Oda confirmation")
+        with self._browser_operation(deadline):
+            snapshot = self.store.read()
+            if snapshot.get("pending_cancellation"):
+                raise HouseholdError("Finish the pending order cancellation before changing its payment")
+            pending = deepcopy(snapshot.get("pending_checkout"))
+            if not isinstance(pending, Mapping) or pending.get("order_change"):
+                raise HouseholdError("No exact new-order Oda payment is pending abort")
+            attempt = self._checkout_attempt_for_abort(pending, confirmation_id)
+            order_id = safe_order_id(attempt.get("order_id") if attempt is not pending else pending.get("unpaid_order_id"))
+            current = self._exact_checkout_order_for_cancellation(pending, order_id, deadline)
+            tracking = str(current["tracking"].get("status") or "").casefold()
+            if tracking in {"cancelled", "canceled"}:
+                return {"confirmed": False, "payment_abort_status": "closed", "order_id": order_id,
+                        "confirmation_id": confirmation_id, "retry_allowed": False,
+                        "next": "The merchant order is already cancelled. Reconcile that exact cancellation; do not repeat payment."}
+            method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is not pending else (pending.get("checkout_payment") or {}).get("method")
+            if method not in {"saved_card", "vipps"}:
+                raise HouseholdError("The active Oda payment method is unavailable")
+            context = attempt.get("authentication_context") if method == "saved_card" else attempt.get("vipps_request_context")
+            failure = attempt.get("payment_failure") or {}
+            known_card_failure = (method == "saved_card" and failure.get("payment_failed") is True
+                                  and self._checkout_payment_closed(pending))
+            if method == "saved_card" and not isinstance(context, Mapping) and not (
+                    known_card_failure):
+                raise HouseholdError("The exact card payment context is unavailable; reconcile it before aborting")
+            if method == "vipps" and not isinstance(context, Mapping):
+                raise HouseholdError("The exact Vipps request is unavailable; reconcile it before aborting")
+            prior = deepcopy(attempt.get("payment_abort") or {})
+            if prior and (prior.get("confirmation_id") != confirmation_id
+                          or prior.get("order_id") != order_id or prior.get("method") != method):
+                raise HouseholdError("The retained payment abort belongs to another attempt")
+            source_switch = attempt.get("payment_switch") or {}
+            if (method == "vipps" and not prior
+                    and source_switch.get("source_confirmation_id") == confirmation_id
+                    and (source_switch.get("cancel_attempted") or (source_switch.get("closure") or {}).get("status") in {"closed", "paid"})):
+                inherited_closure = source_switch.get("closure") or {}
+                prior = {"confirmation_id": confirmation_id, "order_id": order_id,
+                         "method": method, "status": inherited_closure.get("status") if inherited_closure.get("status") in {"closed", "paid"} else "observing",
+                         "cancel_attempted": bool(source_switch.get("cancel_attempted")),
+                         **({"cancel_evidence": deepcopy(source_switch["cancel_evidence"])}
+                            if source_switch.get("cancel_evidence") else {}),
+                         **({"closure": deepcopy(source_switch["closure"])}
+                            if isinstance(source_switch.get("closure"), Mapping) else {})}
+
+            def update_abort(changes):
+                nonlocal pending, attempt, prior
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_checkout")) != canonical(pending):
+                        raise HouseholdError("The payment changed during abort")
+                    target = state["pending_checkout"]["recovery"] if attempt is not pending else state["pending_checkout"]
+                    target["payment_abort"] = {**prior, **deepcopy(changes)}
+                    pending = deepcopy(state["pending_checkout"])
+                    attempt = pending["recovery"] if "recovery" in pending else pending
+                    prior = deepcopy(attempt["payment_abort"])
+
+            if not attempt.get("payment_abort"):
+                update_abort({"confirmation_id": confirmation_id, "order_id": order_id,
+                              "method": method, "status": prior.get("status", "observing"),
+                              "cancel_attempted": bool(prior.get("cancel_attempted")),
+                              **({"cancel_evidence": deepcopy(prior["cancel_evidence"])}
+                                 if prior.get("cancel_evidence") else {}),
+                              **({"closure": deepcopy(prior["closure"])}
+                                 if isinstance(prior.get("closure"), Mapping) else {})})
+
+            def before_abort(evidence):
+                if prior.get("cancel_attempted"):
+                    raise HouseholdError("The payment cancellation was already attempted; observe it without repeating")
+                update_abort({"cancel_attempted": True, "cancel_evidence": deepcopy(evidence),
+                              "status": "closing"})
+
+            closure = prior.get("closure")
+            if not isinstance(closure, Mapping) or closure.get("status") not in {"closed", "paid"}:
+                if method == "saved_card":
+                    if known_card_failure:
+                        closure = {"status": "closed", "order_id": order_id,
+                                   "payment_id": (context or {}).get("payment_id"),
+                                   "terminal_status": "FAILED", "source": "native_payment_failure",
+                                   "cancel_attempted": False}
+                    else:
+                        closure = self.browser.abort_card_payment(
+                            context, before_abort, order_id=order_id, deadline=deadline,
+                            prior=deepcopy(prior))
+                else:
+                    closure = self.browser.close_vipps_request(
+                        context, before_abort, deadline=deadline, prior=deepcopy(prior))
+                if not isinstance(closure, Mapping):
+                    closure = {"status": "unknown"}
+                card_proofs = ({("oda_three_ds", "checkout-payment-retry"),
+                                ("native_payment_failure", "FAILED")}
+                               if closure.get("status") == "closed" else
+                               {("oda_three_ds", "checkout-payment-success")})
+                if closure.get("status") in {"closed", "paid"} and (
+                        method == "saved_card" and (
+                            closure.get("order_id") != order_id
+                            or closure.get("payment_id") != (context or {}).get("payment_id")
+                            or (closure.get("source"), closure.get("terminal_status")) not in card_proofs)
+                        or method == "vipps" and (
+                            closure.get("gateway_url_digest") != context.get("gateway_url_digest")
+                            or closure.get("payment_id") != (prior.get("cancel_evidence") or {}).get("payment_id", closure.get("payment_id")))):
+                    closure = {"status": "unknown"}
+                update_abort({"closure": deepcopy(dict(closure)),
+                              "status": closure.get("status") if closure.get("status") in {"closed", "paid"} else "unknown"})
+            status = closure.get("status")
+            result = {"confirmed": False, "confirmation_id": confirmation_id,
+                      "order_id": order_id, "payment_abort_status": status,
+                      "retry_allowed": False}
+            if status == "paid":
+                reconciled = self._checkout_reconcile_unlocked(deadline, confirmation_id)
+                return {**reconciled, "payment_abort_status": "paid", "retry_allowed": False,
+                        "next": "The payment may have been accepted. Reconcile this exact purchase before any order cancellation."}
+            if status == "closed":
+                return {**result, "payment_closed": True,
+                        "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
+                        "next": "The exact payment is closed. For an explicit same-order cancellation, use orders cancel_prepare; a different payment method requires a separately reviewed switch."}
+            return {**result, "payment_closed": False,
+                    "next": "The payment closure is unknown. Resume abort_payment with this confirmation to observe it; do not click or pay again."}
+
     def _checkout_switch_payment(self, deadline, confirmation_id, checkout_payment):
         if self.provider != "oda" or self.browser is None:
             raise HouseholdError("Payment switching requires the dedicated Oda browser")
@@ -2910,6 +3230,8 @@ class OrderOperations:
                                           _switch_confirmation_id=confirmation_id)
         with self._browser_operation(deadline):
             state = self.store.read()
+            if state.get("pending_cancellation"):
+                raise HouseholdError("Finish the pending order cancellation before changing its payment")
             completed = self._read_protected_result(state, confirmation_id, "checkout")
             if completed:
                 return completed
@@ -2940,11 +3262,17 @@ class OrderOperations:
             if method.get("method") == payment["method"]:
                 raise HouseholdError("The requested payment method is already in use; reconcile this attempt")
             result = self._checkout_reconcile_unlocked(deadline, confirmation_id)
-            if result.get("confirmed"):
+            if result.get("confirmed") or result.get("cancelled"):
                 return result
             pending = deepcopy(self.store.read().get("pending_checkout"))
             attempt = pending["recovery"] if source_child else pending
             change = pending.get("order_change") or {}
+            abort = attempt.get("payment_abort") or {}
+            abort_closure = abort.get("closure") or {}
+            closed_abort = abort_closure.get("status") == "closed" and self._checkout_payment_closed(pending)
+            if abort.get("cancel_attempted") and not closed_abort:
+                return {**result, "payment_switch_pending": True, "retry_allowed": False,
+                        "next": "The prior payment abort is unresolved. Resume abort_payment with this confirmation to observe it; do not cancel or pay again."}
             if change.get("requested_delivery"):
                 raise HouseholdError("Payment switching is unavailable for this delivery change")
             if method.get("method") == "vipps":
@@ -2983,7 +3311,7 @@ class OrderOperations:
                     raise HouseholdError("The exact Vipps request is not retained; reconcile its original payment without another dispatch")
             else:
                 failure = attempt.get("payment_failure") or {}
-                if failure.get("payment_failed") is not True:
+                if failure.get("payment_failed") is not True and not closed_abort:
                     return {**result, "payment_switch_pending": True,
                             "next": "The original card payment has no verified terminal failure. Complete or resolve that same bank payment, then reconcile; no replacement payment has been sent."}
             inherited = attempt.get("payment_switch") or {}
@@ -3011,12 +3339,14 @@ class OrderOperations:
                 update_switch({"cancel_attempted": True, "cancel_evidence": evidence, "status": "closing"})
 
             if (switch.get("closure") or {}).get("status") != "closed":
-                if method.get("method") == "vipps":
+                if closed_abort:
+                    closure = deepcopy(abort_closure)
+                elif method.get("method") == "vipps":
                     closure = self.browser.close_vipps_request(context, before_cancel, deadline=deadline, prior=deepcopy(switch))
                 else:
                     card_context = attempt.get("authentication_context") or {}
                     closure = {"status": "closed", "terminal_status": "FAILED", "source": "native_payment_failure",
-                               "payment_id": card_context.get("payment_id")}
+                               "payment_id": card_context.get("payment_id"), "order_id": failure["order_id"]}
                     if card_context.get("checkout_request_id"):
                         closure.update(card_failure_context=deepcopy(card_context),
                                        order_id=failure["order_id"], order_change_id=failure.get("order_change_id"))
@@ -3240,7 +3570,10 @@ class OrderOperations:
     def _checkout_recovery_prepare_unlocked(self, deadline, checkout_payment=None,
                                             requested_order_id=None,
                                             original_confirmation_id=None, *, _switch_payment=False):
-        pending = deepcopy(self.store.read().get("pending_checkout"))
+        state = self.store.read()
+        if state.get("pending_cancellation"):
+            raise HouseholdError("Finish the pending order cancellation before changing its payment")
+        pending = deepcopy(state.get("pending_checkout"))
         if not pending or pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}:
             raise HouseholdError("No original dispatched checkout is pending recovery")
         if (requested_order_id is not None
@@ -3380,6 +3713,20 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
+        source_attempt = previous if isinstance(previous, Mapping) else pending
+        if (self.provider == "oda" and not pending.get("order_change")
+                and self._checkout_payment_closed(pending)):
+            child["closed_source"] = deepcopy(source_attempt.get("closed_source") or {
+                "confirmation_id": source_attempt["confirmation_id"],
+                "status": source_attempt.get("status"), "order_id": order_id,
+                "browser_review": {"payment_choice": deepcopy(
+                    (source_attempt.get("browser_review") or {}).get("payment_choice")
+                    or pending.get("checkout_payment"))},
+                "authentication_context": deepcopy(source_attempt.get("authentication_context")),
+                "vipps_request_context": deepcopy(source_attempt.get("vipps_request_context")),
+                "payment_failure": deepcopy(source_attempt.get("payment_failure")),
+                "payment_abort": deepcopy(source_attempt.get("payment_abort")),
+            })
         if switch := self._closed_payment_switch(pending):
             child["payment_switch"] = {**deepcopy(switch), "checkout_payment": deepcopy(payment)}
         prior_vipps_request_status = previous.get("vipps_request_status") if isinstance(previous, Mapping) else None
@@ -3951,6 +4298,8 @@ class OrderOperations:
         context = attempt.get("authentication_context")
         if attempt.get("payment_failure"):
             return {}
+        if ((attempt.get("payment_abort") or {}).get("closure") or {}).get("status") == "closed" and self._checkout_payment_closed(pending):
+            return {}
         if not context and attempt.get("authentication_unresolved") is not True:
             return {}
         observed = self.browser.checkout_payment_authentication(context, deadline=deadline) if context else None
@@ -3968,7 +4317,14 @@ class OrderOperations:
                             or self.provider == "oda" and failure.get("order_change_id") != (expected_change if change else None)):
                         raise HouseholdError("Recovery bank verification resolved to another merchant change")
                 candidate = {**pending, "payment_failure": failure} if change and attempt is pending else pending
-                if failure["order_id"] != self._checkout_recovery_target(candidate, deadline):
+                if (self.provider == "oda" and not change
+                        and pending.get("unpaid_order_id") == failure["order_id"]
+                        and not pending.get("automatic_checkout")):
+                    # This is observation of a terminal native payment, not a
+                    # request to dispatch a retry. The retry page may disappear
+                    # after 3D Secure closes, while the frozen order remains.
+                    self._exact_checkout_order_for_cancellation(candidate, failure["order_id"], deadline)
+                elif failure["order_id"] != self._checkout_recovery_target(candidate, deadline):
                     raise HouseholdError("The original bank verification resolved to another merchant order")
                 with self.store.locked() as state:
                     if canonical(state.get("pending_checkout")) != canonical(pending):
@@ -4084,8 +4440,11 @@ class OrderOperations:
         with self.store.locked() as state:
             pending = deepcopy(state.get("pending_checkout"))
             recovered = self._read_protected_result(state, confirmation_id, "checkout") if confirmation_id else None
+            cancellation = deepcopy(state.get("pending_cancellation"))
         if recovered:
             return recovered
+        if cancellation:
+            raise HouseholdError("Finish or reconcile the pending order cancellation before checkout reconciliation")
         if confirmation_id and isinstance(pending, Mapping) and confirmation_id not in {
                 pending.get("confirmation_id"), (pending.get("recovery") or {}).get("confirmation_id")}:
             raise HouseholdError("checkout reconciliation does not match the pending attempt")
@@ -4369,6 +4728,21 @@ class OrderOperations:
             tracking_id = str(tracking.get("orderNumber") or tracking.get("order_number") or tracking.get("order_id") or tracking.get("id") or "")
             order = {**candidates[0], **details}
         tracking_status = str((tracking or {}).get("status") or "").casefold()
+        if (self.provider == "oda" and tracking_status in {"cancelled", "canceled"}
+                and candidate_id == details_id == tracking_id == pending.get("unpaid_order_id")
+                and not self.store.read().get("pending_cancellation")):
+            self._exact_checkout_order_for_cancellation(pending, candidate_id, deadline)
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("The checkout changed while verifying merchant cancellation")
+                self._mark_order_cancelled(state, candidate_id, provider=self.provider,
+                                           active_provider=self.provider)
+                self._archive_cancelled_checkout(state, pending, candidate_id)
+            return {"confirmed": False, "cancelled": True, "order_id": candidate_id,
+                    "confirmation_id": confirmation_id or (pending.get("recovery") or pending)["confirmation_id"],
+                    "retry_allowed": False,
+                    "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
+                    "next": "The exact merchant order is cancelled. Do not confirm or retry its payment."}
         recovery_dispatched = bool(
             pending.get("recovery")
             and pending["recovery"].get("status") != "awaiting_confirmation"
@@ -4404,10 +4778,35 @@ class OrderOperations:
         )
         payment_page_status = None
         tracking_conflict = False
+        active_abort = active_attempt.get("payment_abort") or {}
+        paid_card_closure = active_abort.get("closure") or {}
+        card_context = active_attempt.get("authentication_context") or {}
+        exact_paid_card_abort = (
+            self.provider == "oda" and active_payment.get("method") == "saved_card"
+            and active_abort.get("confirmation_id") == active_attempt.get("confirmation_id")
+            and paid_card_closure.get("status") == "paid"
+            and paid_card_closure.get("source") == "oda_three_ds"
+            and paid_card_closure.get("terminal_status") == "checkout-payment-success"
+            and paid_card_closure.get("order_id") == pending.get("unpaid_order_id")
+            and paid_card_closure.get("payment_id") == card_context.get("payment_id")
+            and (active_attempt is pending or active_attempt.get("order_id") == pending.get("unpaid_order_id"))
+        )
+        active_vipps_context = active_attempt.get("vipps_request_context") or {}
+        exact_paid_vipps_abort = (
+            self.provider == "oda" and active_payment.get("method") == "vipps"
+            and active_abort.get("confirmation_id") == active_attempt.get("confirmation_id")
+            and paid_card_closure.get("status") == "paid"
+            and paid_card_closure.get("terminal_status") == "ACCEPTED"
+            and paid_card_closure.get("gateway_url_digest") == active_vipps_context.get("gateway_url_digest")
+            and isinstance(paid_card_closure.get("payment_id"), str) and bool(paid_card_closure["payment_id"])
+            and active_vipps_context.get("order_id") == pending.get("unpaid_order_id")
+            and (active_attempt is pending or active_attempt.get("order_id") == pending.get("unpaid_order_id"))
+        )
         page_bound_before_retry = (
             self.provider == "oda"
             and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
             and not exact_retry_payment_authorized
+            and not (exact_paid_card_abort or exact_paid_vipps_abort)
             and not owner_payment_completed
         )
         if (
