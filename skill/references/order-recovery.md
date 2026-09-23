@@ -15,7 +15,7 @@ are not confirmation of a new purchase or order change.
 | Reduce an order | `orders remove_prepare` with desired remaining quantities, then unchanged review through `remove_confirm`; uncertain result uses `remove_reconcile` |
 | Cancel an order | `orders cancel_prepare`, then its exact confirmation/submission; uncertain result uses `cancel_reconcile` |
 | Uncertain checkout/payment | `checkout reconcile` with the original confirmation/idempotency identity |
-| Explicit Oda Vipps-to-card switch | `checkout switch_payment` on the existing confirmation with the requested saved-card override |
+| Explicit Oda payment-method switch | `checkout switch_payment` on the current confirmation with the requested Vipps or saved-card override |
 
 Follow returned arguments and the discovered tool's provider-specific guidance.
 Do not clear unrelated cart goods to start an order edit. Existing-order changes
@@ -38,9 +38,20 @@ Mathem uses SEK. Reuse valid authorization within its actual scope.
 ## Payments and recovery
 
 Do not change payment methods automatically. An accepted merchant order is not
-proof of settled payment. Report the service's separate order/payment outcome;
+proof of settled payment. Distinguish a Meal Concierge verification failure from
+a documented retailer/payment-provider rejection; name the actual source.
+Report the service's separate order/payment outcome;
 only a matched submit/reconcile with `confirmed=true` establishes success for
 that intent. `manual_checkout_required` is a handoff, not success.
+
+Oda supports saved cards and Vipps, including an explicit switch in either
+direction. A prepared review can change method before dispatch without changing
+the household default. After dispatch, preserve the current confirmation and
+use `switch_payment`; it reconciles that attempt before returning any replacement
+review. Card replacement requires the exact native terminal failure. Vipps
+replacement requires verified native closure (and may cancel that exact request
+once when the user asks to switch). Never describe an unsubmitted hosted form as
+a sent notification.
 
 For Oda Vipps, preserve the bound pending attempt while awaiting user payment or
 when its outcome is unknown. A missing phone notification or merchant unpaid
@@ -58,3 +69,22 @@ If the response explicitly establishes no dispatch and gives a safe fresh
 prepare path, follow that supported path within the existing mandate. Otherwise
 keep the original journal and reconcile. Do not restore older state over a
 possibly completed payment, cancellation or send.
+
+## Checkout product display differences
+
+A manual new-checkout `prepare` can return `line_difference` with a digest and
+indexed raw cart/checkout rows. Inspect the complete product name, description,
+brand, package and quantity. Exact native product identities take precedence.
+If every remaining pair is demonstrably the same product with a cosmetic
+presentation difference, repeat `prepare` with `identity_review` containing that
+digest and `decisions` (`expected_index`, `actual_index`, `reason`) for the
+unresolved pairs. Explain the actual evidence in each reason; do not merely say
+“same product”. This is model judgment within the authorized purchase, not a new
+user approval step. If the evidence is ambiguous, obtain the missing product
+information instead of guessing.
+
+The service retains every raw field and binds these decisions to this exact
+checkout, account, delivery, amount and quantities. A changed checkout requires
+a new review. Decisions cannot override conflicting IDs, missing/extra goods,
+quantity changes or indistinguishable variants, and never become global aliases.
+Existing-order edits and payment recovery retain their original goods binding.

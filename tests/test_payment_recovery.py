@@ -2805,14 +2805,7 @@ class OdaAdditionPaymentTests(unittest.TestCase):
                     self.call("confirm", confirmation_id=prepared["confirmation_id"])
                 self.assertNotIn("vipps_request_context", self.app.store.read()["pending_checkout"])
 
-    def test_override_rejects_unrelated_checkout_and_vipps_zero_delta(self):
-        with self.app.store.locked() as state:
-            original = deepcopy(state["order_change"])
-            state["order_change"] = None
-        with self.assertRaisesRegex(HouseholdError, "active manual Oda addition"):
-            self.call("prepare", checkout_payment={"method": "saved_card"})
-        with self.app.store.locked() as state:
-            state["order_change"] = original
+    def test_vipps_zero_delta_cannot_prepare(self):
         self.cart["totalGrossAmount"] = 0
         with self.assertRaisesRegex(HouseholdError, "positive reviewed amount"):
             self.call("prepare")
@@ -2873,6 +2866,7 @@ class OdaAdditionBrowserTests(unittest.TestCase):
                     browser._settle = lambda *a: None
                     browser._require_checkout_time = lambda *a: None
                     browser._checkout_dispatch_tab = lambda: "owned"
+                    browser._oda_card_requests = lambda tab: []
                     browser._eval = evaluate
                     browser._capture_checkout_payment = lambda tab, **kw: captures.append((tab, kw)) or {}
                     review = browser.review_order_change(cart, "order-1", order, payment=payment,
@@ -2962,7 +2956,7 @@ class RetryAmountTests(unittest.TestCase):
         expected = {
             "delivery_address": "Eksempelveien 1",
             "delivery_text": "12. september 09:00–12:00",
-            "lines": [{"identity": "Pasta 500 g Sopps", "quantity": 1}],
+            "lines": [{"name": "Pasta", "description": "500 g", "brand": "Sopps", "quantity": 1}],
             "product_count": 1,
             "total_minor": 4550,
         }
@@ -3119,7 +3113,7 @@ class RetryAmountTests(unittest.TestCase):
         expected = {
             "delivery_address": "Eksempelveien 1",
             "delivery_text": "12. september 09:00–12:00",
-            "lines": [{"identity": "Pasta 500 g Sopps", "quantity": 1}],
+            "lines": [{"name": "Pasta", "description": "500 g", "brand": "Sopps", "quantity": 1}],
             "product_count": 1,
             "total_minor": 4550,
         }
@@ -3226,6 +3220,7 @@ class RetryAmountTests(unittest.TestCase):
                             vipps_expected_total=(4550 if method == "vipps" else None),
                             vipps_source_url=(url if method == "vipps" else None),
                             before_vipps_request=None,
+                            on_vipps_gateway=None,
                         )
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
                     self.assertEqual(len(observed), 9 if change else 1)
@@ -3267,6 +3262,7 @@ class RetryAmountTests(unittest.TestCase):
             )
             browser._require_checkout_time = lambda seconds: events.append("time")
             browser._checkout_dispatch_tab = lambda: "tab-1"
+            browser._oda_card_request_fence = lambda *args: None
             browser._settle = lambda seconds: events.append(("settle", seconds))
             browser._eval = evaluate
             browser._capture_checkout_payment = mock.Mock(return_value={"captured": True})
@@ -3595,6 +3591,15 @@ class RetryAmountTests(unittest.TestCase):
         self.assertFalse(mismatch["amounts_valid"])
         self.assertIn("row_arithmetic", mismatch["amount_check_failures"])
 
+        arbitrary_label = execute(
+            _oda_checkout_amount_script(10000, expected_product_count=1, retry=True),
+            [["1 vare", "108,10 kr"], ["Tilfeldig rabatt", "-8,10 kr"],
+             ["Total inkl. MVA", "100,00 kr"]],
+        )["result"]
+        self.assertTrue(arbitrary_label["amounts_valid"])
+        self.assertEqual(arbitrary_label["itemized_discount_rows"],
+                         [{"label": "Tilfeldig rabatt", "amount": -810}])
+
         for row in (
             ["Tilfeldig rabatt", "-8,10 kr"],
             ["8kr: Produkt A", "8,10 kr"],
@@ -3612,7 +3617,8 @@ class RetryAmountTests(unittest.TestCase):
                     ["Total inkl. MVA", "2 394,47 kr"],
                 ])["result"]
                 self.assertFalse(unknown["amounts_valid"])
-                self.assertIn("unrecognized_amount_row", unknown["amount_check_failures"])
+                self.assertIn("row_arithmetic" if row[1] == "-8,10 kr" else "unrecognized_amount_row",
+                              unknown["amount_check_failures"])
 
         normal_checkout = execute(
             _oda_checkout_amount_script(900, expected_product_count=1),
@@ -4242,7 +4248,7 @@ process.on('exit',()=>process.stderr.write(JSON.stringify({clicks,reads})));
 
 class OdaSamePaymentRetryTests(unittest.TestCase):
     def test_same_payment_get_binds_target_and_rejects_changed_native_page(self):
-        from contextlib import nullcontext
+        from contextlib import contextmanager, nullcontext
         from oda_payment_switch import prepare_oda_addition_retry, verify_oda_addition_retry
         merchant = Merchant()
         binding = {"account_reference_digest": "a" * 64, "receipt_address": "Example street 1"}
@@ -4253,7 +4259,15 @@ class OdaSamePaymentRetryTests(unittest.TestCase):
                 self.scripts = []
             def _checkout_operation(self, *args, **kwargs): return nullcontext()
             def _binding_client(self): return merchant
-            def read_order_binding(self, order_id, before, **kwargs):
+            @contextmanager
+            def _inspection_tab(self):
+                previous = self.url
+                self.url = "https://oda.com/no/"
+                try:
+                    yield
+                finally:
+                    self.url = previous
+            def _read_order_binding(self, order_id, before, **kwargs):
                 assert kwargs["expected_binding"] == binding
                 self.url = "https://oda.com/no/account/orders/order-1/"
             def _open(self, url): self.url = url
@@ -4352,6 +4366,7 @@ class VippsNativeTerminalTests(unittest.TestCase):
         browser.checkout_provider = "oda"
         browser._checkout_operation = lambda *args, **kwargs: nullcontext()
         browser._checkout_dispatch_tab = lambda: "owned"
+        browser._select_payment_tab = lambda tab_id: tab_id == browser._checkout_dispatch_tab()
         context = {"expected_total": 4370, "gateway_url_digest": hashlib.sha256(source.encode()).hexdigest(), "tab_id": "owned"}
         clicks = []
         result = close_vipps_request(browser, context, clicks.append, deadline=999999999)

@@ -99,6 +99,17 @@ class PaymentSetupTests(unittest.TestCase):
                              {"method": "vipps", "card_last4": None})
 
 
+class DeliveryIdentityTests(unittest.TestCase):
+    def test_delivery_only_rows_return_structured_mismatch(self):
+        from oda_browser import OdaBrowser
+        expected = {"delivery_change": True, "lines": []}
+        self.assertEqual(OdaBrowser._review_checkout_identity(expected, {"items": []}, None), {"matched": True})
+        mismatch = OdaBrowser._review_checkout_identity(expected,
+            {"items": [{"title": "Pasta", "subtitle": "500 g", "quantity": 1}]}, None)
+        self.assertFalse(mismatch["matched"])
+        self.assertIn("unexpected product rows", mismatch["issue"]["next"])
+
+
 # Synthetic rendering of the observed Oda confirm controls. The browser helper's
 # actual JavaScript runs in Node; the only mutating controls count their clicks.
 PAYMENT_DOM = r"""
@@ -124,9 +135,16 @@ for(const [index,text] of (c.options||['Vipps','Nytt kort','•••• 1234'])
 const quantity=new E('input');quantity.type='number';quantity.value=c.quantity||1;
 const quantityLabel=new E('label',c.provider==='mathem'?'Antal':'Antall');quantity.labels=[quantityLabel];
 const item=new E('article','',[new E('p','Pasta'),new E('p','500 g, Sopps'),quantityLabel,quantity]);
+if(c.nativeRow){
+ item.getAttribute=k=>k==='data-testid'?'product-row':null;
+ item.__reactProps$synthetic={children:[{props:{children:[{props:{productId:c.linkId??10}},
+  {props:{children:{props:{item:{product:{id:c.nativeId??10,name:'Pasta',nameExtra:'500 g',brand:'Sopps'},quantity:c.nativeQuantity??1}}}}}]}}]};
+}
+
 const delivery=new E('section','',[new E('h2','Vi leverer varene dine'),new E('p','12. september 09:00–12:00'),new E('p','Eksempelveien 1')]);
 const rows=c.rows||[['1 vare','26,50 kr'],['Delsum','26,50 kr'],['Levering',c.fee?'20,00 kr':'19,00 kr'],['Total inkl. MVA','45,50 kr']];
-const summary=new E('section','',rows.map(parts=>new E('div','',parts.map(x=>new E('span',x)))));
+const summary=new E('section','',rows.map((parts,i)=>{const row=new E('div','',parts.map(x=>new E('span',x)));row.hidden=(c.hiddenRows||[]).includes(i);return c.wrapRows?new E('div','',[row]):row;}));
+const outside=(c.outsideRows||[]).map(parts=>new E('div','',parts.map(x=>new E('span',x))));
 const pay=new E('button',c.button||((c.selected??0)===0?'Betal med':'Bekreft og betal')+' 45,50 kr');pay.id='PAY';pay.disabled=!!c.payDisabled;
 const itemExpand=new E('button',c.provider==='mathem'?'Visa varor':'Vis varene');itemExpand.id='ITEM';itemExpand.hidden=!!c.itemButtonHidden;itemExpand.hideOnClick=true;
 const summaryExpand=new E('button',c.provider==='mathem'?'Visa sammanfattning':'Vis oppsummering');summaryExpand.id='SUMMARY';summaryExpand.hidden=!!c.summaryButtonHidden;summaryExpand.hideOnClick=true;
@@ -135,7 +153,7 @@ const summaryHide=new E('button',c.provider==='mathem'?'Dölj sammanfattning':'S
 const expand=c.expandButtons==='both'?[itemExpand,summaryExpand]:c.expandButtons==='item'?[itemExpand]:c.expandButtons==='summary'?[summaryExpand]:[];
 if(c.duplicateSummary)expand.push(duplicateSummaryExpand);
 if(c.summaryExpanded)expand.push(summaryHide);
-global.document=new E('document','',[new E('body','',[...expand,...(c.summaryOnly?[]:[item]),delivery,...labels,summary,pay])]);document.body=document.children[0];
+global.document=new E('document','',[new E('body','',[...expand,...(c.summaryOnly?[]:[item]),delivery,...labels,summary,...outside,pay])]);document.body=document.children[0];
 global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
 global.location=new URL(c.url||'https://oda.com/no/checkout/confirm/');
 process.stdout.write(JSON.stringify({result:JSON.parse(eval(script)),clicks,selected:radios.map(r=>r.checked)}));
@@ -187,6 +205,106 @@ class PaymentBrowserTests(unittest.TestCase):
         plural = [["2 varer", "16,70 kr"], *rows[1:]]
         self.assertTrue(self.evaluate(_oda_checkout_amount_script(24640, expected_product_count=2),
                                      rows=plural, **options)["result"]["amounts_valid"])
+
+    def test_retry_discounts_follow_structured_rows_not_promotion_wording(self):
+        from oda_browser import _oda_checkout_amount_script
+        rows = [["2 varer", "100,00 kr"], ["Fish offer: Fillet", "−10,00 kr"],
+                ["-20%: Tofu", "−5,00 kr"], ["3 for 60 kr på urter", "−5,00 kr"],
+                ["Levering", "10,00 kr"], ["Total inkl. MVA", "90,00 kr"]]
+        script = _oda_checkout_amount_script(9000, expected_product_count=2, retry=True)
+        for wrapped in (False, True):
+            result = self.evaluate(script, rows=rows, wrapRows=wrapped,
+                outsideRows=[["Unrelated credit", "−900,00 kr"]])["result"]
+            self.assertTrue(result["amounts_valid"])
+            self.assertEqual(result["amounts"]["discounts"], -2000)
+            self.assertEqual(len(result["itemized_discount_rows"]), 3)
+        frozen = self.evaluate(script, rows=rows)["result"]
+        click = _oda_checkout_amount_script(9000, expected_product_count=2, retry=True,
+            expected_amounts=frozen["amounts"], expected_itemized_discounts=frozen["itemized_discount_rows"],
+            expected_url="https://oda.com/no/checkout/retry/?orderNumber=example", vipps=True)
+        options = {"url": "https://oda.com/no/checkout/retry/?orderNumber=example", "button": "Betal med 90,00 kr"}
+        self.assertEqual(self.evaluate(click, rows=rows, **options)["clicks"], ["PAY"])
+        changed = [*rows[:2], ["-20%: Different product", "−5,00 kr"], *rows[3:]]
+        self.assertEqual(self.evaluate(click, rows=changed, **options)["clicks"], [])
+        for extra in (
+            [["Foreign fee", "10,00 EUR"], ["Foreign credit", "−10,00 EUR"]],
+            [["Unexpected fee", "10,00 kr"], ["Extra credit", "−10,00 kr"]],
+            [["Malformed fee", "10,0 kr"], ["Malformed credit", "−10,0 kr"]],
+            [["Trailing fee", "10,00 kr extra"], ["Trailing credit", "−10,00 kr extra"]],
+        ):
+            with self.subTest(extra=extra):
+                self.assertFalse(self.evaluate(script, rows=[*rows[:-1], *extra, rows[-1]])["result"]["amounts_valid"])
+        repeated = [*rows[:2], ["Fish offer: Fillet", "−10,00 kr"], *rows[4:]]
+        self.assertTrue(self.evaluate(script, rows=repeated)["result"]["amounts_valid"])
+        aggregate = [*rows[:4], ["Du sparer", "−20,00 kr"], *rows[4:]]
+        self.assertTrue(self.evaluate(script, rows=aggregate)["result"]["amounts_valid"])
+        hidden = [*rows[:-1], ["Hidden fee", "123,00 kr"], rows[-1]]
+        self.assertTrue(self.evaluate(script, rows=hidden, hiddenRows=[5])["result"]["amounts_valid"])
+
+    def test_checkout_extracts_committed_row_identity_and_rejects_conflicts(self):
+        from oda_browser import _oda_checkout_surface_script
+        from checkout_identity import checkout_lines_match, review_checkout_lines
+        expected = {"lines": [{"product_id": "10", "name": "Sopps Pasta Italia", "description": "Italia, 500g", "brand": "Sopps", "quantity": 1}],
+            "total_minor": 4550, "delivery_address": "Eksempelveien 1"}
+        script = _oda_checkout_surface_script(expected, {"method": "vipps"})
+        surface = self.evaluate(script, nativeRow=True)["result"]
+        self.assertEqual(surface["items"][0]["product_id"], "10")
+        self.assertTrue(checkout_lines_match(expected["lines"], surface["items"]))
+        for changes in ({"linkId": 11}, {"nativeQuantity": 2}, {"nativeId": 11}):
+            rows = self.evaluate(script, nativeRow=True, **changes)["result"]["items"]
+            self.assertTrue(rows[0]["identity_conflict"])
+            self.assertFalse(checkout_lines_match(expected["lines"], rows))
+            self.assertFalse(review_checkout_lines(expected["lines"], rows, binding={})["matched"])
+
+    def test_semantic_display_review_is_bound_to_the_exact_browser_surface(self):
+        from oda_browser import OdaBrowser, OdaCheckoutMismatchError
+        expected = {"lines": [{"product_id": "10", "name": "Yoghurt Mild", "description": "Naturell mild smak, 500 g", "brand": "Example", "quantity": 1}],
+            "total_minor": 4550, "delivery_address": "Eksempelveien 1", "delivery_text": "12. september 09–12"}
+        surface = {"items": [{"title": "Mild yoghurt", "subtitle": "Naturell mild smak, 500 g, Example", "quantity": 1}],
+                   "url": "https://oda.com/no/checkout/confirm/", "payment_display": "Vipps"}
+        issue = OdaBrowser._review_checkout_identity(expected, surface, "a" * 64)["issue"]
+        review = {"digest": issue["digest"], "decisions": [{"expected_index": 0, "actual_index": 0,
+            "reason": "Same mild natural yoghurt, same package and brand; title word order differs."}]}
+        accepted = OdaBrowser._review_checkout_identity(expected, surface, "a" * 64, review)
+        self.assertTrue(accepted["matched"])
+        self.assertEqual(accepted["review"], review)
+        for changed in ({**surface, "payment_display": "•••• 1234"}, {**surface, "items": [{**surface["items"][0], "quantity": 2}]}):
+            with self.assertRaises(OdaCheckoutMismatchError):
+                OdaBrowser._review_checkout_identity(expected, changed, "a" * 64, review)
+        with self.assertRaises(OdaCheckoutMismatchError):
+            OdaBrowser._review_checkout_identity(expected, surface, "b" * 64, review)
+
+    def test_order_inspection_preserves_original_payment_tab_and_page(self):
+        from contextlib import nullcontext
+        from oda_browser import OdaBrowser
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        tabs = [{"tabId": "payment", "active": True, "label": None}]
+        pages = {"payment": "https://pay.vipps.no/?token=synthetic"}
+        def invoke(*args):
+            if args == ("tab", "list"):
+                return {"tabs": tabs}
+            if args[:2] == ("tab", "new"):
+                tabs.append({"tabId": "inspection", "active": False, "label": args[3]})
+                pages["inspection"] = args[4]
+                target = "inspection"
+            elif args[0] == "tab":
+                target = args[1]
+            else:
+                self.fail("Unexpected browser operation")
+            for tab in tabs:
+                tab["active"] = tab["tabId"] == target
+            return {}
+        browser._invoke = invoke
+        browser._checkout_operation = lambda deadline, **kwargs: self.assertTrue(kwargs["preserve_session"]) or nullcontext()
+        browser._open = lambda url: pages.update({browser._checkout_dispatch_tab(): url})
+        browser._eval = lambda script: {"status": "payment_started"}
+        self.assertEqual(browser.order_payment_state("example")["status"], "payment_started")
+        self.assertEqual(browser._checkout_dispatch_tab(), "payment")
+        self.assertEqual(pages["payment"], "https://pay.vipps.no/?token=synthetic")
+        self.assertIn("/account/orders/example/", pages["inspection"])
+        browser.order_payment_state("example")
+        self.assertEqual(len(tabs), 2)
 
     def test_amount_summary_diagnostics_preserve_safe_failure_categories(self):
         from core import HouseholdError
@@ -400,6 +518,7 @@ class PaymentBrowserTests(unittest.TestCase):
                     browser._checkout_deadline = None
                     observed, callbacks, network = [], [], []
                     browser._invoke = lambda *arguments: network.append(arguments)
+                    browser._oda_card_request_fence = lambda *args: None
                     browser._capture_checkout_payment = mock.Mock(return_value=None)
                     def evaluate(final):
                         self.assertEqual(callbacks, [True])
@@ -420,7 +539,7 @@ class PaymentBrowserTests(unittest.TestCase):
                             authentication_expected=True,
                             vipps_expected_total=(4550 if method == "vipps" else None),
                             vipps_source_url=(CHECKOUT_URL if method == "vipps" else None),
-                            before_vipps_request=None,
+                            before_vipps_request=None, on_vipps_gateway=None,
                         )
                     self.assertEqual(observed[0]["clicks"], [] if change else ["PAY"])
                     self.assertEqual(network, [])

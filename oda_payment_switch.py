@@ -9,7 +9,7 @@ import select
 import shutil
 import subprocess
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from core import HouseholdError, cart_summary
 
@@ -244,7 +244,7 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
             or not re.fullmatch(r"[0-9a-f]{64}", str(context.get("gateway_url_digest", "")))):
         return unknown
     with browser._checkout_operation(deadline, preserve_session=True):
-        if browser._checkout_dispatch_tab() != context.get("tab_id"):
+        if not browser._select_payment_tab(context.get("tab_id")):
             return unknown
         current_url = str(browser._invoke("get", "url").get("url") or "")
         url = current_url
@@ -269,8 +269,8 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
         if not node:
             return unknown
         surface = browser._eval(_oda_vipps_gateway_script(context["expected_total"], browser.vipps_phone_number,
-                                expected_url=url, allow_post_dispatch_ack=True))
-        if not surface.get("identity") or not (surface.get("sent") or surface.get("expired")):
+                                expected_url=url, allow_post_dispatch_ack=True, allow_source_bound_amountless=True))
+        if not surface.get("identity") or not (surface.get("sent") or surface.get("expired") or surface.get("fillable")):
             return unknown
         endpoint = browser._invoke("get", "cdp-url").get("cdpUrl")
         parsed_endpoint = urlsplit(str(endpoint or ""))
@@ -295,8 +295,8 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
                 if latest != url:
                     return unknown
                 observed = browser._eval(_oda_vipps_gateway_script(context["expected_total"], browser.vipps_phone_number,
-                                      expected_url=url, allow_post_dispatch_ack=True))
-                if not observed.get("identity") or not observed.get("sent"):
+                                      expected_url=url, allow_post_dispatch_ack=True, allow_source_bound_amountless=True))
+                if not observed.get("identity") or not (observed.get("sent") or observed.get("fillable")):
                     return unknown
                 evidence = {"cancel_attempted": True, "gateway_url_digest": context["gateway_url_digest"],
                             "poll_url_digest": first["poll_url_digest"], "observed_status": first["observed_status"],
@@ -313,6 +313,71 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
             if process.poll() is None:
                 process.kill()
             process.wait()
+
+
+def adopt_vipps_request(browser, cart, review, *, deadline, order_id):
+    """Recover missing context only from a retained, provider-bound request.
+
+    Old journals without a hosted tab and native validation response stay
+    unresolved. An expired token or unpaid order is not closure evidence.
+    """
+    from oda_browser import _oda_vipps_gateway_script
+    if browser.checkout_provider != "oda":
+        return None
+    expected = browser._cart_expectation(cart)
+    with browser._checkout_operation(deadline, preserve_session=True):
+        tabs = browser._invoke("tab", "list").get("tabs", [])
+        hosted = [tab for tab in tabs if urlsplit(str(tab.get("url") or "")).netloc == "pay.vipps.no"]
+        if len(hosted) != 1 or not browser._select_payment_tab(hosted[0].get("tabId")):
+            return None
+        url = str(browser._invoke("get", "url").get("url") or "")
+        parsed = urlsplit(url)
+        token = parse_qs(parsed.query).get("token")
+        if (parsed.scheme != "https" or parsed.netloc != "pay.vipps.no" or parsed.path != "/"
+                or parsed.fragment or not token or len(token) != 1 or not token[0]):
+            return None
+        records = browser._invoke("network", "requests", "--filter", "api.vipps.no", "--method", "GET").get("requests", [])
+        validations = [row for row in records if row.get("method") == "GET" and row.get("status") == 200
+                       and urlsplit(str(row.get("url") or "")).scheme == "https"
+                       and urlsplit(str(row.get("url") or "")).netloc == "api.vipps.no"
+                       and not urlsplit(row["url"]).fragment
+                       and urlsplit(row["url"]).path == _VIPPS_POLL_PATH + "/validate-token"
+                       and parse_qs(urlsplit(row["url"]).query).get("token") == token]
+        if len(validations) != 1:
+            return None
+        observed = browser._invoke("network", "request", str(validations[0]["requestId"]))
+        try:
+            claims = json.loads(observed.get("responseBody", ""))
+        except (TypeError, ValueError):
+            return None
+        if (observed.get("url") != validations[0]["url"] or observed.get("status") != 200
+                or observed.get("method") != "GET" or observed.get("requestId") != validations[0]["requestId"]
+                or not isinstance(claims, dict) or type(claims.get("amount")) is not int
+                or claims["amount"] != expected["total_minor"] or claims.get("currency") != "NOK"):
+            return None
+        fallback = urlsplit(str(claims.get("fallback") or ""))
+        match = re.fullmatch(r"/no/checkout/([1-9][0-9]*)/[A-Za-z0-9_-]+/redirect-return/", fallback.path)
+        if fallback.scheme != "https" or fallback.netloc != "oda.com" or fallback.fragment or not match:
+            return None
+        surface = browser._eval(_oda_vipps_gateway_script(expected["total_minor"], browser.vipps_phone_number,
+                                expected_url=url, allow_source_bound_amountless=True, allow_post_dispatch_ack=True))
+        if not surface.get("identity") or not (surface.get("fillable") or surface.get("sent") or surface.get("expired")):
+            return None
+        # A native payment ID must resolve to the independently verified order;
+        # equal amount alone cannot identify a payment after a lost handoff.
+        with browser._inspection_tab():
+            value = browser._eval(r"""(async()=>{
+ if(location.origin!=='https://oda.com')return JSON.stringify({});
+ const r=await fetch('/api/v1/checkout/payment/'+PAYMENT+'/retry/',{method:'GET',credentials:'same-origin',cache:'no-store',redirect:'error'});
+ return r.ok?JSON.stringify({retry:await r.json()}):JSON.stringify({});
+})()""".replace("PAYMENT", json.dumps(match[1]))).get("retry")
+        params = value.get("params") if isinstance(value, dict) else None
+        if (not isinstance(params, dict) or value.get("type") != "checkout-payment-retry"
+                or params.get("order_number") != order_id or params.get("order_change_id") is not None):
+            return None
+        return {"tab_id": hosted[0]["tabId"], "expected_total": expected["total_minor"],
+                "gateway_url_digest": hashlib.sha256(url.encode()).hexdigest(),
+                "order_id": order_id if review.get("order_id") else None}
 
 
 def _current_retry_target(browser, order_id):
@@ -360,6 +425,21 @@ def _cart_digest(cart):
     return hashlib.sha256(canonical(cart_summary(cart)).encode()).hexdigest()
 
 
+def _card_failure_retry(browser, context, order_id, order_change_id, deadline):
+    """Re-read the terminal native pay response without leaving its retained tab."""
+    previous = browser._checkout_dispatch_tab()
+    try:
+        failure = browser.checkout_payment_failure(context, expected_order_id=order_id, deadline=deadline)
+    finally:
+        if previous is not None and not browser._select_payment_tab(previous):
+            raise HouseholdError("The retained Oda payment review tab is unavailable")
+    if (not isinstance(failure, dict) or failure.get("payment_failed") is not True
+            or failure.get("order_id") != order_id or failure.get("order_change_id") != order_change_id
+            or not isinstance(order_change_id, str) or not re.fullmatch(r"[1-9][0-9]{0,15}", order_change_id)):
+        raise HouseholdError("The native card failure no longer resolves to this exact order addition")
+    return {"order_id": order_id, "order_change_id": order_change_id, "card_failure_context": dict(context)}
+
+
 def verify_oda_addition_retry(browser, order_id, cart, before_order, binding, target, *, deadline):
     """Read only; verify the same payment target immediately before card dispatch."""
     from oda_browser import require_order_binding
@@ -368,7 +448,8 @@ def verify_oda_addition_retry(browser, order_id, cart, before_order, binding, ta
         raise HouseholdError("The retained Oda addition goods changed")
     _verify_base(browser, order_id, before_order, deadline)
     native = _current_retry_target(browser, order_id)
-    observed = _payment_retry(browser, target.get("payment_id"), order_id)
+    observed = (_card_failure_retry(browser, target["card_failure_context"], order_id, target.get("order_change_id"), deadline)
+                if target.get("card_failure_context") else _payment_retry(browser, target.get("payment_id"), order_id))
     if any(target.get(k) != v for source in (native, observed) for k, v in source.items()):
         raise HouseholdError("The retained Oda addition retry target changed")
 
@@ -384,11 +465,20 @@ def prepare_oda_addition_retry(browser, order_id, cart, before_order, binding, *
         raise HouseholdError("The original Vipps request is not proven closed")
     with browser._checkout_operation(deadline, preserve_session=True):
         _verify_base(browser, order_id, before_order, deadline)
-        browser.read_order_binding(order_id, before_order, deadline=deadline, expected_binding=binding)
-        pair = _payment_retry(browser, closure.get("payment_id"), order_id)
+        with browser._inspection_tab():
+            browser._read_order_binding(order_id, before_order, deadline=deadline, expected_binding=binding)
+            pair = (_card_failure_retry(browser, closure["card_failure_context"], order_id, closure.get("order_change_id"), deadline)
+                    if closure.get("source") == "native_payment_failure" and closure.get("card_failure_context")
+                    else _payment_retry(browser, closure.get("payment_id"), order_id))
         target = {**pair, "cart_digest": _cart_digest(cart)}
         if retained_target is not None and target != retained_target:
             raise HouseholdError("The retained Oda addition retry target changed")
-        browser._open("https://oda.com/no/checkout/retry/?orderNumber=" + order_id + "&orderChangeId=" + pair["order_change_id"])
+        if pair.get("card_failure_context"):
+            # Reloading would discard the exact native response. The retained
+            # tab already has the verified retry route; recovery gets its own tab.
+            if not browser._select_payment_tab(pair["card_failure_context"]["tab_id"]):
+                raise HouseholdError("The retained Oda card failure tab is unavailable")
+        else:
+            browser._open("https://oda.com/no/checkout/retry/?orderNumber=" + order_id + "&orderChangeId=" + pair["order_change_id"])
         verify_oda_addition_retry(browser, order_id, cart, before_order, binding, target, deadline=deadline)
         return target

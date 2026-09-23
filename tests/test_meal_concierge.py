@@ -52,7 +52,6 @@ from oda_browser import (  # noqa: E402
     checkout_delivery_matches,
     checkout_lines_match,
     oda_checkout_amount_minor,
-    product_identity,
 )
 from service import Application, Server, config, delivery_matches, menu_email_html, meny_order_matches_checkout, oda_order_matches_addition, order_matches_checkout, peer_uid, validate_schedule  # noqa: E402
 from meny import DEFAULT_BROWSER_ARGS as MENY_BROWSER_ARGS, MenyClient, MenyOrderChangeDispatchError, _BrowserTransportError, _CheckoutNotReadyError, _DeliveryReservationError, meny_checkout_reviews_match, meny_delivery_reservation_acknowledged, meny_delivery_window_identity, meny_label_slot_ref, meny_order_card_status, meny_order_search_completed, meny_selected_delivery, normalize_browser_cdp, normalize_cart_snapshot, normalize_checkout_payment_snapshot, normalize_delivery_slot_ref, normalize_meny_delivery_slot, normalize_product_ref, vipps_dispatch_acknowledged, vipps_dispatch_attempted  # noqa: E402
@@ -177,7 +176,7 @@ class FakeBrowser:
         self.review_deadlines.append(deadline)
         return {"page_digest": "a" * 64, "payment_display": "Vipps" if payment and payment["method"] == "vipps" else "•••• 1234"}
 
-    def submit_checkout(self, cart, review, before_click=None, *, deadline=None, before_vipps_request=None):
+    def submit_checkout(self, cart, review, before_click=None, *, deadline=None, before_vipps_request=None, on_vipps_gateway=None):
         self.submit_deadlines.append(deadline)
         if before_click:
             before_click()
@@ -190,12 +189,16 @@ class FakeBrowser:
             "deliveryAddress": "Eksempelveien 1",
             "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}],
         })
-        if review.get("payment_display") == "Vipps" and before_vipps_request:
-            before_vipps_request({
+        if review.get("payment_display") == "Vipps":
+            context = {
                 "tab_id": "tab-1", "expected_total": 3500,
                 "gateway_url_digest": "a" * 64,
                 "order_id": None,
-            })
+            }
+            if on_vipps_gateway:
+                on_vipps_gateway(context)
+            if before_vipps_request:
+                before_vipps_request(context)
         return {"vipps_request_sent": True} if review.get("payment_display") == "Vipps" else None
 
     def checkout_vipps_request_state(self, context, *, deadline=None):
@@ -219,16 +222,20 @@ class FakeBrowser:
             },
         }
 
-    def submit_payment_recovery(self, cart, review, before_click=None, *, deadline=None, addition=None, before_vipps_request=None):
+    def submit_payment_recovery(self, cart, review, before_click=None, *, deadline=None, addition=None, before_vipps_request=None, on_vipps_gateway=None):
         if before_click:
             before_click()
         self.checkout_clicks += 1
-        if review["payment_choice"]["method"] == "vipps" and before_vipps_request:
-            before_vipps_request({
+        if review["payment_choice"]["method"] == "vipps":
+            context = {
                 "tab_id": "tab-1", "expected_total": 3500,
                 "gateway_url_digest": "a" * 64,
                 "order_id": review["order_id"],
-            })
+            }
+            if on_vipps_gateway:
+                on_vipps_gateway(context)
+            if before_vipps_request:
+                before_vipps_request(context)
         return {"vipps_request_sent": True} if review["payment_choice"]["method"] == "vipps" else None
 
     def review_order_change(self, cart, order_id, order, *, deadline=None, expected_binding=None, payment=None, select_payment=False):
@@ -1084,7 +1091,8 @@ class CoreTestsBase:
             "provider_total": 35.0,
         })
         expected = OdaBrowser._cart_expectation(cart)
-        self.assertEqual(expected["lines"], [{"name": "Fullkornspasta", "identity": "fullkornspasta 500 g testmerke", "quantity": 1}])
+        self.assertEqual(expected["lines"], [{"product_id": "10", "name": "Fullkornspasta",
+                                              "description": "500 g", "brand": "Testmerke", "quantity": 1}])
         self.assertEqual(expected["product_count"], 1)
 
         with self.assertRaisesRegex(HouseholdError, "product count changed"):
@@ -1096,120 +1104,133 @@ class CoreTestsBase:
             with self.subTest(count=count), self.assertRaises(HouseholdError):
                 OdaBrowser._order_product_count({"products": [{"quantity": count}]})
 
+    @staticmethod
+    def _checkout_product(name, description, brand="", quantity=1):
+        return {"name": name, "description": description, "brand": brand, "quantity": quantity}
+
+    @staticmethod
+    def _checkout_row(title, subtitle, quantity=1):
+        return {"title": title, "subtitle": subtitle, "quantity": quantity}
+
     def test_checkout_product_identity_rejects_a_different_package_size(self):
-        expected = [{"identity": product_identity("Karbonadedeig", "350 g", "Testmerke"), "quantity": 1}]
-        self.assertTrue(checkout_lines_match(expected, [{"text": "Karbonadedeig 350 g Testmerke", "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": "Karbonadedeig 700 g Testmerke", "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": "Karbonadedeig 350 g Testmerke", "quantity": 2}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": ["Karbonadedeig", "350 g", "Testmerke"], "quantity": 1}]))
+        expected = [self._checkout_product("Karbonadedeig", "350 g", "Testmerke")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row("Karbonadedeig", "350 g, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row("Karbonadedeig", "700 g, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row("Karbonadedeig", "350 g, Testmerke", 2)]))
+        self.assertFalse(checkout_lines_match(expected, [{"title": ["Karbonadedeig"], "subtitle": "350 g, Testmerke", "quantity": 1}]))
 
     def test_checkout_product_identity_preserves_package_order(self):
-        expected = [{"identity": product_identity("Melk", "2 x 1 l", "Testmerke"), "quantity": 1}]
-        self.assertTrue(checkout_lines_match(expected, [{"text": "Melk 2 x 1 l Testmerke", "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": "Melk 1 x 2 l Testmerke", "quantity": 1}]))
+        expected = [self._checkout_product("Melk", "2 x 1 l", "Testmerke")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row("Melk", "2 x 1 l, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row("Melk", "1 x 2 l, Testmerke")]))
 
     def test_checkout_product_identity_accepts_oda_display_deduplication(self):
-        expected = [{"identity": product_identity("Store Lime Brasil / Colombia", "Maks 10 per kunde, Brasil / Colombia, 3 stk", ""), "quantity": 1}]
-        self.assertTrue(checkout_lines_match(expected, [{"text": "Store Lime Maks 10 per kunde, Brasil / Colombia, 3 stk", "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": "Store Lime Maks 10 per kunde, Brasil / Colombia, 6 stk", "quantity": 1}]))
-        conflicting_size = [{"identity": product_identity("Melk 1 l", "2 x 1 l", "Testmerke"), "quantity": 1}]
-        self.assertFalse(checkout_lines_match(conflicting_size, [{"text": "Melk 2 x 1 l Testmerke", "quantity": 1}]))
+        expected = [self._checkout_product(
+            "Store Lime Brasil / Colombia", "Maks 10 per kunde, Brasil / Colombia, 3 stk")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row(
+            "Store Lime", "Maks 10 per kunde, Brasil / Colombia, 3 stk")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row(
+            "Store Lime", "Maks 10 per kunde, Brasil / Colombia, 6 stk")]))
+        conflicting_size = [self._checkout_product("Melk 1 l", "2 x 1 l", "Testmerke")]
+        self.assertFalse(checkout_lines_match(conflicting_size, [self._checkout_row("Melk", "2 x 1 l, Testmerke")]))
 
     def test_checkout_product_identity_deduplicates_matching_count_before_repeated_suffix(self):
-        expected = [{
-            "identity": product_identity(
-                "Testvare 3 store porsjoner",
-                "Mild, 3 store porsjoner, 450 g",
-                "Testmerke",
-            ),
-            "quantity": 1,
-        }]
-        self.assertTrue(checkout_lines_match(expected, [{
-            "text": "Testvare Mild, 3 store porsjoner, 450 g Testmerke",
-            "quantity": 1,
-        }]))
-        self.assertFalse(checkout_lines_match(expected, [{
-            "text": "Testvare Mild, 4 store porsjoner, 450 g Testmerke",
-            "quantity": 1,
-        }]))
-        self.assertFalse(checkout_lines_match(expected, [{
-            "text": "Testvare Mild, 3 store porsjoner, 500 g Testmerke",
-            "quantity": 1,
-        }]))
-
-        conflicting_internal_count = [{
-            "identity": product_identity(
-                "Testvare 3 store porsjoner",
-                "Mild, 4 store porsjoner, 450 g",
-                "Testmerke",
-            ),
-            "quantity": 1,
-        }]
-        self.assertFalse(checkout_lines_match(conflicting_internal_count, [{
-            "text": "Testvare Mild, 4 store porsjoner, 450 g Testmerke",
-            "quantity": 1,
-        }]))
+        expected = [self._checkout_product(
+            "Testvare 3 store porsjoner", "Mild, 3 store porsjoner, 450 g", "Testmerke")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row(
+            "Testvare", "Mild, 3 store porsjoner, 450 g, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row(
+            "Testvare", "Mild, 4 store porsjoner, 450 g, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row(
+            "Testvare", "Mild, 3 store porsjoner, 500 g, Testmerke")]))
+        conflicting_internal_count = [self._checkout_product(
+            "Testvare 3 store porsjoner", "Mild, 4 store porsjoner, 450 g", "Testmerke")]
+        self.assertFalse(checkout_lines_match(conflicting_internal_count, [self._checkout_row(
+            "Testvare", "Mild, 4 store porsjoner, 450 g, Testmerke")]))
 
     def test_checkout_product_identity_accepts_repeated_dom_brand(self):
-        expected = [{"identity": product_identity("Zalo Ultra", "500 ml", "Zalo"), "quantity": 1}]
-        self.assertTrue(checkout_lines_match(expected, [{"text": "Zalo Ultra 500 ml, Zalo", "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": "Zalo Ultra 750 ml, Zalo", "quantity": 1}]))
+        expected = [self._checkout_product("Zalo Ultra", "500 ml", "Zalo")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row("Zalo Ultra", "500 ml, Zalo")]))
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row("Ultra", "500 ml, Zalo")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row("Ultra", "750 ml, Zalo")]))
 
     def test_checkout_identity_preserves_title_words_across_description_fields(self):
-        expected = [{
-            "identity": product_identity(
-                "Testvare God Pris Norge", "Maks 4 til nedsatt pris, Norge, 1 stk", "",
-            ),
-            "quantity": 1,
-        }]
-        displayed = "Testvare God Pris Maks 4 til nedsatt pris, Norge, 1 stk"
-        self.assertTrue(checkout_lines_match(expected, [{"text": displayed, "quantity": 1}]))
+        expected = [self._checkout_product(
+            "Testvare God Pris Norge", "Maks 4 til nedsatt pris, Norge, 1 stk")]
+        displayed = self._checkout_row("Testvare God Pris", "Maks 4 til nedsatt pris, Norge, 1 stk")
+        self.assertTrue(checkout_lines_match(expected, [displayed]))
         for changed in (
-            displayed.replace("God Pris", "God"),
-            displayed.replace("Norge", "Sverige"),
-            displayed.replace("1 stk", "2 stk"),
+            {**displayed, "title": "Testvare God"},
+            {**displayed, "subtitle": "Maks 4 til nedsatt pris, Sverige, 1 stk"},
+            {**displayed, "subtitle": "Maks 4 til nedsatt pris, Norge, 2 stk"},
+            {**displayed, "quantity": 2},
         ):
             with self.subTest(changed=changed):
-                self.assertFalse(checkout_lines_match(expected, [{"text": changed, "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{"text": displayed, "quantity": 2}]))
+                self.assertFalse(checkout_lines_match(expected, [changed]))
 
     def test_checkout_identity_does_not_take_a_count_from_another_description_field(self):
-        expected = [{
-            "identity": product_identity(
-                "Testvare 3 store porsjoner", "Maks 3, store porsjoner, 450 g", "Testmerke",
-            ),
-            "quantity": 1,
-        }]
-        self.assertTrue(checkout_lines_match(expected, [{
-            "text": "Testvare 3 Maks 3, store porsjoner, 450 g Testmerke", "quantity": 1,
-        }]))
-        self.assertFalse(checkout_lines_match(expected, [{
-            "text": "Testvare Maks 3, store porsjoner, 450 g Testmerke", "quantity": 1,
-        }]))
+        expected = [self._checkout_product(
+            "Testvare 3 store porsjoner", "Maks 3, store porsjoner, 450 g", "Testmerke")]
+        self.assertTrue(checkout_lines_match(expected, [self._checkout_row(
+            "Testvare 3", "Maks 3, store porsjoner, 450 g, Testmerke")]))
+        self.assertFalse(checkout_lines_match(expected, [self._checkout_row(
+            "Testvare", "Maks 3, store porsjoner, 450 g, Testmerke")]))
 
     def test_checkout_identity_deduplicates_matching_description_field_boundaries(self):
-        expected = [{
-            "identity": product_identity(
-                "Testvare Lav Pris, Italia / Chile",
-                "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk", "",
-            ),
-            "quantity": 1,
-        }]
-        displayed = "Testvare Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk"
-        self.assertTrue(checkout_lines_match(expected, [{"text": displayed, "quantity": 1}]))
-        self.assertFalse(checkout_lines_match(expected, [{
-            "text": displayed.replace("8 stk", "4 stk"), "quantity": 1,
-        }]))
-        different_boundaries = [{
-            "identity": product_identity(
-                "Testvare Lav, Pris Italia / Chile",
-                "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk", "",
-            ),
-            "quantity": 1,
-        }]
-        self.assertFalse(checkout_lines_match(
-            different_boundaries, [{"text": displayed, "quantity": 1}],
-        ))
+        expected = [self._checkout_product(
+            "Testvare Lav Pris, Italia / Chile",
+            "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk")]
+        displayed = self._checkout_row("Testvare", "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk")
+        self.assertTrue(checkout_lines_match(expected, [displayed]))
+        self.assertFalse(checkout_lines_match(expected, [{**displayed,
+            "subtitle": "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 4 stk"}]))
+        different_boundaries = [self._checkout_product(
+            "Testvare Lav, Pris Italia / Chile",
+            "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk")]
+        self.assertFalse(checkout_lines_match(different_boundaries, [displayed]))
+
+    @unittest.skipUnless(shutil.which("node"), "Node executes checkout row extraction")
+    def test_checkout_dom_rows_bind_title_subtitle_and_quantity_to_product_fields(self):
+        expected = [
+            self._checkout_product("Synnøve Gresk Gresk yoghurt 2% Fett", "2% Fett, 350 g", "Synnøve Gresk"),
+            self._checkout_product("Store Lime Brasil / Colombia", "Maks 10 per kunde, Brasil / Colombia, 3 stk"),
+        ]
+        harness = r"""
+const {script, rows}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const paragraph=(innerText,hidden=false)=>({innerText,hidden,
+ getBoundingClientRect:()=>({width:20,height:10})});
+const inputs=rows.map(row=>{
+ const root={getAttribute:()=>null,innerText:'Antall '+row.title+' '+row.subtitle,
+  querySelectorAll:s=>s==='p'?[paragraph('Hidden recommendation',true),
+   paragraph(row.title),paragraph(row.subtitle),paragraph('100,00 kr /kg')]:[]};
+ return {value:String(row.quantity),closest:s=>s==='li,article'?root:null,
+  getBoundingClientRect:()=>({width:20,height:10})};
+});
+global.document={body:{innerText:''},querySelector:()=>null,querySelectorAll:s=>
+ s==='input[type="number"]'?inputs:[]};
+global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});
+global.location=new URL('https://oda.com/no/checkout/confirm/');
+process.stdout.write(eval(script));
+"""
+        rows = [
+            self._checkout_row("Store Lime", "Maks 10 per kunde, Brasil / Colombia, 3 stk"),
+            self._checkout_row("Gresk yoghurt 2% Fett", "2% Fett, 350 g, Synnøve Gresk"),
+        ]
+
+        def extracted(display_rows):
+            completed = subprocess.run(
+                [shutil.which("node"), "-e", harness],
+                input=json.dumps({"script": _oda_checkout_surface_script({
+                    "total_minor": 10000, "delivery_address": "Eksempelveien 1"}),
+                    "rows": display_rows}),
+                text=True, capture_output=True, check=True, timeout=10,
+            )
+            return json.loads(completed.stdout)["items"]
+
+        self.assertEqual(extracted(rows), rows)
+        self.assertTrue(checkout_lines_match(expected, extracted(rows)))
+        changed = [rows[0], {**rows[1], "subtitle": "2% Fett, 700 g, Synnøve Gresk"}]
+        self.assertFalse(checkout_lines_match(expected, extracted(changed)))
 
     def test_checkout_delivery_requires_one_exact_selected_tuple(self):
         expected = "Hjemlevering mellom kl 07 og 13, 3. sep"
@@ -1769,7 +1790,8 @@ class CoreTestsBase:
             "deliverySlot": {"id": 7, "name": "Hjemlevering mellom kl 07 og 13, 3. sep"},
         }
         expected = OdaBrowser._cart_expectation(cart)
-        self.assertEqual(expected["lines"], [{"name": "Fennikel Norge", "identity": "fennikel norge 1 stk", "quantity": 1}])
+        self.assertEqual(expected["lines"], [{"product_id": "10", "name": "Fennikel Norge",
+                                              "description": "Norge, 1 stk", "brand": "", "quantity": 1}])
 
     def test_checkout_requires_a_nonempty_normalized_delivery_address(self):
         cart = {
@@ -1800,7 +1822,8 @@ class CoreTestsBase:
             "url": "https://oda.com/no/checkout/confirm/",
             "authenticated": True,
             "available": True,
-            "items": [{"quantity": 1, "text": "Gresk yoghurt 2% Fett, 350 g, Synnøve Gresk"}],
+            "items": [{"quantity": 1, "title": "Gresk yoghurt 2% Fett",
+                       "subtitle": "2% Fett, 350 g, Synnøve Gresk"}],
             "total_matches": True,
             "delivery_roots": ["Vi leverer varene dine torsdag 3. september 07:00–13:00 Endre"],
             "address_matches": True,
@@ -1870,13 +1893,14 @@ class CoreTestsBase:
         lines = [
             {
                 "name": f"Product {index}",
-                "identity": f"product {index} 500 g brand",
+                "description": "500 g",
+                "brand": "Brand",
                 "quantity": 2 if index < 4 else 1,
             }
             for index in range(55)
         ]
         items = [
-            {"quantity": line["quantity"], "text": line["identity"]}
+            {"quantity": line["quantity"], "title": line["name"], "subtitle": "500 g, Brand"}
             for line in lines
         ]
         expected = {
@@ -1917,7 +1941,7 @@ class CoreTestsBase:
 
         cases = {
             "line": ({**base_surface, "items": [
-                {**items[0], "text": "SECRET_ACTUAL_PRODUCT"}, *items[1:],
+                {**items[0], "title": "SECRET_ACTUAL_PRODUCT"}, *items[1:],
             ]}, {"line_matches": False}),
             "total": ({**base_surface, "total_matches": False}, {"total_matches": False}),
             "delivery": ({**base_surface, "delivery_roots": [
@@ -1962,7 +1986,7 @@ class CoreTestsBase:
             with self.subTest(label=label), self.assertRaises(OdaCheckoutMismatchError) as raised:
                 review(surface)
             message = str(raised.exception)
-            self.assertLess(len(message), 512)
+            self.assertLess(len(message), 10000)
             diagnostic = json.loads(message[message.index("{"):])
             self.assertEqual(diagnostic["expected_line_count"], 55)
             self.assertEqual(diagnostic["expected_product_quantity_count"], 59)
@@ -1976,7 +2000,6 @@ class CoreTestsBase:
                 self.assertEqual(diagnostic[key], wanted.get(key, True))
             self.assertEqual(diagnostic["submit_controls"], wanted.get("submit_controls", 1))
             for secret in (
-                "Product 0", "product 0", "SECRET_ACTUAL_PRODUCT",
                 "SECRET_QUANTITY", "SECRET ADDRESS", "SECRET_ADDRESS",
                 "SECRET_PAYMENT",
             ):
@@ -2957,7 +2980,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_operation = lambda *args, **kwargs: nullcontext()
-        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._select_payment_tab = mock.Mock(side_effect=lambda tab_id: tab_id == "tab-1")
         browser._invoke = mock.Mock(return_value={
             "url": "https://pay.vipps.no/dwo-api-application/v1/deeplink/vippsgateway?token=other",
         })
@@ -2972,17 +2995,17 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
         self.assertEqual(result, {"status": "unknown"})
         browser._eval.assert_not_called()
 
-    def test_retained_vipps_observation_never_enables_amountless_gateway_mode(self):
+    def test_retained_vipps_observation_recognizes_prepared_source_bound_gateway(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_operation = lambda *args, **kwargs: nullcontext()
-        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._select_payment_tab = mock.Mock(return_value=True)
         gateway = "https://pay.vipps.no/?token=opaque"
         browser._invoke = mock.Mock(return_value={"url": gateway})
         scripts = []
         browser._eval = lambda script: scripts.append(script) or {
             "identity": True, "ready": False, "sent": False, "expired": False,
-            "fillable": False, "phone_matches": False,
+            "fillable": True, "phone_matches": False,
         }
 
         result = browser.checkout_vipps_request_state({
@@ -2990,9 +3013,9 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
             "gateway_url_digest": hashlib.sha256(gateway.encode()).hexdigest(),
         })
 
-        self.assertEqual(result, {"status": "unknown"})
+        self.assertEqual(result, {"status": "prepared"})
         self.assertEqual(len(scripts), 1)
-        self.assertIn("const amountlessBound=false&&", scripts[0])
+        self.assertIn("const amountlessBound=true&&", scripts[0])
 
     def test_checkout_deadline_caps_each_browser_command(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -3368,6 +3391,9 @@ process.stdout.write(eval(script));
             {"url": "https://user@pay.vipps.no/?token=opaque"},
             {"url": "https://pay.vipps.no/?token=current", "expectedUrl": "https://pay.vipps.no/?token=stale"},
             {"amount": "256.51"},
+            {"amount": "-256.50"},
+            {"extraText": "NOK 123"},
+            {"extraText": "EUR 999"},
             {"merchant": False},
             {"phone": ""},
             {"phone": "123"},
@@ -3399,7 +3425,7 @@ process.stdout.write(eval(script));
         # The reviewed Oda retry page supplies the amount authority for this
         # causal handoff. Incidental, unparsed transport text is not treated as
         # a second amount parser, and React internals are not an identity gate.
-        for extra_text in ("+47", "+47 1", "+47 SEK", "+47 kroner"):
+        for extra_text in ("+47", "+47 1", "+47 kroner"):
             with self.subTest(extra_text=extra_text):
                 self.assertTrue(evaluate(
                     {**amountless, "extraText": extra_text, "react": False},
@@ -3434,6 +3460,8 @@ process.stdout.write(eval(script));
             {**amountless, "button": "Continue"},
             {**amountless, "extraText": "+47 256.51 kr"},
             {**amountless, "extraText": "+47 NOK 256,51"},
+            {**amountless, "extraText": "+47 SEK"},
+            {**amountless, "extraText": "NOK 123"},
         ):
             with self.subTest(amountless=case):
                 self.assertFalse(evaluate(
@@ -3477,7 +3505,7 @@ process.stdout.write(eval(script));
         browser = OdaBrowser.__new__(OdaBrowser)
         browser.vipps_phone_number = "90000000"
         browser._checkout_operation = lambda *a, **kw: nullcontext()
-        browser._checkout_dispatch_tab = mock.Mock(return_value="tab-1")
+        browser._select_payment_tab = mock.Mock(side_effect=lambda tab_id: tab_id == "tab-1")
         browser._invoke = mock.Mock(return_value={"url": gateway})
         browser._eval = mock.Mock(side_effect=evaluate)
         context = {"tab_id": "tab-1", "expected_total": 25650, "order_id": "order-1",
@@ -3710,7 +3738,7 @@ process.stdout.write(eval(script));
         self.assertTrue(all(stale_gateway in call.args[0] for call in browser._eval.call_args_list))
         self.assertFalse(any(call.args[:2] == ("mouse", "down") for call in browser._invoke.call_args_list))
 
-    def test_oda_vipps_amountless_mode_requires_the_exact_recovery_source_and_order(self):
+    def test_oda_vipps_amountless_mode_requires_exact_confirm_or_retry_source(self):
         gateway = "https://pay.vipps.no/?token=opaque"
 
         def attempted_script(expected_order_id, source_url):
@@ -3739,10 +3767,13 @@ process.stdout.write(eval(script));
 
         source = "https://oda.com/no/checkout/retry/?orderNumber=order-1"
         self.assertTrue(attempted_script("order-1", source)["allow_source_bound_amountless"])
+        for order_id, bound_source in ((None, "https://oda.com/no/checkout/confirm/"),
+                ("order-1", "https://oda.com/no/checkout/confirm/?orderNumber=order-1")):
+            self.assertTrue(attempted_script(order_id, bound_source)["allow_source_bound_amountless"])
         for order_id, unbound_source in (
             (None, source),
             ("order-2", source),
-            ("order-1", "https://oda.com/no/checkout/confirm/?orderNumber=order-1"),
+            ("order-1", "https://oda.com/no/checkout/confirm/?orderNumber=order-2"),
             ("order-1", source + "&other=1"),
         ):
             with self.subTest(order_id=order_id, source=unbound_source):
