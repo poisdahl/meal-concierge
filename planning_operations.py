@@ -1866,11 +1866,16 @@ class PlanningOperations:
 
     def _product_binding(
         self, *, menu_ref: Any = None, planner_handoff: Any = None,
-        planner_selection_ref: Any = None,
+        planner_selection_ref: Any = None, planner_ref: Any = None,
         require_saved_planner: bool = False,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-        if sum(value is not None for value in (menu_ref, planner_handoff, planner_selection_ref)) != 1:
-            raise HouseholdError("product preparation needs exactly one menu_ref, planner_handoff or planner_selection_ref")
+        if sum(value is not None for value in (menu_ref, planner_handoff, planner_selection_ref, planner_ref)) != 1:
+            raise HouseholdError("product preparation needs exactly one menu_ref, planner_ref, planner_handoff or planner_selection_ref")
+        if planner_ref is not None:
+            handoff, _resolved, _request = self._resolve_planner_ref(planner_ref)
+            return self._product_binding(
+                planner_handoff=handoff, require_saved_planner=require_saved_planner,
+            )
         if menu_ref is not None:
             if not isinstance(menu_ref, Mapping) or set(menu_ref) != {"menu_id", "revision", "digest"}:
                 raise HouseholdError("menu_ref must be the exact current menu identity")
@@ -2730,6 +2735,10 @@ class PlanningOperations:
 
     def _products(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        if request.get("planner_ref") is not None and action != "prepare":
+            raise HouseholdError("planner_ref is only for product preparation; save the menu before apply")
+        if request.get("planner_ref") is not None and request.get("planner_input") is not None:
+            raise HouseholdError("planner_ref replaces planner_input for product preparation")
         if action == "record_ingredients":
             binding, menu, reference = self._product_binding(menu_ref=request.get("menu_ref"))
             decisions = request.get("ingredient_decisions")
@@ -2766,7 +2775,7 @@ class PlanningOperations:
             mode = request.get("continuation_mode", "extend")
             if continuation_ref is not None:
                 if any(request.get(key) is not None for key in (
-                    "menu_ref", "planner_handoff", "planner_selection_ref",
+                    "menu_ref", "planner_ref", "planner_handoff", "planner_selection_ref",
                 )):
                     raise HouseholdError("product_plan_ref replaces menu/planner binding arguments")
                 continuation_record = self._product_plan_record(self.store.read(), continuation_ref)
@@ -2786,6 +2795,7 @@ class PlanningOperations:
                     raise HouseholdError("continuation_mode replace requires product_plan_ref")
                 binding, menu, saved_ref = self._product_binding(
                     menu_ref=request.get("menu_ref"),
+                    planner_ref=request.get("planner_ref"),
                     planner_handoff=request.get("planner_handoff"),
                     planner_selection_ref=request.get("planner_selection_ref"),
                 )
@@ -2928,6 +2938,12 @@ class PlanningOperations:
                     "partial_product_plan_digest": partial_apply_digest,
                 } if partial_apply_digest else None,
                 "product_plan": plan}
+            if request.get("planner_ref") is not None and saved_ref is None:
+                result.pop("apply_arguments", None)
+                result.pop("partial_apply_arguments", None)
+                result["next"] = (
+                    "Save this exact menu selection, then prepare products with its menu_ref before cart apply."
+                )
             previous = request.get("previous_product_plan")
             if previous is not None:
                 previous = validate_product_plan(previous, previous.get("product_plan_digest") if isinstance(previous, Mapping) else None)
