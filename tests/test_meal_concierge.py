@@ -1155,6 +1155,62 @@ class CoreTestsBase:
         self.assertTrue(checkout_lines_match(expected, [{"text": "Zalo Ultra 500 ml, Zalo", "quantity": 1}]))
         self.assertFalse(checkout_lines_match(expected, [{"text": "Zalo Ultra 750 ml, Zalo", "quantity": 1}]))
 
+    def test_checkout_identity_preserves_title_words_across_description_fields(self):
+        expected = [{
+            "identity": product_identity(
+                "Testvare God Pris Norge", "Maks 4 til nedsatt pris, Norge, 1 stk", "",
+            ),
+            "quantity": 1,
+        }]
+        displayed = "Testvare God Pris Maks 4 til nedsatt pris, Norge, 1 stk"
+        self.assertTrue(checkout_lines_match(expected, [{"text": displayed, "quantity": 1}]))
+        for changed in (
+            displayed.replace("God Pris", "God"),
+            displayed.replace("Norge", "Sverige"),
+            displayed.replace("1 stk", "2 stk"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(checkout_lines_match(expected, [{"text": changed, "quantity": 1}]))
+        self.assertFalse(checkout_lines_match(expected, [{"text": displayed, "quantity": 2}]))
+
+    def test_checkout_identity_does_not_take_a_count_from_another_description_field(self):
+        expected = [{
+            "identity": product_identity(
+                "Testvare 3 store porsjoner", "Maks 3, store porsjoner, 450 g", "Testmerke",
+            ),
+            "quantity": 1,
+        }]
+        self.assertTrue(checkout_lines_match(expected, [{
+            "text": "Testvare 3 Maks 3, store porsjoner, 450 g Testmerke", "quantity": 1,
+        }]))
+        self.assertFalse(checkout_lines_match(expected, [{
+            "text": "Testvare Maks 3, store porsjoner, 450 g Testmerke", "quantity": 1,
+        }]))
+
+    def test_checkout_identity_deduplicates_matching_description_field_boundaries(self):
+        expected = [{
+            "identity": product_identity(
+                "Testvare Lav Pris, Italia / Chile",
+                "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk", "",
+            ),
+            "quantity": 1,
+        }]
+        displayed = "Testvare Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk"
+        self.assertTrue(checkout_lines_match(expected, [{"text": displayed, "quantity": 1}]))
+        self.assertFalse(checkout_lines_match(expected, [{
+            "text": displayed.replace("8 stk", "4 stk"), "quantity": 1,
+        }]))
+        different_boundaries = [{
+            "identity": product_identity(
+                "Testvare Lav, Pris Italia / Chile",
+                "Maks 4 til nedsatt pris, Lav Pris, Italia / Chile, 8 stk", "",
+            ),
+            "quantity": 1,
+        }]
+        self.assertFalse(checkout_lines_match(
+            different_boundaries, [{"text": displayed, "quantity": 1}],
+        ))
+
     def test_checkout_delivery_requires_one_exact_selected_tuple(self):
         expected = "Hjemlevering mellom kl 07 og 13, 3. sep"
         selected = "Vi leverer varene dine torsdag 3. september 07:00–13:00 Endre"

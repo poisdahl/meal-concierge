@@ -626,9 +626,20 @@ def identity_tokens(value: str) -> tuple[str, ...]:
 def product_identity(name: str, description: str, brand: str) -> str:
     name_tokens = list(identity_tokens(name))
     description_tokens = list(identity_tokens(description))
+    # Retain matching field boundaries when deduplicating later title suffixes:
+    # "pris Norge" is not the same phrase as "pris, Norge".
+    name_fields = [
+        index for index, field in enumerate(name.split(","))
+        for _ in identity_tokens(field)
+    ]
+    description_fields = [
+        index for index, field in enumerate(description.split(","))
+        for _ in identity_tokens(field)
+    ]
     brand_tokens = list(identity_tokens(brand))
     if brand_tokens and name_tokens[:len(brand_tokens)] == brand_tokens:
         name_tokens = name_tokens[len(brand_tokens):]
+        name_fields = name_fields[len(brand_tokens):]
     for length in range(min(len(name_tokens) - 1, len(description_tokens)), 0, -1):
         suffix = name_tokens[-length:]
         repeated_at_start = description_tokens[:length] == suffix
@@ -636,6 +647,11 @@ def product_identity(name: str, description: str, brand: str) -> str:
             start
             for start in range(1, len(description_tokens) - length + 1)
             if description_tokens[start:start + length] == suffix
+            and all(
+                (description_fields[start + offset] != description_fields[start + offset - 1])
+                == (name_fields[-length + offset] != name_fields[-length + offset - 1])
+                for offset in range(1, length)
+            )
         ]
         repeated_later = not any(token.isdigit() for token in suffix) and bool(repeated_positions)
         if repeated_at_start or repeated_later:
@@ -644,6 +660,8 @@ def product_identity(name: str, description: str, brand: str) -> str:
                 preceding_token = name_tokens[-length - 1]
                 if preceding_token.isdigit() and any(
                     description_tokens[start - 1] == preceding_token
+                    and (description_fields[start - 1] == description_fields[start])
+                    == (name_fields[-length - 1] == name_fields[-length])
                     for start in repeated_positions
                 ):
                     trim_length += 1
