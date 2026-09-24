@@ -67,7 +67,7 @@ class PaymentSwitchTests(unittest.TestCase):
                 raise HouseholdError('lost payment target read')
             if self.target_unknown:
                 return {'status': 'unknown'}
-            self.target = {'order_id': order_id, 'order_change_id': 'change-1',
+            self.target = {'order_id': order_id, 'order_change_id': '7654321',
                            'payment_id': closure['payment_id'], 'goods_digest': 'c' * 64}
             if retained_target is not None:
                 self.assertEqual(retained_target, self.target)
@@ -84,7 +84,7 @@ class PaymentSwitchTests(unittest.TestCase):
 
         def review(cart, order_id, *, payment, expected_binding, addition, **kwargs):
             self.assertEqual(addition['payment_switch_target'], self.target)
-            self.assertEqual(addition['order_change_id'], 'change-1')
+            self.assertEqual(addition['order_change_id'], '7654321')
             self.assertEqual(payment['method'], 'saved_card')
             amounts = {key: None for key in AMOUNTS}
             amounts.update(product_subtotal=16.70, provider_total=16.70)
@@ -132,6 +132,103 @@ class PaymentSwitchTests(unittest.TestCase):
         self.assertEqual((self.cancel_clicks, self.target_reads, self.card_clicks), (1, 1, 1))
         self.assertEqual(self.app.store.read()['checkout_payment']['method'], 'vipps')
         self.assertEqual(self.app.store.read()['order_snapshots'], self.flow.snapshots)
+
+    def test_lower_native_charge_survives_switch_review_and_restart(self):
+        from core import StateStore
+        context = {'provider_charge_minor': 1200, 'payment_id': '123456',
+                   'order_change_id': '7654321'}
+        with self.app.store.locked() as state:
+            state['pending_checkout']['vipps_request_context'].update(context)
+        original_review = self.browser.review_payment_recovery
+        def review(*args, **kwargs):
+            self.assertEqual(kwargs['addition']['provider_charge_minor'], 1200)
+            result = original_review(*args, **kwargs)
+            result['provider_charge_minor'] = 1200
+            result['amounts_minor'].update(provider_total=1671, bags=750)
+            return result
+        self.browser.review_payment_recovery = review
+        prepared = self.switch()
+        self.assertEqual(prepared['summary']['total'], 16.70)
+        self.assertEqual(prepared['summary']['provider_charge_total'], 12.00)
+        self.assertEqual(prepared['summary']['merchant_summary_total'], 16.71)
+        self.app = Application(StateStore(self.flow.temp.name, self.flow.settings), self.merchant, self.browser)
+        self.app._now = self.flow.app._now
+        self.assertTrue(self.call('confirm', confirmation_id=prepared['confirmation_id'])['confirmed'])
+        self.assertEqual((self.cancel_clicks, self.card_clicks), (1, 1))
+
+    def test_changed_native_payment_target_blocks_switch_after_closure(self):
+        with self.app.store.locked() as state:
+            state['pending_checkout']['vipps_request_context'].update(
+                provider_charge_minor=1200, payment_id='123456', order_change_id='9999999')
+        with self.assertRaisesRegex(HouseholdError, 'payment target changed'):
+            self.switch()
+        self.assertEqual((self.cancel_clicks, self.card_clicks), (1, 0))
+
+    def test_child_context_requires_its_frozen_charge_and_change(self):
+        from order_operations import OrderOperations
+        with self.app.store.locked() as state:
+            state['pending_checkout']['vipps_request_context'].update(
+                provider_charge_minor=1200, payment_id='123456', order_change_id='7654321')
+        original_review = self.browser.review_payment_recovery
+        def review(*args, **kwargs):
+            result = original_review(*args, **kwargs)
+            result['provider_charge_minor'] = 1200
+            return result
+        self.browser.review_payment_recovery = review
+        self.switch()
+        pending = self.app.store.read()['pending_checkout']
+        context = {'tab_id': 'owned', 'order_id': 'order-1', 'expected_total': 1670,
+                   'gateway_url_digest': 'b' * 64, 'provider_charge_minor': 1200,
+                   'payment_id': '123457', 'order_change_id': '7654321'}
+        self.assertTrue(OrderOperations._vipps_context_matches(context, pending, 'order-1', child=True))
+        for change in ({'provider_charge_minor': 1199}, {'order_change_id': '7654322'},
+                       {'payment_id': 'wrong'}):
+            self.assertFalse(OrderOperations._vipps_context_matches(
+                {**context, **change}, pending, 'order-1', child=True))
+
+    def test_legacy_addition_adoption_persists_only_exact_native_context(self):
+        with self.app.store.locked() as state:
+            state['pending_checkout'].pop('vipps_request_context', None)
+        context = {'tab_id': 'owned', 'order_id': 'order-1', 'expected_total': 1670,
+                   'gateway_url_digest': 'b' * 64, 'provider_charge_minor': 1200,
+                   'payment_id': '123456', 'order_change_id': '7654321'}
+        self.browser.read_order_binding = lambda *args, **kwargs: deepcopy(self.flow.binding)
+        calls = []
+        def adopt(cart, review, *, deadline, order_id, addition):
+            calls.append((order_id, addition))
+            return deepcopy(context)
+        self.browser.adopt_vipps_request = adopt
+        pending = self.app.store.read()['pending_checkout']
+        adopted, observed = self.app._adopt_checkout_vipps_request(pending, 'order-1', None)
+        self.assertEqual(observed, context)
+        self.assertEqual(adopted['vipps_request_context'], context)
+        self.assertEqual(adopted['vipps_request_status'], 'unknown')
+        self.assertEqual(calls, [('order-1', True)])
+        self.assertEqual((self.cancel_clicks, self.card_clicks), (0, 0))
+
+    def test_failed_card_addition_can_switch_to_vipps_without_vipps_context(self):
+        with self.app.store.locked() as state:
+            pending = state['pending_checkout']
+            pending['checkout_payment'] = {'method': 'saved_card', 'card_last4': None}
+            pending['browser_review']['payment_choice'] = {'method': 'saved_card', 'card_last4': None}
+            pending['browser_review']['payment_display'] = '•••• 1234'
+            pending.pop('vipps_request_context', None)
+            pending.pop('vipps_request_status', None)
+            pending['authentication_context'] = {'tab_id': 'card-tab', 'payment_id': '123456'}
+            pending['payment_failure'] = {'payment_failed': True, 'order_id': 'order-1',
+                                          'order_change_id': '7654321'}
+        original_review = self.browser.review_payment_recovery
+        def review(*args, **kwargs):
+            result = original_review(*args, **{**kwargs, 'payment': {'method': 'saved_card'}})
+            result['payment_choice'] = {'method': 'vipps'}
+            result['payment_display'] = 'Vipps'
+            return result
+        self.browser.review_payment_recovery = review
+        prepared = self.call('switch_payment', confirmation_id=self.source['confirmation_id'],
+                             checkout_payment={'method': 'vipps'})
+        self.assertTrue(prepared['recovery'])
+        self.assertEqual(prepared['summary']['payment_method'], 'vipps')
+        self.assertEqual((self.cancel_clicks, self.card_clicks), (0, 0))
 
     def test_lost_cancel_response_reopens_without_repeating_abort(self):
         self.lose_cancel = True
@@ -304,7 +401,8 @@ class PaymentSwitchTests(unittest.TestCase):
 
 
 class NativeRetryTabTests(unittest.TestCase):
-    def fixture(self, *, changed_order=False, retry_order='order-1', retry_change=123):
+    def fixture(self, *, changed_order=False, retry_order='order-1', retry_change=123,
+                restarted=False):
         from contextlib import nullcontext
         from oda_browser import OdaBrowser
 
@@ -317,7 +415,8 @@ class NativeRetryTabTests(unittest.TestCase):
         if changed_order:
             current_order['grossAmount'] += 1
         binding = {'account_reference_digest': 'a' * 64, 'receipt_address': 'Example street 1'}
-        state = {'tab': 'vipps', 'urls': {'vipps': 'https://pay.vipps.no/?token=retained'},
+        payment_tab = 'fresh' if restarted else 'vipps'
+        state = {'tab': payment_tab, 'urls': {payment_tab: 'about:blank' if restarted else 'https://pay.vipps.no/?token=retained'},
                  'events': []}
 
         class Provider:
@@ -367,7 +466,7 @@ class NativeRetryTabTests(unittest.TestCase):
         browser._eval = eval_retry
 
         def open_url(url):
-            self.assertEqual(state['tab'], 'vipps')
+            self.assertEqual(state['tab'], payment_tab)
             state['events'].append(('retry_open', state['tab']))
             state['urls'][state['tab']] = url
 
@@ -406,8 +505,90 @@ class NativeRetryTabTests(unittest.TestCase):
                 self.assertEqual(state['tab'], 'vipps')
                 self.assertNotIn(('retry_open', 'vipps'), state['events'])
 
+    def test_restarted_browser_reopens_only_retained_closed_retry(self):
+        from oda_payment_switch import prepare_oda_addition_retry
+        browser, cart, original, binding, closure, state = self.fixture(restarted=True)
+        target = {'order_id': 'order-1', 'order_change_id': '123', 'payment_id': '123456'}
+        from oda_payment_switch import _cart_digest
+        target['cart_digest'] = _cart_digest(cart)
+        observed = prepare_oda_addition_retry(browser, 'order-1', cart, original, binding,
+            deadline=None, closure=closure, retained_target=target)
+        self.assertEqual(observed, target)
+        self.assertEqual(state['events'].count(('retry_open', 'fresh')), 1)
+        self.assertEqual(state['urls']['fresh'],
+            'https://oda.com/no/checkout/retry/?orderNumber=order-1&orderChangeId=123')
+
 
 class NativeObservedAdoptionTests(unittest.TestCase):
+    def test_addition_adopts_exact_lower_native_charge_and_rejects_unbound_charge(self):
+        from contextlib import nullcontext
+        import json
+        from oda_payment_switch import adopt_vipps_request, _native_vipps_terminal
+
+        browser, validation, poll = recovery_fixtures.VippsNativeTerminalTests().fixture()
+        source = 'https://pay.vipps.no/?token=source'
+        claims = json.loads(validation['responseBody'])
+        claims['amount'] = 1640
+        validation['responseBody'] = json.dumps(claims)
+        validation['timestamp'] = 3
+        poll['timestamp'] = 4
+        pay = {'url': 'https://oda.com/api/v1/checkout/pay/', 'method': 'POST', 'status': 200,
+               'timestamp': 2, 'requestId': 'pay', 'postData': json.dumps({
+                   'mode': {'type': 'confirm_modification', 'orderNumber': 'order-1'},
+                   'primaryPayment': {'methodId': 25, 'paymentMethodData': {}}})}
+        browser.rows.append(pay)
+        browser.checkout_provider = 'oda'
+        browser.vipps_phone_number = '90000000'
+        browser._cart_expectation = lambda cart: {'total_minor': 2040}
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        browser._inspection_tab = lambda: nullcontext()
+        browser._order_url = lambda order_id: 'https://oda.com/no/orders/' + order_id + '/'
+        browser._open = lambda url: None
+        browser._select_payment_tab = lambda tab_id: tab_id == 'owned'
+        original_invoke = browser._invoke
+        browser._invoke = lambda *args: (
+            {'tabs': [{'tabId': 'owned', 'url': source}]} if args == ('tab', 'list') else
+            {'url': source} if args == ('get', 'url') else original_invoke(*args))
+        target = [7654321]
+        browser._eval = lambda script: (
+            {'retry': {'type': 'checkout-payment-retry', 'params': {
+                'order_number': 'order-1', 'order_change_id': target[0]}}}
+            if '/api/v1/checkout/payment/' in script else {'identity': True, 'sent': True})
+        context = adopt_vipps_request(browser, {}, {'order_id': 'order-1'}, deadline=None,
+                                      order_id='order-1', addition=True)
+        self.assertEqual(context['expected_total'], 2040)
+        self.assertEqual(context['provider_charge_minor'], 1640)
+        self.assertEqual(context['payment_id'], '456')
+        self.assertEqual(context['order_change_id'], '7654321')
+        self.assertEqual(_native_vipps_terminal(browser, source, context)['terminal_status'], 'TIMEOUT')
+        for mutate in (lambda: pay.update(timestamp=5),
+                       lambda: target.__setitem__(0, None),
+                       lambda: claims.update(amount=2041),
+                       lambda: claims.update(currency='SEK')):
+            with self.subTest(mutate=mutate):
+                old_pay, old_target, old_claims = pay['timestamp'], target[0], dict(claims)
+                mutate()
+                validation['responseBody'] = json.dumps(claims)
+                self.assertIsNone(adopt_vipps_request(browser, {}, {'order_id': 'order-1'},
+                    deadline=None, order_id='order-1', addition=True))
+                pay['timestamp'], target[0] = old_pay, old_target
+                claims.clear(); claims.update(old_claims)
+                validation['responseBody'] = json.dumps(claims)
+        pay['postData'] = json.dumps({'mode': {'type': 'confirm_modification', 'orderNumber': 'order-1'},
+                                      'primaryPayment': {'methodId': 99, 'paymentMethodData': {}}})
+        self.assertIsNone(adopt_vipps_request(browser, {}, {'order_id': 'order-1'},
+                          deadline=None, order_id='order-1', addition=True))
+        pay['postData'] = json.dumps({'mode': {'type': 'confirm_modification', 'orderNumber': 'order-1'},
+                                      'primaryPayment': {'methodId': 25, 'paymentMethodData': {}}})
+        for invalid_url in ('https://pay.vipps.no/?token=other',
+                            'https://pay.vipps.no/?token=source&other=1'):
+            with self.subTest(invalid_url=invalid_url):
+                browser._invoke = lambda *args: (
+                    {'tabs': [{'tabId': 'owned', 'url': invalid_url}]} if args == ('tab', 'list') else
+                    {'url': invalid_url} if args == ('get', 'url') else original_invoke(*args))
+                self.assertIsNone(adopt_vipps_request(browser, {}, {'order_id': 'order-1'},
+                                  deadline=None, order_id='order-1', addition=True))
+
     def test_native_validation_amount_fallback_and_retry_order_bind_adoption(self):
         from contextlib import nullcontext
         import json
@@ -420,6 +601,8 @@ class NativeObservedAdoptionTests(unittest.TestCase):
         browser._cart_expectation = lambda cart: {'total_minor': 4370}
         browser._checkout_operation = lambda *args, **kwargs: nullcontext()
         browser._inspection_tab = lambda: nullcontext()
+        browser._order_url = lambda order_id: 'https://oda.com/no/orders/' + order_id + '/'
+        browser._open = lambda url: None
         browser._select_payment_tab = lambda tab_id: tab_id == 'owned'
         native_invoke = browser._invoke
         browser._invoke = lambda *args: (

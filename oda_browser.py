@@ -261,6 +261,7 @@ def _oda_checkout_amount_script(
     vipps: bool = False,
     retry: bool = False,
     addition_retry: bool = False,
+    addition_goods_minor: int | None = None,
 ) -> str:
     """Build the shared read/final-click parser from observed retailer rows."""
 
@@ -280,6 +281,9 @@ def _oda_checkout_amount_script(
         raise HouseholdError("Oda itemized discount binding is invalid")
     if isinstance(expected_product_count, bool) or not isinstance(expected_product_count, int) or not 0 < expected_product_count <= 1_000_000:
         raise HouseholdError("Oda checkout product count is invalid")
+    goods_minor = addition_goods_minor if addition_goods_minor is not None else expected_total
+    if addition_retry and (type(goods_minor) is not int or goods_minor <= 0):
+        raise HouseholdError("Oda addition goods subtotal is invalid")
     script = r"""
 (() => {
  const amountLabels=AMOUNT_LABELS;
@@ -362,7 +366,9 @@ def _oda_checkout_amount_script(
  // On addition retry the overview gross total and the payment calculation are
  // separate merchant values. The final button is the calculated amount due.
  const totalValid=discountsAgree&&(ADDITION_RETRY
-   ? amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0)
+   ? (ODA_ADDITION_RETRY
+      ? amounts.product_subtotal===ADDITION_GOODS&&Number.isSafeInteger(amounts.provider_total)&&amounts.provider_total>0
+      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
    : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0));
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&itemizedRowsValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
@@ -406,6 +412,7 @@ def _oda_checkout_amount_script(
             json.dumps(labels, ensure_ascii=False, separators=(",", ":")),
         )
         .replace("TOTAL", json.dumps(expected_total))
+        .replace("ADDITION_GOODS", json.dumps(addition_goods_minor if addition_goods_minor is not None else expected_total))
         .replace("PRODUCT_LABEL",
             json.dumps("1 vara" if expected_product_count == 1 else f"{expected_product_count} varor")
             if provider == "mathem" else json.dumps("1 vare" if expected_product_count == 1 else f"{expected_product_count} varer")
@@ -414,6 +421,7 @@ def _oda_checkout_amount_script(
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
         .replace("VERIFY_READ_PAYMENT", "true" if provider == "mathem" and not retry else "false")
+        .replace("ODA_ADDITION_RETRY", "true" if addition_retry and provider == "oda" else "false")
         .replace("ADDITION_RETRY", "true" if addition_retry else "false")
         .replace("RETRY", "true" if retry else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
@@ -1209,9 +1217,9 @@ class OdaBrowser:
             self._invoke("tab", tab_id)
         return self._checkout_dispatch_tab() == tab_id
 
-    def adopt_vipps_request(self, cart, review, *, deadline=None, order_id):
+    def adopt_vipps_request(self, cart, review, *, deadline=None, order_id, addition=False):
         from oda_payment_switch import adopt_vipps_request
-        return adopt_vipps_request(self, cart, review, deadline=deadline, order_id=order_id)
+        return adopt_vipps_request(self, cart, review, deadline=deadline, order_id=order_id, addition=addition)
 
     def order_payment_state(self, order_id, *, deadline=None):
         """Read a fail-closed payment state from the exact Oda order page."""
@@ -1303,6 +1311,12 @@ class OdaBrowser:
                 raise HouseholdError("Addition payment recovery is unavailable for this provider")
             bound_cart = self._order_cart(cart, order_id, addition["before"]["order"], binding) if addition else cart
             expected = self._cart_expectation(bound_cart)
+            payment_total = addition.get("provider_charge_minor", expected["total_minor"]) if addition else expected["total_minor"]
+            if (addition and self.checkout_provider == "oda"
+                    and (type(payment_total) is not int or not 0 < payment_total <= expected["total_minor"]
+                         or type(addition.get("added_goods_minor")) is not int
+                         or addition["added_goods_minor"] <= 0)):
+                raise HouseholdError("The addition retry charge or goods subtotal is unavailable")
             # Keep the original payment page intact while the merchant decides
             # whether this exact outstanding order has a retry review.
             label = "meal-concierge-payment-recovery"
@@ -1352,7 +1366,7 @@ class OdaBrowser:
             self._expand_checkout_amount_summary()
             summary_only = item_review == "summary"
             surface = self._eval(_oda_checkout_surface_script(
-                expected,
+                {**expected, "total_minor": payment_total},
                 payment,
                 provider=self.checkout_provider,
                 summary_product_count=expected["product_count"] if summary_only else None,
@@ -1368,15 +1382,17 @@ class OdaBrowser:
                     or not item_binding_matches
                     or not checkout_delivery_matches(expected["delivery_text"], surface.get("delivery_roots"), provider=self.checkout_provider)):
                 raise HouseholdError("The merchant recovery review differs from the original order")
-            amounts = self._eval(_oda_checkout_amount_script(expected["total_minor"],
+            amounts = self._eval(_oda_checkout_amount_script(payment_total,
                 expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True,
-                addition_retry=bool(addition)))
+                addition_retry=bool(addition),
+                addition_goods_minor=addition.get("added_goods_minor") if addition and self.checkout_provider == "oda" else None))
             if amounts.get("amounts_valid") is not True:
                 failures = amounts.get("amount_check_failures") or ["unverified_summary"]
                 raise HouseholdError("The merchant recovery amounts cannot be verified (" + ", ".join(failures) + "); review the same order without sending payment")
             return {"order_id": order_id, "binding": dict(binding), "payment_choice": dict(payment),
                     "payment_display": surface["payment_display"], "surface": surface,
                     "amounts_minor": amounts["amounts"],
+                    **({"provider_charge_minor": payment_total} if addition and self.checkout_provider == "oda" else {}),
                     **({"itemized_discount_rows": amounts["itemized_discount_rows"]}
                        if "itemized_discount_rows" in amounts else {}),
                     "summary_only": summary_only}
@@ -1406,30 +1422,40 @@ class OdaBrowser:
                     raise HouseholdError("Recovery changed after its confirmation")
                 bound_cart = self._order_cart(cart, review["order_id"], addition["before"]["order"], review["binding"]) if addition else cart
                 expected = self._cart_expectation(bound_cart)
+                payment_total = addition.get("provider_charge_minor", expected["total_minor"]) if addition else expected["total_minor"]
+                if addition and self.checkout_provider == "oda" and review.get("provider_charge_minor") != payment_total:
+                    raise HouseholdError("The frozen addition retry charge changed")
                 self._require_checkout_time(required_time)
                 dispatch_tab = self._checkout_dispatch_tab()
                 if vipps and dispatch_tab is None:
                     raise HouseholdError("The Oda/Vipps payment tab is unavailable; do not send payment")
                 surface = _oda_checkout_surface_script(
-                    expected,
+                    {**expected, "total_minor": payment_total},
                     review["payment_choice"],
                     provider=self.checkout_provider,
                     summary_product_count=(
                         expected["product_count"] if review.get("summary_only") is True else None
                     ),
                 ).strip()
-                click = _oda_checkout_amount_script(expected["total_minor"],
+                click = _oda_checkout_amount_script(payment_total,
                     expected_product_count=expected["product_count"], provider=self.checkout_provider,
                     expected_amounts=review["amounts_minor"], expected_url=review["surface"]["url"],
                     expected_itemized_discounts=review.get("itemized_discount_rows"),
                     vipps=review["payment_choice"].get("method") == "vipps", retry=True,
-                    addition_retry=bool(addition)).strip()
+                    addition_retry=bool(addition),
+                    addition_goods_minor=addition.get("added_goods_minor") if addition and self.checkout_provider == "oda" else None).strip()
                 script = ("(() => {const actual=JSON.parse(" + surface
                           + "),expected=" + json.dumps(review["surface"], ensure_ascii=False)
                           + ";const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;"
                           + "if(JSON.stringify(canonical(actual))!==JSON.stringify(canonical(expected))){const keys=['url','authenticated','available','items','total_matches','delivery_roots','address_matches','masked_payment','payment_display','submit_controls','summary_count_matches'];return JSON.stringify({clicked:false,diagnostic:{stage:'surface',difference_keys:keys.filter(key=>JSON.stringify(canonical(actual[key]))!==JSON.stringify(canonical(expected[key])))}})}return " + click + ";})()")
                 card_request_fence = (self._oda_card_request_fence(dispatch_tab, review["surface"]["url"])
                                       if self.checkout_provider == "oda" and not vipps else None)
+                addition_fence = (self._oda_card_request_fence(dispatch_tab, review["surface"]["url"])
+                                  if self.checkout_provider == "oda" and vipps and addition else None)
+                if vipps and addition and (not addition_fence or addition_fence["mode"] != {
+                        "type": "retry_modification", "orderNumber": review["order_id"],
+                        "orderChangeId": int(addition["order_change_id"])}):
+                    raise HouseholdError("The native Oda addition retry payment could not be fenced")
                 before_click()
                 clicked = None
                 for attempt in range(RECOVERY_FINAL_CLICK_ATTEMPTS):
@@ -1583,7 +1609,9 @@ class OdaBrowser:
                     authentication_expected=review["payment_choice"]["method"] == "saved_card",
                     capture_failure=False,
                     vipps_expected_total=(expected["total_minor"]
-                                          if vipps else None),
+                                          if vipps and not addition else payment_total if vipps else None),
+                    **({"vipps_reviewed_total": expected["total_minor"],
+                        "vipps_addition_fence": addition_fence} if vipps and addition else {}),
                     vipps_source_url=(review["surface"]["url"] if vipps else None),
                     before_vipps_request=before_vipps_request, on_vipps_gateway=on_vipps_gateway,
                     **({"card_request_fence": card_request_fence} if card_request_fence is not None else {}))
@@ -2500,6 +2528,8 @@ class OdaBrowser:
         on_gateway=None,
         expected_order_id: str | None = None,
         source_url: str | None = None,
+        addition_fence=None,
+        reviewed_total=None,
     ) -> dict[str, Any]:
         """Continue the payment page opened by one exact successful Oda click."""
 
@@ -2529,6 +2559,7 @@ class OdaBrowser:
                      and set(source_params) <= {"orderNumber", "orderChangeId"}))
         )
         gateway_url = None
+        charge = None
         followed_source = False
         started_at = time.monotonic()
         checkout_deadline = getattr(self, "_checkout_deadline", None)
@@ -2556,12 +2587,28 @@ class OdaBrowser:
                             expected_total, self.vipps_phone_number, expected_url=current_url,
                             allow_source_bound_amountless=allow_source_bound_amountless,
                         ))
-                        if (candidate.get("identity") is True
+                        if (addition_fence is None and candidate.get("identity") is True
                                 and (candidate.get("fillable") is True
                                      or candidate.get("sent") is True
                                      or candidate.get("expired") is True)):
                             gateway_url = current_url
                             break
+                    if addition_fence is not None and current_url != source_url:
+                        from oda_payment_switch import validated_addition_charge
+                        charge = validated_addition_charge(self, current_url, expected_order_id,
+                            reviewed_total if reviewed_total is not None else expected_total,
+                            prior_request_ids=addition_fence["request_ids"],
+                            expected_mode=addition_fence["mode"],
+                            required_charge=expected_total if reviewed_total is not None else None)
+                        if charge:
+                            candidate = self._eval(_oda_vipps_gateway_script(
+                                charge["provider_charge_minor"], self.vipps_phone_number, expected_url=current_url,
+                                allow_source_bound_amountless=allow_source_bound_amountless))
+                            if (candidate.get("identity") is True and
+                                    (candidate.get("fillable") is True or candidate.get("sent") is True
+                                     or candidate.get("expired") is True)):
+                                gateway_url = current_url
+                                break
                 except HouseholdError:
                     pass
                 if attempt < gateway_polls - 1:
@@ -2582,9 +2629,12 @@ class OdaBrowser:
                 + "Do not submit a new order or repeat the addition."
             )
         order_id = expected_order_id
-        request_context = {"tab_id": dispatch_tab, "expected_total": expected_total,
+        gateway_amount = charge["provider_charge_minor"] if charge else expected_total
+        request_context = {"tab_id": dispatch_tab, "expected_total": reviewed_total if reviewed_total is not None else expected_total,
                            "gateway_url_digest": hashlib.sha256(gateway_url.encode()).hexdigest(),
-                           "order_id": order_id}
+                           "order_id": order_id,
+                           **({"provider_charge_minor": gateway_amount, "payment_id": charge["payment_id"],
+                               "order_change_id": charge["order_change_id"]} if charge else {})}
         if on_gateway:
             on_gateway(request_context)
         observed: dict[str, Any] = {}
@@ -2593,7 +2643,7 @@ class OdaBrowser:
             if self._checkout_dispatch_tab() != dispatch_tab:
                 raise HouseholdError("The Oda/Vipps payment tab changed; the outcome is uncertain; do not retry")
             observed = self._eval(_oda_vipps_gateway_script(
-                expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                gateway_amount, self.vipps_phone_number, expected_url=gateway_url,
                 allow_source_bound_amountless=allow_source_bound_amountless,
             ))
             if observed.get("sent") is True:
@@ -2622,7 +2672,7 @@ class OdaBrowser:
         y = box["y"] + box["height"] / 2
         if (self._checkout_dispatch_tab() != dispatch_tab
                 or self._eval(_oda_vipps_gateway_script(
-                    expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    gateway_amount, self.vipps_phone_number, expected_url=gateway_url,
                     allow_source_bound_amountless=allow_source_bound_amountless,
                     require_hit=True, hit_x=x, hit_y=y,
                 )) != {"identity": True, "ready": True, "sent": False, "expired": False,
@@ -2634,7 +2684,7 @@ class OdaBrowser:
         current_gateway_url = str(self._invoke("get", "url").get("url") or "")
         if (self._checkout_dispatch_tab() != dispatch_tab or current_gateway_url != gateway_url
                 or self._eval(_oda_vipps_gateway_script(
-                    expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                    gateway_amount, self.vipps_phone_number, expected_url=gateway_url,
                     allow_source_bound_amountless=allow_source_bound_amountless,
                     require_hit=True, hit_x=x, hit_y=y,
                 )) != {"identity": True, "ready": True, "sent": False, "expired": False,
@@ -2647,7 +2697,7 @@ class OdaBrowser:
             if self._checkout_dispatch_tab() != dispatch_tab:
                 break
             result = self._eval(_oda_vipps_gateway_script(
-                expected_total, self.vipps_phone_number, expected_url=gateway_url,
+                gateway_amount, self.vipps_phone_number, expected_url=gateway_url,
                 allow_post_dispatch_ack=True,
             ))
             if result.get("sent") is True:
@@ -2659,10 +2709,19 @@ class OdaBrowser:
         """Observe the retained Oda/Vipps page without causing another request."""
 
         if (not isinstance(context, Mapping)
-                or set(context) != {"tab_id", "expected_total", "gateway_url_digest", "order_id"}
+                or set(context) not in ({"tab_id", "expected_total", "gateway_url_digest", "order_id"},
+                                        {"tab_id", "expected_total", "gateway_url_digest", "order_id",
+                                         "provider_charge_minor", "payment_id", "order_change_id"})
                 or not isinstance(context.get("tab_id"), str)
                 or type(context.get("expected_total")) is not int
                 or context["expected_total"] < 0
+                or ("provider_charge_minor" in context and
+                    (type(context["provider_charge_minor"]) is not int
+                     or not 0 < context["provider_charge_minor"] <= context["expected_total"]
+                     or not isinstance(context.get("payment_id"), str)
+                     or re.fullmatch(r"[1-9][0-9]*", context["payment_id"]) is None
+                     or not isinstance(context.get("order_change_id"), str)
+                     or re.fullmatch(r"[1-9][0-9]*", context["order_change_id"]) is None))
                 or re.fullmatch(r"[0-9a-f]{64}", str(context.get("gateway_url_digest") or "")) is None
                 or (context.get("order_id") is not None
                     and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
@@ -2683,7 +2742,7 @@ class OdaBrowser:
                 if native["status"] in {"sent", "expired"}:
                     return native
                 observed = self._eval(_oda_vipps_gateway_script(
-                    context["expected_total"], self.vipps_phone_number, expected_url=current_url,
+                    context.get("provider_charge_minor", context["expected_total"]), self.vipps_phone_number, expected_url=current_url,
                     allow_post_dispatch_ack=True, allow_source_bound_amountless=True,
                 ))
             except HouseholdError:
@@ -2694,7 +2753,7 @@ class OdaBrowser:
             return {"status": "prepared"}
         return {"status": "unknown"}
 
-    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True, vipps_expected_total=None, vipps_source_url=None, before_vipps_request=None, on_vipps_gateway=None, card_request_fence=None):
+    def _capture_checkout_payment(self, dispatch_tab, *, order_id=None, authentication_expected=True, capture_failure=True, vipps_expected_total=None, vipps_source_url=None, before_vipps_request=None, on_vipps_gateway=None, card_request_fence=None, vipps_addition_fence=None, vipps_reviewed_total=None):
         # Bind 3DS to this dispatch's tab and native payment identity. Only a
         # visible issuer challenge establishes user action. Continue observing
         # so a terminal failure still retains its ID.
@@ -2711,6 +2770,8 @@ class OdaBrowser:
                 expected_order_id=order_id,
                 source_url=vipps_source_url,
                 on_gateway=on_vipps_gateway,
+                addition_fence=vipps_addition_fence,
+                reviewed_total=vipps_reviewed_total,
             )
             return {"vipps_request_sent": True, "vipps_request_context": context}
         context = None
@@ -3034,6 +3095,11 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             raise CheckoutPreconditionError("The Oda/Vipps payment tab is unavailable; do not send payment")
         card_request_fence = (self._oda_card_request_fence(dispatch_tab, expected_url)
                               if self.checkout_provider == "oda" and not vipps and authentication_expected else None)
+        addition_fence = (self._oda_card_request_fence(dispatch_tab, expected_url)
+                          if self.checkout_provider == "oda" and vipps and addition_expectation is not None else None)
+        if vipps and addition_expectation is not None and (not addition_fence
+                or addition_fence.get("mode") != {"type": "confirm_modification", "orderNumber": order_id}):
+            raise CheckoutPreconditionError("The native Oda addition payment could not be fenced")
         if before_click:
             try:
                 before_click()
@@ -3077,6 +3143,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             vipps_expected_total=(expected_total if vipps else None),
             vipps_source_url=(expected_url if vipps else None),
             before_vipps_request=before_vipps_request, on_vipps_gateway=on_vipps_gateway,
+            **({"vipps_addition_fence": addition_fence} if addition_fence is not None else {}),
             **({"card_request_fence": card_request_fence} if card_request_fence is not None else {}),
         )
 

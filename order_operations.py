@@ -59,6 +59,39 @@ ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
 
 class OrderOperations:
     @staticmethod
+    def _addition_payment_summary(pending, attempt):
+        summary = deepcopy(pending["summary"])
+        if pending.get("order_change") and isinstance(attempt, Mapping):
+            context = attempt.get("vipps_request_context") or {}
+            charge = context.get("provider_charge_minor")
+            if type(charge) is int and 0 < charge <= money_cents(summary.get("total")):
+                summary["provider_charge_total"] = charge / 100
+        return summary
+
+    @staticmethod
+    def _vipps_context_matches(context, pending, order_id, *, child=False):
+        if (not isinstance(context, Mapping)
+                or context.get("order_id") != (order_id if child or pending.get("order_change") else None)
+                or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+            return False
+        charge = context.get("provider_charge_minor")
+        if charge is None:
+            return True  # Existing exact-amount journals retain their original contract.
+        attempt = pending.get("recovery") if child else None
+        frozen_charge = ((attempt.get("browser_review") or {}).get("provider_charge_minor")
+                         if isinstance(attempt, Mapping) else None)
+        target = (((attempt.get("payment_switch") or {}).get("target") or {})
+                  if isinstance(attempt, Mapping) else {})
+        return (bool(pending.get("order_change")) and type(charge) is int
+                and 0 < charge <= context["expected_total"]
+                and isinstance(context.get("payment_id"), str)
+                and re.fullmatch(r"[1-9][0-9]*", context["payment_id"]) is not None
+                and isinstance(context.get("order_change_id"), str)
+                and re.fullmatch(r"[1-9][0-9]*", context["order_change_id"]) is not None
+                and (not child or frozen_charge == charge)
+                and (not target or target.get("order_change_id") == context["order_change_id"]))
+
+    @staticmethod
     def _checkout_cancellation_digest(pending):
         return hashlib.sha256(canonical(pending).encode()).hexdigest()
 
@@ -3168,11 +3201,21 @@ class OrderOperations:
         attempt = child if isinstance(child, Mapping) else pending
         if not hasattr(self.browser, "adopt_vipps_request"):
             return pending, None
+        change = pending.get("order_change") or {}
+        if change:
+            if change.get("requested_delivery") or change.get("order_id") != order_id:
+                return pending, None
+            current = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
+            require_provider_identity(current, order_id)
+            if not oda_order_matches_addition(change["before"]["order"], current,
+                    {"items": [], "total": 0}, provider="oda"):
+                return pending, None
+            self.browser.read_order_binding(order_id, current, deadline=deadline,
+                                            expected_binding=change["binding"])
         context = self.browser.adopt_vipps_request(
-            pending["cart"], attempt["browser_review"], deadline=deadline, order_id=order_id)
-        if (not isinstance(context, Mapping)
-                or context.get("order_id") != (order_id if child else None)
-                or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+            pending["cart"], attempt["browser_review"], deadline=deadline, order_id=order_id,
+            **({"addition": True} if change else {}))
+        if not self._vipps_context_matches(context, pending, order_id, child=bool(child)):
             return pending, None
         with self.store.locked() as state:
             if canonical(state.get("pending_checkout")) != canonical(pending):
@@ -3379,22 +3422,24 @@ class OrderOperations:
                         "next": "The prior payment abort is unresolved. Resume abort_payment with this confirmation to observe it; do not cancel or pay again."}
             if change.get("requested_delivery"):
                 raise HouseholdError("Payment switching is unavailable for this delivery change")
+            context = None
             if method.get("method") == "vipps":
                 context = attempt.get("vipps_request_context")
-                if not isinstance(context, Mapping) and not change:
+                if not isinstance(context, Mapping):
                     # Legacy failures may predate gateway journalling. Bind one
                     # exact unpaid merchant order first, then adopt only native
                     # evidence for its original hosted payment. No notification
                     # report or missing journal entry establishes terminality.
-                    candidate = attempt.get("order_id") if source_child else (pending.get("unpaid_order_id") or result.get("unpaid_order_id"))
+                    candidate = (change.get("order_id") if change else
+                                 attempt.get("order_id") if source_child else
+                                 (pending.get("unpaid_order_id") or result.get("unpaid_order_id")))
                     if candidate and hasattr(self.browser, "adopt_vipps_request"):
-                        order_id = self._checkout_recovery_target(pending, deadline,
+                        order_id = candidate if change else self._checkout_recovery_target(pending, deadline,
                             candidate if not source_child and pending.get("unpaid_order_binding_source") not in ODA_VIPPS_ORDER_BINDING_SOURCES else None)
                         pending, context = self._adopt_checkout_vipps_request(pending, order_id, deadline)
                         attempt = pending["recovery"] if source_child else pending
-                if (not isinstance(context, Mapping)
-                        or context.get("order_id") != (change.get("order_id") or (attempt.get("order_id") if source_child else None))
-                        or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+                if not self._vipps_context_matches(context, pending,
+                        change.get("order_id") or attempt.get("order_id"), child=source_child):
                     raise HouseholdError("The exact Vipps request is not retained; reconcile its original payment without another dispatch")
             else:
                 failure = attempt.get("payment_failure") or {}
@@ -3455,6 +3500,10 @@ class OrderOperations:
                     return {"confirmed": False, "confirmation_id": confirmation_id, "payment_switch_pending": True,
                             "retry_allowed": False, "recovery_preparation_available": False,
                             "next": "The original addition retry target is not verified. Resume this same switch without restaging goods or sending payment."}
+                if (isinstance(context, Mapping) and context.get("provider_charge_minor") is not None
+                        and (target.get("payment_id") != context.get("payment_id")
+                             or target["order_change_id"] != context.get("order_change_id"))):
+                    raise HouseholdError("The closed Oda addition payment target changed")
                 update_switch({"target": target, "status": "ready"})
             return self._checkout_recovery_prepare_unlocked(deadline, payment)
 
@@ -3491,8 +3540,15 @@ class OrderOperations:
                     {"items": [], "total": 0}, provider=self.provider):
                 raise HouseholdError("The original paid order changed before addition recovery")
             if oda_target:
-                self.browser.verify_oda_addition_retry(order_id, pending["cart"], change["before"]["order"],
-                    change["binding"], target, deadline=deadline)
+                if hasattr(self.browser, "_invoke"):
+                    # Reconstruct this read-only review from the retained
+                    # payment ID even after a browser restart or stale tab.
+                    self.browser.prepare_oda_addition_retry(order_id, pending["cart"], change["before"]["order"],
+                        change["binding"], deadline=deadline, closure=deepcopy(switch["closure"]),
+                        retained_target=deepcopy(target))
+                else:
+                    self.browser.verify_oda_addition_retry(order_id, pending["cart"], change["before"]["order"],
+                        change["binding"], target, deadline=deadline)
             return order_id
         retained_order_id = pending.get("unpaid_order_id")
         failed_order_id = (pending.get("payment_failure") or {}).get("order_id")
@@ -3650,8 +3706,13 @@ class OrderOperations:
             return {}
         switch = OrderOperations._closed_payment_switch(pending)
         target = (switch or {}).get("target")
+        original_context = pending.get("vipps_request_context") or {}
+        charge = original_context.get("provider_charge_minor")
+        added = ((pending.get("browser_review") or {}).get("order_amounts") or {}).get("added_minor")
         return {"addition": {**pending["order_change"],
                              "order_change_id": target["order_change_id"] if target else pending["payment_failure"]["order_change_id"],
+                             **({"added_goods_minor": added} if added is not None else {}),
+                             **({"provider_charge_minor": charge} if charge is not None else {}),
                              **({"payment_switch_target": deepcopy(target)} if target else {})}}
 
     def _recovery_summary(self, pending, review, assessment):
@@ -3671,6 +3732,8 @@ class OrderOperations:
                 for key, value in review["amounts_minor"]["discount_breakdown"].items()
             }
         overview = review["amounts_minor"]["provider_total"]
+        if pending.get("order_change") and review.get("provider_charge_minor") is not None:
+            summary["provider_charge_total"] = review["provider_charge_minor"] / 100
         if pending.get("order_change") and overview != money_cents(summary["total"]):
             summary["merchant_summary_total"] = overview / 100
         return summary
@@ -3790,10 +3853,13 @@ class OrderOperations:
             for key, value in review_amounts.items():
                 if key == "other_fees" and value is not None:
                     if (not isinstance(value, Mapping) or len(value) != 1
-                            or any(not isinstance(label, str) or type(amount) is not int
+                            or any(not isinstance(label, str) or type(amount) is not int or amount < 0
                                    for label, amount in value.items())):
                         raise HouseholdError("Recovery fees differ from the original reviewed amounts")
                 elif value is not None and type(value) is not int:
+                    raise HouseholdError("Recovery fees differ from the original reviewed amounts")
+                elif type(value) is int and ((key == "discounts" and value > 0)
+                                             or (key != "discounts" and value < 0)):
                     raise HouseholdError("Recovery fees differ from the original reviewed amounts")
         if not isinstance(review_amounts, Mapping):
             raise HouseholdError("Recovery fees differ from the original reviewed amounts")
@@ -3808,6 +3874,15 @@ class OrderOperations:
                     raise HouseholdError("Recovery fees differ from the original reviewed amounts")
                 if all(value is None or value == 0 for value in values):
                     expected_amounts[key] = observed_amounts[key] = None
+        native_addition_charge = ((pending.get("vipps_request_context") or {}).get("provider_charge_minor")
+                                  if pending.get("order_change") else None)
+        if self.provider == "oda" and pending.get("order_change") and native_addition_charge is not None:
+            # The original addition review omits fee rows. The exact retry
+            # target can show them; freeze those native rows at final click.
+            observed_amounts = {key: value for key, value in observed_amounts.items()
+                                if expected_amounts.get(key) is not None}
+            expected_amounts = {key: value for key, value in expected_amounts.items()
+                                if value is not None}
         if observed_amounts != expected_amounts:
             raise HouseholdError("Recovery fees differ from the original reviewed amounts")
         if self.provider == "mathem" and not pending.get("order_change"):
@@ -3940,9 +4015,7 @@ class OrderOperations:
 
             def on_vipps_gateway(context):
                 nonlocal vipps_prepared
-                if (not isinstance(context, Mapping)
-                        or context.get("order_id") != child["order_id"]
-                        or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+                if not self._vipps_context_matches(context, pending, child["order_id"], child=True):
                     raise HouseholdError("Recovery Vipps gateway belongs to another reviewed payment")
                 with self.store.locked() as state:
                     if (not dispatch_claimed or vipps_prepared is not None
@@ -4199,9 +4272,8 @@ class OrderOperations:
 
                 def on_vipps_gateway(context) -> None:
                     nonlocal vipps_prepared
-                    if (not isinstance(context, Mapping)
-                            or context.get("order_id") != (pending_change.get("order_id") if pending_change else None)
-                            or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+                    if not self._vipps_context_matches(context, pending,
+                            pending_change.get("order_id") if pending_change else None):
                         raise HouseholdError("The Oda/Vipps gateway differs from the reviewed payment")
                     with self.store.locked() as state:
                         current = state.get("pending_checkout")
@@ -4213,9 +4285,8 @@ class OrderOperations:
 
                 def before_vipps_request(context) -> None:
                     nonlocal vipps_dispatched
-                    if (not isinstance(context, Mapping)
-                            or context.get("order_id") != (pending_change.get("order_id") if pending_change else None)
-                            or context.get("expected_total") != money_cents(pending["summary"].get("total"))):
+                    if not self._vipps_context_matches(context, pending,
+                            pending_change.get("order_id") if pending_change else None):
                         raise HouseholdError("The Oda payment handoff does not match the reviewed order and payable amount")
                     with self.store.locked() as state:
                         current = state.get("pending_checkout")
@@ -4311,7 +4382,7 @@ class OrderOperations:
                     return {
                         "confirmed": False,
                         "confirmation_id": pending["confirmation_id"],
-                        "summary": deepcopy(pending["summary"]),
+                        "summary": self._addition_payment_summary(pending, vipps_dispatched),
                         "awaiting_user_payment": True,
                         "payment_method": "vipps",
                         "payment_request_sent": True,
@@ -4631,7 +4702,7 @@ class OrderOperations:
                 prior_report and isinstance(context, Mapping)
                 and pending.get("unpaid_order_binding_source") in ODA_VIPPS_ORDER_BINDING_SOURCES
                 and context.get("order_id") == (reported_order_id if child else None)
-                and context.get("expected_total") == money_cents(pending["summary"].get("total"))
+                and self._vipps_context_matches(context, pending, reported_order_id, child=bool(child))
                 and reported_attempt.get("vipps_request_status") in {"unknown", "expired", "not_sent"}
             )
             if adopted_unsent_report:
@@ -5287,15 +5358,15 @@ class OrderOperations:
         if (not confirmed and self.provider == "oda" and not change.get("requested_delivery")
                 and attempt.get("browser_review", {}).get("payment_choice", {}).get("method") == "vipps"):
             context = attempt.get("vipps_request_context")
-            if (isinstance(context, Mapping) and context.get("order_id") == order_id
-                    and context.get("expected_total") == money_cents(pending["summary"].get("total"))):
+            if self._vipps_context_matches(context, pending, order_id):
                 observed = self.browser.checkout_vipps_request_state(context, deadline=deadline)
                 vipps_status = observed.get("status") if observed.get("status") in {"prepared", "sent", "expired"} else (
                     "prepared" if attempt.get("vipps_request_status") == "prepared" else "unknown")
             else:
                 vipps_status = "unknown"
             vipps_followup = {
-                "confirmation_id": attempt["confirmation_id"], "summary": deepcopy(pending["summary"]),
+                "confirmation_id": attempt["confirmation_id"],
+                "summary": self._addition_payment_summary(pending, attempt),
                 "payment_method": "vipps", "payment_request_state": vipps_status,
                 "awaiting_user_payment": vipps_status == "sent", "payment_followup_required": True,
                 "recovery_preparation_available": False,
