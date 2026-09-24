@@ -515,7 +515,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             ):
                 with self.product_plan_lock:
                     result = self._handle(request)
-            elif operation == "menu" and action in {"add_slot", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"}:
+            elif operation == "menu" and action in {"add_slot", "edit_slots", "lock", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"}:
                 with self._recipe_planner_operation(), self.product_plan_lock:
                     result = self._handle(request)
             elif operation == "menu" and action in {"save", "clear"}:

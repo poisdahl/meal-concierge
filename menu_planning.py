@@ -23,10 +23,48 @@ def slot_order(slot):
     return slot["date"], RECIPE_CATEGORIES.index(slot["meal_type"]), slot["slot_id"]
 
 
+def source_slot(menu, slot):
+    """A consumption slot names its one preparation, never a recipe family."""
+    source_id = slot.get("source_slot_id", slot["slot_id"])
+    return slot_by_id(menu, source_id)
+
+
+def recipe_for_slot(menu, slot, *, allow_stale=False):
+    source = source_slot(menu, slot)
+    recipes = menu.get("dishes", []) + menu.get("salads", [])
+    bound = [r for r in recipes if r.get("preparation_slot_id") == source["slot_id"]]
+    if not bound:
+        bound = [r for r in recipes if r.get("preparation_slot_id") is None
+                 and r.get("recipe_key") == source.get("recipe_key")
+                 and digest(r) == source.get("snapshot_digest")]
+    if not bound and allow_stale:
+        bound = [r for r in recipes if r.get("preparation_slot_id") is None
+                 and r.get("recipe_key") == source.get("recipe_key")]
+    if len(bound) != 1:
+        raise HouseholdError("meal slot has no unique exact preparation snapshot")
+    return bound[0]
+
+
+def recipe_snapshot_digest(recipe):
+    return digest({key: value for key, value in recipe.items() if key != "preparation_slot_id"})
+
+
+def preparation_slots(menu):
+    return [slot for slot in menu.get("slots", []) if slot.get("kind") != "leftover"]
+
+
+def bind_preparations(menu):
+    """Upgrade legacy unique-key snapshots when building a successor."""
+    if not menu.get("slots"):
+        return
+    for slot in preparation_slots(menu):
+        recipe = recipe_for_slot(menu, slot)
+        recipe["preparation_slot_id"] = slot["slot_id"]
+
+
 def schedule(menu):
-    recipes = {r["recipe_key"]: r for r in menu["dishes"] + menu["salads"]}
-    return [{"day": s["date"], "meal": recipes[s["recipe_key"]]["name"] + (" (rester)" if s.get("kind") == "leftover" else ""), "meal_type": s["meal_type"],
-             "portions": deepcopy(s.get("portions", recipes[s["recipe_key"]].get("portions"))),
+    return [{"day": s["date"], "meal": recipe_for_slot(menu, s)["name"] + (" (rester)" if s.get("kind") == "leftover" else ""), "meal_type": s["meal_type"],
+             "portions": deepcopy(s.get("portions", recipe_for_slot(menu, s).get("portions"))),
              "recipe_key": s["recipe_key"], "slot_id": s["slot_id"]} for s in menu["slots"]]
 
 
@@ -81,11 +119,27 @@ def slot_outcome(state, menu, slot):
 
 def shopping_menu(menu, historical_ids=None):
     import batch_planning
-    result = batch_planning.shopping(menu)
+    if not menu.get("slots"):
+        return batch_planning.shopping(menu)
+    result = deepcopy(menu)
     historical = set(menu.get("historical_slot_ids", []) if historical_ids is None else historical_ids)
-    keys = {s["recipe_key"] for s in menu.get("slots", []) if s["slot_id"] in historical}
+    result["dishes"], result["salads"] = [], []
+    batches = {b["source_slot_id"]: b for b in batch_planning.sources(menu)}
+    sources = {}
+    for slot in preparation_slots(menu):
+        recipe = recipe_for_slot(menu, slot)
+        if id(recipe) in sources:
+            raise HouseholdError("two preparations share one recipe snapshot; exact occurrence accounting is unavailable")
+        sources[id(recipe)] = slot
     for collection in ("dishes", "salads"):
-        result[collection] = [r for r in result[collection] if r.get("recipe_key") not in keys]
+        for original in menu[collection]:
+            slot = sources.get(id(original))
+            if slot is None or slot["slot_id"] in historical:
+                continue
+            recipe = deepcopy(original)
+            if batch := batches.get(slot["slot_id"]):
+                batch_planning.scale_preparation(recipe, batch)
+            result[collection].append(recipe)
     return result
 
 

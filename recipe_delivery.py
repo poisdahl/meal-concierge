@@ -42,10 +42,9 @@ def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
     # Saved structured slots carry canonical dates; legacy schedule text alone
     # must not be mistaken for dated slots.
     dates = []
-    names = {r.get("recipe_key"): r.get("name", "")
-             for group in ("dishes", "salads") for r in frozen.get(group, [])}
+    import menu_planning as mp
     for slot in frozen.get("slots", []):
-        recipe_name = names.get(slot.get("recipe_key"), '') + (' (rester)' if slot.get('kind') == 'leftover' else '')
+        recipe_name = mp.recipe_for_slot(frozen, slot, allow_stale=True).get("name", "") + (' (rester)' if slot.get('kind') == 'leftover' else '')
         dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type")), recipe_name,
                      f"{format_portions(slot['portions'])} porsjoner" if slot.get("portions") else None) if v))
     if dates:
