@@ -9441,6 +9441,53 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(repeated["idempotent"])
         self.assertEqual(self.browser.checkout_clicks, 1)
 
+    def test_oda_dietary_review_batches_search_without_losing_strict_findings(self):
+        with self.store.locked() as state:
+            state["profile"]["diet"]["rules"] = [{"kind": "never_buy", "term": "fløte"}]
+        items = [{"product_id": number, "name": f"Vare {number}", "quantity": 1}
+                 for number in range(10, 19)]
+        by_name = {item["name"]: item for item in items}
+
+        def batch(queries, *, size, deadline):
+            self.assertLessEqual(len(queries), 8)
+            self.assertEqual(size, 20)
+            return {query: {"provider": "oda", "products": [{
+                "product_ref": by_name[query]["product_id"], "name": query,
+                "dietary_evidence": {"ingredients": "fløte" if query == "Vare 10" else "mel"},
+            }]} for query in queries}
+
+        self.oda.product_search_batch = mock.Mock(side_effect=batch)
+        self.oda.product_dietary_evidence = mock.Mock(return_value={})
+
+        result = self.app._checkout_dietary({"items": items})
+
+        self.assertEqual(self.oda.product_search_batch.call_count, 2)
+        self.assertEqual(self.oda.product_dietary_evidence.call_count, len(items))
+        self.assertFalse(any(tool == "product_search" for tool, _ in self.oda.calls))
+        self.assertTrue(any(finding["kind"] == "never_buy" for finding in result["findings"]))
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_confirm_reprepares_when_fresh_dietary_evidence_changes(self):
+        with self.store.locked() as state:
+            state["profile"]["diet"]["rules"] = [{"kind": "never_buy", "term": "fløte"}]
+        observations = iter(("mel", "fløte", "fløte"))
+
+        def batch(queries, *, size, deadline):
+            return {queries[0]: {"provider": "oda", "products": [{
+                "product_ref": 10, "name": queries[0],
+                "dietary_evidence": {"ingredients": next(observations)},
+            }]}}
+
+        self.oda.product_search_batch = mock.Mock(side_effect=batch)
+        self.oda.product_dietary_evidence = mock.Mock(return_value={})
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+
+        result = self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
+
+        self.assertTrue(result["reprepared"])
+        self.assertNotEqual(result["confirmation_id"], prepared["confirmation_id"])
+        self.assertEqual(self.browser.checkout_clicks, 0)
+
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_oda_configured_vipps_prepares_without_payment_and_reconciles_one_attempt(self):
         self.app.handle({"operation": "setup", "action": "apply", "keep_current": False,
