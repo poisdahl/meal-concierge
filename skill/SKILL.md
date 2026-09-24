@@ -73,6 +73,12 @@ meal selection and product preparation need no additional reference loading.
    `strict_targets` only when it is an explicit requirement. Allergies and
    never-buy rules remain binding. Do not claim a target was met when evidence
    is unknown. Do not change the profile merely to get a proposal accepted.
+   `diet.leafy_green_days=[minimum,maximum]` means that many dinners with a
+   substantial amount of named leafy greens per week, on any weekdays.
+   The days may differ between weekly menus. Check ingredient quantities;
+   herbs or a small garnish do not count. The service counts at least 25 g
+   listed leafy greens per person as positive evidence and reports unknown
+   amounts separately.
 5. Save the exact returned handoff or save reference. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
    To save a requested distinct whole new draft during a pending purchase,
@@ -200,10 +206,16 @@ that date is not evidence of an active delivery. Unknown status stays unknown.
 Confirm an order only when the matched submit/reconcile returns `confirmed=true`.
 Report payment status separately: an accepted merchant order does not by itself
 prove settled payment. `manual_checkout_required` is a handoff, not a purchase.
-Do not switch payment method after a failure unless the owner requests it. A
-requested Oda Vipps-to-card switch uses `checkout switch_payment` on the existing
-confirmation; the service first resolves the original attempt. A missing phone
-notification is not proof that the payment ended.
+Do not switch payment method unless the owner requests it. On an exact existing
+unpaid order, inspect the merchant's current same-order payment review even if
+an earlier local Vipps outcome is unknown. A fresh review does not pay. Check
+order, account, delivery, goods, payable amount and method, then confirm only
+that review under the owner's authorization. Use `checkout switch_payment`
+for an explicit Oda Vipps/card change on this same order; keep the old attempt
+in the journal. A missing phone notification is not proof of its outcome.
+An addition to a paid order is a separate charge and still needs its own
+positively bound recovery target. MENY has no supported same-order recovery
+review; report its actual available flow instead of claiming a retry.
 
 For an existing order, use exact `orders change_begin` before additions; keep its
 receipt address and delivery. Do not empty another cart merely to start the edit.

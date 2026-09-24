@@ -263,9 +263,10 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
                 from dietary_assessment import validate_rules, validate_permissions
                 (validate_rules if path == "diet.rules" else validate_permissions)(value)
                 return
-            if path == "diet.leafy_green_days" and all(type(x) is int for x in value):
-                if len(value) != len(set(value)) or any(not 1 <= x <= 7 for x in value):
-                    raise HouseholdError("profile leafy_green_days must contain distinct day numbers from 1 to 7")
+            if path == "diet.leafy_green_days":
+                if value and (len(value) != 2 or any(type(x) is not int or not 0 <= x <= 7 for x in value)
+                              or value[0] > value[1]):
+                    raise HouseholdError("profile diet.leafy_green_days must be [minimum, maximum] dinner days per week, from 0 to 7")
                 return
             numeric = path in {"meals.target_active_minutes", "meals.prepared_portion_range", "diet.fish_grams_per_person"}
             if numeric:

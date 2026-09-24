@@ -658,7 +658,7 @@ class NewOrderPaymentSwitchTests(unittest.TestCase):
         flow.browser.submit_payment_recovery = original_submit
         self.assertTrue(flow.call('confirm', confirmation_id=prepared['confirmation_id'])['confirmed'])
         self.assertEqual(flow.browser.clicks, 2)
-        self.assertEqual(cancels, [True])
+        self.assertEqual(cancels, [])
 
     def test_same_new_order_switch_preserves_context_and_never_enters_addition_retry(self):
         flow = recovery_fixtures.RecoveryTests()
@@ -684,7 +684,7 @@ class NewOrderPaymentSwitchTests(unittest.TestCase):
         result = flow.call('confirm', confirmation_id=prepared['confirmation_id'])
         self.assertTrue(result['confirmed'])
         self.assertEqual(flow.browser.clicks, 1)
-        self.assertEqual(cancels, [True])
+        self.assertEqual(cancels, [])
 
 
 class AdditionRelativeDeliveryTests(unittest.TestCase):

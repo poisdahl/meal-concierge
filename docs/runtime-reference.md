@@ -617,12 +617,16 @@ Oda journals a verified hosted Vipps form before Next separately from the Next
 dispatch fence and positive request acknowledgement. Source-bound amountless
 forms work for new orders, additions and retries. Read-only order/account
 inspection preserves the payment tab. Explicit `checkout switch_payment` accepts
-Vipps or an existing saved card; prepared reviews can change before dispatch,
-while dispatched attempts require their exact native closure/failure before a
-replacement review. A missing notification, an unpaid order or an expired API
-token is not proof of a terminal payment. Legacy attempts are adopted only when
-retained native evidence binds the same gateway, payment and independently
-verified order; missing evidence remains unresolved.
+Vipps or an existing saved card. For a new order already created at Oda, a
+fresh merchant retry review can offer either method even while an earlier
+request's local outcome remains unknown. Preparation verifies the same order,
+account, goods, delivery and amount; confirmation rechecks that review and
+claims one dispatch under the household lock. The old attempt remains in the
+journal. Addition payments have their own obligation and retain terminal
+evidence requirements. A missing notification, an unpaid order or an expired
+API token is not proof of a terminal payment. Legacy attempts are adopted only
+when retained native evidence binds the same gateway and independently verified
+order; missing evidence remains unresolved.
 
 For an explicit new-order Oda cancellation with an active unresolved card or Vipps payment,
 `orders cancel_prepare` returns the exact current checkout confirmation to

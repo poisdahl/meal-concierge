@@ -48,17 +48,20 @@ that intent. `manual_checkout_required` is a handoff, not success.
 Oda supports saved cards and Vipps, including an explicit switch in either
 direction. A prepared review can change method before dispatch without changing
 the household default. Once a payment request has been sent or may have been
-sent, preserve the current confirmation and use `switch_payment`; it reconciles
-that attempt before returning any replacement review. Card replacement requires the exact native terminal failure. Vipps
-replacement requires verified native closure (and may cancel that exact request
-once when the user asks to switch). Never describe an unsubmitted hosted form as
-a sent notification.
+sent, preserve the current confirmation and use `switch_payment` for an
+explicit change on the same new order. It reconciles the attempt, then checks
+the merchant's current payable review for that exact order and requested method.
+The old result remains journalled even when its native closure is unknown.
+An addition to a paid order remains a separate payment obligation and requires
+its own verified payment target and terminal evidence. Never describe an
+unsubmitted hosted form as a sent notification.
 
 For Oda Vipps, preserve the bound pending attempt while awaiting user payment or
-when its outcome is unknown. A missing phone notification, expired hosted page or merchant unpaid
-label does not establish expiry. An explicit payment switch first reconciles
-that original attempt; only its verified terminal state can unlock the returned
-new review. Do not submit another order to solve a missing notification.
+when its outcome is unknown. A missing phone notification, expired hosted page or
+merchant unpaid label does not establish expiry. An unknown local status does
+not prevent a read-only merchant review for the same identified unpaid order.
+Confirm only the fresh review after exact order, account, goods, delivery,
+amount and method checks. Do not submit another order to solve a missing notification.
 
 Read `workflow.next_action` against the active payment attempt. A prepared
 recovery child uses its fresh `confirmation_id` and the existing confirmation
@@ -79,8 +82,8 @@ verify the same order, account, goods, delivery and payable amount before it
 returns a fresh recovery confirmation. The report alone never authorizes a
 retry or a new order. Preserve the original journal and confirm only that fresh
 review if its existing authorization policy permits; reconcile uncertainty.
-`retry_allowed=false` still forbids another payment attempt from the old
-confirmation; it does not forbid this non-submitting review.
+`retry_allowed=false` forbids resubmitting the old confirmation; it does not
+forbid this non-submitting review or confirmation of a new exact same-order review.
 
 When reconciliation establishes `payment_request_state=not_sent` and
 `payment_dispatched=false`, prepare recovery with the requested payment method
@@ -92,8 +95,8 @@ it is still true, then follow the service's fresh review.
 For bank/device approval, follow the returned handoff. Never collect BankID
 passwords or repeat payment because the chooser is unavailable. Owner-reported
 approval may support the documented resume, but the service must still verify
-the exact outcome. Follow `retry_allowed` and the returned recovery action;
-unknown cannot be converted into permission by making a new idempotency key.
+the exact outcome. Follow the returned same-order action. An unknown local
+status never authorizes a new order or addition payment.
 
 When the owner explicitly asks to cancel a new Oda order with an unresolved card
 or Vipps payment, `orders cancel_prepare` identifies the current attempt. Use
@@ -109,8 +112,8 @@ the exact accepted addition and show a native cancellation control. Keep the
 payment page and both journals; never retry the addition payment. Confirm that
 exact cancellation under the existing policy; its result is terminal only after verified merchant
 cancellation. Report refund and authorization release as unknown unless separately
-verified. For a requested payment-method change after closure, use the existing
-`switch_payment` review path.
+verified. For a requested payment-method change on the same unpaid new order,
+use `switch_payment` to obtain the merchant's current review.
 
 If the response explicitly establishes no dispatch and gives a safe fresh
 prepare path, follow that supported path within the existing mandate. Otherwise

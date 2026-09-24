@@ -121,7 +121,11 @@ def workflow_status(state):
         elif (attempt.get("payment_abort") or {}).get("status") in {"observing", "closing", "unknown"}:
             action = "abort_payment"
             reason = ("Observe the already started exact payment abort with this confirmation. "
-                      "An unknown result remains pending; do not cancel or pay again.")
+                      "An unknown result remains recorded. For this same unpaid new order, "
+                      "a separate fresh merchant payment review may be inspected; never repeat the abort click or create another order."
+                      if state.get("provider") == "oda" and not pending.get("order_change") else
+                      "Observe the already started exact payment abort with this confirmation. "
+                      "An unknown result remains pending; do not repeat the addition payment.")
         elif (method == "vipps" and attempt.get("vipps_request_status") == "sent"
               and isinstance(attempt.get("vipps_request_context"), Mapping)
               and bool(attempt["vipps_request_context"])
@@ -145,7 +149,9 @@ def workflow_status(state):
                       "choose the requested existing saved_card or vipps method with checkout_payment. "
                       "The service must independently verify it before any confirmation. Do not erase the journal or retry from the report alone.")
         else:
-            reason = "Reconcile this exact payment attempt before any further payment; its outcome is not established."
+            reason = "Reconcile this exact payment attempt. If the merchant still offers payment for the same identified unpaid order, inspect a fresh recovery review; an unknown local outcome does not itself forbid that review."
+            if pending.get("order_change") or state.get("provider") == "meny":
+                reason = "Reconcile this exact payment attempt; its outcome is not established. This flow has no verified same-order payment review."
             if (state.get("provider") == "oda" and method == "saved_card"
                     and isinstance(attempt.get("authentication_context"), Mapping)):
                 reason += (" For an explicit cancellation or method change, abort_payment with this active "

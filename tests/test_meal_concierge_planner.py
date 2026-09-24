@@ -100,6 +100,34 @@ def explicit_facts(
 
 
 class WeeklyPlannerTests(unittest.TestCase):
+    def test_leafy_green_range_counts_real_amount_on_any_four_or_five_dinner_days(self):
+        profile = deepcopy(self.store.read()["profile"])
+        profile["diet"]["leafy_green_days"] = [4, 5]
+
+        def week(leafy_days):
+            selected = []
+            for day in range(7):
+                dish = recipe(f"Dinner {day}", f"leafy-{day}",
+                              ingredient="spinat" if day in leafy_days else "gulrot")
+                dish["ingredients"].append({"item": "koriander", "quantity": 10,
+                                            "unit": "g", "scalable": True})
+                selected.append({"recipe": dish})
+            return planner._leafy_week(tuple(selected), profile)
+
+        first = week({0, 1, 3, 5})
+        second = week({1, 2, 3, 5, 6})
+        self.assertEqual((first["status"], first["counted_dinners"]), ("pass", 4))
+        self.assertEqual((second["status"], second["counted_dinners"]), ("pass", 5))
+        self.assertEqual(week({0, 1, 2})["status"], "fail")
+        self.assertEqual(week({0, 1, 2, 3, 4, 5})["status"], "fail")
+        garnish = recipe("Garnish", "garnish", ingredient="spinat")
+        garnish["ingredients"][0]["quantity"] = 20  # 10 g per serving.
+        self.assertEqual(planner._listed_leafy_mass(garnish), 10)
+        self.assertEqual(planner._leafy_week(tuple({"recipe": garnish} for _ in range(7)), profile)["counted_dinners"], 0)
+        salad = recipe("Leafy salad", "leafy-salad", ingredient="ruccola")
+        salad["ingredients"][0]["quantity"] = 60  # 30 g per serving.
+        self.assertEqual(planner._listed_leafy_mass(salad), 30)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = StateStore(Path(self.temp.name), CONFIG)

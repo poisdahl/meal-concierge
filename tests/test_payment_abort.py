@@ -219,10 +219,11 @@ class PaymentAbortTests(unittest.TestCase):
         self.assertNotIn("payment_failure", child)
         self.assertNotIn("vipps_request_attempted_at", child)
         self.assertNotIn("payment_requested_at", child)
-        blocked = self.flow.call("prepare", recovery=True, checkout_payment={"method": "vipps"})
-        self.assertFalse(blocked["retry_allowed"])
-        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["confirmation_id"],
-                         self.confirmation)
+        reviewed = self.flow.call("prepare", recovery=True, checkout_payment={"method": "vipps"})
+        self.assertTrue(reviewed["recovery"])
+        self.assertNotEqual(reviewed["confirmation_id"], self.confirmation)
+        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["payment_action"],
+                         "same_order_payment")
         self.assertEqual(self.browser.clicks, 0)
 
     def test_abort_adoption_terminal_proof_allows_same_order_card_review(self):
@@ -306,10 +307,9 @@ class PaymentAbortTests(unittest.TestCase):
         self.browser.close_vipps_request = close_vipps
         switched = self.flow.call("switch_payment", confirmation_id=self.confirmation,
                                   checkout_payment={"method": "saved_card"})
-        self.assertTrue(switched["payment_switch_pending"])
-        aborted = self.abort()
-        self.assertEqual(aborted["payment_abort_status"], "unknown")
-        self.assertEqual(cancellations, 1)
+        self.assertTrue(switched["recovery"])
+        self.assertEqual(switched["summary"]["payment_method"], "saved_card")
+        self.assertEqual(cancellations, 0)
 
     def test_native_card_failure_is_journaled_without_retry_page_readiness(self):
         self.browser.payment_state = "unknown"

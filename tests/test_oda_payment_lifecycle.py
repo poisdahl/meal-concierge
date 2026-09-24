@@ -60,25 +60,25 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
             self.call("confirm", confirmation_id=prepared["confirmation_id"])
         return prepared
 
-    def test_pre_next_gateway_survives_restart_and_closes_before_card_replacement(self):
+    def test_pre_next_gateway_survives_restart_and_card_uses_fresh_same_order_review(self):
         prepared = self.prepare_gateway_failure()
         self.reopen()
         self.browser.vipps_request_state = "prepared"
         observed = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
         self.assertEqual(observed["payment_request_state"], "prepared")
         self.assertFalse(observed["awaiting_user_payment"])
-        self.assertNotIn("recovery_preparation_available", observed)
+        self.assertTrue(observed["recovery_preparation_available"])
         self.browser.close_vipps_request = self.close
         card = self.call("switch_payment", confirmation_id=prepared["confirmation_id"],
                          checkout_payment={"method": "saved_card"})
         self.assertEqual(card["summary"]["payment_method"], "saved_card")
-        self.assertEqual((self.cancel_count, self.browser.clicks), (1, 1))
+        self.assertEqual((self.cancel_count, self.browser.clicks), (0, 1))
         archived = self.app.store.read()["protected_results"][prepared["confirmation_id"]]
         self.assertEqual(archived["failed_attempt"]["vipps_request_status"], "prepared")
-        self.assertTrue(self.call("confirm", confirmation_id=prepared["confirmation_id"])["payment_closed"])
+        self.assertFalse(self.call("confirm", confirmation_id=prepared["confirmation_id"]).get("payment_closed", False))
         self.browser.submit_payment_recovery = recovery_fixtures.MerchantBrowser.submit_payment_recovery.__get__(self.browser)
         self.assertTrue(self.call("confirm", confirmation_id=card["confirmation_id"])["confirmed"])
-        self.assertEqual((self.cancel_count, self.browser.clicks), (1, 2))
+        self.assertEqual((self.cancel_count, self.browser.clicks), (0, 2))
 
     def test_pre_next_gateway_does_not_confirm_from_coarse_paid_tracking(self):
         prepared = self.prepare_gateway_failure()
@@ -89,7 +89,7 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
         self.assertEqual(result["payment_request_state"], "prepared")
         self.assertIsNotNone(self.app.store.read()["pending_checkout"])
 
-    def test_lost_post_next_response_preserves_fence_and_unknown_cancel_never_replaces(self):
+    def test_lost_post_next_response_keeps_journal_and_reviews_same_order_card(self):
         prepared = self.prepare_gateway_failure(dispatch=True)
         self.reopen()
         attempt = self.app.store.read()["pending_checkout"]["recovery"]
@@ -103,14 +103,14 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
             return {"status": "unknown"}
 
         self.browser.close_vipps_request = unresolved
-        for _ in range(2):
-            result = self.call("switch_payment", confirmation_id=prepared["confirmation_id"],
-                               checkout_payment={"method": "saved_card"})
-            self.assertTrue(result["payment_switch_pending"])
-            self.assertFalse(result["recovery_preparation_available"])
-            self.reopen()
-        self.assertEqual((self.cancel_count, self.browser.clicks), (1, 1))
-        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["confirmation_id"], prepared["confirmation_id"])
+        result = self.call("switch_payment", confirmation_id=prepared["confirmation_id"],
+                           checkout_payment={"method": "saved_card"})
+        self.assertTrue(result["recovery"])
+        self.assertEqual(result["summary"]["payment_method"], "saved_card")
+        self.reopen()
+        self.assertEqual((self.cancel_count, self.browser.clicks), (0, 1))
+        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["confirmation_id"], result["confirmation_id"])
+        self.assertEqual(self.app.store.read()["protected_results"][prepared["confirmation_id"]]["failed_attempt"]["vipps_request_status"], "dispatching")
 
     def test_next_cannot_replace_the_journalled_gateway_context(self):
         prepared = self.prepare_gateway_failure(changed_context=True)
@@ -133,22 +133,19 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
             pending["authentication_context"] = {"tab_id": "bank", "payment_id": "123456"}
         self.browser.checkout_payment_authentication = lambda *args, **kwargs: None
 
-    def test_card_to_vipps_requires_native_failure_then_dispatches_one_replacement(self):
+    def test_card_to_vipps_uses_current_same_order_review_then_dispatches_once(self):
         self.set_card_attempt()
         failure = None
         self.browser.checkout_payment_failure = lambda *args, **kwargs: deepcopy(failure)
         waiting = self.call("switch_payment", confirmation_id="original", checkout_payment={"method": "vipps"})
-        self.assertTrue(waiting["payment_switch_pending"])
-        self.assertNotIn("recovery", self.app.store.read()["pending_checkout"])
+        self.assertTrue(waiting["recovery"])
+        self.assertEqual(waiting["summary"]["payment_method"], "vipps")
         self.assertEqual(self.browser.clicks, 0)
-        failure = {"payment_failed": True, "order_id": "order-1"}
         self.reopen()
-        vipps = self.call("switch_payment", confirmation_id="original", checkout_payment={"method": "vipps"})
-        self.assertEqual(vipps["summary"]["payment_method"], "vipps")
+        vipps = waiting
         pending = self.app.store.read()["pending_checkout"]
-        self.assertEqual(pending["payment_failure"], failure)
-        self.assertNotIn("authentication_unresolved", pending)
-        self.assertEqual(pending["recovery"]["payment_switch"]["closure"]["source"], "native_payment_failure")
+        self.assertEqual(pending["authentication_context"], {"tab_id": "bank", "payment_id": "123456"})
+        self.assertEqual(pending["recovery"]["payment_action"], "same_order_payment")
 
         def submit(cart, review, before_click, *, on_vipps_gateway, before_vipps_request, **kwargs):
             before_click()
@@ -185,7 +182,7 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
         vipps = self.call("switch_payment", confirmation_id=card["confirmation_id"], checkout_payment={"method": "vipps"})
         self.assertNotEqual(vipps["confirmation_id"], card["confirmation_id"])
         self.assertEqual(vipps["summary"]["payment_method"], "vipps")
-        self.assertEqual((self.cancel_count, self.browser.clicks), (1, 1))
+        self.assertEqual((self.cancel_count, self.browser.clicks), (0, 1))
         with self.assertRaises(HouseholdError):
             self.call("confirm", confirmation_id=card["confirmation_id"])
         self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["confirmation_id"], vipps["confirmation_id"])
@@ -699,7 +696,8 @@ class OdaDirectCardPersistenceTests(unittest.TestCase):
         self.assertEqual(replacement["summary"]["payment_method"], "vipps")
         state = flow.app.store.read()["pending_checkout"]
         self.assertEqual(state["payment_failure"], {"payment_failed": True, "order_id": "order-1"})
-        self.assertEqual(state["recovery"]["payment_switch"]["closure"]["card_failure_context"], result["authentication_context"])
+        self.assertEqual(state["authentication_context"], result["authentication_context"])
+        self.assertEqual(state["recovery"]["payment_action"], "same_order_payment")
         self.assertEqual(flow.browser.clicks, 0)
 
     def test_recovery_vipps_ack_without_dispatch_callback_does_not_claim_sent(self):

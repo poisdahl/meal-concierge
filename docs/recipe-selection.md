@@ -91,8 +91,12 @@ Unknown/non-scalable ingredient measures remain visible in saved menus with
 
 Planner version `weekly-menu-v4` adds category-aware dinner selection and retains exact recipe-tag matches for
 `cuisine.wanted`/`flavours`, personal favorites, documented English/Norwegian
-food-category matches for `diet.prioritise`, and positive leafy-green evidence
-on requested ISO weekdays or English weekday names. Whole grains and potatoes
+food-category matches for `diet.prioritise`, and a weekly range in
+`diet.leafy_green_days`. `[4,5]` means four or five dinners on any days of
+the week; the days can vary between menus. Positive evidence requires at least
+25 g of listed leafy greens (such as spinach, kale, chard or salad leaves) per person in a dinner. Optional herbs and
+small garnish quantities do not satisfy the target; unknown quantities remain
+unknown. Whole grains and potatoes
 are distinct for whole-grain preference scoring. Existing time, feedback,
 variety and dinner/vegetable targets remain assessed; agent-mode numerical
 goals are advisory unless explicitly strict.

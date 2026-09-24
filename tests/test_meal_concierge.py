@@ -204,6 +204,9 @@ class FakeBrowser:
     def checkout_vipps_request_state(self, context, *, deadline=None):
         return {"status": self.vipps_request_state}
 
+    def order_payment_state(self, order_id, *, deadline=None):
+        return {"status": "unknown", "payment_started_page": False}
+
     def review_payment_recovery(self, cart, order_id, *, payment, expected_binding, deadline=None, addition=None):
         return {
             "order_id": order_id,
@@ -9654,14 +9657,15 @@ class FlowTests(unittest.TestCase):
             "confirmation_id": recovery["confirmation_id"],
         })
         self.assertTrue(still_waiting["awaiting_user_payment"])
-        self.assertNotIn("recovery_preparation_available", still_waiting)
+        self.assertTrue(still_waiting["recovery_preparation_available"])
         no_second_recovery = self.app.handle({"operation": "checkout", "action": "prepare", "recovery": True})
-        self.assertTrue(no_second_recovery["awaiting_user_payment"])
+        self.assertTrue(no_second_recovery["recovery"])
+        self.assertNotEqual(no_second_recovery["confirmation_id"], recovery["confirmation_id"])
         self.assertEqual(self.browser.checkout_clicks, 2)
         self.oda.tracking = "paid_and_modifiable"
         paid = self.app.handle({
             "operation": "checkout", "action": "reconcile",
-            "confirmation_id": recovery["confirmation_id"],
+            "confirmation_id": no_second_recovery["confirmation_id"],
         })
         self.assertTrue(paid["confirmed"])
         self.assertEqual(paid["order_id"], "new-order")
