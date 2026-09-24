@@ -1115,6 +1115,7 @@ class OrderOperations:
             delivery_reselections=reselections + 1,
             automatic_checkout=pending.get("automatic_checkout", bool(occurrence)),
             scheduler_context=pending.get("scheduler_context"),
+            payment_override=pending["checkout_payment"] if "payment_preference" in pending else None,
         )
         problem = self._scheduled_checkout_problem(prepared["summary"], occurrence or None, automatic=pending.get("automatic_checkout", bool(occurrence)))
         if problem is not None:
@@ -2537,8 +2538,7 @@ class OrderOperations:
                 raise HouseholdError("order_id must match the active Oda order change; begin that exact change first")
             if payment_override is not None:
                 if (self.provider != "oda"
-                        or order_change and (order_change.get("status") != "editing"
-                                             or order_change.get("requested_delivery") or order_change.get("delivery_only"))
+                        or order_change and order_change.get("status") != "editing"
                         or occurrence or automatic_checkout or scheduler_context or cart_ready_continuation):
                     raise HouseholdError("Per-checkout payment selection requires a manual Oda checkout")
                 checkout_payment = checkout_payment_settings(payment_override, self.provider)
@@ -2783,8 +2783,11 @@ class OrderOperations:
                 vipps = self.provider == "oda" and not delivery_change and checkout_payment["method"] == "vipps"
                 if (vipps and payment_display != "Vipps") or (not vipps and re.fullmatch(r"•••• \d{4}", payment_display) is None):
                     raise HouseholdError("checkout returned no verified configured payment identity")
+                if (self.provider == "oda" and delivery_change and checkout_payment.get("card_last4")
+                        and payment_display != f"•••• {checkout_payment['card_last4']}"):
+                    raise HouseholdError("Oda delivery change displayed a different saved card")
                 summary["payment"] = payment_display
-                if self.provider == "oda" and not delivery_change:
+                if self.provider == "oda":
                     summary["payment_method"] = checkout_payment["method"]
             if retail_addition:
                 if self.provider == "mathem" or isinstance(review.get("order_amounts"), Mapping):
