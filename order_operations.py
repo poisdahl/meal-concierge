@@ -5339,7 +5339,9 @@ class OrderOperations:
         if (self.provider == "oda" and status in {"cancelled", "canceled"}
                 and current_id == tracking_id == order_id
                 and not self.store.read().get("pending_cancellation")):
-            self._exact_checkout_order_for_cancellation(pending, order_id, deadline)
+            verified = self._exact_checkout_order_for_cancellation(pending, order_id, deadline)
+            if str((verified.get("tracking") or {}).get("status") or "").casefold() not in {"cancelled", "canceled"}:
+                raise HouseholdError("Merchant cancellation status changed during verification; preserve the payment and order-change journals and reconcile again")
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) != canonical(pending):
                     raise HouseholdError("The checkout changed while verifying merchant cancellation")

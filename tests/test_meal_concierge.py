@@ -9082,7 +9082,7 @@ class FlowTests(unittest.TestCase):
 
             provider.call = racing_call
             app = Application(store, provider, self.browser)
-            with self.assertRaisesRegex(HouseholdError, "active order change"):
+            with self.assertRaisesRegex(HouseholdError, "order change changed before cancellation review"):
                 app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "99990001"})
             self.assertEqual(provider.cancellation_review_deadlines, [])
             self.assertIsNone(store.read()["pending_cancellation"])

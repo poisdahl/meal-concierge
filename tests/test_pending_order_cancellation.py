@@ -161,6 +161,31 @@ class PendingAdditionCancellationTests(unittest.TestCase):
         self.assertEqual(self.app.store.read()["recipe_usage"]["menu-B"]["status"], "planned")
         self.assertEqual(self.clicks, 0)
 
+    def test_reconcile_does_not_archive_if_fresh_tracking_contradicts_cancellation(self):
+        self.merchant.status = "cancelled"
+        frozen_checkout = deepcopy(self.app.store.read()["pending_checkout"])
+        original_call = self.merchant.call
+        tracking_reads = 0
+
+        def changing_tracking(name, arguments, **kwargs):
+            nonlocal tracking_reads
+            result = original_call(name, arguments, **kwargs)
+            if name == "order_tracking":
+                tracking_reads += 1
+                if tracking_reads == 1:
+                    self.merchant.status = "paid_and_modifiable"
+            return result
+
+        self.merchant.call = changing_tracking
+        with self.assertRaisesRegex(HouseholdError, "status changed during verification"):
+            self.flow.call("reconcile", confirmation_id="original")
+        state = self.app.store.read()
+        self.assertEqual(tracking_reads, 2)
+        self.assertEqual(state["pending_checkout"], frozen_checkout)
+        self.assertEqual(state["order_change"], self.change)
+        self.assertNotIn("original", state["protected_results"])
+        self.assertEqual(self.clicks, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
