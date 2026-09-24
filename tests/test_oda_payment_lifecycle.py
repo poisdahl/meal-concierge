@@ -193,6 +193,8 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
     def test_legacy_adoption_is_exact_and_does_not_establish_terminal_state(self):
         with self.app.store.locked() as state:
             state["pending_checkout"].pop("vipps_request_status", None)
+            state["pending_checkout"].pop("vipps_request_context", None)
+            state["pending_checkout"].pop("vipps_expiry_gateway_digest", None)
             state["pending_checkout"].pop("unpaid_order_binding_source", None)
         self.browser.payment_state = "retry_available"
         adopted = []
@@ -220,6 +222,8 @@ class OdaPaymentLifecycleTests(unittest.TestCase):
     def test_missing_or_wrong_legacy_evidence_never_adopts_or_replaces(self):
         with self.app.store.locked() as state:
             state["pending_checkout"].pop("vipps_request_status", None)
+            state["pending_checkout"].pop("vipps_request_context", None)
+            state["pending_checkout"].pop("vipps_expiry_gateway_digest", None)
             state["pending_checkout"].pop("unpaid_order_binding_source", None)
         self.browser.payment_state = "retry_available"
         for context in (None, self.context("another-order"), {**self.context(None), "expected_total": 1}):

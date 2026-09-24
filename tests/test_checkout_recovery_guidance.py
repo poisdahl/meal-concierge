@@ -104,6 +104,8 @@ class CheckoutRecoveryGuidanceTests(unittest.TestCase):
         with flow.app.store.locked() as state:
             pending = state["pending_checkout"]
             pending.pop("vipps_request_status")
+            pending.pop("vipps_request_context", None)
+            pending.pop("vipps_expiry_gateway_digest", None)
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
             pending["status"] = "awaiting_user_payment"
