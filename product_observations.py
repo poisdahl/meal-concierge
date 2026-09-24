@@ -634,6 +634,29 @@ def normalize_retail_product_search(value: Any, *, observed_at: str | None = Non
     }
 
 
+def normalize_retail_product_search_batch(value: Any, queries: list[str], *, size: int,
+                                          provider: str = "oda") -> dict[str, dict[str, Any]]:
+    """Bind every native result to exactly one requested query; never zip by order."""
+    if (not isinstance(queries, list) or not 1 <= len(queries) <= 8
+            or any(not isinstance(query, str) or not query.strip() or len(query) > 200 for query in queries)
+            or len(set(queries)) != len(queries) or type(size) is not int or not 1 <= size <= MAX_PRODUCTS):
+        raise HouseholdError("Product search batch requires one to eight distinct bounded queries")
+    batches = value.get("result") if isinstance(value, Mapping) else None
+    if not isinstance(batches, list) or len(batches) != len(queries):
+        raise HouseholdError("Product search batch scope changed")
+    observed = {}
+    for batch in batches:
+        query = batch.get("query") if isinstance(batch, Mapping) else None
+        if not isinstance(query, str) or query not in queries or query in observed:
+            raise HouseholdError("Product search batch query changed")
+        normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
+        if len(batch["products"]) > size:
+            raise HouseholdError("Product search batch exceeded its candidate scope")
+        normalized["scope"]["requested_size"] = size
+        observed[query] = normalized
+    return observed
+
+
 def compare_unit_prices(left: Mapping[str, Any], right: Mapping[str, Any]) -> int:
     """Compare exact unit-price fractions without float arithmetic."""
 

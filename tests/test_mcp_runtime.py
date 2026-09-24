@@ -95,8 +95,8 @@ def serve(root):
             return result
 
     class ObservedApplication(Application):
-        def _products_operation(self, request):
-            result = super()._products_operation(request)
+        def _products_operation(self, request, **kwargs):
+            result = super()._products_operation(request, **kwargs)
             with (root / "internal-plan-sizes.jsonl").open("a") as log:
                 log.write(json.dumps({"bytes": len(json.dumps(result).encode())}) + "\n")
             return result
@@ -344,13 +344,13 @@ async def sdk_checks(root, process):
         assert approved_plan["menu_ref"] == menu_ref
         assert approved_plan["requirements"][0]["candidate_approval"]["candidate_refs"] == [10]
 
-        # A full 64-need internal plan exceeds the RPC cap. Only bounded
+        # A full 67-need internal plan exceeds the RPC cap. Only bounded
         # service-side pages cross the Unix and MCP transports.
         oversized_recipe = full_recipe("Oversized continuation transport")
         oversized_recipe["ingredients"] = [{
             "quantity": 6, "unit": "stk", "scalable": True,
             "item": f"wire-continuation-{index:02d} ägg " + "x" * 80,
-        } for index in range(64)]
+        } for index in range(67)]
         oversized_saved = await call(client, "recipe_write", recipe=oversized_recipe,
                                       idempotency_key="mc01-oversized-continuation")
         oversized_ref = {key: oversized_saved["recipe"][key] for key in ("id", "revision")}
@@ -358,6 +358,9 @@ async def sdk_checks(root, process):
             menu=menu("2026-W41", {"recipe_ref": oversized_ref}), menu_ref=menu_ref))["menu_ref"]
         menu_ref = {key: oversized_menu[key] for key in ("menu_id", "revision", "digest")}
         first = await call(client, "products", menu_ref=menu_ref)
+        assert first["progress"]["requirement_count"] == 67
+        assert first["progress"]["pending_search_count"] == 3
+        first = await call(client, "products", **first["continue_arguments"])
         first_product_ref = first["product_plan_ref"]
         rows = list(first["requirements"])
         page = first
@@ -365,7 +368,7 @@ async def sdk_checks(root, process):
             page = await call(client, "products", action="get", product_plan_ref=first_product_ref,
                               offset=page["next_offset"])
             rows.extend(page["requirements"])
-        assert len(rows) == 64
+        assert len(rows) == 67
         assert rows[0]["candidates"], rows[0]
         assert max(json.loads(line)["bytes"] for line in
                    (root / "internal-plan-sizes.jsonl").read_text().splitlines()) > 2 * 1024 * 1024, (root / "internal-plan-sizes.jsonl").read_text()
@@ -389,6 +392,8 @@ async def sdk_checks(root, process):
                            candidate_approvals=approvals[48:])
         assert final["status"] == "prepared", final
         applied = await call(client, "products", **final["apply_arguments"], cart_change_requested=True)
+        assert applied["status"] == "validating" and not applied["cart_changed"], applied
+        applied = await call(client, "products", **applied["continue_arguments"])
         assert applied["applied"], applied
         cart = await call(client, "cart")
         assert cart["cart_digest"]
