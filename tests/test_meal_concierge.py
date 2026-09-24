@@ -3366,7 +3366,7 @@ process.stdout.write(eval(script));
                 [shutil.which("node"), "-e", harness],
                 input=json.dumps({
                     "script": _oda_vipps_gateway_script(
-                        25650, "90000000", expected_url=case.get("expectedUrl", url),
+                        case.get("expected_total", 25650), "90000000", expected_url=case.get("expectedUrl", url),
                         allow_source_bound_amountless=allow_source_bound_amountless,
                         require_hit=require_hit, hit_x=5, hit_y=5,
                     ),
@@ -3382,6 +3382,27 @@ process.stdout.write(eval(script));
 
         self.assertEqual(evaluate({}), {"identity": True, "ready": True, "sent": False, "expired": False,
                                         "fillable": True, "phone_matches": True})
+        for amount in (
+            "2,345.67 NOK", "NOK 2,345.67", "2.345,67 kr", "NOK 2.345,67",
+            "2 345,67 NOK", "2\u202f345,67 NOK", "2 345.67 NOK",
+            "2345.67 NOK", "2345,67 kr",
+        ):
+            with self.subTest(amount=amount):
+                self.assertTrue(evaluate({"amount": amount, "currency": False,
+                                          "expected_total": 234567})["ready"])
+        for amount in (
+            "23,45.67 NOK", "2,34.67 NOK", "2,345,67 NOK", "2.345.67 NOK",
+            "2,345.670 NOK", "2,345.6 NOK", "2,345.67.00 NOK",
+            "999, 2,345.67 NOK", "999 2,345.67 NOK",
+            "+2,345.67 NOK", "-2,345.67 NOK", "NOK +2,345.67",
+            "NOK -2,345.67", "EUR 2,345.67", "2,345.67 EUR",
+            "(NOK 2,345.67)", "(2,345.67 NOK)",
+            "234567 øre",
+            "999999999999999999999.00 NOK", "2,345.67 NOK 2345.68 kr",
+        ):
+            with self.subTest(invalid_amount=amount):
+                self.assertFalse(evaluate({"amount": amount, "currency": False,
+                                           "expected_total": 234567})["ready"])
         self.assertEqual(evaluate({"sent": True}), {"identity": True, "ready": False, "sent": True, "expired": False,
                                                      "fillable": False, "phone_matches": False})
         self.assertEqual(evaluate({"expired": True}), {"identity": True, "ready": False, "sent": False, "expired": True,

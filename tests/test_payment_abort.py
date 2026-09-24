@@ -184,6 +184,87 @@ class PaymentAbortTests(unittest.TestCase):
         self.assertEqual(cancellations, 1)
         self.assertEqual(self.browser.clicks, 0)
 
+    def _contextless_vipps(self):
+        context = {"tab_id": "vipps-tab", "order_id": "order-1", "expected_total": 24640,
+                   "gateway_url_digest": "a" * 64}
+        with self.app.store.locked() as state:
+            child = state["pending_checkout"]["recovery"]
+            child["browser_review"]["payment_choice"] = {"method": "vipps"}
+            child.pop("authentication_context", None)
+            child["status"] = "clicking"
+            child["vipps_request_status"] = "not_sent"
+            child["payment_failure"] = {
+                "payment_failed": True, "order_id": "order-1",
+                "reason": "owner_reported_no_vipps_request_before_dispatch_fence"}
+        return context
+
+    def test_abort_adopts_exact_vipps_and_replaces_phone_report_with_unknown(self):
+        context = self._contextless_vipps()
+        adopted = []
+        def adopt(cart, review, *, order_id, **kwargs):
+            self.assertEqual(order_id, "order-1")
+            self.assertGreater(self.browser.binding_reads, 0)
+            adopted.append(order_id)
+            return deepcopy(context)
+        self.browser.adopt_vipps_request = adopt
+        self.browser.close_vipps_request = lambda *a, **kw: {"status": "unknown"}
+        first = self.abort()
+        second = self.abort()
+        self.assertEqual(adopted, ["order-1"])
+        self.assertEqual(first["payment_abort_status"], "unknown")
+        self.assertEqual(second["payment_abort_status"], "unknown")
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["vipps_request_context"], context)
+        self.assertEqual(child["vipps_request_status"], "unknown")
+        self.assertNotIn("payment_failure", child)
+        self.assertNotIn("vipps_request_attempted_at", child)
+        self.assertNotIn("payment_requested_at", child)
+        blocked = self.flow.call("prepare", recovery=True, checkout_payment={"method": "vipps"})
+        self.assertFalse(blocked["retry_allowed"])
+        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["confirmation_id"],
+                         self.confirmation)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abort_adoption_terminal_proof_allows_same_order_card_review(self):
+        context = self._contextless_vipps()
+        self.browser.adopt_vipps_request = lambda *a, **kw: deepcopy(context)
+        self.browser.close_vipps_request = lambda *a, **kw: {
+            "status": "closed", "terminal_status": "TIMEOUT", "source": "native_http200",
+            "gateway_url_digest": context["gateway_url_digest"], "payment_id": "456"}
+        result = self.abort()
+        self.assertEqual(result["payment_abort_status"], "closed")
+        switched = self.flow.call("switch_payment", confirmation_id=self.confirmation,
+                                  checkout_payment={"method": "saved_card"})
+        self.assertEqual(switched["order_id"], "order-1")
+        self.assertNotEqual(switched["confirmation_id"], self.confirmation)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abort_rejects_unbound_adoption_without_state_change(self):
+        context = self._contextless_vipps()
+        for offered in (None, {**context, "order_id": "other"},
+                        {**context, "expected_total": 24641}):
+            with self.subTest(offered=offered):
+                self.browser.adopt_vipps_request = lambda *a, **kw: deepcopy(offered)
+                before = self.app.store.read()
+                with self.assertRaisesRegex(HouseholdError, "exact Vipps request is unavailable"):
+                    self.abort()
+                self.assertEqual(self.app.store.read(), before)
+        self.assertEqual(self.browser.clicks, 0)
+
+    def test_abort_adoption_rejects_concurrent_attempt_change(self):
+        context = self._contextless_vipps()
+        def adopt(*a, **kw):
+            with self.app.store.locked() as state:
+                state["pending_checkout"]["recovery"]["confirmation_id"] = "new-attempt"
+            return context
+        self.browser.adopt_vipps_request = adopt
+        with self.assertRaisesRegex(HouseholdError, "payment changed during gateway adoption"):
+            self.abort()
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertNotIn("vipps_request_context", child)
+        self.assertNotIn("payment_abort", child)
+        self.assertEqual(self.browser.clicks, 0)
+
     def test_native_paid_vipps_abort_reconciles_legacy_retry_page_purchase(self):
         vipps = {"tab_id": "vipps-tab", "order_id": "order-1", "expected_total": 24640,
                  "gateway_url_digest": "a" * 64}

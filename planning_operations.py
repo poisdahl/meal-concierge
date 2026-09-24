@@ -539,6 +539,16 @@ class PlanningOperations:
                 _digest, current_record = self._prepared_replan_record(state, replan_ref)
                 if canonical(current_record) != canonical(record):
                     raise HouseholdError("replan_ref changed before apply; prepare again")
+            if (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
+                if self.browser_lock.locked():
+                    raise HouseholdError("finish the active provider operation before changing a menu")
+                self._menu_save_pending_payment(state)
+                raise HouseholdError(
+                    "Targeted replan waits for the pending checkout to resolve. "
+                    "For a distinct whole new menu draft, read menu get, run menu plan, "
+                    "then save its unchanged save_ref as planner_ref with the exact current "
+                    "menu_ref returned by get; the pending purchase remains frozen."
+                )
             self._abandon_predispatch(state, reason="menu replanned before checkout")
             result = self._commit_successor(state, supplied)
             state["menu_planning"]["prepared"].pop(
@@ -1293,7 +1303,7 @@ class PlanningOperations:
             raise HouseholdError("reconcile the pending protected operation before saving a menu")
         child = pending.get("recovery")
         if isinstance(child, Mapping) and child.get("status") == "awaiting_confirmation":
-            raise HouseholdError("confirm or discard the prepared recovery review before saving a menu")
+            raise HouseholdError("resolve the prepared recovery review through checkout before saving a menu")
         attempt = child if isinstance(child, Mapping) else pending
         if attempt.get("status") == "clicking" and not (
                 attempt.get("authentication_context") or self._checkout_payment_closed(pending)):

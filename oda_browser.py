@@ -846,10 +846,24 @@ def _oda_vipps_gateway_script(
  const roots=[...document.querySelectorAll('main,[role="main"]')].filter(visible);
  const root=roots.length===1?roots[0]:null;
  const text=norm(root?.innerText||'');
- const amountPattern=/(?<![\d.,+−-])(?:\bNOK\s*(\d+(?:[ .]\d{3})*)[,.](\d{2})(?![\d.,])|\b(\d+(?:[ .]\d{3})*)[,.](\d{2})\s*(?:kr|NOK)\b)/gi;
- const amounts=[...text.matchAll(amountPattern)].map(m=>Number((m[1]||m[3]).replace(/[ .]/g,''))*100+Number(m[2]||m[4]));
- const remainingMoneyText=text.replace(amountPattern,'');
- const unsupportedMoney=/(?:\b(?:NOK|SEK|EUR|USD|GBP|kr)\s*[−-]?\d|\d[\d .,]*\s*(?:NOK|SEK|EUR|USD|GBP|kr)\b|[€$£])/i.test(remainingMoneyText);
+ const decimal='(?:\\d{1,3}(?:,\\d{3})+\\.\\d{2}|\\d{1,3}(?:\\.\\d{3})+,\\d{2}|\\d{1,3}(?: \\d{3})+[.,]\\d{2}|\\d+[.,]\\d{2})';
+ const amountPattern=new RegExp('(?<![\\w.,+−-])(?:\\bNOK\\s*('+decimal+')|('+decimal+')\\s*(?:kr|NOK)\\b)(?![\\w.,])','gi');
+ const tokens=[...text.matchAll(amountPattern)];
+ const amounts=tokens.map(m=>{
+   const decimalText=m[1]||m[2];
+   const separator=Math.max(decimalText.lastIndexOf(','),decimalText.lastIndexOf('.'));
+   return Number(decimalText.slice(0,separator).replace(/[ ,.]/g,''))*100+Number(decimalText.slice(separator+1));
+ });
+ const ambiguousLead=tokens.some(m=>/[+−\d-][.,]?\s*$/.test(text.slice(0,m.index)));
+ const accountingNegative=tokens.some(m=>/\(\s*$/.test(text.slice(0,m.index))&&
+   /^\s*\)/.test(text.slice(m.index+m[0].length)));
+ // +47 and the observed +47 1 / +47 kroner labels identify the phone,
+ // not money; keep that source-bound amountless path unchanged.
+ const remainingMoneyText=text.replace(amountPattern,'').replace(/\bNOK\s*\+47(?=\s|$)/gi,'NOK PHONE');
+ const unsupportedMoney=ambiguousLead||accountingNegative||/\b(?:SEK|EUR|USD|GBP)\b|[€$£]/i.test(text)
+   ||/(?:\b(?:NOK|kr|øre)\s*[+−-]?\s*\d|\d[\d .,]*\s*(?:NOK|kr|øre)\b)/i.test(remainingMoneyText)
+   ||(amounts.length>0&&/\b(?:NOK|kr|øre)\b/i.test(remainingMoneyText))
+   ||/\d[.,]\s*(?:\d|$)/.test(remainingMoneyText);
  const merchant=/(?:^|\s)Oda(?:\s|$)/i.test(text);
  const amountBound=!unsupportedMoney&&amounts.length>0&&amounts.every(value=>Number.isSafeInteger(value)&&value===EXPECTED_TOTAL);
  const query=[...current.searchParams.entries()];
@@ -2631,6 +2645,12 @@ class OdaBrowser:
                 current_url = str(self._invoke("get", "url").get("url") or "")
                 if hashlib.sha256(current_url.encode()).hexdigest() != context["gateway_url_digest"]:
                     return {"status": "unknown"}
+                from oda_payment_switch import native_vipps_request_state
+                native = native_vipps_request_state(
+                    self, current_url, context,
+                    deadline=getattr(self, "_checkout_deadline", None) or time.monotonic() + CHECKOUT_BROWSER_TIMEOUT)
+                if native["status"] in {"sent", "expired"}:
+                    return native
                 observed = self._eval(_oda_vipps_gateway_script(
                     context["expected_total"], self.vipps_phone_number, expected_url=current_url,
                     allow_post_dispatch_ack=True, allow_source_bound_amountless=True,
@@ -2639,8 +2659,6 @@ class OdaBrowser:
                 return {"status": "unknown"}
         if observed.get("sent") is True:
             return {"status": "sent"}
-        if observed.get("expired") is True:
-            return {"status": "expired"}
         if observed.get("identity") is True and observed.get("fillable") is True:
             return {"status": "prepared"}
         return {"status": "unknown"}

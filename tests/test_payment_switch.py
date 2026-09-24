@@ -530,5 +530,99 @@ class AdditionRelativeDeliveryTests(unittest.TestCase):
                     flow.doCleanups()
 
 
+class VippsSeededObserverTests(unittest.TestCase):
+    def observe(self, *, status='PENDING', read_http=200, mode='cancel'):
+        import json
+        import shutil
+        import subprocess
+        from oda_payment_switch import _VIPPS_OBSERVER_SCRIPT
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node is required for native payment observation')
+        fixture = r'''
+import vm from 'node:vm';
+const test=TEST;
+let reads=0,clicks=0,socket;
+const source='https://pay.vipps.no/?token=synthetic';
+const pollUrl='https://api.vipps.no/vipps-epayment-legacy-mobile-api/landing-page';
+const document={querySelectorAll:()=>[],elementFromPoint:()=>null};
+const fetch=async(url,options)=>{reads++;
+ if(url!==pollUrl||options.headers.Authorization!=='Bearer synthetic')throw Error('Wrong native request');
+ return {status:test.read_http,headers:{get:()=> 'application/json'},json:async()=>({status:test.status})};
+};
+globalThis.WebSocket=class {
+ constructor(){socket=this;this.listeners={};queueMicrotask(()=>this.fire('open',{}))}
+ addEventListener(k,f){(this.listeners[k]??=[]).push(f)}
+ fire(k,v){for(const f of this.listeners[k]||[])f(v)}
+ async send(raw){const m=JSON.parse(raw);let result={};
+  if(m.method==='Target.getTargets')result={targetInfos:[{type:'page',url:source,targetId:'owned'}]};
+  if(m.method==='Target.createTarget')result={targetId:'reader'};
+  if(m.method==='Target.attachToTarget')result={sessionId:m.params.targetId==='reader'?'reader-session':'session'};
+  if(m.method==='Runtime.evaluate')result={result:{value:await vm.runInNewContext(m.params.expression,
+   {document,location:m.sessionId==='reader-session'?{origin:'https://pay.vipps.no'}:
+    {origin:'https://pay.vipps.no',href:source},URL,AbortSignal,fetch,getComputedStyle:()=>({})})}};
+  queueMicrotask(()=>this.fire('message',{data:JSON.stringify({id:m.id,result})}));
+ }
+ close(){}
+};
+process.on('exit',()=>process.stderr.write(JSON.stringify({reads,clicks})));
+'''.replace('TEST', json.dumps({'status': status, 'read_http': read_http}))
+        cfg = {'endpoint': 'ws://localhost/synthetic', 'url': 'https://pay.vipps.no/?token=synthetic',
+               'mode': mode, 'poll_path': '/vipps-epayment-legacy-mobile-api/landing-page',
+               'observe_ms': 25, 'prior_attempted': False,
+               'poll_seed': {'url': 'https://api.vipps.no/vipps-epayment-legacy-mobile-api/landing-page',
+                             'payment_id': '456', 'headers': {'Authorization': 'Bearer synthetic'}}}
+        process = subprocess.run([node, '--input-type=module', '-e', fixture + _VIPPS_OBSERVER_SCRIPT],
+                                 input=json.dumps(cfg) + '\n', text=True, capture_output=True, timeout=10)
+        self.assertNotIn('Bearer synthetic', process.stdout)
+        self.assertNotIn('token=synthetic', process.stdout)
+        return json.loads(process.stdout.splitlines()[-1]), json.loads(process.stderr)
+
+    def test_expired_surface_requires_fresh_native_terminal_not_new_poll_or_cancel(self):
+        terminal, metrics = self.observe(status='TIMEOUT')
+        self.assertEqual((terminal['status'], terminal['terminal_status']), ('closed', 'TIMEOUT'))
+        self.assertEqual(metrics, {'reads': 1, 'clicks': 0})
+        for status, read_http in [('PENDING', 200), ('SUBMITTED', 200), ('TIMEOUT', 401)]:
+            with self.subTest(status=status, http=read_http):
+                unresolved, metrics = self.observe(status=status, read_http=read_http)
+                self.assertEqual(unresolved['status'], 'unknown')
+                self.assertEqual(metrics, {'reads': 1, 'clicks': 0})
+
+    def test_fresh_native_acceptance_prevents_cancel_even_on_expired_surface(self):
+        accepted, metrics = self.observe(status='ACCEPTED')
+        self.assertEqual((accepted['status'], accepted['terminal_status']), ('paid', 'ACCEPTED'))
+        self.assertEqual(metrics, {'reads': 1, 'clicks': 0})
+        observed, metrics = self.observe(status='TIMEOUT', mode='state')
+        self.assertEqual((observed['status'], observed['terminal_status']), ('closed', 'TIMEOUT'))
+        self.assertEqual(metrics, {'reads': 1, 'clicks': 0})
+
+    def test_gateway_expiry_needs_native_terminal_proof(self):
+        import hashlib
+        import time
+        from contextlib import nullcontext
+        from unittest import mock
+        from oda_browser import OdaBrowser
+        source = 'https://pay.vipps.no/?token=synthetic'
+        context = {'tab_id': 'owned', 'expected_total': 234567,
+                   'gateway_url_digest': hashlib.sha256(source.encode()).hexdigest(),
+                   'order_id': 'order-1'}
+        class Browser:
+            vipps_phone_number = '12345678'
+            _checkout_deadline = time.monotonic() + 30
+            _checkout_operation = lambda self, *args, **kwargs: nullcontext()
+            _select_payment_tab = lambda self, tab_id: tab_id == 'owned'
+            _invoke = lambda self, *args: {'url': source}
+            _eval = lambda self, script: {'identity': True, 'expired': True}
+        browser = Browser()
+        with mock.patch('oda_payment_switch.native_vipps_request_state', return_value={'status': 'unknown'}):
+            self.assertEqual(OdaBrowser.checkout_vipps_request_state(browser, context), {'status': 'unknown'})
+        with mock.patch('oda_payment_switch.native_vipps_request_state',
+                        return_value={'status': 'expired', 'terminal_status': 'TIMEOUT'}):
+            self.assertEqual(OdaBrowser.checkout_vipps_request_state(browser, context)['status'], 'expired')
+        with mock.patch('oda_payment_switch.native_vipps_request_state',
+                        return_value={'status': 'sent', 'terminal_status': 'ACCEPTED'}):
+            self.assertEqual(OdaBrowser.checkout_vipps_request_state(browser, context)['status'], 'sent')
+
+
 if __name__ == '__main__':
     unittest.main()
