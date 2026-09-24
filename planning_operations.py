@@ -1430,11 +1430,17 @@ class PlanningOperations:
             handoff, _resolved, _planner_request = self._resolve_planner_ref(planner_ref)
             return {"planner_handoff": handoff}
         if action == "assess":
-            return {"assessment": assess_menu(self.store.read())}
+            state = self.store.read()
+            current = state.get("menu")
+            return {"assessment": assess_menu(state),
+                    **({"minimum_evaluation": saved_menu_minimum_evaluation(current, state.get("profile") or {})}
+                       if isinstance(current, Mapping) else {})}
         if action == "get":
             state = self.store.read()
             current = state.get("menu")
             return {"menu": deepcopy(current), "assessment": assess_menu(state), "feedback_targets": feedback_targets(current), "slot_replan_available": bool(current and current.get("slots")),
+                    **({"minimum_evaluation": saved_menu_minimum_evaluation(current, state.get("profile") or {})}
+                       if isinstance(current, Mapping) else {}),
                     "batch_dependencies": bp.dependency_status(state, current) if current else [],
                     "locks": deepcopy(state["menu_planning"]["locks"].get(mp.lock_key(current), [])) if current else []}
         if action == "add_slot":

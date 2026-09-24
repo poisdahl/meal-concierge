@@ -56,7 +56,7 @@ class LeafyAssessmentTests(unittest.TestCase):
         self.assertEqual(plan["status"], "planned")
         evidence = plan["selection"]["strict_targets"]["results"][0]["detail"]["dinner_assessments"][0]
         self.assertEqual(evidence["source"], "agent_assessment")
-        self.assertEqual(evidence["quantity_evidence"], "mechanically_verified")
+        self.assertEqual(evidence["quantity_evidence"], "calculated_from_listed_recipe")
         self.assertEqual(evidence["listed_grams_per_serving"], 100)
         visible = project_agent_result("menu", "plan", {"plan": plan}, offset=0, limit=10, section="summary")
         reasons = visible["plan"]["selection"]["slots"][0]["reason_contributions"]
@@ -70,6 +70,16 @@ class LeafyAssessmentTests(unittest.TestCase):
         observed = planner.saved_menu_minimum_evaluation(saved, self.store.read()["profile"])
         self.assertEqual(observed["enforced_status"], "pass")
         self.assertEqual(observed["results"][0]["detail"]["dinner_assessments"][0]["listed_grams_per_serving"], 100)
+        for action in ("get", "assess"):
+            readback = self.app.handle({"operation": "menu", "action": action})
+            visible = project_agent_result("menu", action, readback,
+                                           offset=0, limit=10, section="summary")
+            leafy = visible["minimum_evaluation"]["leafy_green_days"]
+            self.assertEqual(leafy["status"], "pass")
+            self.assertEqual(leafy["detail"]["dinner_assessments"][0]["source"], "agent_assessment")
+            self.assertEqual(leafy["detail"]["dinner_assessments"][0]["listed_grams_per_serving"], 100)
+            self.assertEqual(leafy["detail"]["dinner_assessments"][0]["quantity_evidence"],
+                             "calculated_from_listed_recipe")
 
         changed = deepcopy(saved)
         changed["dishes"][0]["ingredients"][0]["quantity"] = 1
@@ -77,6 +87,16 @@ class LeafyAssessmentTests(unittest.TestCase):
         self.assertEqual(stale["results"][0]["status"], "unknown")
         self.assertEqual(stale["results"][0]["detail"]["dinner_assessments"][0]["detail"],
                          "saved_assessment_missing_or_stale")
+        with self.store.locked() as state:
+            state["menu"]["dishes"][0]["ingredients"][0]["quantity"] = 1
+        for action in ("get", "assess"):
+            readback = self.app.handle({"operation": "menu", "action": action})
+            visible = project_agent_result("menu", action, readback,
+                                           offset=0, limit=10, section="summary")
+            leafy = visible["minimum_evaluation"]["leafy_green_days"]
+            self.assertEqual(leafy["status"], "unknown")
+            self.assertEqual(leafy["detail"]["dinner_assessments"][0]["detail"],
+                             "saved_assessment_missing_or_stale")
 
     def test_no_fact_and_unsupported_mass_cannot_satisfy_strict_target(self):
         mixed = self.save_recipe("Spinach pasta", "spinach-pasta", "spinach pasta")
@@ -90,6 +110,13 @@ class LeafyAssessmentTests(unittest.TestCase):
         self.assertEqual(unsupported["status"], "needs_input")
         self.assertEqual(unsupported["issues"][0]["detail"]["dinner_assessments"][0]["quantity_evidence"],
                          "mass_unit_unavailable")
+        visible = project_agent_result("menu", "plan", {"plan": unsupported},
+                                       offset=0, limit=10, section="summary")
+        repair = visible["plan"]["issues"][0]["detail"]["dinner_assessments"][0]
+        self.assertEqual(repair["source"], "agent_assessment")
+        self.assertEqual(repair["ingredient_indices"], [0])
+        self.assertEqual(repair["quantity_evidence"], "mass_unit_unavailable")
+        self.assertIsNone(repair["counts"])
 
     def test_intact_old_slot_uses_labeled_legacy_hint_but_missing_new_fact_does_not(self):
         spinach = self.save_recipe("Spinach dinner", "old-spinach", "spinat")

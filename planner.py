@@ -626,14 +626,17 @@ def _leafy_dinner(candidate: Mapping[str, Any]) -> dict[str, Any]:
         checked.append({"ingredient_index": index, "item": item.get("item"), "listed_grams_per_serving": grams})
     return {**result, "counts": True,
             "listed_grams_per_serving": sum(item["listed_grams_per_serving"] for item in checked),
-            "quantity_evidence": "mechanically_verified"}
+            "quantity_evidence": "calculated_from_listed_recipe"}
 
 
 def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]) -> dict[str, Any] | None:
     target = (profile.get("diet") or {}).get("leafy_green_days")
     if not target:
         return None
-    assessments = [_leafy_dinner(candidate) for candidate in selected]
+    assessments = [
+        {**_leafy_dinner(candidate), **({"date": candidate["date"]} if candidate.get("date") else {})}
+        for candidate in selected
+    ]
     counted = sum(item["counts"] is True for item in assessments)
     unknown = sum(item["counts"] is None for item in assessments)
     minimum, maximum = target
@@ -804,7 +807,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 and isinstance(facets.get("complete"), bool)
             ):
                 planned_facts[recipe_key] = deepcopy(dict(facets))
-    selected = tuple({"recipe": recipe, "facts": {
+    selected = tuple({"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
         "dietary_facets": deepcopy(planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)),
         "leafy_green": (
             deepcopy(slot["leafy_green"])
