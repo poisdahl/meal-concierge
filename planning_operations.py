@@ -660,13 +660,28 @@ class PlanningOperations:
             return {"status":"needs_input", "reason":str(exc)}
         source = mp.slot_by_id(current, spec["source_slot_id"])
         self._require_recipe_provider(mp.recipe_for_slot(current, source))
+        source_snapshot_matches = source["snapshot_digest"] == mp.recipe_snapshot_digest(mp.recipe_for_slot(current, source))
+        source_facets = source.get("dietary_facets") if source_snapshot_matches else None
+        if source_facets is None and source_snapshot_matches:
+            for field in ("replan_selection", "planner_selection"):
+                handoff = current.get(field)
+                selection = handoff.get("selection") if isinstance(handoff, Mapping) else None
+                for selected in selection.get("slots", []) if isinstance(selection, Mapping) else []:
+                    if (isinstance(selected, Mapping) and selected.get("date") == source["date"]
+                            and selected.get("recipe_key") == source["recipe_key"]
+                            and canonical(selected.get("reference")) == canonical(source["reference"])
+                            and isinstance(selected.get("dietary_facets"), Mapping)):
+                        source_facets = normalize_candidate_facts({"dietary_facets": selected["dietary_facets"]})["dietary_facets"]
+                        break
+                if source_facets is not None:
+                    break
         replaced = {d["replaces_slot_id"] for d in spec["leftovers"]}
         carried = [deepcopy(s) for s in current["slots"] if s["slot_id"] not in replaced]
         leftover_slots = [{"slot_id":d["slot_id"], "date":d["date"], "meal_type":d["meal_type"], "kind":"leftover",
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
             "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"],
             **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {}),
-            **({"dietary_facets": deepcopy(source["dietary_facets"])} if "dietary_facets" in source else {}),
+            **({"dietary_facets": deepcopy(source_facets)} if source_facets is not None else {}),
             **({"served_with": mp.slot_by_id(current, d["replaces_slot_id"])["served_with"]}
                if "served_with" in mp.slot_by_id(current, d["replaces_slot_id"]) else {})} for d in spec["leftovers"]]
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=mp.slot_order),
@@ -939,6 +954,26 @@ class PlanningOperations:
                 raise HouseholdError("household ingredient rules block this meal: " + canonical(conflicts))
             return checked, recipe
 
+        def legacy_facets(slot):
+            if (slot["slot_id"] not in {s["slot_id"] for s in current["slots"]}
+                    or slot.get("dietary_facets")
+                    or slot.get("snapshot_digest") != mp.recipe_snapshot_digest(mp.recipe_for_slot(current, slot))):
+                return None
+            for field in ("replan_selection", "planner_selection"):
+                handoff = current.get(field)
+                selection = handoff.get("selection") if isinstance(handoff, Mapping) else None
+                if not isinstance(selection, Mapping):
+                    continue
+                for rows in (selection.get("slots"), selection.get("source_slots")):
+                    for selected in rows if isinstance(rows, list) else []:
+                        if (isinstance(selected, Mapping) and selected.get("date") == slot["date"]
+                                and selected.get("recipe_key") == slot["recipe_key"]
+                                and isinstance(selected.get("reference"), Mapping)
+                                and canonical(selected.get("reference")) == canonical(slot.get("reference"))
+                                and isinstance(selected.get("dietary_facets"), Mapping)):
+                            return normalize_candidate_facts({"dietary_facets": selected["dietary_facets"]})["dietary_facets"]
+            return None
+
         def fresh_slot(edit, index, *, old=None, frozen_recipe=None):
             day = checked_day(edit.get("date", old["date"] if old else None))
             meal_type = checked_type(edit.get("meal_type", old["meal_type"] if old else None))
@@ -966,7 +1001,9 @@ class PlanningOperations:
                 slot["leafy_green"] = normalize_candidate_facts({"leafy_green": fact})["leafy_green"]
             elif old is not None and old.get("snapshot_digest") == slot["snapshot_digest"] and "leafy_green" in old:
                 slot["leafy_green"] = deepcopy(old["leafy_green"])
-            if old is not None and old.get("snapshot_digest") == slot["snapshot_digest"] and "dietary_facets" in old:
+            if "dietary_facets" in edit:
+                slot["dietary_facets"] = normalize_candidate_facts({"dietary_facets": edit["dietary_facets"]})["dietary_facets"]
+            elif old is not None and old.get("snapshot_digest") == slot["snapshot_digest"] and "dietary_facets" in old:
                 slot["dietary_facets"] = deepcopy(old["dietary_facets"])
             recipe["preparation_slot_id"] = slot_id
             slots.append(slot)
@@ -990,7 +1027,7 @@ class PlanningOperations:
                 raise HouseholdError("edit action must be add, replace, remove or move")
             if action == "add":
                 if "reference" in edit:
-                    if set(edit).difference({"action", "date", "meal_type", "portions", "reference", "leafy_green", "served_with"}):
+                    if set(edit).difference({"action", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"}):
                         raise HouseholdError("fresh add has unknown fields")
                     fresh_slot(edit, index)
                 else:
@@ -1024,14 +1061,14 @@ class PlanningOperations:
                         slot["served_with"] = served_with
                     if "leafy_green" in source:
                         slot["leafy_green"] = deepcopy(source["leafy_green"])
-                    if "dietary_facets" in source:
-                        slot["dietary_facets"] = deepcopy(source["dietary_facets"])
+                    if facets := source.get("dietary_facets") or legacy_facets(source):
+                        slot["dietary_facets"] = deepcopy(facets)
                     slots.append(slot)
                     added.append(slot)
             elif action in {"remove", "replace", "move"}:
                 allowed = {"action", "slot_id"} if action == "remove" else (
-                    {"action", "slot_id", "date", "meal_type", "portions", "reference", "leafy_green", "served_with"} if action == "replace" else
-                    {"action", "slot_id", "date", "meal_type", "portions", "leafy_green", "served_with"})
+                    {"action", "slot_id", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"} if action == "replace" else
+                    {"action", "slot_id", "date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with"})
                 if set(edit).difference(allowed):
                     raise HouseholdError("slot edit has unknown fields")
                 slot = mp.slot_by_id(successor, edit.get("slot_id"))
@@ -1043,9 +1080,11 @@ class PlanningOperations:
                 if action in {"replace", "move"} and slot.get("kind") == "leftover":
                     raise HouseholdError("replace or move a linked serving by removing it and adding an exact new serving")
                 old = deepcopy(slot)
-                if action == "move" and not any(field in edit for field in ("date", "meal_type", "portions", "leafy_green", "served_with")):
+                if action == "move" and not any(field in edit for field in ("date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with")):
                     raise HouseholdError("move needs a changed date, type, portions or assessment")
                 frozen_recipe = deepcopy(mp.recipe_for_slot(successor, slot)) if action == "move" else None
+                if inherited := legacy_facets(slot):
+                    old["dietary_facets"] = inherited
                 remove_slot(slot)
                 if action == "replace":
                     if "reference" not in edit:
@@ -1090,9 +1129,9 @@ class PlanningOperations:
                         unused = bp.fraction(retained["prepared_portions"]) - bp.fraction(retained["consumed_at_source"])
                         unused -= sum((bp.fraction(s["portions"]) for s in dependents), Fraction())
                         retained["unallocated_portions"] = bp.rational(unused)
-                        retained["suitability"] = {"source": "unassessed", "value": "unknown"}
-                        retained["storage"] = {"basis": "unknown"}
-                        retained.pop("confirmation", None)
+                        retained.setdefault("allocation_amendments", []).append({
+                            "removed_slot_ids": sorted(s["slot_id"] for s in removed),
+                            "prior_spec_digest": old_batch["spec_digest"]})
                         retained["spec_digest"] = mp.digest({k: v for k, v in retained.items() if k != "spec_digest"})
                         successors.append(retained)
                         continue

@@ -837,10 +837,11 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     def candidate_for(slot, recipe):
         facets = None
         if isinstance(slot, Mapping):
-            if (isinstance(slot.get("dietary_facets"), Mapping)
-                    and slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)):
-                facets = slot["dietary_facets"]
-            elif isinstance(slot.get("reference"), Mapping) and isinstance(slot.get("date"), str):
+            exact_snapshot = slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)
+            if "dietary_facets" in slot:
+                if isinstance(slot["dietary_facets"], Mapping) and exact_snapshot:
+                    facets = slot["dietary_facets"]
+            elif exact_snapshot and isinstance(slot.get("reference"), Mapping) and isinstance(slot.get("date"), str):
                 facets = planned_by_occurrence.get((slot["date"], slot.get("recipe_key"),
                                                     mp.canonical(slot["reference"])))
             elif slot.get("reference") is None and sum(

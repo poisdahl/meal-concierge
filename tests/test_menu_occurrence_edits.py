@@ -15,6 +15,7 @@ from planner import saved_menu_minimum_evaluation
 from product_planner import menu_requirements
 from recipe_quantities import read_quantity
 from service import Application
+from service_common import menu_digest
 from tests import test_meal_concierge_planner as fixtures
 from tests import test_meal_concierge_product_capacity as product_fixtures
 
@@ -231,6 +232,38 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         self.assertEqual(edited["menu"]["batches"][0]["unallocated_portions"], {"numerator": 2, "denominator": 1})
         self.assertNotIn("spinat", self.amounts(edited["menu"])[0])
 
+    def test_cooked_batch_keeps_original_facts_when_future_serving_is_removed(self):
+        added, _ = self.edit(self.menu, [
+            {"action": "add", "date": day, "meal_type": "side", "portions": 2,
+             "reference": self.salad, "served_with": "dinner"}
+            for day in ("2026-09-07", "2026-09-08", "2026-09-09")], "three-confirmed-sides")
+        menu = added["menu"]
+        source, first, later = [s for s in menu["slots"] if s["meal_type"] == "side"]
+        spec = {"source_slot_id": source["slot_id"], "source_snapshot_digest": source["snapshot_digest"],
+                "prepared_portions": "6", "consumed_at_source": "2",
+                "suitability": {"source": "current_user", "value": "suitable"},
+                "storage": {"source": "current_user", "method": "refrigerated", "max_interval_days": 2},
+                "leftovers": [{"slot_id": s["slot_id"], "portions": "2"} for s in (first, later)]}
+        prepared = self.app.handle({"operation": "menu", "action": "batch_prepare",
+                                    "menu_ref": mp.menu_ref(menu), "batch_spec": spec})["batch_plan"]
+        batched = self.app.handle({"operation": "menu", "action": "batch_apply", "batch_plan": prepared,
+                                   "batch_confirmation": {"batch_digest": prepared["batch_digest"],
+                                                          "statement": bp.CONFIRMATION_STATEMENT}})["menu"]
+        self.app.handle({"operation": "recipes", "action": "mark_cooked", "menu_id": batched["menu_id"],
+                         "expected_revision": batched["revision"], "slot_id": source["slot_id"],
+                         "actual_batch": {"prepared_portions": "6", "consumed_at_source": "2"}})
+        consumed = next(s for s in batched["slots"] if s.get("kind") == "leftover" and s["date"] == "2026-09-08")
+        future = next(s for s in batched["slots"] if s.get("kind") == "leftover" and s["date"] == "2026-09-09")
+        self.app.handle({"operation": "recipes", "action": "mark_cooked", "menu_id": batched["menu_id"],
+                         "expected_revision": batched["revision"], "slot_id": consumed["slot_id"]})
+        edited, _ = self.edit(batched, [{"action": "remove", "slot_id": future["slot_id"]}], "cancel-future-batch-serving")
+        retained = edited["menu"]["batches"][0]
+        self.assertEqual(retained["storage"], spec["storage"])
+        self.assertEqual(retained["suitability"], spec["suitability"])
+        self.assertIn("confirmation", retained)
+        self.assertEqual(retained["allocation_amendments"][0]["removed_slot_ids"], [future["slot_id"]])
+        self.assertEqual(retained["unallocated_portions"], {"numerator": 2, "denominator": 1})
+
     def test_one_not_cooked_repeat_does_not_cancel_another_planned_occurrence(self):
         added, _ = self.edit(self.menu, [
             {"action": "add", "date": day, "meal_type": "side", "portions": 1,
@@ -266,6 +299,45 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         assessment = saved_menu_minimum_evaluation(menu, profile)
         self.assertEqual(assessment["status"], "pass")
         self.assertEqual(assessment["results"][0]["detail"]["observed"], 1)
+        menu["slots"][0]["dietary_facets"] = facts[0]
+        recipes[0]["ingredients"][0]["item"] = "changed ingredient"
+        self.assertNotEqual(saved_menu_minimum_evaluation(menu, profile)["status"], "pass")
+
+    def test_fresh_strict_edit_accepts_exact_dietary_facets(self):
+        skrei = self.save_recipe("Skrei dinner", "skrei-dinner", "skrei")
+        with self.store.locked() as state:
+            state["profile"]["diet"]["minimum_fish_portions"] = 1
+            state["menu"]["planning_scope"] = {"selection_mode": "agent", "strict_targets": ["minimum_fish_portions"]}
+            state["menu"]["digest"] = menu_digest(state["menu"])
+        current = self.store.read()["menu"]
+        target = next(s for s in current["slots"] if s["date"] == "2026-09-07")
+        result, _ = self.edit(current, [{"action": "replace", "slot_id": target["slot_id"],
+                                        "reference": skrei,
+                                        "dietary_facets": {"source": "explicit", "values": ["fish"], "vegetable_types": [],
+                                                           "complete": True}}], "strict-skrei")
+        replacement = next(s for s in result["menu"]["slots"] if s["date"] == "2026-09-07")
+        self.assertIn("fish", replacement["dietary_facets"]["values"])
+        self.assertEqual(saved_menu_minimum_evaluation(result["menu"], self.store.read()["profile"])["enforced_status"], "pass")
+
+    def test_legacy_saved_facts_survive_same_recipe_move(self):
+        with self.store.locked() as state:
+            state["profile"]["diet"]["minimum_fish_portions"] = 1
+            state["menu"]["planning_scope"] = {"selection_mode": "agent", "strict_targets": ["minimum_fish_portions"]}
+            first = next(s for s in state["menu"]["slots"] if s["date"] == "2026-09-07")
+            first.pop("dietary_facets", None)
+            for slot in state["recipe_usage"][state["menu"]["menu_id"]]["slots"]:
+                if slot["slot_id"] == first["slot_id"]:
+                    slot.pop("dietary_facets", None)
+            selected = state["menu"]["planner_selection"]["selection"]["slots"]
+            source = next(s for s in selected if s["date"] == first["date"])
+            source["dietary_facets"] = {"source": "explicit", "values": ["fish"], "vegetable_types": [], "complete": True}
+            state["menu"]["digest"] = menu_digest(state["menu"])
+        current = self.store.read()["menu"]
+        first = next(s for s in current["slots"] if s["date"] == "2026-09-07")
+        moved, _ = self.edit(current, [{"action": "move", "slot_id": first["slot_id"],
+                                       "date": "2026-09-10"}], "move-legacy-facts")
+        new_slot = next(s for s in moved["menu"]["slots"] if s["date"] == "2026-09-10")
+        self.assertIn("fish", new_slot["dietary_facets"]["values"])
 
     def test_two_same_recipe_preparations_scale_independently(self):
         result, _ = self.edit(self.menu, [

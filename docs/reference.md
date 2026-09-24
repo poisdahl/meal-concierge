@@ -1599,6 +1599,11 @@ by the requested person count, including recipes measured in jars, loaves or vol
 
 `replace` targets one `slot_id` and exact new reference; `remove` targets one
 `slot_id`; `move` targets one slot and a changed date, meal type or portions.
+Fresh `add` and `replace` edits can carry validated
+`dietary_facets:{"source":"explicit","values":[...],"complete":true,"vegetable_types":[...]}`
+when the recipe's culinary classification is needed for a strict saved target.
+The assessment belongs to that exact frozen recipe snapshot. A changed recipe
+requires a fresh assessment.
 Every edit creates an immutable successor with exact predecessor history. A
 repeated recipe key creates another independent preparation snapshot. Linked
 later servings instead use `source_slot_id` or `source_edit_index` pointing to
@@ -1609,7 +1614,9 @@ storage-safety assertion; the agent must judge suitability and report unknowns.
 Changing a source with linked servings requires changing its full future
 component together. Editing an unrecorded confirmed batch drops that batch's
 old confirmation and leaves its revised suitability unassessed. Past, cooked
-and locked slots remain immutable. A menu
+and locked slots remain immutable. Removing only an unconsumed future serving
+from a cooked batch retains the original preparation facts and records the
+allocation amendment. A menu
 permits up to 31 slots, including multiple courses on one date. `add_slot`
 remains supported for simple additions and for the first slot of an empty menu.
 Returned

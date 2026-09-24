@@ -94,7 +94,9 @@ meal selection and product preparation need no additional reference loading.
    changes to an existing independent menu, use `edit_slots` with its current
    `menu_ref`, a stable idempotency key and an ordered `edits` list. `add`
    supplies date, meal_type, portions and exact reference; optional `leafy_green`
-   carries the structured assessment above. Set `served_with:"dinner"` for a
+   carries the structured assessment above. Fresh add/replace can also carry
+   `dietary_facets` with `source:"explicit"` when needed for strict targets;
+   base it on the exact recipe snapshot. Set `served_with:"dinner"` for a
    side served with that date's dinner (or `"lunch"`/`"other"` otherwise),
    including each linked serving. A dinner side needs enough portions for the
    dinner's people to count fully toward leafy-green days. Only one dinner slot
