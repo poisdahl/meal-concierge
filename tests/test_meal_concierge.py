@@ -11243,7 +11243,8 @@ class FlowTests(unittest.TestCase):
 
 class DeliveryPriceAuthorizationTests(unittest.TestCase):
     @contextmanager
-    def flow(self, provider, policy, final=10000, payable=None, maximum=None, delivery_only=True):
+    def flow(self, provider, policy, final=10000, payable=None, maximum=None, delivery_only=True,
+             payment_method=None):
         with tempfile.TemporaryDirectory() as directory:
             shop = FakeMeny() if provider == 'meny' else FakeOda()
             browser = shop if provider == 'meny' else FakeBrowser()
@@ -11292,7 +11293,8 @@ class DeliveryPriceAuthorizationTests(unittest.TestCase):
                         return result
                     shop.call = call
             shop.orders = [order]
-            store = StateStore(Path(directory), {**CONFIG, 'provider': provider, 'confirmation_policy': policy})
+            store = StateStore(Path(directory), {**CONFIG, 'provider': provider, 'confirmation_policy': policy,
+                                                  **({'checkout_payment': {'method': payment_method}} if payment_method else {})})
             app = Application(store, shop, browser)
             app._now = lambda: ODA_FIXTURE_NOW
             app.handle({'operation': 'setup', 'action': 'apply', 'keep_current': True})
@@ -11397,6 +11399,95 @@ class DeliveryPriceAuthorizationTests(unittest.TestCase):
                             replay = app.handle({'operation': 'checkout', 'action': 'confirm', 'confirmation_id': prepared['confirmation_id']})
                             self.assertTrue(replay['confirmed'])
                             self.assertEqual(browser.checkout_clicks, 1)
+
+    def test_manual_oda_delivery_change_uses_existing_card_without_changing_vipps_preference(self):
+        for final, delivery_only in ((10000, True), (11000, True), (10000, False)):
+            with self.subTest(final=final, delivery_only=delivery_only):
+                with self.flow('oda', 'fresh', final, delivery_only=delivery_only,
+                               payment_method='vipps') as (app, store, shop, browser):
+                    preference = store.read()['checkout_payment']
+                    with self.assertRaisesRegex(HouseholdError, 'Vipps delivery-only changes'):
+                        app.handle({'operation': 'checkout', 'action': 'prepare'})
+                    with self.assertRaisesRegex(HouseholdError, 'Vipps delivery-only changes'):
+                        app.handle({'operation': 'checkout', 'action': 'prepare',
+                                    'checkout_payment': {'method': 'vipps'}})
+                    self.assertIsNone(store.read()['pending_checkout'])
+                    prepared = app.handle({'operation': 'checkout', 'action': 'prepare',
+                                           'checkout_payment': {'method': 'saved_card'}})
+                    self.assertEqual(prepared['order_change'], {'order_id': '99990001', 'kind': 'delivery'})
+                    self.assertEqual(prepared['summary']['payment'], '•••• 1234')
+                    self.assertEqual(prepared['summary']['payment_method'], 'saved_card')
+                    pending = store.read()['pending_checkout']
+                    self.assertEqual(pending['checkout_payment']['method'], 'saved_card')
+                    self.assertEqual(pending['payment_preference'], preference)
+                    self.assertEqual(browser.checkout_clicks, 0)
+                    if final > 10000:
+                        blocked = self.finish(app, shop, browser, prepared)
+                        self.assertTrue(blocked['confirmation_required'])
+                        self.assertEqual(browser.checkout_clicks, 0)
+                    result = self.finish(app, shop, browser, prepared, approve=final > 10000)
+                    self.assertTrue(result['confirmed'])
+                    self.assertEqual(result['order_id'], '99990001')
+                    self.assertEqual(len(shop.orders), 1)
+                    self.assertEqual(browser.checkout_clicks, 1)
+                    self.assertEqual(store.read()['checkout_payment'], preference)
+
+    def test_manual_oda_delivery_card_override_stays_out_of_scheduled_and_inflight_checkout(self):
+        with self.flow('oda', 'fresh', payment_method='vipps') as (app, store, shop, browser):
+            request = {'operation': 'checkout', 'action': 'prepare',
+                       'checkout_payment': {'method': 'saved_card'}}
+            with store.locked() as state:
+                state['occurrences']['2026-W36'] = {'status': 'cart_ready'}
+            with self.assertRaisesRegex(HouseholdError, 'Per-checkout payment selection'):
+                app.handle({**request, 'occurrence': '2026-W36'})
+            self.assertIsNone(store.read()['pending_checkout'])
+            with store.locked() as state:
+                state['pending_checkout'] = {'status': 'uncertain', 'confirmation_id': 'other'}
+            with self.assertRaisesRegex(HouseholdError, 'reconcile the pending checkout'):
+                app.handle(request)
+            self.assertEqual(store.read()['pending_checkout']['confirmation_id'], 'other')
+            self.assertEqual(browser.checkout_clicks, 0)
+
+    def test_manual_oda_delivery_card_last_four_must_match_reviewed_card(self):
+        for last_four, expected in (('1234', True), ('9999', False)):
+            with self.subTest(last_four=last_four):
+                with self.flow('oda', 'fresh', payment_method='vipps') as (app, store, shop, browser):
+                    request = {'operation': 'checkout', 'action': 'prepare',
+                               'checkout_payment': {'method': 'saved_card', 'card_last4': last_four}}
+                    if expected:
+                        prepared = app.handle(request)
+                        self.assertEqual(prepared['summary']['payment'], '•••• 1234')
+                        self.assertEqual(store.read()['pending_checkout']['checkout_payment']['card_last4'], last_four)
+                    else:
+                        with self.assertRaisesRegex(HouseholdError, 'different saved card'):
+                            app.handle(request)
+                        self.assertIsNone(store.read()['pending_checkout'])
+                    self.assertEqual(browser.checkout_clicks, 0)
+                    self.assertEqual(store.read()['checkout_payment']['method'], 'vipps')
+
+    def test_delivery_price_reprepare_keeps_manual_card_choice_and_requires_fresh_confirmation(self):
+        with self.flow('oda', 'fresh', final=11000, payment_method='vipps') as (app, store, shop, browser):
+            prepared = app.handle({'operation': 'checkout', 'action': 'prepare',
+                                   'checkout_payment': {'method': 'saved_card'}})
+            self.assertEqual(browser.checkout_clicks, 0)
+            shop.delivery_slots['slots'][1]['price_ore'] = 100
+            refreshed = app.handle({'operation': 'checkout', 'action': 'confirm',
+                                    'confirmation_id': prepared['confirmation_id'],
+                                    'delivery_price_approved': True})
+            self.assertTrue(refreshed['reprepared'])
+            self.assertNotEqual(refreshed['confirmation_id'], prepared['confirmation_id'])
+            self.assertEqual(refreshed['summary']['payment_method'], 'saved_card')
+            self.assertEqual(store.read()['pending_checkout']['checkout_payment']['method'], 'saved_card')
+            self.assertEqual(store.read()['checkout_payment']['method'], 'vipps')
+            self.assertEqual(browser.checkout_clicks, 0)
+            with self.assertRaisesRegex(HouseholdError, 'confirmation does not match'):
+                app.handle({'operation': 'checkout', 'action': 'confirm',
+                            'confirmation_id': prepared['confirmation_id']})
+            blocked = self.finish(app, shop, browser, refreshed)
+            self.assertTrue(blocked['confirmation_required'])
+            self.assertEqual(browser.checkout_clicks, 0)
+            self.assertTrue(self.finish(app, shop, browser, refreshed, approve=True)['confirmed'])
+            self.assertEqual(browser.checkout_clicks, 1)
 
     def test_payable_is_separate_from_final_total_and_lost_dispatch_is_not_repeated(self):
         for provider in ('oda', 'mathem'):

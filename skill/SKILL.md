@@ -203,6 +203,10 @@ Use `delivery_only=true` for a delivery-only request, or supported
 order review. Follow returned reconciliation guidance. For these less common
 operations, read the relevant section of the
 [order recovery](references/order-recovery.md).
+For a manual Oda delivery change, `checkout prepare` may select an existing
+saved card with `checkout_payment={"method":"saved_card"}` even when the
+household preference is Vipps. This choice applies only to the reviewed change;
+Oda/Vipps delivery-only payment remains unsupported.
 Mathem amounts are SEK; Oda and MENY amounts are NOK.
 
 ## Recipes, delivery and ongoing use
