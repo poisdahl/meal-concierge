@@ -114,14 +114,30 @@ class RecipeChanges(TypedDict, total=False):
     steps: Annotated[list[str], Field(max_length=100)]
 
 
+class LeafyGreenAssessment(TypedDict):
+    source: Literal["explicit"]
+    assessment: Literal["substantial", "does_not_count", "unknown"]
+    ingredient_indices: Annotated[list[int], Field(max_length=20)]
+    basis: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class PlannerCandidateFacts(TypedDict, total=False):
+    active_minutes: dict[str, Any]
+    dietary_facets: dict[str, Any]
+    variety_facets: dict[str, Any]
+    perishability: dict[str, Any]
+    batch_guidance: dict[str, Any]
+    leafy_green: LeafyGreenAssessment
+
+
 class PlannerRecipeCandidate(TypedDict):
     recipe_ref: RecipeRef
-    facts: NotRequired[dict[str, Any]]
+    facts: NotRequired[PlannerCandidateFacts]
 
 
 class PlannerDiscoveryCandidate(TypedDict):
     discovery_ref: str
-    facts: NotRequired[dict[str, Any]]
+    facts: NotRequired[PlannerCandidateFacts]
 
 
 PlannerCandidate = PlannerRecipeCandidate | PlannerDiscoveryCandidate
@@ -483,7 +499,7 @@ def meal_concierge_setup(
     return rpc("setup", action=action, keep_current=keep_current, changes=changes or {})
 
 
-@server.tool(description="Show, update or reset household meal preferences, or set the private email recipient. Reversible preference writes need no code. Recurring meals use meals.meal_mode, dinner_days, batch_dishes, dishes, prepared_portion_range, equipment (known specialist appliances; pot/pan/oven are defaults), portions consumed per meal, cook_days/eat_days and explicitly accepted recurring_batch_accepted. A recurring-definition change clears prior acceptance unless the same atomic update supplies recurring_batch_accepted=true with one complete coherent batch/mixed definition; fresh mode requires one dish per dinner day and batch_dishes=0. Preserve old numbers/text. diet.rules has explicit kind and term; uncertainty_permissions requires exact kind/term/product_ref/condition plus accepted=true and notify=true. Do not infer a diagnosis, weaken exclusions or infer consent. diet.leafy_green_days is an inclusive [minimum,maximum] count of dinners per week, not weekday numbers; days may vary. Count only substantial listed leafy-green quantities (at least 25 g per person), not herbs or garnish.")
+@server.tool(description="Show, update or reset household meal preferences, or set the private email recipient. Reversible preference writes need no code. Recurring meals use meals.meal_mode, dinner_days, batch_dishes, dishes, prepared_portion_range, equipment (known specialist appliances; pot/pan/oven are defaults), portions consumed per meal, cook_days/eat_days and explicitly accepted recurring_batch_accepted. A recurring-definition change clears prior acceptance unless the same atomic update supplies recurring_batch_accepted=true with one complete coherent batch/mixed definition; fresh mode requires one dish per dinner day and batch_dishes=0. Preserve old numbers/text. diet.rules has explicit kind and term; uncertainty_permissions requires exact kind/term/product_ref/condition plus accepted=true and notify=true. Do not infer a diagnosis, weaken exclusions or infer consent. diet.leafy_green_days is an inclusive [minimum,maximum] count of dinners per week, not weekday numbers; days may vary. Count meaningful leafy-green dinner servings, not herbs, garnish or the full weight of mixed products. Agent assessments should cite exact ingredient indices and a brief culinary basis; the service checks listed mass and portions separately. Unknown quantity stays unknown.")
 def meal_concierge_profile(action: Literal["show", "update", "reset", "set_email"] = "show", changes: dict[str, Any] | None = None, paths: list[str] | None = None, email: str | None = None) -> dict[str, Any]:
     return rpc("profile", action=action, changes=changes or {}, paths=paths, email=email)
 
@@ -1587,7 +1603,7 @@ def _bounded_product_result(result: dict[str, Any]) -> dict[str, Any]:
 @server.tool(
     structured_output=False,
     description=(
-        "Choose a coherent menu using culinary judgment and the household profile. Call plan with planner_input.selection_mode=agent, chronological dates and one exact ordered candidate per cooking/source date. The service preserves this order and checks hard restrictions, cooldown, dates and explicit strict_targets; saved numeric minima remain visible advisory goals in agent mode. Use ranked mode or omit selection_mode for legacy ranking and automatic discovery when candidates are omitted. Save only the unchanged save_ref as planner_ref. Existing-menu actions use the exact menu_ref={menu_id,revision,digest}; never split identity into top-level ID/revision fields. For a requested distinct whole new menu during a pending purchase, read menu get, plan, then save the unchanged save_ref as planner_ref with the exact current menu_ref; the pending purchase and cart stay frozen. For targeted remaining-slot changes to a separate menu, use replan_prepare/replan_apply even while an unrelated order change or payment recovery waits; the service checks the frozen purchase menu or exact existing-order snapshot, slot owners and usage under its state lock. A linked or unidentified menu, or pending cancellation, still requires the protected operation to resolve. Neither menu action retries payment or prepares cart goods; never confirm payment merely to unlock planning. planner_input.cooldown_overrides is only for an explicitly requested historical repeat. The planner returns bounded selections and source/unknown diagnostics and changes no cart. Known allergy/never-buy conflicts require alternatives. Honor ordinary preferences when choosing recipes: resolve obvious conflicts before save, adapting the existing dish first when requested. Advisory means model responsibility, not permission to knowingly ignore preferences. Use add_slot for an explicitly requested dated extra meal/course. Exact replan and batch apply arguments remain opaque and replay-safe; preserve actual history and never invent consent, safety facts or source evidence."
+        "Choose a coherent menu using culinary judgment and the household profile. Call plan with planner_input.selection_mode=agent, chronological dates and one exact ordered candidate per cooking/source date. The service preserves this order and checks hard restrictions, cooldown, dates and explicit strict_targets; saved numeric minima remain visible advisory goals in agent mode. Use ranked mode or omit selection_mode for legacy ranking and automatic discovery when candidates are omitted. Save only the unchanged save_ref as planner_ref. Existing-menu actions use the exact menu_ref={menu_id,revision,digest}; never split identity into top-level ID/revision fields. For a requested distinct whole new menu during a pending purchase, read menu get, plan, then save the unchanged save_ref as planner_ref with the exact current menu_ref; the pending purchase and cart stay frozen. For targeted remaining-slot changes to a separate menu, use replan_prepare/replan_apply even while an unrelated order change or payment recovery waits; the service checks the frozen purchase menu or exact existing-order snapshot, slot owners and usage under its state lock. A linked or unidentified menu, or pending cancellation, still requires the protected operation to resolve. Neither menu action retries payment or prepares cart goods; never confirm payment merely to unlock planning. planner_input.cooldown_overrides is only for an explicitly requested historical repeat. The planner returns bounded selections and source/unknown diagnostics and changes no cart. Known allergy/never-buy conflicts require alternatives. Honor ordinary preferences when choosing recipes: resolve obvious conflicts before save, adapting the existing dish first when requested. For diet.leafy_green_days, assess each exact dinner recipe with facts.leafy_green: source=explicit, assessment=substantial|does_not_count|unknown, ingredient_indices for substantial listed leafy ingredients, and a brief basis. Treat the agent judgment as culinary assessment; the service verifies indexed required mass lines and portions, then counts possible dinners against the inclusive weekly range. Do not count herbs, garnish or the entire weight of a mixed product as leaves, and do not invent gram conversions. Missing or unsupported evidence remains unknown. Advisory means model responsibility, not permission to knowingly ignore preferences. Use add_slot for an explicitly requested dated extra meal/course. Exact replan and batch apply arguments remain opaque and replay-safe; preserve actual history and never invent consent, safety facts or source evidence."
     ),
 )
 def meal_concierge_menu(

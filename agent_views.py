@@ -100,6 +100,24 @@ def _concise_detail(value: Any) -> Any:
     return {"summary": encoded[:399] + "…", "truncated": True}
 
 
+def _compact_leafy_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """Show the count and recipe arithmetic without echoing culinary prose."""
+    compact = {
+        field: detail[field] for field in ("target_range", "counted_dinners", "unknown_dinners", "status")
+        if field in detail
+    }
+    compact["dinner_assessments"] = [
+        {"dinner_index": index, **{
+            field: row[field] for field in (
+                "date", "source", "assessment", "counts", "ingredient_indices",
+                "listed_grams_per_serving", "quantity_evidence", "detail",
+            ) if field in row}}
+        for index, row in enumerate(detail.get("dinner_assessments", [])[:7])
+        if isinstance(row, dict)
+    ]
+    return compact
+
+
 def _compact_issue(issue: Any, strict_targets: Any = None) -> Any:
     if not isinstance(issue, dict):
         return _bounded_detail(issue)
@@ -112,7 +130,10 @@ def _compact_issue(issue: Any, strict_targets: Any = None) -> Any:
         compact["targets"] = strict_targets
     for key in ("unknown", "detail", "shortages"):
         if key in issue:
-            compact[key] = _bounded_detail(issue[key])
+            if key == "detail" and issue.get("target") == "leafy_green_days" and isinstance(issue[key], dict):
+                compact[key] = _compact_leafy_detail(issue[key])
+            else:
+                compact[key] = _bounded_detail(issue[key])
     for key in ("required_portions", "available_portions"):
         if key in issue:
             compact[key] = issue[key]
@@ -675,6 +696,14 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     for key in ("minimum_evaluation", "evaluation"):
         if isinstance(result.get(key), dict):
             view[key] = _fields(result[key], ("status", "enforced_status", "complete_menu", "strict_targets", "reason"))
+            if key == "minimum_evaluation":
+                leafy = next((row for row in result[key].get("results", [])
+                              if isinstance(row, dict) and row.get("target") == "leafy_green_days"), None)
+                if leafy and isinstance(leafy.get("detail"), dict):
+                    view[key]["leafy_green_days"] = {
+                        "status": leafy.get("status"),
+                        "detail": _compact_leafy_detail(leafy["detail"]),
+                    }
     comparison = result.get("shopping_comparison")
     if isinstance(comparison, dict):
         view["shopping_comparison_counts"] = {key: len(value) for key, value in comparison.items()

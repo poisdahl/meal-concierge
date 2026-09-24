@@ -254,6 +254,10 @@ async def sdk_checks(root, process):
         assert candidate_refs == {"PlannerRecipeCandidate", "PlannerDiscoveryCandidate"}
         assert menu_schema["$defs"]["PlannerRecipeCandidate"]["required"] == ["recipe_ref"]
         assert menu_schema["$defs"]["PlannerDiscoveryCandidate"]["required"] == ["discovery_ref"]
+        leafy_fact_schema = menu_schema["$defs"]["LeafyGreenAssessment"]
+        assert leafy_fact_schema["required"] == ["source", "assessment", "ingredient_indices", "basis"]
+        assert leafy_fact_schema["properties"]["assessment"]["enum"] == ["substantial", "does_not_count", "unknown"]
+        assert menu_schema["$defs"]["PlannerCandidateFacts"]["properties"]["leafy_green"]["$ref"].endswith("/LeafyGreenAssessment")
         assert menu_schema["$defs"]["AvailableIngredient"]["required"] == ["item"]
         assert {"start_date", "end_date", "week_start", "week_end"}.isdisjoint(planner_input)
         assert "cooldown_overrides" not in menu_properties
