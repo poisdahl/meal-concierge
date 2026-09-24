@@ -206,6 +206,85 @@ class PaymentBrowserTests(unittest.TestCase):
         self.assertTrue(self.evaluate(_oda_checkout_amount_script(24640, expected_product_count=2),
                                      rows=plural, **options)["result"]["amounts_valid"])
 
+    def test_oda_addition_binds_line_subtotal_separately_from_payable_and_final_click(self):
+        from copy import deepcopy
+        from unittest import mock
+        from oda_browser import OdaBrowser, _retail_addition_amount_script
+
+        browser = OdaBrowser.__new__(OdaBrowser)
+        order = {"orderNumber": "test-order", "currency": "NOK", "grossAmount": "100.00",
+                 "deliverySlotDisplay": "Lør 5. sep 09:00 - 12:00",
+                 "products": [{"product": {"id": 1}, "quantity": 1, "totalGrossAmount": "100.00"}]}
+        cart = {"groups": [{"items": [{"product": {"id": 2, "name": "Carrots"},
+                                       "quantity": 2, "totalGrossAmount": "12.50"}]}],
+                "productQuantityCount": 2, "totalGrossAmount": "14.90",
+                "deliveryAddress": "Example Road 1"}
+        binding = {"receipt_address": "Example Road 1", "account_reference_digest": "a" * 64}
+        expected = browser._addition_expectation(cart, "test-order", order, binding)
+        self.assertEqual((expected["added_minor"], expected["total_minor"], expected["product_count"]),
+                         (1250, 1490, 2))
+        for amount in ("12.5", 12.5):
+            with self.subTest(valid_line_total=amount):
+                variant = deepcopy(cart)
+                variant["groups"][0]["items"][0]["totalGrossAmount"] = amount
+                self.assertEqual(browser._addition_expectation(
+                    variant, "test-order", order, binding)["added_minor"], 1250)
+        rows = [["Opprinnelig bestilling", "1 vare", "100,00 kr"],
+                ["Nye varer lagt til", "2 varer", "12,50 kr"],
+                ["Å betale", "14,90 kr"], ["Ny totalsum", "3 varer", "114,90 kr"]]
+        case = {"rows": rows, "url": expected["checkout_url"], "button": "Betal med 14,90 kr"}
+        read = self.evaluate(_retail_addition_amount_script(expected, provider="oda", vipps=True), **case)
+        self.assertTrue(read["result"]["amounts_valid"])
+        self.assertEqual(read["result"]["order_amounts"], {
+            "original_minor": 10000, "original_count": 1, "added_minor": 1250,
+            "added_count": 2, "payable_minor": 1490, "combined_minor": 11490,
+            "combined_count": 3,
+        })
+        self.assertEqual(self.evaluate(_retail_addition_amount_script(
+            expected, submit=True, provider="oda", vipps=True), **case)["clicks"], ["PAY"])
+        for index, value in ((0, "100,01 kr"), (1, "12,51 kr"),
+                             (2, "14,91 kr"), (3, "114,91 kr")):
+            changed = deepcopy(rows)
+            changed[index][-1] = value
+            with self.subTest(row=index):
+                self.assertFalse(self.evaluate(_retail_addition_amount_script(
+                    expected, provider="oda", vipps=True), **{**case, "rows": changed})["result"]["amounts_valid"])
+                self.assertEqual(self.evaluate(_retail_addition_amount_script(
+                    expected, submit=True, provider="oda", vipps=True), **{**case, "rows": changed})["clicks"], [])
+        self.assertEqual(self.evaluate(_retail_addition_amount_script(
+            expected, submit=True, provider="oda", vipps=True),
+            **{**case, "button": "Betal med 14,91 kr"})["clicks"], [])
+
+        surface = {"url": expected["checkout_url"], "authenticated": True, "available": True,
+                   "items": [{"title": "Carrots", "subtitle": "", "quantity": 2}],
+                   "total_matches": True, "delivery_roots": [expected["delivery_text"]],
+                   "address_matches": True, "masked_payment": True,
+                   "payment_display": "Vipps", "submit_controls": 1}
+        browser._navigate_to_checkout = mock.Mock()
+        browser._expand_checkout_items = mock.Mock()
+        browser._expand_checkout_amount_summary = mock.Mock()
+        browser._review_checkout_identity = mock.Mock(return_value={"matched": True})
+        browser._eval = mock.Mock(side_effect=[surface, read["result"]])
+        review = browser._review_checkout(browser._order_cart(cart, "test-order", order, binding),
+            order_id="test-order", delivery_text=expected["delivery_text"],
+            payment={"method": "vipps"}, addition_expectation=expected)
+        self.assertEqual(review["amounts"]["product_subtotal"], 12.5)
+        self.assertEqual(review["amounts"]["provider_total"], 14.9)
+
+        for field, value in (("totalGrossAmount", "14.901"), ("totalGrossAmount", None)):
+            bad = deepcopy(cart)
+            bad[field] = value
+            with self.subTest(cart_total=value), self.assertRaises(HouseholdError):
+                browser._addition_expectation(bad, "test-order", order, binding)
+        for value in (None, "12.501", "12.50 kr", -1):
+            bad = deepcopy(cart)
+            bad["groups"][0]["items"][0]["totalGrossAmount"] = value
+            with self.subTest(line_total=value), self.assertRaises(HouseholdError):
+                browser._addition_expectation(bad, "test-order", order, binding)
+        with self.assertRaises(HouseholdError):
+            browser._addition_expectation(cart, "test-order",
+                {**order, "grossAmount": "100.001"}, binding)
+
     def test_retry_discounts_follow_structured_rows_not_promotion_wording(self):
         from oda_browser import _oda_checkout_amount_script
         rows = [["2 varer", "100,00 kr"], ["Fish offer: Fillet", "−10,00 kr"],
