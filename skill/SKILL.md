@@ -12,11 +12,12 @@ and, when resuming, `status.workflow.next_action`. That indicates unfinished wor
 not a new purchase mandate. Answer simple reads without starting a larger flow.
 An explicit request for a new menu requires choosing and saving a new proposal.
 When a menu already exists, read it before choosing the change path. Use
-replanning for targeted remaining-week changes. A menu-only draft or targeted
+exact slot edits for ordinary additions, replacements, removals and moves;
+use replanning when choosing a new set of remaining dinners. A menu-only draft or targeted
 change can proceed while an unrelated purchase or order change waits, when the
 service verifies that its slots do not belong to that order. Use `plan` and
-`save` for a requested distinct whole menu; use `replan_prepare` and
-`replan_apply` for changes to the existing independent menu. Leave the old
+`save` for a requested distinct whole menu; use `edit_slots` for ordinary
+changes to the existing independent menu. Leave the old
 checkout, cart and payment untouched. If the service reports linked or
 unidentified protected work, follow that operation's status and recovery path;
 do not confirm payment merely to unlock planning. Reading back the saved menu
@@ -89,9 +90,20 @@ meal selection and product preparation need no additional reference loading.
    To save a requested distinct whole new draft during a pending purchase,
    pass both the plan's `save_ref` as `planner_ref` and the
    exact current `menu_ref` returned by `get`. This leaves the pending purchase frozen; do
-   not prepare or apply new cart goods until it resolves. For targeted same-week
-   changes to an existing independent menu, use `replan_prepare` and its unchanged
-   `apply_arguments`; past, cooked, locked and dependent batch slots are retained.
+   not prepare or apply new cart goods until it resolves. For exact same-week
+   changes to an existing independent menu, use `edit_slots` with its current
+   `menu_ref`, a stable idempotency key and an ordered `edits` list. `add`
+   supplies date, meal_type, portions and exact reference; optional `leafy_green`
+   carries the structured assessment above. `replace` supplies slot_id and a
+   new exact reference, `remove` supplies slot_id, and `move` supplies slot_id
+   plus changed date, meal_type or portions. To consume one preparation across
+   later dates, first add its fresh slot and then add linked slots with
+   `source_edit_index` naming that earlier edit and exact date and portions; an
+   existing fresh source can use `source_slot_id`. The service sums prepared
+   portions and shops once. Assess storage suitability yourself; the allocation
+   does not establish food safety. Past, cooked, locked and ordered slots stay
+   immutable. Use `replan_prepare` and its unchanged `apply_arguments` when
+   choosing a new set of remaining dinners.
    A blocked linked or unidentified slot needs the pending operation resolved;
    do not replace a whole menu to evade it.
 

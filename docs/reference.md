@@ -1059,8 +1059,9 @@ ID and revision even after cleanup or a later explicit recipe update.
 For the ordinary model-led path, use `planner_input.selection_mode="agent"`,
 chronological dates, and exactly one ordered candidate per cooking date. Accepted
 batch layouts determine leftover dates. The service preserves that order without
-permutation ranking; exact references, readiness, configured hard restrictions,
-cooldown and explicit strict targets still apply. Automatic discovery requires
+permutation ranking; exact references, readiness, configured hard restrictions
+and explicit strict targets still apply. Cooldown remains visible variety
+guidance in agent mode. Automatic discovery requires
 `selection_mode="ranked"` (also the omitted-field legacy behavior).
 The request contains a week and optional exact dates and portions.
 Omit `candidates` for automatic discovery through the enabled local bank (including
@@ -1106,10 +1107,11 @@ conflicts require alternatives. Legacy ambiguous allergy/sensitivity statements
 and ordinary avoid preferences retain their meaning. See [recurring batches and dietary
 checkout](recurring-batch-dietary.md) for typed rules, exact retail evidence,
 manual review and notification-conditioned standing permission. Caller-supplied
-`facts.safety` remains unsupported. Cooldown is also hard. Its only bypass is an
-exact currently blocked `recipe_key` in this request's `cooldown_overrides`,
-with a non-empty bounded reason. Unneeded, historical or other-recipe overrides
-are rejected.
+`facts.safety` remains unsupported. Ranked planning retains hard cooldown; its
+explicit bypass is an exact currently blocked `recipe_key` in this request's
+`cooldown_overrides`, with a non-empty bounded reason. Unneeded or unrelated
+overrides are rejected. Agent-selected repeats and exact occurrence edits need
+no cooldown approval.
 
 Time targets and unsupported dietary preferences are soft by default. In agent
 mode numeric saved minima are advisory unless expressly listed in `strict_targets`;
@@ -1326,9 +1328,10 @@ Menus carry a server-owned `menu_id`, revision and content digest. Bank recipes
 are materialized from an exact recipe ID/revision and optional portion count.
 Updating or clearing a menu requires its current returned `menu_id` and
 `expected_revision`, so a stale request cannot replace newer work.
-The default six-week repeat cooldown includes planned, ordered and explicitly
-marked-cooked use. A deliberate repeat needs the exact returned recipe key and
-a reason. Cancellation does not pretend a meal was cooked, and `not cooked`
+The default six-week repeat history includes planned, ordered and explicitly
+marked-cooked use. Ranked planning requires an exact override reason for a
+blocked candidate; agent selections and exact menu edits may repeat it while
+still showing the variety history. Cancellation does not pretend a meal was cooked, and `not cooked`
 must be recorded explicitly against the matching menu. Confirmed orders and
 their recipe-email jobs keep immutable menu, recipient, subject and HTML
 snapshots even if the current menu or recipient later changes.
@@ -1556,7 +1559,7 @@ successors without deleting historical or unresolved state. The default remains
 one different dinner per day with no inferred leftovers or batch capability.
 
 
-## Explicit meal additions
+## Exact meal occurrence edits
 
 Recipe documents support multiple standard `categories`, independent of their
 original free-form tags. Recipe `libraries` lists the supported categories;
@@ -1566,49 +1569,52 @@ and bread. Canonical category filtering applies to the built-in bank; native
 provider filters retain their own meanings. An unclassified recipe remains
 usable and can be found by ordinary text search or discovery.
 
-The host interprets “add a dessert for two on Thursday” or “add a brunch dish for
-four on Sunday”, resolves the date in the requested week, and chooses a suitable
-recipe. It then sends a concrete addition through the ordinary menu tool:
+The host interprets “add a dessert for two on Thursday”, resolves the date in
+the requested week, and chooses a suitable recipe. It sends one or more exact
+changes through the ordinary menu tool:
 
 ```json
 {
   "operation": "menu",
-  "action": "add_slot",
+  "action": "edit_slots",
   "menu_ref": {"menu_id": "<returned ID>", "revision": 1, "digest": "<returned digest>"},
-  "slot_input": {
-    "date": "2026-09-10",
-    "meal_type": "dessert",
-    "portions": 2,
-    "reference": {"recipe_ref": {"id": "<returned recipe ID>", "revision": 1}}
-  },
+  "edits": [{"action": "add", "date": "2026-09-10", "meal_type": "dessert",
+             "portions": 2, "reference": {"recipe_ref": {"id": "<returned recipe ID>", "revision": 1}}}],
   "idempotency_key": "thursday-dessert-1"
 }
 ```
 
 Use a returned `discovery_ref` instead of `recipe_ref` for an unsaved imported
 recipe. Dates must be canonical, today or later, and in the active menu's week.
-Omit `menu_ref` only when no menu exists; the addition creates a menu for its ISO
-week. Each addition has its own 1–100 person portions. Every recipe category is
+Each addition has its own 1–100 person portions. Every recipe category is
 accepted as `meal_type`: breakfast, brunch, lunch, dinner, starter, side, dessert,
 snack, baking, bread, drink, sauce, dressing, condiment and preserve. For example,
 add a sauce and two different side dishes as three additional slots on the dinner
 date. Recipes retain their source yield; unknown source servings are not replaced
 by the requested person count, including recipes measured in jars, loaves or volume.
 
-Additions preserve current slots, snapshots, cooking history, locks and batch
-context through the existing menu successor path. A menu permits up to 31 slots,
-including multiple courses on the same date. There is one dinner per date;
-replace dinner through replanning. The existing one-fresh-entry-per-recipe rule
-still applies; linked leftovers use the explicit batch flow. Linked
-batch sources and targets are limited to dinner slots, whose failed dependencies
-can be repaired together through dinner replanning. Returned
+`replace` targets one `slot_id` and exact new reference; `remove` targets one
+`slot_id`; `move` targets one slot and a changed date, meal type or portions.
+Every edit creates an immutable successor with exact predecessor history. A
+repeated recipe key creates another independent preparation snapshot. Linked
+later servings instead use `source_slot_id` or `source_edit_index` pointing to
+an earlier fresh add in the same request, with exact date and portions. The
+service sums the preparation portions and shops once. Its allocation makes no
+storage-safety assertion; the agent must judge suitability and report unknowns.
+Changing a source with linked servings requires changing its full future
+component together. Past, cooked and locked slots remain immutable. A menu
+permits up to 31 slots, including multiple courses on one date. `add_slot`
+remains supported for simple additions and for the first slot of an empty menu.
+Returned
 `shopping_comparison` describes ingredient changes at the requested portions.
 Product selection, cart writes, checkout and recipe sending retain their existing
 separate operations. An uncertain call reuses the exact original key and content.
 
 Dinner `replan_prepare` interprets `remaining_dates` as dinner dates and carries
 desserts, brunches and other additional slots unchanged. Dinner coverage and
-weekly dietary targets do not count an additional dessert as a dinner. Recipe
+weekly dietary targets count each dinner date once; explicitly associated side
+slots on that date can contribute leafy greens, while lunch-only sides do not.
+Recipe
 delivery shows the date, meal type and portions for every saved slot.
 
 ## Explicit planning feedback
@@ -1677,7 +1683,8 @@ arrangements support multiple disjoint sources too. `menu.batch_prepare` takes
 (or an exact `use_by_date`; when both are supplied, both constrain the interval).
 `leftovers` lists one to six exact target `slot_id`/`portions` pairs. The source
 must be unrecorded and current/future; source consumption must match its existing
-meal portions. Targets must follow the source within the supplied interval.
+meal portions. Targets must follow the source within the supplied interval and
+have the same meal type, including a side with later side servings.
 Decimal strings/integers and `{numerator,denominator}` fractions use exact bounded
 arithmetic (up to 1,000 portions, denominator up to 1,000,000).
 

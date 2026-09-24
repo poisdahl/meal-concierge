@@ -32,8 +32,8 @@ but a menu-only change to a separate menu can proceed when the service proves
 the menus are independent. For a requested distinct whole menu, read the
 current menu with `get`, choose it with `plan`, and `save` the unchanged
 `save_ref` as `planner_ref` together with the exact current `menu_ref`. For a
-targeted change to an already independent menu, use `replan_prepare` and
-`replan_apply`, even if the older order has a prepared recovery review or an
+exact slot change to an already independent menu, use `edit_slots`, even if
+the older order has a prepared recovery review or an
 active provider handler. Neither menu action resolves, retries or changes the
 older payment; do not prepare or apply new cart goods until it resolves. If
 the service reports linked or unidentified protected work, reconcile that
@@ -42,15 +42,20 @@ planning, or replace a whole menu to bypass a cooked, locked or batch-dependent
 slot.
 
 Read the current `menu_ref={menu_id,revision,digest}` and stable slot IDs. Use
-`replan_prepare` with `remaining_dates`, current `planner_input`, and any actual
+`edit_slots` with a stable idempotency key to add, replace, remove or move exact
+future occurrences. Repeating a recipe creates another preparation; linked
+later servings use `source_slot_id` or an earlier add's `source_edit_index` and
+shop the combined prepared portions once. Record per-date portions explicitly.
+For a new selection of remaining dinners, use `replan_prepare` with
+`remaining_dates`, current `planner_input`, and any actual
 `locked_slot_ids`/`as_of_date`; then pass returned `apply_arguments` unchanged to
 `replan_apply`. Keep past, cooked, locked and batch-dependent slots. Do not replace
 a whole menu just to evade a blocked slot. A partial replan retains the original
 whole-menu dietary policy; a full replacement can introduce agent-mode policy.
 
-An expressly requested extra meal/course uses menu `add_slot` with
-`slot_input={date,meal_type,portions,reference}` (an exact recipe/discovery
-reference), menu reference and stable idempotency key, rather than displacing
+An expressly requested extra meal/course uses menu `edit_slots` with
+an `add` entry containing date, meal_type, portions and exact recipe/discovery
+reference, menu reference and stable idempotency key, rather than displacing
 an ordinary dinner. Regenerate product preparation for the resulting menu and
 use its apply path to reconcile existing menu goods while preserving extras.
 

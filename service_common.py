@@ -392,11 +392,12 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         parts.append("</ul>")
     from batch_planning import sources, fraction
     from recipes import scale_recipe
+    import menu_planning as mp
     cooking_batches = {}
     for batch in sources(menu):
         source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
-        cooking_batches.setdefault(source_slot.get('recipe_key'), []).append((batch, source_slot.get('date', '')))
-        recipe = next((r for r in menu.get('dishes', []) if r['recipe_key'] == source_slot.get('recipe_key')), {})
+        cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, source_slot.get('date', '')))
+        recipe = mp.recipe_for_slot(menu, source_slot, allow_stale=True) if source_slot else {}
         parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source_slot.get('date', ''))}</p>")
         guidance = batch.get('storage', {})
         method = {'refrigerated': 'Oppbevares i kjøleskap.', 'frozen': 'Oppbevares fryst.'}.get(guidance.get('method'))
@@ -426,7 +427,10 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         for recipe in recipes:
             if not isinstance(recipe, Mapping):
                 continue
-            batches = cooking_batches.get(recipe.get('recipe_key'), [])
+            batches = cooking_batches.get(recipe.get('preparation_slot_id'), [])
+            if not batches and recipe.get('preparation_slot_id') is None and menu.get('slots'):
+                batches = [item for slot_id, values in cooking_batches.items()
+                           if mp.recipe_for_slot(menu, mp.slot_by_id(menu, slot_id), allow_stale=True) is recipe for item in values]
             if not batches:
                 cooking_recipes.append((recipe, ''))
             for batch, cooking_date in batches:

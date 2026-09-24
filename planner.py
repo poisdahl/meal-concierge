@@ -461,6 +461,9 @@ def _hard_evaluation(
             "code": "cooldown_override", "status": "pass",
             "detail": {"recipe_key": key, "reason": overrides[key]},
         })
+    elif meal_role_advisory:
+        reasons.append({"code": "cooldown", "status": "advisory",
+                        "detail": deepcopy(usage.get("blocked_by", [])) if isinstance(usage, Mapping) else "unknown"})
     else:
         status = "fail"
         reasons.append({
@@ -624,8 +627,9 @@ def _leafy_dinner(candidate: Mapping[str, Any]) -> dict[str, Any]:
             return {**result, "counts": None, "quantity_evidence": "quantity_unavailable"}
         grams = float(mass)
         checked.append({"ingredient_index": index, "item": item.get("item"), "listed_grams_per_serving": grams})
-    return {**result, "counts": True,
-            "listed_grams_per_serving": sum(item["listed_grams_per_serving"] for item in checked),
+    grams = sum(item["listed_grams_per_serving"] for item in checked)
+    return {**result, "counts": grams >= MIN_LEAFY_GRAMS_PER_SERVING,
+            "listed_grams_per_serving": grams,
             "quantity_evidence": "calculated_from_listed_recipe"}
 
 
@@ -633,10 +637,20 @@ def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, A
     target = (profile.get("diet") or {}).get("leafy_green_days")
     if not target:
         return None
-    assessments = [
-        {**_leafy_dinner(candidate), **({"date": candidate["date"]} if candidate.get("date") else {})}
-        for candidate in selected
-    ]
+    assessments = []
+    for candidate in selected:
+        components = candidate.get("leafy_components") or [candidate]
+        rows = [_leafy_dinner(component) for component in components]
+        grams = sum(row.get("listed_grams_per_serving") or 0 for row in rows
+                    if row.get("assessment") == "substantial" or row.get("source") == "legacy_heuristic")
+        counts = (True if grams >= MIN_LEAFY_GRAMS_PER_SERVING else
+                  None if any(row["counts"] is None for row in rows) else False)
+        row = {**rows[0], "counts": counts, "listed_grams_per_serving": grams or rows[0].get("listed_grams_per_serving")}
+        if len(rows) > 1:
+            row["components"] = rows
+        if candidate.get("date"):
+            row["date"] = candidate["date"]
+        assessments.append(row)
     counted = sum(item["counts"] is True for item in assessments)
     unknown = sum(item["counts"] is None for item in assessments)
     minimum, maximum = target
@@ -765,21 +779,21 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         return with_policy({"status": "pass", "complete_menu": True, "results": []})
     if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]})
-    recipes = {
-        recipe.get("recipe_key"): recipe
-        for recipe in menu["dishes"]
-        if isinstance(recipe, Mapping) and isinstance(recipe.get("recipe_key"), str)
-    }
+    import menu_planning as mp
+    recipes = {recipe.get("recipe_key"): recipe for recipe in menu["dishes"]
+               if isinstance(recipe, Mapping) and isinstance(recipe.get("recipe_key"), str)}
     has_explicit_slots = isinstance(menu.get("slots"), list)
     dinner_slots = [
         slot for slot in menu.get("slots", [])
         if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
     ] if has_explicit_slots else []
-    selected_recipes = (
-        [recipes.get(slot.get("recipe_key")) for slot in dinner_slots]
-        if has_explicit_slots else list(recipes.values())
-    )
-    selected_slots = dinner_slots if has_explicit_slots else [None] * len(selected_recipes)
+    dinner_by_date = {slot.get("date") if isinstance(slot.get("date"), str) else f"__undated_{index}": slot
+                      for index, slot in enumerate(reversed(dinner_slots))}
+    selected_slots = [dinner_by_date[day] for day in sorted(dinner_by_date)] if has_explicit_slots else None
+    selected_recipes = ([mp.recipe_for_slot(menu, slot, allow_stale=True) if slot.get("slot_id")
+                         else recipes.get(slot.get("recipe_key")) for slot in selected_slots]
+                        if has_explicit_slots else list(recipes.values()))
+    selected_slots = selected_slots if has_explicit_slots else [None] * len(selected_recipes)
     expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
@@ -807,19 +821,32 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 and isinstance(facets.get("complete"), bool)
             ):
                 planned_facts[recipe_key] = deepcopy(dict(facets))
-    selected = tuple({"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
+    def candidate_for(slot, recipe):
+        return {"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
         "dietary_facets": deepcopy(planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)),
         "leafy_green": (
             deepcopy(slot["leafy_green"])
             if isinstance(slot, Mapping) and isinstance(slot.get("leafy_green"), Mapping)
-            and slot.get("snapshot_digest") == digest(recipe)
+            and slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)
             else {"source": "heuristic"}
             if isinstance(slot, Mapping) and "leafy_green" not in slot
-            and slot.get("snapshot_digest") == digest(recipe)
+            and slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)
+            and slot.get("meal_type") == "dinner"
             and (slot.get("date"), slot.get("recipe_key")) not in new_assessment_slots
             else {"source": "unavailable"} if has_explicit_slots else {"source": "heuristic"}
         ),
-    }} for slot, recipe in zip(selected_slots, selected_recipes, strict=True))
+    }}
+    selected = []
+    for slot, recipe in zip(selected_slots, selected_recipes, strict=True):
+        candidate = candidate_for(slot, recipe)
+        if isinstance(slot, Mapping):
+            sides = [side for side in menu["slots"] if isinstance(side, Mapping)
+                     and slot.get("date") is not None and side.get("date") == slot.get("date") and
+                     (side.get("meal_type") == "side" or side.get("meal_type") == "dinner" and side is not slot)]
+            candidate["leafy_components"] = [candidate] + [candidate_for(side, mp.recipe_for_slot(menu, side, allow_stale=True)
+                if side.get("slot_id") else recipes.get(side.get("recipe_key"))) for side in sides]
+        selected.append(candidate)
+    selected = tuple(selected)
     return with_policy({"complete_menu": True, **_strict_evaluation(selected, targets, profile)})
 
 

@@ -6,6 +6,7 @@ from fractions import Fraction
 
 from core import HouseholdError
 import menu_planning as mp
+from recipes import RECIPE_CATEGORIES
 from recipe_quantities import read_quantity, quantity_json
 
 CONFIRMATION_STATEMENT = "I confirm these exact batch portions, suitability and storage facts for this plan."
@@ -44,13 +45,13 @@ def normalize(state, menu, value, today):
     if value['source_slot_id'] in reserved or (isinstance(value['leftovers'], list) and any(x.get('slot_id') in reserved for x in value['leftovers'] if isinstance(x, dict))):
         raise HouseholdError('batch component intersects an existing source or leftover')
     source=mp.slot_by_id(menu,value['source_slot_id'])
-    if source['meal_type'] != 'dinner':
-        raise HouseholdError('linked batch sources must be dinner slots; add other meals as fresh dishes')
+    if source['meal_type'] not in RECIPE_CATEGORIES:
+        raise HouseholdError('batch source meal type is invalid')
     if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
         raise HouseholdError('batch source must be one exact fresh recipe snapshot')
     if source['date'] < today or mp.slot_outcome(state,menu,source) is not None:
         raise HouseholdError('batch source must be an unrecorded current/future meal')
-    recipe=next(r for r in menu['dishes']+menu['salads'] if r['recipe_key']==source['recipe_key'])
+    recipe=mp.recipe_for_slot(menu, source)
     prepared=fraction(value['prepared_portions']); consumed=fraction(value['consumed_at_source'])
     if consumed != fraction(str(recipe['portions'])) or prepared <= consumed:
         raise HouseholdError('source consumption must match its exact meal portions, with explicit extra preparation')
@@ -82,8 +83,8 @@ def normalize(state, menu, value, today):
         if not isinstance(item,dict) or set(item)!={'slot_id','portions'}:
             raise HouseholdError('each leftover needs an exact target slot_id and portions')
         target=mp.slot_by_id(menu,item['slot_id'])
-        if target['meal_type'] != 'dinner':
-            raise HouseholdError('linked leftover targets must be dinner slots so source failures can be replanned')
+        if target['meal_type'] != source['meal_type']:
+            raise HouseholdError('linked leftovers must match source meal type; dinner slots require dinner targets')
         if target['slot_id'] in seen or target['slot_id']==source['slot_id']:
             raise HouseholdError('leftover target is duplicated or equals its source')
         seen.add(target['slot_id'])
@@ -106,23 +107,25 @@ def normalize(state, menu, value, today):
     return spec
 
 
+def scale_preparation(recipe, batch):
+    factor = fraction(batch['prepared_portions']) / fraction(batch['consumed_at_source'])
+    for requirement in recipe['shopping_requirements']:
+        if requirement.get('scalable') is True:
+            try:
+                requirement['quantity'] = quantity_json(read_quantity(requirement['quantity'], legacy_float=True) * factor)
+            except (ValueError, ZeroDivisionError):
+                requirement['scalable'] = False
+    recipe['batch_prepared_portions'] = deepcopy(batch['prepared_portions'])
+
+
 def shopping(menu):
     result = deepcopy(menu)
     for batch in sources(menu):
         source = mp.slot_by_id(menu, batch['source_slot_id'])
         if source['slot_id'] in menu.get('historical_slot_ids', []):
             continue
-        factor = fraction(batch['prepared_portions']) / fraction(batch['consumed_at_source'])
-        for recipe in result['dishes'] + result['salads']:
-            if recipe['recipe_key'] != source['recipe_key']:
-                continue
-            for requirement in recipe['shopping_requirements']:
-                if requirement.get('scalable') is True:
-                    try:
-                        requirement['quantity'] = quantity_json(read_quantity(requirement['quantity'], legacy_float=True) * factor)
-                    except (ValueError, ZeroDivisionError):
-                        requirement['scalable'] = False
-            recipe['batch_prepared_portions'] = deepcopy(batch['prepared_portions'])
+        recipe = mp.recipe_for_slot(result, source)
+        scale_preparation(recipe, batch)
     return result
 
 
@@ -185,10 +188,9 @@ def evaluate_plan(state, original, successor):
     if not handoff:
         return {'status':'unknown','reason':'an exact structured planner selection is required'}
     facts={mp.canonical({k:v for k,v in c.items() if k!='facts'}):c.get('facts',{}) for c in handoff['request']['candidates']}
-    recipes={r['recipe_key']:r for r in successor['dishes'] + successor['salads']}
     candidates=[]; hard=[]
     for slot in successor['slots']:
-        recipe=recipes[slot['recipe_key']]
+        recipe=mp.recipe_for_slot(successor, slot)
         candidate={'recipe':recipe,'recipe_key':slot['recipe_key'],'usage':{'eligible':True},'materialization_error':None,
                    'facts':_effective_facts(recipe,facts.get(mp.canonical(slot['reference']),{}))}
         check=_hard_evaluation(candidate,state['profile'],{},meal_type=slot['meal_type'])

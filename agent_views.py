@@ -431,16 +431,13 @@ def _bounded_menu_plan_result(result: dict[str, Any]) -> dict[str, Any]:
 def _menu_successor_summary(successor: Any) -> dict[str, Any]:
     if not isinstance(successor, dict):
         return {"week": None, "slots": []}
-    dishes = {
-        dish.get("recipe_key"): dish for dish in successor.get("dishes", [])
-        if isinstance(dish, dict) and isinstance(dish.get("recipe_key"), str)
-    }
+    import menu_planning as mp
     slots = [{
         **{key: slot[key] for key in (
             "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
         ) if key in slot},
-        **({"name": dishes[slot.get("recipe_key")].get("name")}
-           if isinstance(dishes.get(slot.get("recipe_key")), dict) else {}),
+        **({"name": mp.recipe_for_slot(successor, slot, allow_stale=True).get("name")}
+           if successor.get("dishes") else {}),
     } for slot in successor.get("slots", []) if isinstance(slot, dict)]
     return {"week": successor.get("week"), "slots": slots}
 
@@ -660,6 +657,8 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     view = {"projection": "agent", "operation": "menu", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "idempotent", "locked", "slot_id",
                                  "slot_replan_available", "menu_ref", "added_slot")))
+    if isinstance(result.get("added_slots"), list):
+        view["added_slots"] = _page(result["added_slots"], offset, limit, "items")
     menu = result.get("menu")
     if isinstance(menu, dict):
         view["menu_ref"] = _fields(menu, ("menu_id", "revision", "digest"))
@@ -933,7 +932,7 @@ def _project_agent_result_once(operation: str, action: str | None, result: dict[
         return {"projection": "agent", **_bounded_menu_replan_result(result)}
     if operation == "status":
         return _status_view(result, offset, limit, section)
-    if operation == "menu" and action in {None, "get", "assess", "save", "replan_apply", "add_slot", "lock", "batch_apply"}:
+    if operation == "menu" and action in {None, "get", "assess", "save", "replan_apply", "add_slot", "edit_slots", "lock", "batch_apply"}:
         return _menu_view(action or "get", result, offset, limit, section)
     if operation == "cart":
         return _cart_view(action or "get", result, offset, limit, section)

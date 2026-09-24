@@ -269,14 +269,16 @@ class RecipeOperations:
         if not isinstance(menu, Mapping):
             return
         slots = menu.get("slots")
-        new_keys = None
         if isinstance(slots, list):
+            import menu_planning as mp
             historical = set(menu.get("historical_slot_ids", []))
-            new_keys = {slot["recipe_key"] for slot in slots if slot["slot_id"] not in historical}
+            for slot in mp.preparation_slots(menu):
+                if slot["slot_id"] not in historical:
+                    self._require_recipe_provider(mp.recipe_for_slot(menu, slot, allow_stale=True))
+            return
         for collection in ("dishes", "salads"):
             for recipe in menu.get(collection, []):
-                if new_keys is None or recipe.get("recipe_key") in new_keys:
-                    self._require_recipe_provider(recipe)
+                self._require_recipe_provider(recipe)
 
     def _recipe_detail(self, request: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         """Enrich one service-owned search snapshot; no personal save."""
