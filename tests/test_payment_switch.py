@@ -29,6 +29,7 @@ class PaymentSwitchTests(unittest.TestCase):
         self.lose_target_read = False
         self.paid_during_cancel = False
         self.target = None
+        self.target_change_id = 'change-1'
         self.target_invalid = False
         self.target_unknown = False
         self.card_pending = False
@@ -67,7 +68,7 @@ class PaymentSwitchTests(unittest.TestCase):
                 raise HouseholdError('lost payment target read')
             if self.target_unknown:
                 return {'status': 'unknown'}
-            self.target = {'order_id': order_id, 'order_change_id': '7654321',
+            self.target = {'order_id': order_id, 'order_change_id': self.target_change_id,
                            'payment_id': closure['payment_id'], 'goods_digest': 'c' * 64}
             if retained_target is not None:
                 self.assertEqual(retained_target, self.target)
@@ -84,7 +85,7 @@ class PaymentSwitchTests(unittest.TestCase):
 
         def review(cart, order_id, *, payment, expected_binding, addition, **kwargs):
             self.assertEqual(addition['payment_switch_target'], self.target)
-            self.assertEqual(addition['order_change_id'], '7654321')
+            self.assertEqual(addition['order_change_id'], self.target_change_id)
             self.assertEqual(payment['method'], 'saved_card')
             amounts = {key: None for key in AMOUNTS}
             amounts.update(product_subtotal=16.70, provider_total=16.70)
@@ -135,6 +136,7 @@ class PaymentSwitchTests(unittest.TestCase):
 
     def test_lower_native_charge_survives_switch_review_and_restart(self):
         from core import StateStore
+        self.target_change_id = '7654321'
         context = {'provider_charge_minor': 1200, 'payment_id': '123456',
                    'order_change_id': '7654321'}
         with self.app.store.locked() as state:
@@ -157,6 +159,7 @@ class PaymentSwitchTests(unittest.TestCase):
         self.assertEqual((self.cancel_clicks, self.card_clicks), (1, 1))
 
     def test_changed_native_payment_target_blocks_switch_after_closure(self):
+        self.target_change_id = '7654321'
         with self.app.store.locked() as state:
             state['pending_checkout']['vipps_request_context'].update(
                 provider_charge_minor=1200, payment_id='123456', order_change_id='9999999')
@@ -166,6 +169,7 @@ class PaymentSwitchTests(unittest.TestCase):
 
     def test_child_context_requires_its_frozen_charge_and_change(self):
         from order_operations import OrderOperations
+        self.target_change_id = '7654321'
         with self.app.store.locked() as state:
             state['pending_checkout']['vipps_request_context'].update(
                 provider_charge_minor=1200, payment_id='123456', order_change_id='7654321')
@@ -187,6 +191,7 @@ class PaymentSwitchTests(unittest.TestCase):
                 {**context, **change}, pending, 'order-1', child=True))
 
     def test_legacy_addition_adoption_persists_only_exact_native_context(self):
+        self.target_change_id = '7654321'
         with self.app.store.locked() as state:
             state['pending_checkout'].pop('vipps_request_context', None)
         context = {'tab_id': 'owned', 'order_id': 'order-1', 'expected_total': 1670,
@@ -216,7 +221,7 @@ class PaymentSwitchTests(unittest.TestCase):
             pending.pop('vipps_request_status', None)
             pending['authentication_context'] = {'tab_id': 'card-tab', 'payment_id': '123456'}
             pending['payment_failure'] = {'payment_failed': True, 'order_id': 'order-1',
-                                          'order_change_id': '7654321'}
+                                          'order_change_id': 'change-1'}
         original_review = self.browser.review_payment_recovery
         def review(*args, **kwargs):
             result = original_review(*args, **{**kwargs, 'payment': {'method': 'saved_card'}})

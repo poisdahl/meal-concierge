@@ -3384,13 +3384,14 @@ class RetryAmountTests(unittest.TestCase):
                 text=True, capture_output=True, check=True, timeout=10)
             return json.loads(result.stdout)
         read = _oda_checkout_amount_script(1640, expected_product_count=1,
-                                            retry=True, addition_retry=True, addition_goods_minor=1290)
+                                            retry=True, addition_retry=True, addition_goods_minor=1290,
+                                            native_charge_retry=True)
         observed = evaluate(read)['result']
         self.assertTrue(observed['amounts_valid'])
         self.assertEqual(observed['amounts']['provider_total'], 2041)
         self.assertEqual(observed['amounts']['bags'], 750)
         click = _oda_checkout_amount_script(1640, expected_product_count=1, retry=True,
-            addition_retry=True, addition_goods_minor=1290, vipps=True,
+            addition_retry=True, addition_goods_minor=1290, native_charge_retry=True, vipps=True,
             expected_amounts=observed['amounts'], expected_url=url,
             expected_itemized_discounts=observed['itemized_discount_rows'])
         self.assertEqual(evaluate(click)['clicks'], ['PAY'])

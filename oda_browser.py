@@ -262,6 +262,7 @@ def _oda_checkout_amount_script(
     retry: bool = False,
     addition_retry: bool = False,
     addition_goods_minor: int | None = None,
+    native_charge_retry: bool = False,
 ) -> str:
     """Build the shared read/final-click parser from observed retailer rows."""
 
@@ -282,7 +283,10 @@ def _oda_checkout_amount_script(
     if isinstance(expected_product_count, bool) or not isinstance(expected_product_count, int) or not 0 < expected_product_count <= 1_000_000:
         raise HouseholdError("Oda checkout product count is invalid")
     goods_minor = addition_goods_minor if addition_goods_minor is not None else expected_total
-    if addition_retry and (type(goods_minor) is not int or goods_minor <= 0):
+    if (addition_retry and (type(goods_minor) is not int or goods_minor <= 0)
+            or native_charge_retry and (not addition_retry or provider != "oda"
+                                        or type(addition_goods_minor) is not int
+                                        or addition_goods_minor <= 0)):
         raise HouseholdError("Oda addition goods subtotal is invalid")
     script = r"""
 (() => {
@@ -421,7 +425,7 @@ def _oda_checkout_amount_script(
         .replace("FINAL_CONTROL", "Bekräfta och betala" if provider == "mathem" else "Betal med" if vipps else "Bekreft og betal|Confirm and pay")
         .replace("CLICK_MODE", "true" if click_mode else "false")
         .replace("VERIFY_READ_PAYMENT", "true" if provider == "mathem" and not retry else "false")
-        .replace("ODA_ADDITION_RETRY", "true" if addition_retry and provider == "oda" else "false")
+        .replace("ODA_ADDITION_RETRY", "true" if addition_retry and provider == "oda" and native_charge_retry else "false")
         .replace("ADDITION_RETRY", "true" if addition_retry else "false")
         .replace("RETRY", "true" if retry else "false")
         .replace("MATHEM_BREAKDOWN", "true" if provider == "mathem" else "false")
@@ -1312,7 +1316,9 @@ class OdaBrowser:
             bound_cart = self._order_cart(cart, order_id, addition["before"]["order"], binding) if addition else cart
             expected = self._cart_expectation(bound_cart)
             payment_total = addition.get("provider_charge_minor", expected["total_minor"]) if addition else expected["total_minor"]
-            if (addition and self.checkout_provider == "oda"
+            native_charge_retry = bool(addition and self.checkout_provider == "oda"
+                                       and addition.get("provider_charge_minor") is not None)
+            if (native_charge_retry
                     and (type(payment_total) is not int or not 0 < payment_total <= expected["total_minor"]
                          or type(addition.get("added_goods_minor")) is not int
                          or addition["added_goods_minor"] <= 0)):
@@ -1385,7 +1391,8 @@ class OdaBrowser:
             amounts = self._eval(_oda_checkout_amount_script(payment_total,
                 expected_product_count=expected["product_count"], provider=self.checkout_provider, retry=True,
                 addition_retry=bool(addition),
-                addition_goods_minor=addition.get("added_goods_minor") if addition and self.checkout_provider == "oda" else None))
+                addition_goods_minor=addition.get("added_goods_minor") if native_charge_retry else None,
+                native_charge_retry=native_charge_retry))
             if amounts.get("amounts_valid") is not True:
                 failures = amounts.get("amount_check_failures") or ["unverified_summary"]
                 raise HouseholdError("The merchant recovery amounts cannot be verified (" + ", ".join(failures) + "); review the same order without sending payment")
@@ -1423,6 +1430,8 @@ class OdaBrowser:
                 bound_cart = self._order_cart(cart, review["order_id"], addition["before"]["order"], review["binding"]) if addition else cart
                 expected = self._cart_expectation(bound_cart)
                 payment_total = addition.get("provider_charge_minor", expected["total_minor"]) if addition else expected["total_minor"]
+                native_charge_retry = bool(addition and self.checkout_provider == "oda"
+                                           and addition.get("provider_charge_minor") is not None)
                 if addition and self.checkout_provider == "oda" and review.get("provider_charge_minor") != payment_total:
                     raise HouseholdError("The frozen addition retry charge changed")
                 self._require_checkout_time(required_time)
@@ -1443,7 +1452,8 @@ class OdaBrowser:
                     expected_itemized_discounts=review.get("itemized_discount_rows"),
                     vipps=review["payment_choice"].get("method") == "vipps", retry=True,
                     addition_retry=bool(addition),
-                    addition_goods_minor=addition.get("added_goods_minor") if addition and self.checkout_provider == "oda" else None).strip()
+                    addition_goods_minor=addition.get("added_goods_minor") if native_charge_retry else None,
+                    native_charge_retry=native_charge_retry).strip()
                 script = ("(() => {const actual=JSON.parse(" + surface
                           + "),expected=" + json.dumps(review["surface"], ensure_ascii=False)
                           + ";const canonical=v=>v&&typeof v==='object'?(Array.isArray(v)?v.map(canonical):Object.fromEntries(Object.keys(v).sort().map(k=>[k,canonical(v[k])]))):v;"
