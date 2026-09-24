@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 import calendar
 import hashlib
@@ -534,7 +535,7 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
  // establish a bank refund; it is preserved exactly through the final click.
  const wanted=expected.delivery_change
   ? {original_minor:expected.original_minor,original_count:expected.original_count,combined_count:expected.original_count,...(expected.order_amounts||{})}
-  : {original_minor:expected.original_minor,original_count:expected.original_count,added_minor:expected.total_minor,added_count:expected.product_count,payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
+  : {original_minor:expected.original_minor,original_count:expected.original_count,added_minor:ADDED_MINOR,added_count:expected.product_count,payable_minor:expected.total_minor,combined_minor:expected.original_minor+expected.total_minor,combined_count:expected.original_count+expected.product_count};
  if(SUBMIT&&expected.delivery_change&&!expected.order_amounts)return failed();
  if(Object.keys(wanted).some(key=>values[key]!==wanted[key]))return failed();
  const controls=[...document.querySelectorAll('button')].filter(visible).filter(e=>!e.disabled&&e.getAttribute('aria-disabled')!=='true').filter(e=>/^Bekräfta och betala\s/.test(norm(e.innerText||e.getAttribute('aria-label')||'')));
@@ -550,7 +551,8 @@ def _retail_addition_amount_script(expected: Mapping[str, Any], *, submit: bool 
         "Att betala nu", "Å betale" if provider == "oda" else "Att betala nu",
     ).replace("Totalsumma för beställning", "Ny totalsum" if provider == "oda" else "Totalsumma för beställning").replace(
         "Bekräfta och betala", "Betal med" if vipps else "Bekreft og betal" if provider == "oda" else "Bekräfta och betala",
-    ).replace("SEK", "NOK" if provider == "oda" else "SEK").replace(
+    ).replace("ADDED_MINOR", "expected.added_minor" if provider == "oda" else "expected.total_minor").replace(
+        "SEK", "NOK" if provider == "oda" else "SEK").replace(
         "(vara|varor)", "(vare|varer)" if provider == "oda" else "(vara|varor)",
     ).replace("==='vara'", "==='vare'" if provider == "oda" else "==='vara'").replace("EXPECTED", json.dumps(dict(expected), ensure_ascii=False))
 
@@ -1605,6 +1607,34 @@ class OdaBrowser:
         expected = self._cart_expectation(bound)
         expected.update(order_id=order_id, checkout_url=self.checkout_url + "?orderNumber=" + quote(order_id, safe=""),
                         original_minor=original["total_minor"], original_count=original_count)
+        if self.checkout_provider == "oda":
+            def exact_minor(value):
+                if (isinstance(value, bool) or not isinstance(value, (str, int, float))
+                        or isinstance(value, str) and re.fullmatch(r"\d+(?:\.\d{1,2})?", value) is None):
+                    raise HouseholdError("Oda addition cart amount is unavailable")
+                try:
+                    cents = Decimal(str(value)) * 100
+                except InvalidOperation as exc:
+                    raise HouseholdError("Oda addition cart amount is unavailable") from exc
+                if (not cents.is_finite() or cents < 0 or cents != cents.to_integral_value()
+                        or cents > 2**53 - 1):
+                    raise HouseholdError("Oda addition cart amount is unavailable")
+                return int(cents)
+
+            if exact_minor(order.get("grossAmount", order.get("subtotal", order.get("total")))) != original["total_minor"]:
+                raise HouseholdError("Oda original order total changed")
+            if exact_minor(cart.get("totalGrossAmount")) != expected["total_minor"]:
+                raise HouseholdError("Oda addition cart total changed")
+            groups = cart.get("groups")
+            rows = ([item for group in groups if isinstance(group, Mapping)
+                     and isinstance(group.get("items"), list) for item in group["items"]]
+                    if isinstance(groups, list) else cart.get("items", []))
+            added_minor = 0
+            for row in rows:
+                added_minor += exact_minor(row.get("totalGrossAmount"))
+                if added_minor > 2**53 - 1:
+                    raise HouseholdError("Oda addition cart amount is unavailable")
+            expected["added_minor"] = added_minor
         if order.get("currency") != ("SEK" if self.checkout_provider == "mathem" else "NOK") or delivery_signature(expected["delivery_text"], provider=self.checkout_provider) is None:
             raise HouseholdError("Retail original order currency or delivery is unavailable")
         return expected
@@ -1739,7 +1769,8 @@ class OdaBrowser:
                 raise OdaCheckoutMismatchError("Oda original, added and combined order amounts do not match")
             result["order_amounts"] = amounts["order_amounts"]
             result["amounts"] = {key: None for key in ODA_CHECKOUT_AMOUNT_KEYS}
-            result["amounts"].update(product_subtotal=expected["total_minor"] / 100, provider_total=expected["total_minor"] / 100)
+            result["amounts"].update(product_subtotal=amounts["order_amounts"]["added_minor"] / 100,
+                                     provider_total=expected["total_minor"] / 100)
         else:
             result["amounts"] = self._read_checkout_amounts(
                 expected["total_minor"], expected["product_count"],

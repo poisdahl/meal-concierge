@@ -2908,7 +2908,9 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
         oda = OdaBrowser.__new__(OdaBrowser); oda._checkout_deadline = None
         oda._invoke = mock.Mock(return_value={})
         order['currency'] = 'NOK'
-        expected = oda._addition_expectation(cart, '123456', order, binding)
+        oda_cart = deepcopy(cart)
+        oda_cart['items'][0]['totalGrossAmount'] = 18.5
+        expected = oda._addition_expectation(oda_cart, '123456', order, binding)
         read = evaluate(_retail_addition_amount_script(expected, provider='oda'), provider='oda')
         self.assertTrue(read['result']['amounts_valid'])
         surface = evaluate(_oda_checkout_surface_script(expected), provider='oda')['result']
@@ -2927,9 +2929,9 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     value = evaluate(script, change, provider='oda'); observed.append(value); return value['result']
                 oda._eval = final_eval
                 if change is None:
-                    oda.submit_order_change(cart, '123456', order, review)
+                    oda.submit_order_change(oda_cart, '123456', order, review)
                 else:
-                    with self.assertRaises(CheckoutPreconditionError): oda.submit_order_change(cart, '123456', order, review)
+                    with self.assertRaises(CheckoutPreconditionError): oda.submit_order_change(oda_cart, '123456', order, review)
                 self.assertEqual(observed[-1]['clicks'], 0 if change else 1)
 
     @unittest.skipUnless(shutil.which('node'), 'Node executes the actual final browser script')

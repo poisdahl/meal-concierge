@@ -3292,7 +3292,8 @@ class OdaAdditionBrowserTests(unittest.TestCase):
         order = {"orderNumber": "order-1", "grossAmount": 100, "currency": "NOK",
                  "products": [{"product_id": "1", "quantity": 1}],
                  "deliverySlotDisplay": "12. september 09:00–12:00"}
-        cart = {"items": [{"product_id": "2", "name": "Pasta", "description": "500 g", "brand": "Sopps", "quantity": 1}],
+        cart = {"items": [{"product_id": "2", "name": "Pasta", "description": "500 g", "brand": "Sopps",
+                           "quantity": 1, "totalGrossAmount": "45.50"}],
                 "count": 1, "totalGrossAmount": 45.50}
         for method in ("vipps", "saved_card"):
             payment = {"method": method}
