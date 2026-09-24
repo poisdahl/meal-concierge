@@ -144,8 +144,10 @@ old orders and previous carts are not proof that something is at home. Aggregate
 stock once before package rounding. See [meal adjustments](references/meal-adjustments.md)
 for bounded inputs and batch layouts.
 
-Every prepare returns a `product_plan_ref`, including unsaved previews. Continue
-with that ref and only the remaining choices. Read `products get` pages with
+Every prepare returns a `product_plan_ref`, including unsaved previews. The whole
+menu is retained while provider reads run in bounded slices. Follow returned
+`continue_arguments` to finish pending reads, and send at most 64 changed choices
+per prepare with the latest ref. Do not omit dinners to fit a call. Read `products get` pages with
 `offset`, `limit`, and `section="requirements"` or `"issues"`; use `requirement_id`
 for one exact need. Follow `next_offset` until all relevant requirements and
 issues are reviewed. After a lost reply or context compaction, get with the exact
@@ -162,7 +164,10 @@ shell commands to recover hidden output.
 Apply the returned `apply_arguments` unchanged, adding `cart_change_requested=true`
 only for an authorized cart update. The short arguments refer to the saved
 review; do not copy product observations, candidate lists or menu context into
-apply. Full apply is the normal path. A partial
+apply. Full apply is the normal path. If it returns `status="validating"`, follow
+its `continue_arguments`: selected-product reads are still pending and no cart
+write has occurred. A long pause can restart those reads without losing choices.
+Do not substitute partial cart writes for this continuation. A partial
 apply leaves checkout incomplete; finish the same menu. If apply reports drift,
 read/reconcile it and prepare again. Never bypass an incomplete menu apply with
 raw additions or by dropping menu requirements.

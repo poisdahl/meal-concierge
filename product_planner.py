@@ -16,7 +16,7 @@ from core import HouseholdError
 
 
 PRODUCT_PLAN_VERSION = "product-plan-v4"
-MAX_REQUIREMENTS = 64
+MAX_REQUIREMENTS = 64  # Per request/observation slice, not the size of a saved menu.
 MAX_ALTERNATIVE_REQUIREMENTS = 3 * MAX_REQUIREMENTS
 MAX_CANDIDATES_PER_REQUIREMENT = 5
 MAX_PACKAGES_PER_REQUIREMENT = 100
@@ -238,7 +238,7 @@ def _read_fraction(value: Any, *, positive: bool = False) -> Fraction:
     return Fraction(numerator, denominator)
 
 
-def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingredient_decisions: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decisions: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Aggregate only exact compatible recipe requirements."""
 
     if not isinstance(menu, Mapping):
@@ -410,7 +410,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = MAX_REQUIREMENTS, ingr
 def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict[str, Any]]:
     if value is None:
         return {}
-    if not isinstance(value, list) or len(value) > MAX_ALTERNATIVE_REQUIREMENTS:
+    if not isinstance(value, list) or len(value) > len(requirement_ids):
         raise HouseholdError("candidate_approvals must be a bounded list")
     approvals = {}
     for raw in value:
@@ -485,7 +485,7 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
                 or not {"requirement_ids", "package_count", "quantity_basis"}.issubset(shared)
                 or shared.get("authorized_by") not in (None, "agent", "current_user")
                 or not isinstance(shared.get("requirement_ids"), list)
-                or not 2 <= len(shared["requirement_ids"]) <= MAX_REQUIREMENTS
+                or not 2 <= len(shared["requirement_ids"]) <= len(requirement_ids)
                 or any(member not in requirement_ids for member in shared["requirement_ids"])
                 or len(set(shared["requirement_ids"])) != len(shared["requirement_ids"])
                 or requirement_id not in shared["requirement_ids"]
@@ -969,6 +969,7 @@ def build_product_plan(
     budget_ore: int | None = None,
     price_mode: str = "exact",
     deadline: float | None = None,
+    selected_refs: Mapping[str, list[Any]] | None = None,
 ) -> dict[str, Any]:
     if price_mode not in {"exact", "estimate"}:
         raise HouseholdError("price_mode must be exact or estimate")
@@ -997,6 +998,8 @@ def build_product_plan(
         requirement_id = requirement["requirement_id"]
         observation = observations.get(requirement_id)
         item = deepcopy(requirement)
+        if requirement_id in approvals:
+            item["candidate_approval"] = deepcopy(approvals[requirement_id])
         if not isinstance(observation, Mapping) or observation.get("unavailable_reason"):
             reason = observation["unavailable_reason"] if isinstance(observation, Mapping) else "provider_search_unavailable"
             unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": reason})
@@ -1028,7 +1031,8 @@ def build_product_plan(
         item['dietary_assessments'] = [f for values in product_findings.values() for f in values]
         filtered = deepcopy(approval)
         nonfood = {p['product_ref'] for p in safe_observation['products'] if nonfood_candidate(p)}
-        filtered['candidate_refs'] = [ref for ref in approval['candidate_refs'] if ref not in nonfood and not any(f['blocked'] for f in product_findings.get(ref, []))]
+        choice_refs = selected_refs.get(requirement_id, approval['candidate_refs']) if selected_refs is not None else approval['candidate_refs']
+        filtered['candidate_refs'] = [ref for ref in choice_refs if ref not in nonfood and not any(f['blocked'] for f in product_findings.get(ref, []))]
         evaluated_observation = deepcopy(safe_observation)
         for product in evaluated_observation['products']:
             product['dietary_findings'] = product_findings[product['product_ref']]
@@ -1285,7 +1289,7 @@ def build_product_plan(
         "scope": {
             "search_semantics": "bounded_relevance_ranked",
             "candidate_semantics": "exact_selected_refs_per_requirement",
-            "maximum_requirements": MAX_REQUIREMENTS,
+            "maximum_requirements_per_read_slice": MAX_REQUIREMENTS,
             "maximum_candidates_per_requirement": MAX_CANDIDATES_PER_REQUIREMENT,
             "maximum_combinations_per_requirement": MAX_COMBINATIONS,
         },

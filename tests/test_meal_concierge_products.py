@@ -2054,10 +2054,11 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertEqual(drifted["status"], "needs_input")
         self.assertNotIn("manipulate_cart", [name for name, _arguments in self.provider.calls])
 
-    def test_stable_apply_reuses_idempotent_cart_sync_and_reports_later_price_drift(self):
+    def test_stable_apply_uses_one_product_refresh_then_verified_cart_price(self):
         plan = self.prepare(approve=True)
-        self.provider.search_prices = [1000, 1000, 1000, 900]
+        self.provider.search_prices = [1000, 1000, 900]
         self.provider.search_count = 1
+        self.provider.cart_line_price = 9.0
         result = self.app.handle({
             "operation": "products", "action": "apply", "product_plan": plan,
             "product_plan_digest": plan["product_plan_digest"],
@@ -2084,9 +2085,9 @@ class ProductRuntimeTests(unittest.TestCase):
         self.assertFalse(result["price_locked"])
         self.assertEqual(self.provider.cart["items"][0]["price"], 9.0)
 
-    def test_price_drift_at_final_product_prewrite_causes_zero_cart_write(self):
+    def test_price_drift_at_selected_product_refresh_causes_zero_cart_write(self):
         plan = self.prepare(approve=True)
-        self.provider.search_prices = [1000, 1000, 900]
+        self.provider.search_prices = [1000, 900]
         self.provider.search_count = 1
         result = self.app.handle({
             "operation": "products", "action": "apply", "product_plan": plan,
@@ -2095,8 +2096,7 @@ class ProductRuntimeTests(unittest.TestCase):
         })
         self.assertFalse(result["applied"])
         self.assertEqual(result["status"], "needs_input")
-        self.assertTrue(result["product_plan_stale"])
-        self.assertEqual(result["reason"], "product facts changed immediately before cart sync")
+        self.assertIn("price facts changed", result["reason"])
         self.assertNotIn("manipulate_cart", [name for name, _arguments in self.provider.calls])
 
     def test_repeated_stable_apply_is_idempotent_and_preserves_manual_goods(self):

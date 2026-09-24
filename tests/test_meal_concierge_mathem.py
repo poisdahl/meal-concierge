@@ -1604,7 +1604,7 @@ class CompactProductApplyTests(unittest.TestCase):
             'budget_ore': plan['budget_ore'], 'price_mode': plan['price_mode'],
             'product_plan_digest': plan['product_plan_digest'], 'cart_change_requested': True}
 
-    def test_compact_inputs_and_fresh_or_final_price_drift_cannot_write(self):
+    def test_compact_inputs_fresh_price_guard_and_cart_price_authority(self):
         before = len(self.shop.calls)
         self.assertFalse(self.app.handle({**self.arguments, 'cart_change_requested': False})['applied'])
         for value in (None, 'bad'):
@@ -1616,10 +1616,23 @@ class CompactProductApplyTests(unittest.TestCase):
         for change in ({'candidate_approvals': []}, {'budget_ore': 1}, {'price_mode': 'estimate'}):
             with self.subTest(change=change):
                 self.assertFalse(self.app.handle({**self.arguments, **change})['applied'])
-        for prices in ([1000, 900], [1000, 1000, 900]):
-            self.shop.search_prices, self.shop.search_count = prices, 1
-            self.assertFalse(self.app.handle(self.arguments)['applied'])
+        self.shop.search_prices, self.shop.search_count = [1000, 900], 1
+        self.assertFalse(self.app.handle(self.arguments)['applied'])
         self.assertNotIn('manipulate_cart', [name for name, _ in self.shop.calls])
+
+        # One fresh product validation precedes the guarded cart write. The
+        # verified cart line, rather than a second search, supplies its actual price.
+        self.shop.search_prices, self.shop.search_count = [1000, 1000, 900], 1
+        self.shop.cart_line_price = 9.0
+        result = self.app.handle(self.arguments)
+        self.assertTrue(result['applied'])
+        self.assertEqual(self.shop.search_count, 2)
+        self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
+        self.assertEqual(self.shop.cart['items'][0]['quantity'], 1)
+        self.assertEqual(self.shop.cart['items'][0]['price'], 9.0)
+        self.assertEqual(result['price_verification'], 'changed_after_cart_write')
+        self.assertFalse(result['price_locked'])
+        self.assertEqual(result['final_price_authority'], 'provider checkout summary')
 
     def test_compact_apply_restart_and_lost_cart_response_preserve_single_write(self):
         original = self.shop.call

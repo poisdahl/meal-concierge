@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from core import HouseholdError, cart_summary, validate_delivery_slot
-from product_observations import _mathem_ore, normalize_retail_product_search
+from product_observations import _mathem_ore, normalize_retail_product_search, normalize_retail_product_search_batch
 
 
 ODA_ENDPOINT = "https://oda.com/mcp"
@@ -263,6 +263,18 @@ class RetailMcpClient:
     def probe(self) -> dict[str, Any]:
         return self._run(None, {}, 90.0)
 
+    def product_search_batch(self, queries: list[str], *, size: int, deadline=None):
+        if (not isinstance(queries, list) or not 1 <= len(queries) <= 8
+                or any(not isinstance(query, str) or not query.strip() or len(query) > 200 for query in queries)
+                or len(set(queries)) != len(queries)):
+            raise HouseholdError("Product search batch requires one to eight distinct queries")
+        # Native multi-query shape is verified for Oda. Other retailers keep
+        # their supported single-query path, including Mathem translations.
+        if self.provider != "oda" or len(queries) == 1:
+            return {query: self.call("product_search", {"queries": [query], "page": 1, "size": size},
+                                     deadline=deadline) for query in queries}
+        return self.call("product_search", {"queries": queries, "page": 1, "size": size}, deadline=deadline)
+
     def call(self, tool: str, arguments: Mapping[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
         if not isinstance(tool, str) or not tool:
             raise HouseholdError(f"{self.label} tool is missing")
@@ -367,6 +379,9 @@ class RetailMcpClient:
         if tool == "get_delivery_slots":
             return normalize_retail_delivery_slots(value, provider=self.provider)
         if tool == "product_search":
+            queries = arguments.get("queries")
+            if isinstance(queries, list) and len(queries) > 1:
+                return normalize_retail_product_search_batch(value, queries, size=arguments.get("size"), provider=self.provider)
             normalized = normalize_retail_product_search(value, provider=self.provider)
             requested_size = arguments.get("size")
             if isinstance(requested_size, int) and not isinstance(requested_size, bool):

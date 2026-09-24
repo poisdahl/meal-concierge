@@ -161,12 +161,12 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertEqual(result["price_verification"], "unchanged")
         self.assertEqual(len(self.provider.quantities), 37)
         self.assertEqual(sum(self.provider.quantities.values()), sum(counts.values()))
-        self.assertEqual(sum(tool == "product_search" for tool, _, _ in self.provider.calls), 3 * 37)
+        self.assertEqual(sum(tool == "product_search" for tool, _, _ in self.provider.calls), 37)
         writes = [args for tool, args, _ in self.provider.calls if tool == "manipulate_cart"]
         self.assertEqual(len(writes), 1)
         self.assertEqual(len(writes[0]["operations"]), 37)
         self.assertEqual(self.store.read()["cart_plan"]["product_plan_digest"], plan["product_plan_digest"])
-        self.assertEqual(len({kw["deadline"] for _, _, kw in self.provider.calls}), 1)
+        self.assertEqual(len({kw["deadline"] for tool, _, kw in self.provider.calls if tool == "product_search"}), 1)
 
     def test_full_apply_authority_retains_exact_refs_for_unrelated_delta_and_correction(self):
         dinners = deepcopy(DINNERS)
@@ -830,7 +830,7 @@ class ProductCapacityTests(unittest.TestCase):
         with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
             plan = self.prepare()
         self.assertEqual(len(self.provider.calls), 3)
-        self.assertTrue(all(kw["deadline"] == 1240 for _, _, kw in self.provider.calls))
+        self.assertTrue(all(kw["deadline"] == 1235 for _, _, kw in self.provider.calls))
         self.assertEqual(len(plan["requirements"]), 37)
         self.assertEqual(sum(r["reason"] == "provider_search_deadline" for r in plan["unresolved_requirements"]), 34)
         self.assertEqual(plan["status"], "needs_input")
@@ -845,13 +845,15 @@ class ProductCapacityTests(unittest.TestCase):
         def advance(tool, args):
             if tool == "product_search":
                 searches[0] += 1
-                if searches[0] == 38:
+                if searches[0] == 3:
                     clock[0] = 1240
         self.provider.on_call = advance
         with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
             result = self.apply(plan)
         self.assertFalse(result["applied"])
-        self.assertEqual(searches[0], 38)
+        self.assertEqual(searches[0], 3)
+        self.assertEqual(result["status"], "validating")
+        self.assertIn("continue_arguments", result)
         self.assertNotIn("manipulate_cart", [tool for tool, _, _ in self.provider.calls])
 
     def test_deadline_after_uncertain_write_requires_reconciliation(self):
@@ -894,7 +896,7 @@ class ProductCapacityTests(unittest.TestCase):
             self.apply(plan)
         self.assertEqual(self.provider.calls, [])
 
-    def test_exact_64_and_65_with_resolved_plus_unresolved_count(self):
+    def test_full_scope_preserves_unresolved_line_above_read_slice(self):
         refs = self.save_recipes([recipe("Boundary", [(f"food{i}", 100) for i in range(63)], undecided="salt")])
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
         first = self.prepare()
@@ -911,9 +913,10 @@ class ProductCapacityTests(unittest.TestCase):
         with self.store.locked() as state:
             state["menu"]["dishes"][0]["shopping_requirements"].append({"item": "unknown", "scalable": False})
         self.provider.calls.clear()
-        with self.assertRaisesRegex(HouseholdError, "at most 64"):
-            self.prepare()
-        self.assertEqual(self.provider.calls, [])
+        expanded = self.prepare()
+        self.assertEqual(len(expanded["requirements"]), 64)
+        self.assertTrue(any(row["item"] == "unknown" for row in expanded["unresolved_requirements"]))
+        self.assertEqual(len(self.provider.calls), 64)
 
     def test_three_week_alternatives_reuse_observations_and_batch_shopping(self):
         with self.store.locked() as state:
@@ -998,7 +1001,7 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertNotIn("manipulate_cart", [tool for tool, _, _ in self.provider.calls])
         self.assertFalse(self.provider.quantities)
 
-    def test_postwrite_read_deadline_reports_unavailable_price(self):
+    def test_verified_cart_price_does_not_require_a_second_catalog_pass(self):
         self.save_week()
         plan = self.complete()
         clock = [1000.0]
@@ -1013,10 +1016,9 @@ class ProductCapacityTests(unittest.TestCase):
         with mock.patch("planning_operations.time.monotonic", side_effect=lambda: clock[0]):
             result = self.apply(plan)
         self.assertTrue(result["applied"])
-        self.assertEqual(result["price_verification"], "unavailable_after_cart_write")
-        self.assertEqual(len(result["fresh_product_plan"]["requirements"]), 37)
-        self.assertTrue(all(r["reason"] == "provider_search_deadline" for r in result["fresh_product_plan"]["unresolved_requirements"]))
-        self.assertEqual(sum(tool == "product_search" for tool, _, _ in self.provider.calls), 74)
+        self.assertEqual(result["price_verification"], "unchanged")
+        self.assertNotIn("fresh_product_plan", result)
+        self.assertEqual(sum(tool == "product_search" for tool, _, _ in self.provider.calls), 37)
 
     def test_calculation_deadline_keeps_observed_but_unfinished_requirements(self):
         self.save_week()

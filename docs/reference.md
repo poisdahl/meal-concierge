@@ -399,7 +399,16 @@ or one complete planner handoff, and to the configured provider. The short
 handoff server-side without saving a menu. `planner_selection_ref` only identifies
 an already saved selection. Mixing bindings is rejected before provider reads. Every prepare, including an unsaved preview, persists a compact normalized review
 in the existing prepared-product record and returns `product_plan_ref`. Continue
-with that ref plus delta candidate approvals; no menu is implicitly saved. Cart apply still requires saving the exact
+with that ref plus at most 64 delta candidate approvals; no menu is implicitly saved.
+Whole-menu requirements have no per-call count cap. Each call performs at most
+64 search/detail observations within its read deadline, using native Oda batches
+of at most eight exact queries or the provider's single-query path. Successful
+normalized observations remain bound to provider, query, page and size in the
+record; failed work rotates behind less recently attempted work. Follow returned
+`continue_arguments` until pending reads finish. Literal dietary detail evidence
+is read once per unique SKU in that work cycle, then evaluated against the current
+profile. Completed unavailable or unlabeled detail remains unknown under existing
+dietary policy; work that could not start within the budget remains pending. Cart apply still requires saving the exact
 selection and a separate authorized cart-change request. It aggregates only identical, scalable ingredients
 with exactly convertible units; raw or non-scalable quantities stay unresolved.
 For a menu saved before shopping requirements carried `scalable`, the flag is
@@ -459,9 +468,16 @@ Apply accepts the unchanged `apply_arguments` plus `cart_change_requested=true`
 for a clear current user request, or the complete unchanged result and digest.
 The compact route regenerates the plan and requires the same reviewed digest;
 it needs no copied observation payload, saved cache or file path.
-It repeats the same provider searches and ranking,
-stops without a cart write on menu, candidate, package, availability, offer or
-price drift, and otherwise hands the exact whole-package quantities to the
+It starts a separate fresh selected-product validation cycle, retaining reviewed
+approval context while checking the chosen refs. Required exact queries are
+batched and dietary detail reads are deduplicated by SKU. Pending reads return
+`status=validating`, `cart_changed=false` and exact `continue_arguments`; the same
+ref survives restart and lost replies. A validation cycle older than one hour,
+missing its service timestamp or dated in the future restarts only its reads,
+preserving choices and review. The existing managed apply fence prevents checkout
+of an older cart while validation is pending. Current menu/profile/ownership are
+checked again near cart sync, including no-op sync. Drift stops before a cart
+write; complete validated whole-package quantities pass to the
 existing guarded, restart-safe cart sync. A verified exact product-line amount
 is compared with the prepared exact total; a post-write difference is reported
 without rollback. MENY's current cart DOM does not establish a semantic line
@@ -1446,10 +1462,10 @@ single-agent installation pays no coordination overhead.
 
 `meal_concierge_products(action="lowest_cost", planner_input=..., candidate_approvals=...)`
 compares at most three deterministic alternatives from one exact planner input.
-The default planner and scheduled strategy are unchanged. Each menu supports
-at most 64 combined aggregated ingredient/unit requirements and unresolved
-ingredient lines. Prepare and apply retain that per-menu limit; comparison
-accepts at most 192 unique requirements, canonical ingredient searches and
+The default planner and scheduled strategy are unchanged. This optional comparison
+supports at most 64 combined aggregated ingredient/unit requirements and unresolved
+ingredient lines per alternative. Ordinary prepare/apply instead use resumable
+whole-menu work. Comparison accepts at most 192 unique requirements, canonical ingredient searches and
 exact approval entries across three alternatives. Compatible searches share
 observations only within that comparison. Each search uses page 1 with at most
 five results, and each requirement retains its 10,000-combination package
@@ -1463,12 +1479,12 @@ Product reads and package planning share one 240-second operation deadline insid
 after expiry; package calculation also checks the deadline between bounded
 requirements. Failed and unfinished searches remain attached to every affected
 requirement as `needs_input`, preserving completed observations and structural
-unknowns. Such a plan cannot be applied. Apply retains independent fresh
-product reads before cart preparation, immediately before mutation, and after
-verified cart synchronization. An unverified write remains gated on cart
-reconciliation; a later request does not retry it automatically. Product facts
-that become unavailable after an already verified cart write are reported as
-unavailable, without claiming a verified price change.
+unknowns. Such a plan cannot be applied. Ordinary prepare/apply reserve time for
+building and saving continuation progress before the operation deadline. Apply
+refreshes selected product facts once per validation cycle; the guarded cart
+readback verifies resulting quantities and actual product-line price rather than
+repeating every alternative search around the write. An unverified write remains
+gated on cart reconciliation; a later request does not retry it automatically.
 
 A complete comparison ranks total payable product amounts including mandatory
 deposits, then exact dimensionless excess, package count, original rank and
