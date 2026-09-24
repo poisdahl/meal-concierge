@@ -808,19 +808,48 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
         } for target in targets]})
     new_assessment_slots = set()
+    planned_by_occurrence = {}
+    planned_by_key = {}
     for field in ("planner_selection", "replan_selection"):
         planner_selection = menu.get(field)
         selection = planner_selection.get("selection") if isinstance(planner_selection, Mapping) else None
-        slots = selection.get("source_slots", selection.get("slots")) if isinstance(selection, Mapping) else None
-        if not isinstance(slots, list):
+        if not isinstance(selection, Mapping):
             continue
-        for slot in slots:
-            if (planner_selection.get("planner_version") == PLANNER_VERSION
-                    and isinstance(slot, Mapping)):
-                new_assessment_slots.add((slot.get("date"), slot.get("recipe_key")))
+        for fact_slots in (selection.get("slots"), selection.get("source_slots")):
+            if not isinstance(fact_slots, list):
+                continue
+            for selected_slot in fact_slots:
+                if not isinstance(selected_slot, Mapping):
+                    continue
+                if planner_selection.get("planner_version") == PLANNER_VERSION:
+                    new_assessment_slots.add((selected_slot.get("date"), selected_slot.get("recipe_key")))
+                facets = selected_slot.get("dietary_facets")
+                if not (isinstance(facets, Mapping) and isinstance(facets.get("values"), list)
+                        and isinstance(facets.get("vegetable_types"), list)
+                        and isinstance(facets.get("complete"), bool)):
+                    continue
+                key = selected_slot.get("recipe_key")
+                if isinstance(key, str):
+                    planned_by_key[key] = deepcopy(dict(facets))
+                    if isinstance(selected_slot.get("date"), str) and isinstance(selected_slot.get("reference"), Mapping):
+                        planned_by_occurrence[(selected_slot["date"], key,
+                                               mp.canonical(selected_slot["reference"]))] = deepcopy(dict(facets))
     def candidate_for(slot, recipe):
+        facets = None
+        if isinstance(slot, Mapping):
+            if (isinstance(slot.get("dietary_facets"), Mapping)
+                    and slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)):
+                facets = slot["dietary_facets"]
+            elif isinstance(slot.get("reference"), Mapping) and isinstance(slot.get("date"), str):
+                facets = planned_by_occurrence.get((slot["date"], slot.get("recipe_key"),
+                                                    mp.canonical(slot["reference"])))
+            elif slot.get("reference") is None and sum(
+                    dinner.get("recipe_key") == slot.get("recipe_key") for dinner in dinner_slots) == 1:
+                facets = planned_by_key.get(slot.get("recipe_key"))
+        elif not has_explicit_slots:
+            facets = planned_by_key.get(recipe.get("recipe_key"))
         return {"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
-        "dietary_facets": _derived_dietary(recipe),
+        "dietary_facets": deepcopy(facets) if facets is not None else _derived_dietary(recipe),
         "leafy_green": (
             deepcopy(slot["leafy_green"])
             if isinstance(slot, Mapping) and isinstance(slot.get("leafy_green"), Mapping)

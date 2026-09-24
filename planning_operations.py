@@ -666,6 +666,7 @@ class PlanningOperations:
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
             "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"],
             **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {}),
+            **({"dietary_facets": deepcopy(source["dietary_facets"])} if "dietary_facets" in source else {}),
             **({"served_with": mp.slot_by_id(current, d["replaces_slot_id"])["served_with"]}
                if "served_with" in mp.slot_by_id(current, d["replaces_slot_id"]) else {})} for d in spec["leftovers"]]
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=mp.slot_order),
@@ -965,6 +966,8 @@ class PlanningOperations:
                 slot["leafy_green"] = normalize_candidate_facts({"leafy_green": fact})["leafy_green"]
             elif old is not None and old.get("snapshot_digest") == slot["snapshot_digest"] and "leafy_green" in old:
                 slot["leafy_green"] = deepcopy(old["leafy_green"])
+            if old is not None and old.get("snapshot_digest") == slot["snapshot_digest"] and "dietary_facets" in old:
+                slot["dietary_facets"] = deepcopy(old["dietary_facets"])
             recipe["preparation_slot_id"] = slot_id
             slots.append(slot)
             successor["dishes"].append(recipe)
@@ -1021,6 +1024,8 @@ class PlanningOperations:
                         slot["served_with"] = served_with
                     if "leafy_green" in source:
                         slot["leafy_green"] = deepcopy(source["leafy_green"])
+                    if "dietary_facets" in source:
+                        slot["dietary_facets"] = deepcopy(source["dietary_facets"])
                     slots.append(slot)
                     added.append(slot)
             elif action in {"remove", "replace", "move"}:
@@ -1073,6 +1078,24 @@ class PlanningOperations:
                     continue
                 old_component = [old_source] + [s for s in current["slots"]
                                                 if s.get("source_slot_id") == source["slot_id"]]
+                protected_source = (old_source["slot_id"] in historical or old_source["slot_id"] in locks
+                                    or mp.slot_outcome(snapshot, current, old_source) is not None)
+                if protected_source and source == old_source and all(s in old_dependents for s in dependents):
+                    removed = [s for s in old_dependents if s not in dependents]
+                    if removed and all(s["slot_id"] not in historical and s["slot_id"] not in locks
+                                       and mp.slot_outcome(snapshot, current, s) is None for s in removed):
+                        retained = deepcopy(old_batch)
+                        retained["leftovers"] = [row for row in retained["leftovers"]
+                                                 if row["slot_id"] in {s["slot_id"] for s in dependents}]
+                        unused = bp.fraction(retained["prepared_portions"]) - bp.fraction(retained["consumed_at_source"])
+                        unused -= sum((bp.fraction(s["portions"]) for s in dependents), Fraction())
+                        retained["unallocated_portions"] = bp.rational(unused)
+                        retained["suitability"] = {"source": "unassessed", "value": "unknown"}
+                        retained["storage"] = {"basis": "unknown"}
+                        retained.pop("confirmation", None)
+                        retained["spec_digest"] = mp.digest({k: v for k, v in retained.items() if k != "spec_digest"})
+                        successors.append(retained)
+                        continue
                 if any(s["slot_id"] in historical or s["slot_id"] in locks
                        or mp.slot_outcome(snapshot, current, s) is not None for s in old_component):
                     raise HouseholdError("recorded batch servings are immutable; edit only an independent future component")
@@ -1081,11 +1104,11 @@ class PlanningOperations:
             if not dependents:
                 continue
             last = date.max
-            storage = deepcopy(old_batch["storage"]) if old_batch else {"basis": "unknown"}
-            if storage.get("max_interval_days") is not None:
-                last = date.fromisoformat(source["date"]) + timedelta(days=storage["max_interval_days"])
-            if storage.get("use_by_date") is not None:
-                last = min(last, date.fromisoformat(storage["use_by_date"]))
+            prior_storage = deepcopy(old_batch["storage"]) if old_batch else {"basis": "unknown"}
+            if prior_storage.get("max_interval_days") is not None:
+                last = date.fromisoformat(source["date"]) + timedelta(days=prior_storage["max_interval_days"])
+            if prior_storage.get("use_by_date") is not None:
+                last = min(last, date.fromisoformat(prior_storage["use_by_date"]))
             if any(s["date"] <= source["date"] or s["date"] > last.isoformat() for s in dependents):
                 raise HouseholdError("linked serving dates exceed their preparation or recorded storage interval")
             total = bp.fraction(source["portions"]) + sum((bp.fraction(s["portions"]) for s in dependents), Fraction())
@@ -1093,7 +1116,7 @@ class PlanningOperations:
                      "prepared_portions": bp.rational(total), "consumed_at_source": bp.rational(bp.fraction(source["portions"])),
                      "unallocated_portions": bp.rational(Fraction()),
                      "suitability": {"source": "unassessed", "value": "unknown"},
-                     "storage": storage,
+                     "storage": {"basis": "unknown"},
                      "leftovers": [{"replaces_slot_id": s["slot_id"], "date": s["date"], "meal_type": s["meal_type"],
                                     "portions": bp.rational(bp.fraction(s["portions"])), "slot_id": s["slot_id"]} for s in dependents]}
             batch["spec_digest"] = mp.digest(batch)
@@ -1614,6 +1637,7 @@ class PlanningOperations:
             "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": slot["date"]})[:32],
             "date": slot["date"], "meal_type": "dinner", "portions": slot["portions"], "recipe_key": slot["recipe_key"],
             "reference": deepcopy(slot["reference"]), "snapshot_digest": mp.digest(recipe),
+            "dietary_facets": deepcopy(slot["dietary_facets"]),
             "leafy_green": deepcopy(slot["leafy_green"]),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
         if handoff['request'].get('recurring_batch'):
