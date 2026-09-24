@@ -339,6 +339,34 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         new_slot = next(s for s in moved["menu"]["slots"] if s["date"] == "2026-09-10")
         self.assertIn("fish", new_slot["dietary_facets"]["values"])
 
+    def test_legacy_derived_facts_survive_move_and_batch_prepare(self):
+        with self.store.locked() as state:
+            first = next(s for s in state["menu"]["slots"] if s["date"] == "2026-09-07")
+            first.pop("dietary_facets", None)
+            for slot in state["recipe_usage"][state["menu"]["menu_id"]]["slots"]:
+                if slot["slot_id"] == first["slot_id"]:
+                    slot.pop("dietary_facets", None)
+            state["menu"]["digest"] = menu_digest(state["menu"])
+        current = self.store.read()["menu"]
+        source = next(s for s in current["slots"] if s["date"] == "2026-09-07")
+        expected = next(s for s in current["planner_selection"]["selection"]["slots"]
+                        if s["date"] == source["date"])["dietary_facets"]
+        self.assertTrue(expected["source"].startswith("derived:"))
+        target = next(s for s in current["slots"] if s["date"] == "2026-09-08")
+        spec = {"source_slot_id": source["slot_id"], "source_snapshot_digest": source["snapshot_digest"],
+                "prepared_portions": "4", "consumed_at_source": "2",
+                "suitability": {"source": "current_user", "value": "suitable"},
+                "storage": {"source": "current_user", "method": "refrigerated", "max_interval_days": 2},
+                "leftovers": [{"slot_id": target["slot_id"], "portions": "2"}]}
+        prepared = self.app.handle({"operation": "menu", "action": "batch_prepare",
+                                    "menu_ref": mp.menu_ref(current), "batch_spec": spec})["batch_plan"]
+        self.assertEqual(prepared["status"], "prepared", prepared)
+        dependent = next(s for s in prepared["successor"]["slots"] if s.get("kind") == "leftover")
+        self.assertEqual(dependent["dietary_facets"], expected)
+        moved, _ = self.edit(current, [{"action": "move", "slot_id": source["slot_id"],
+                                       "date": "2026-09-10"}], "move-legacy-derived")
+        self.assertEqual(next(s for s in moved["menu"]["slots"] if s["date"] == "2026-09-10")["dietary_facets"], expected)
+
     def test_two_same_recipe_preparations_scale_independently(self):
         result, _ = self.edit(self.menu, [
             {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 1,

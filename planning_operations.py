@@ -671,7 +671,7 @@ class PlanningOperations:
                             and selected.get("recipe_key") == source["recipe_key"]
                             and canonical(selected.get("reference")) == canonical(source["reference"])
                             and isinstance(selected.get("dietary_facets"), Mapping)):
-                        source_facets = normalize_candidate_facts({"dietary_facets": selected["dietary_facets"]})["dietary_facets"]
+                        source_facets = deepcopy(dict(selected["dietary_facets"]))
                         break
                 if source_facets is not None:
                     break
@@ -971,7 +971,7 @@ class PlanningOperations:
                                 and isinstance(selected.get("reference"), Mapping)
                                 and canonical(selected.get("reference")) == canonical(slot.get("reference"))
                                 and isinstance(selected.get("dietary_facets"), Mapping)):
-                            return normalize_candidate_facts({"dietary_facets": selected["dietary_facets"]})["dietary_facets"]
+                            return deepcopy(dict(selected["dietary_facets"]))
             return None
 
         def fresh_slot(edit, index, *, old=None, frozen_recipe=None):
