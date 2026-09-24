@@ -4,6 +4,7 @@ Application owns shared state and locks; these methods run on that same instance
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 import hashlib
@@ -1964,24 +1965,48 @@ class OrderOperations:
         profile = self.store.read()['profile']
         findings = []
         if rules(profile):
-            for item in summary.get('items', []):
-                if nonfood_candidate(item):
-                    continue
+            items = [item for item in summary.get('items', []) if not nonfood_candidate(item)]
+            search_results = {}
+            batch = getattr(self.provider_client, 'product_search_batch', None)
+            if self.provider == 'oda' and callable(batch):
+                queries = list(dict.fromkeys(item.get('name') or str(item.get('product_id')) for item in items))
+                for offset in range(0, len(queries), 8):
+                    group = queries[offset:offset + 8]
+                    try:
+                        search_results.update(batch(group, size=20, deadline=deadline))
+                    except HouseholdError:
+                        pass  # Fall back to exact single-query reads below.
+            reader = getattr(self.provider_client, 'product_dietary_evidence', None)
+            details = {}
+            if self.provider == 'oda' and reader is not None and items:
+                references = list(dict.fromkeys(item.get('product_id') for item in items))
+
+                def read_detail(reference):
+                    try:
+                        return reader(reference, deadline=deadline)
+                    except HouseholdError:
+                        return None
+
+                with ThreadPoolExecutor(max_workers=min(4, len(references))) as pool:
+                    details = dict(zip(references, pool.map(read_detail, references)))
+            for item in items:
                 reference = item.get('product_id')
                 product = {'product_ref': reference, 'name': item.get('name'), 'dietary_evidence': {}}
+                query = item.get('name') or str(reference)
                 try:
-                    observed = self.provider_client.call('product_search', {'queries': [item.get('name') or str(reference)], 'page': 1, 'size': 20}, deadline=deadline)
+                    observed = search_results.get(query)
+                    if observed is None:
+                        observed = self.provider_client.call('product_search', {'queries': [query], 'page': 1, 'size': 20}, deadline=deadline)
                     matches = [p for p in observed.get('products', []) if str(p.get('product_ref')) == str(reference)]
                     if observed.get('provider') == self.provider and len(matches) == 1:
                         product = matches[0]
                 except HouseholdError:
                     pass
-                reader = getattr(self.provider_client, 'product_dietary_evidence', None)
                 if reader is not None:
                     try:
-                        details = reader(reference, deadline=deadline)
-                        if isinstance(details, Mapping):
-                            product = {**product, 'dietary_evidence': {**product.get('dietary_evidence', {}), **details}}
+                        detail = details.get(reference) if self.provider == 'oda' else reader(reference, deadline=deadline)
+                        if isinstance(detail, Mapping):
+                            product = {**product, 'dietary_evidence': {**product.get('dietary_evidence', {}), **detail}}
                     except HouseholdError:
                         pass
                 # Unknown preferences are not actionable findings. In particular,
