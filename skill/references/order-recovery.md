@@ -38,12 +38,18 @@ Mathem uses SEK. Reuse valid authorization within its actual scope.
 
 ## Payments and recovery
 
-Do not change payment methods automatically. An accepted merchant order is not
-proof of settled payment. Distinguish a Meal Concierge verification failure from
-a documented retailer/payment-provider rejection; name the actual source.
-Report the service's separate order/payment outcome;
-only a matched submit/reconcile with `confirmed=true` establishes success for
-that intent. `manual_checkout_required` is a handoff, not success.
+Do not change payment methods automatically. Distinguish a Meal Concierge
+verification failure from a documented retailer/payment-provider rejection;
+name the actual source. Only a matched submit/reconcile with `confirmed=true`
+establishes success for that intent. A confirmed merchant order can be reported
+concisely without claiming that the issuer has posted the card charge. Report
+separate payment uncertainty when it affects completion or the owner asks.
+`manual_checkout_required` is a handoff, not success. If Oda reports an
+unavailable cart item before dispatch, identify it from the returned stock
+message, inspect the current cart, and use the ordinary cart/product tools for
+an available equivalent. Ask about a material replacement or omission. Prepare
+a fresh review after any cart change; do not ask the owner to open Oda in their
+own browser to discover the blocker.
 
 Oda supports saved cards and Vipps, including an explicit switch in either
 direction. A prepared review can change method before dispatch without changing

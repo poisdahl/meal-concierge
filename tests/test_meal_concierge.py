@@ -2486,6 +2486,51 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
             [("reload",), ("snapshot",), ("reload",), ("snapshot",)],
         )
 
+    def test_oda_stock_blocker_names_item_before_checkout(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = "oda"
+        browser._open = lambda _url: None
+        browser._invoke = lambda *_args: {}
+        browser._cart_surface = lambda: {
+            "action": "blocked",
+            "unavailable_message": "Nektariner er dessverre utsolgt eller utilgjengelig av andre grunner",
+        }
+        browser._click_action = lambda *_args, **_kwargs: self.fail("checkout must not be clicked")
+        with mock.patch("oda_browser.time.sleep"):
+            with self.assertRaisesRegex(HouseholdError, "Nektariner.*Remove or replace"):
+                browser._continue_checkout_cart()
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for browser script tests")
+    def test_oda_cart_surface_preserves_merchant_stock_reason(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        script = []
+        browser._eval = lambda source: script.append(source) or {}
+        browser._cart_surface()
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location={href:input.url};
+const main={innerText:input.text,querySelectorAll:()=>[]};
+const dialog={innerText:input.dialog||'',getBoundingClientRect:()=>({width:100,height:100})};
+global.document={body:main,querySelector:s=>s==='main'?main:null,
+ querySelectorAll:s=>s.includes('[role="dialog"]')&&input.dialog?[dialog]:[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(eval(input.script));
+"""
+        merchant_text = ("Du må fjerne noen varer fra handlekurven\n"
+                         "Nektariner er dessverre utsolgt eller utilgjengelig av andre grunner.\n"
+                         "Du må fjerne dette produktet fra handlekurven før du kan gå videre til betaling.")
+        for container in ("text", "dialog"):
+            with self.subTest(container=container):
+                run = subprocess.run([shutil.which("node"), "-e", harness],
+                                     input=json.dumps({"script": script[0], "url": CART_URL,
+                                                       "text": merchant_text if container == "text" else "Handlekurv",
+                                                       "dialog": merchant_text if container == "dialog" else ""}),
+                                     text=True, capture_output=True, check=True, timeout=10)
+                surface = json.loads(run.stdout)
+                self.assertEqual(surface["action"], "blocked")
+                self.assertIn("Nektariner", surface["unavailable_message"])
+                self.assertNotIn("Du må fjerne noen varer", surface["unavailable_message"])
+
     def test_checkout_retries_a_failed_read_only_cart_open(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         events = []
