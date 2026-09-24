@@ -556,7 +556,7 @@ const result=JSON.parse(eval(script));process.stdout.write(JSON.stringify({resul
                     browser=OdaBrowser.__new__(OdaBrowser);browser._checkout_deadline=None
                     browser._invoke=mock.Mock();browser._account_reference=lambda address:123
                     browser._cart_expectation=lambda cart:expected;browser._order_cart=lambda *args:{}
-                    browser._addition_expectation=lambda *args:{**expected,'checkout_url':url,'original_minor':10000,'original_count':1}
+                    browser._addition_expectation=lambda *args:{**expected,'checkout_url':url,'original_minor':10000,'original_count':1,'added_minor':4550}
                     browser.review_checkout=lambda cart,**kw:deepcopy(review)
                     browser.review_order_change=lambda *a,**kw:deepcopy(review)
                     callback=[];observed=[]
