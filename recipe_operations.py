@@ -377,19 +377,23 @@ class RecipeOperations:
                 last_planned = max(filter(None, (last_planned, record_week)), default=record_week)
             if status == "ordered" or previous == "ordered":
                 last_ordered = max(filter(None, (last_ordered, record_week)), default=record_week)
+            matched_slots = [slot for slot in record.get("slots", []) if slot.get("recipe_key") in identity_keys]
             cooked = bool(identity_keys.intersection(record.get("cooked_keys", [])))
-            not_cooked = bool(identity_keys.intersection(record.get("not_cooked_keys", [])))
-            for slot in record.get("slots", []):
-                if slot.get("recipe_key") not in identity_keys:
-                    continue
+            not_cooked = bool(identity_keys.intersection(record.get("not_cooked_keys", []))) if not matched_slots else False
+            slot_outcomes = []
+            for slot in matched_slots:
                 overlay = state.get("menu_planning", {}).get("outcomes", {}).get(slot["slot_id"])
-                if overlay is not None:
-                    cooked = overlay["outcome"] == "cooked"
-                    not_cooked = overlay["outcome"] == "not_cooked"
+                outcome = overlay["outcome"] if overlay is not None else (
+                    "cooked" if slot["slot_id"] in record.get("cooked_slot_ids", []) else
+                    "not_cooked" if slot["slot_id"] in record.get("not_cooked_slot_ids", []) else None)
+                slot_outcomes.append(outcome)
                 if slot["slot_id"] in ordered_slots:
                     status = "ordered"
                 if slot["slot_id"] in historical_ordered_slots:
                     last_ordered = max(filter(None, (last_ordered, record_week)), default=record_week)
+            if matched_slots:
+                cooked = cooked or "cooked" in slot_outcomes
+                not_cooked = all(outcome == "not_cooked" for outcome in slot_outcomes)
             retired = bool(identity_keys.intersection(state.get("menu_planning", {}).get("retired", {}).get(menu_id, [])))
             if retired and status == "planned" and not cooked:
                 continue

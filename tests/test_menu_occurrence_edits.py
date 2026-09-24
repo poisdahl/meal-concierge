@@ -9,6 +9,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE))
 
 from core import HouseholdError
+import batch_planning as bp
 import menu_planning as mp
 from planner import saved_menu_minimum_evaluation
 from product_planner import menu_requirements
@@ -57,17 +58,17 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         fact = {"source": "explicit", "assessment": "substantial", "ingredient_indices": [0],
                 "basis": "The spinach is the leafy side, not a garnish."}
         result, request = self.edit(self.menu, [
-            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 1,
-             "reference": self.salad, "leafy_green": fact},
-            {"action": "add", "date": "2026-09-08", "portions": 1, "source_edit_index": 0},
-            {"action": "add", "date": "2026-09-09", "portions": 1, "source_edit_index": 0},
+            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 2,
+             "reference": self.salad, "leafy_green": fact, "served_with": "dinner"},
+            {"action": "add", "date": "2026-09-08", "portions": 2, "source_edit_index": 0, "served_with": "dinner"},
+            {"action": "add", "date": "2026-09-09", "portions": 2, "source_edit_index": 0, "served_with": "dinner"},
         ], "salad-three-days")
         menu = result["menu"]
         self.assertEqual([s["date"] for s in menu["slots"] if s["meal_type"] == "side"],
                          ["2026-09-07", "2026-09-08", "2026-09-09"])
         self.assertEqual(len(menu["batches"]), 1)
-        self.assertEqual(menu["batches"][0]["prepared_portions"], {"numerator": 3, "denominator": 1})
-        self.assertEqual(self.amounts(menu)[0]["spinat"], 300)
+        self.assertEqual(menu["batches"][0]["prepared_portions"], {"numerator": 6, "denominator": 1})
+        self.assertEqual(self.amounts(menu)[0]["spinat"], 600)
         leafy = next(row["detail"] for row in saved_menu_minimum_evaluation(menu, self.store.read()["profile"])["results"]
                      if row["target"] == "leafy_green_days")
         self.assertEqual((leafy["counted_dinners"], leafy["unknown_dinners"]), (3, 0))
@@ -135,17 +136,106 @@ class MenuOccurrenceEditsTests(unittest.TestCase):
         fact = {"source": "explicit", "assessment": "substantial", "ingredient_indices": [0],
                 "basis": "Spinach leaves are eaten as a side."}
         result, _ = self.edit(self.menu, [
-            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 1,
-             "reference": self.salad, "leafy_green": fact},
-            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 1,
-             "reference": self.salad, "leafy_green": fact},
-            {"action": "add", "date": "2026-09-10", "meal_type": "lunch", "portions": 1,
-             "reference": self.salad, "leafy_green": fact},
+            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 2,
+             "reference": self.salad, "leafy_green": fact, "served_with": "dinner"},
+            {"action": "add", "date": "2026-09-07", "meal_type": "side", "portions": 2,
+             "reference": self.salad, "leafy_green": fact, "served_with": "dinner"},
+            {"action": "add", "date": "2026-09-08", "meal_type": "side", "portions": 2,
+             "reference": self.salad, "leafy_green": fact, "served_with": "lunch"},
         ], "two-sides-lunch")
         detail = next(row["detail"] for row in saved_menu_minimum_evaluation(result["menu"], self.store.read()["profile"])["results"]
                       if row["target"] == "leafy_green_days")
         self.assertEqual(detail["counted_dinners"], 1)
         self.assertEqual(len(detail["dinner_assessments"]), 3)
+
+    def test_partial_dinner_side_is_unknown_and_second_dinner_rejected(self):
+        fact = {"source": "explicit", "assessment": "substantial", "ingredient_indices": [0],
+                "basis": "The spinach is served as a side."}
+        result, _ = self.edit(self.menu, [{"action": "add", "date": "2026-09-07", "meal_type": "side",
+                                          "portions": 1, "reference": self.salad, "leafy_green": fact,
+                                          "served_with": "dinner"}], "partial-side")
+        detail = next(row["detail"] for row in saved_menu_minimum_evaluation(result["menu"], self.store.read()["profile"])["results"]
+                      if row["target"] == "leafy_green_days")
+        self.assertEqual(detail["counted_dinners"], 0)
+        self.assertTrue(detail["dinner_assessments"][0]["partial_side_coverage"])
+        with self.assertRaisesRegex(HouseholdError, "already has a dinner"):
+            self.edit(result["menu"], [{"action": "add", "date": "2026-09-07", "meal_type": "dinner",
+                                        "portions": 2, "reference": self.salad}], "second-dinner")
+
+    def test_invalid_action_and_pending_cart_leave_state_unchanged(self):
+        before = self.store.path.read_bytes()
+        with self.assertRaisesRegex(HouseholdError, "edit action"):
+            self.edit(self.menu, [{"action": []}], "bad-action")
+        self.assertEqual(self.store.path.read_bytes(), before)
+        with self.store.locked() as state:
+            state["pending_cart_change"] = {"uncertain": True}
+        before = self.store.path.read_bytes()
+        with self.assertRaisesRegex(HouseholdError, "pending cart change"):
+            self.edit(self.menu, [{"action": "add", "date": "2026-09-07", "meal_type": "side",
+                                   "portions": 1, "reference": self.salad}], "pending-cart")
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_shopping_projection_keeps_salad_source_positions(self):
+        menu = mp.canonical(self.menu)
+        import json
+        menu = json.loads(menu)
+        mp.bind_preparations(menu)
+        recipe = menu["dishes"].pop(0)
+        recipe["shopping_requirements"][0]["pantry"] = True
+        menu["salads"].append(recipe)
+        projected = mp.shopping_menu(menu)
+        self.assertEqual(len(projected["salads"]), 1)
+        self.assertEqual(projected["salads"][0]["preparation_slot_id"], recipe["preparation_slot_id"])
+        source = {"collection": "salads", "recipe_index": 0, "ingredient_index": 0}
+        requirements, unresolved = menu_requirements(projected, ingredient_decisions=[{"source": source, "action": "include"}])
+        self.assertEqual(unresolved, [])
+        self.assertTrue(any(row["item"] == recipe["shopping_requirements"][0]["item"] for row in requirements))
+
+    def test_removing_dinner_updates_planning_scope_and_completeness(self):
+        target = next(slot for slot in self.menu["slots"] if slot["date"] == "2026-09-09")
+        result, _ = self.edit(self.menu, [{"action": "remove", "slot_id": target["slot_id"]}], "remove-dinner")
+        self.assertEqual(result["menu"]["planning_scope"]["dates"], ["2026-09-07", "2026-09-08"])
+        self.assertFalse(result["menu"]["weekly_plan_complete"])
+
+    def test_confirmed_unrecorded_side_batch_can_be_changed(self):
+        added, _ = self.edit(self.menu, [
+            {"action": "add", "date": day, "meal_type": "side", "portions": 2,
+             "reference": self.salad, "served_with": "dinner"}
+            for day in ("2026-09-07", "2026-09-08")], "two-confirmed-sides")
+        menu = added["menu"]
+        source, target = [s for s in menu["slots"] if s["meal_type"] == "side"]
+        spec = {"source_slot_id": source["slot_id"], "source_snapshot_digest": source["snapshot_digest"],
+                "prepared_portions": "4", "consumed_at_source": "2",
+                "suitability": {"source": "current_user", "value": "suitable"},
+                "storage": {"source": "current_user", "method": "refrigerated", "max_interval_days": 2},
+                "leftovers": [{"slot_id": target["slot_id"], "portions": "2"}]}
+        prepared = self.app.handle({"operation": "menu", "action": "batch_prepare",
+                                    "menu_ref": mp.menu_ref(menu), "batch_spec": spec})["batch_plan"]
+        self.assertEqual(prepared["status"], "prepared", prepared)
+        batched = self.app.handle({"operation": "menu", "action": "batch_apply", "batch_plan": prepared,
+                                   "batch_confirmation": {"batch_digest": prepared["batch_digest"],
+                                                          "statement": bp.CONFIRMATION_STATEMENT}})["menu"]
+        self.assertEqual(len(batched["batches"]), 1)
+        leftover = next(s for s in batched["slots"] if s.get("kind") == "leftover")
+        self.assertEqual(leftover["served_with"], "dinner")
+        edited, _ = self.edit(batched, [{"action": "remove", "slot_id": leftover["slot_id"]}], "remove-future-serving")
+        self.assertEqual(edited["menu"]["batches"], [])
+        self.assertEqual(self.amounts(edited["menu"])[0]["spinat"], 200)
+
+    def test_one_not_cooked_repeat_does_not_cancel_another_planned_occurrence(self):
+        added, _ = self.edit(self.menu, [
+            {"action": "add", "date": day, "meal_type": "side", "portions": 1,
+             "reference": self.salad} for day in ("2026-09-07", "2026-09-08")], "two-usage-sides")
+        menu = added["menu"]
+        sides = [s for s in menu["slots"] if s["meal_type"] == "side"]
+        self.app.handle({"operation": "recipes", "action": "mark_not_cooked", "menu_id": menu["menu_id"],
+                         "expected_revision": menu["revision"], "slot_id": sides[0]["slot_id"]})
+        usage = self.app._usage_summary(self.store.read(), sides[0]["recipe_key"], menu["week"])
+        self.assertFalse(usage["eligible"])
+        self.app.handle({"operation": "recipes", "action": "mark_not_cooked", "menu_id": menu["menu_id"],
+                         "expected_revision": menu["revision"], "slot_id": sides[1]["slot_id"]})
+        usage = self.app._usage_summary(self.store.read(), sides[0]["recipe_key"], menu["week"])
+        self.assertTrue(usage["eligible"])
 
     def test_two_same_recipe_preparations_scale_independently(self):
         result, _ = self.edit(self.menu, [

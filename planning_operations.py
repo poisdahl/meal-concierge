@@ -665,7 +665,9 @@ class PlanningOperations:
         leftover_slots = [{"slot_id":d["slot_id"], "date":d["date"], "meal_type":d["meal_type"], "kind":"leftover",
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
             "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"],
-            **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {})} for d in spec["leftovers"]]
+            **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {}),
+            **({"served_with": mp.slot_by_id(current, d["replaces_slot_id"])["served_with"]}
+               if "served_with" in mp.slot_by_id(current, d["replaces_slot_id"]) else {})} for d in spec["leftovers"]]
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=mp.slot_order),
             "dishes":[], "salads":[], "batch":spec, "batches":deepcopy(bp.sources(current))+[spec], "supersedes":mp.menu_ref(current),
             "planner_selection":deepcopy(current.get("planner_selection")),
@@ -855,6 +857,8 @@ class PlanningOperations:
                 return {**prior, "idempotent": True}
             if self._household_today(state).isoformat() != today or self._replan_state_digest(state) != self._replan_state_digest(snapshot):
                 raise HouseholdError("menu or household state changed; read the menu and try again")
+            if state.get("pending_cart_change"):
+                raise HouseholdError("reconcile the pending cart change before adding a meal")
             pending = state.get("pending_checkout") or state.get("order_change")
             if state.get("pending_cancellation") or pending and self._independent_menu_protection(state, current) is None:
                 raise HouseholdError("reconcile the linked or unidentified protected operation before adding a meal")
@@ -909,8 +913,15 @@ class PlanningOperations:
             return value
 
         def checked_type(value):
-            if value not in RECIPE_CATEGORIES:
+            if not isinstance(value, str) or value not in RECIPE_CATEGORIES:
                 raise HouseholdError("meal_type must be one of: " + ", ".join(RECIPE_CATEGORIES))
+            return value
+
+        def checked_served_with(value, meal_type):
+            if value is None:
+                return None
+            if meal_type != "side" or value not in ("dinner", "lunch", "other"):
+                raise HouseholdError("served_with is only for sides and must be dinner, lunch or other")
             return value
 
         def checked_portions(value):
@@ -946,6 +957,9 @@ class PlanningOperations:
             slot_id = "slot_" + mp.digest({"edit": signature, "index": index})[:32]
             slot = {"slot_id": slot_id, "date": day, "meal_type": meal_type, "portions": portions,
                     "recipe_key": recipe["recipe_key"], "reference": reference, "snapshot_digest": mp.digest(recipe)}
+            served_with = checked_served_with(edit.get("served_with", old.get("served_with") if old else None), meal_type)
+            if served_with is not None:
+                slot["served_with"] = served_with
             fact = edit.get("leafy_green")
             if fact is not None:
                 slot["leafy_green"] = normalize_candidate_facts({"leafy_green": fact})["leafy_green"]
@@ -969,13 +983,15 @@ class PlanningOperations:
 
         for index, edit in enumerate(edits):
             action = edit.get("action")
+            if not isinstance(action, str):
+                raise HouseholdError("edit action must be add, replace, remove or move")
             if action == "add":
                 if "reference" in edit:
-                    if set(edit).difference({"action", "date", "meal_type", "portions", "reference", "leafy_green"}):
+                    if set(edit).difference({"action", "date", "meal_type", "portions", "reference", "leafy_green", "served_with"}):
                         raise HouseholdError("fresh add has unknown fields")
                     fresh_slot(edit, index)
                 else:
-                    if set(edit).difference({"action", "date", "meal_type", "portions", "source_slot_id", "source_edit_index"}):
+                    if set(edit).difference({"action", "date", "meal_type", "portions", "source_slot_id", "source_edit_index", "served_with"}):
                         raise HouseholdError("linked add has unknown fields")
                     source_id = edit.get("source_slot_id")
                     if "source_edit_index" in edit:
@@ -1000,14 +1016,17 @@ class PlanningOperations:
                             "kind": "leftover", "source_slot_id": source_id,
                             "recipe_key": source["recipe_key"], "reference": deepcopy(source["reference"]),
                             "snapshot_digest": source["snapshot_digest"]}
+                    served_with = checked_served_with(edit.get("served_with"), meal_type)
+                    if served_with is not None:
+                        slot["served_with"] = served_with
                     if "leafy_green" in source:
                         slot["leafy_green"] = deepcopy(source["leafy_green"])
                     slots.append(slot)
                     added.append(slot)
             elif action in {"remove", "replace", "move"}:
                 allowed = {"action", "slot_id"} if action == "remove" else (
-                    {"action", "slot_id", "date", "meal_type", "portions", "reference", "leafy_green"} if action == "replace" else
-                    {"action", "slot_id", "date", "meal_type", "portions", "leafy_green"})
+                    {"action", "slot_id", "date", "meal_type", "portions", "reference", "leafy_green", "served_with"} if action == "replace" else
+                    {"action", "slot_id", "date", "meal_type", "portions", "leafy_green", "served_with"})
                 if set(edit).difference(allowed):
                     raise HouseholdError("slot edit has unknown fields")
                 slot = mp.slot_by_id(successor, edit.get("slot_id"))
@@ -1019,7 +1038,7 @@ class PlanningOperations:
                 if action in {"replace", "move"} and slot.get("kind") == "leftover":
                     raise HouseholdError("replace or move a linked serving by removing it and adding an exact new serving")
                 old = deepcopy(slot)
-                if action == "move" and not any(field in edit for field in ("date", "meal_type", "portions", "leafy_green")):
+                if action == "move" and not any(field in edit for field in ("date", "meal_type", "portions", "leafy_green", "served_with")):
                     raise HouseholdError("move needs a changed date, type, portions or assessment")
                 frozen_recipe = deepcopy(mp.recipe_for_slot(successor, slot)) if action == "move" else None
                 remove_slot(slot)
@@ -1034,6 +1053,11 @@ class PlanningOperations:
 
         if not slots or len(slots) > 31:
             raise HouseholdError("edited menu needs one to 31 meal slots")
+        dinner_dates = [s["date"] for s in slots if s["meal_type"] == "dinner"]
+        if len(dinner_dates) != len(set(dinner_dates)):
+            raise HouseholdError("a date already has a dinner; add a side or another course")
+        if any(s.get("served_with") == "dinner" and s["date"] not in dinner_dates for s in slots):
+            raise HouseholdError("a dinner side needs a dinner on the same date")
         slot_ids = {s["slot_id"] for s in slots}
         if any(s.get("source_slot_id") not in slot_ids for s in slots if s.get("kind") == "leftover"):
             raise HouseholdError("a preparation has linked servings; remove or replace the whole component together")
@@ -1047,14 +1071,15 @@ class PlanningOperations:
                 if source == old_source and dependents == old_dependents:
                     successors.append(deepcopy(old_batch))
                     continue
-                if old_batch.get("confirmation"):
-                    raise HouseholdError("confirmed batch component changed; prepare a new exact batch arrangement")
+                old_component = [old_source] + [s for s in current["slots"]
+                                                if s.get("source_slot_id") == source["slot_id"]]
+                if any(s["slot_id"] in historical or s["slot_id"] in locks
+                       or mp.slot_outcome(snapshot, current, s) is not None for s in old_component):
+                    raise HouseholdError("recorded batch servings are immutable; edit only an independent future component")
             if old_batch and not dependents:
                 continue
             if not dependents:
                 continue
-            if old_batch and (source["slot_id"] in historical or any(s["slot_id"] in historical for s in current["slots"] if s.get("source_slot_id") == source["slot_id"])):
-                raise HouseholdError("recorded batch servings are immutable; edit only an independent future component")
             last = date.max
             storage = deepcopy(old_batch["storage"]) if old_batch else {"basis": "unknown"}
             if storage.get("max_interval_days") is not None:
@@ -1080,11 +1105,18 @@ class PlanningOperations:
         successor["slot_owners"] = {s["slot_id"]: current.get("slot_owners", {}).get(s["slot_id"], current["menu_id"])
                                     for s in slots if s["slot_id"] in {v["slot_id"] for v in current["slots"]}}
         successor["schedule"] = mp.schedule(successor)
+        successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {})
+        successor["planning_scope"]["dates"] = sorted(set(dinner_dates))
+        expected = (snapshot.get("profile") or {}).get("meals", {}).get("dinner_days")
+        successor["weekly_plan_complete"] = type(expected) is int and expected > 0 and len(dinner_dates) == expected
         if len(canonical(successor).encode()) > MAX_MENU_BYTES or len(menu_email_html(successor).encode()) > MAX_EMAIL_HTML_BYTES:
             raise HouseholdError("edited menu exceeds the recipe delivery size limit")
         before = deepcopy(current)
         before["historical_slot_ids"] = sorted(historical)
         comparison = mp.shopping_comparison(before, successor)
+        response_probe = {"ok": True, "result": {"menu": successor, "shopping_comparison": comparison, "added_slots": added}}
+        if len(json.dumps(response_probe, ensure_ascii=True).encode()) > MAX_REQUEST - 4096:
+            raise HouseholdError("menu edit cannot fit the response transport")
         commit = {"successor": successor, "replaced_slot_ids": sorted(changed), "locked_slot_ids": [],
                   "planner_input": {}, "replan_digest": signature, "shopping_comparison": comparison}
         with self._menu_save_commit(current) as state:
@@ -1092,6 +1124,8 @@ class PlanningOperations:
                 return {**prior, "idempotent": True}
             if self._household_today(state).isoformat() != today or self._replan_state_digest(state) != self._replan_state_digest(snapshot):
                 raise HouseholdError("menu or household state changed; read the menu and try again")
+            if state.get("pending_cart_change"):
+                raise HouseholdError("reconcile the pending cart change before editing this menu")
             pending = state.get("pending_checkout") or state.get("order_change")
             if state.get("pending_cancellation") or pending and self._independent_menu_protection(state, current) is None:
                 raise HouseholdError("reconcile the linked or unidentified protected operation before editing this menu")

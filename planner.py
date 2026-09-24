@@ -641,13 +641,19 @@ def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, A
     for candidate in selected:
         components = candidate.get("leafy_components") or [candidate]
         rows = [_leafy_dinner(component) for component in components]
-        grams = sum(row.get("listed_grams_per_serving") or 0 for row in rows
-                    if row.get("assessment") == "substantial" or row.get("source") == "legacy_heuristic")
+        grams = sum(row.get("listed_grams_per_serving") or 0 for component, row in zip(components, rows)
+                    if not component.get("partial_coverage") and
+                    (row.get("assessment") == "substantial" or row.get("source") == "legacy_heuristic"))
+        partial = any(component.get("partial_coverage") and row.get("counts") is True
+                      for component, row in zip(components, rows))
         counts = (True if grams >= MIN_LEAFY_GRAMS_PER_SERVING else
+                  None if partial else
                   None if any(row["counts"] is None for row in rows) else False)
         row = {**rows[0], "counts": counts, "listed_grams_per_serving": grams or rows[0].get("listed_grams_per_serving")}
         if len(rows) > 1:
             row["components"] = rows
+        if partial:
+            row["partial_side_coverage"] = True
         if candidate.get("date"):
             row["date"] = candidate["date"]
         assessments.append(row)
@@ -780,6 +786,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]})
     import menu_planning as mp
+    import batch_planning as bp
     recipes = {recipe.get("recipe_key"): recipe for recipe in menu["dishes"]
                if isinstance(recipe, Mapping) and isinstance(recipe.get("recipe_key"), str)}
     has_explicit_slots = isinstance(menu.get("slots"), list)
@@ -800,7 +807,6 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             "target": target, "status": "unknown",
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
         } for target in targets]})
-    planned_facts = {}
     new_assessment_slots = set()
     for field in ("planner_selection", "replan_selection"):
         planner_selection = menu.get(field)
@@ -812,18 +818,9 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             if (planner_selection.get("planner_version") == PLANNER_VERSION
                     and isinstance(slot, Mapping)):
                 new_assessment_slots.add((slot.get("date"), slot.get("recipe_key")))
-            facets = slot.get("dietary_facets") if isinstance(slot, Mapping) else None
-            recipe_key = slot.get("recipe_key") if isinstance(slot, Mapping) else None
-            if (
-                isinstance(recipe_key, str) and isinstance(facets, Mapping)
-                and isinstance(facets.get("values"), list)
-                and isinstance(facets.get("vegetable_types"), list)
-                and isinstance(facets.get("complete"), bool)
-            ):
-                planned_facts[recipe_key] = deepcopy(dict(facets))
     def candidate_for(slot, recipe):
         return {"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
-        "dietary_facets": deepcopy(planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)),
+        "dietary_facets": _derived_dietary(recipe),
         "leafy_green": (
             deepcopy(slot["leafy_green"])
             if isinstance(slot, Mapping) and isinstance(slot.get("leafy_green"), Mapping)
@@ -841,10 +838,18 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         candidate = candidate_for(slot, recipe)
         if isinstance(slot, Mapping):
             sides = [side for side in menu["slots"] if isinstance(side, Mapping)
-                     and slot.get("date") is not None and side.get("date") == slot.get("date") and
-                     (side.get("meal_type") == "side" or side.get("meal_type") == "dinner" and side is not slot)]
-            candidate["leafy_components"] = [candidate] + [candidate_for(side, mp.recipe_for_slot(menu, side, allow_stale=True)
-                if side.get("slot_id") else recipes.get(side.get("recipe_key"))) for side in sides]
+                     and side.get("date") == slot.get("date") and side.get("meal_type") == "side"
+                     and side.get("served_with") == "dinner"]
+            components = [candidate]
+            for side in sides:
+                component = candidate_for(side, mp.recipe_for_slot(menu, side, allow_stale=True)
+                    if side.get("slot_id") else recipes.get(side.get("recipe_key")))
+                try:
+                    component["partial_coverage"] = bp.fraction(side.get("portions")) < bp.fraction(slot.get("portions"))
+                except HouseholdError:
+                    component["partial_coverage"] = True
+                components.append(component)
+            candidate["leafy_components"] = components
         selected.append(candidate)
     selected = tuple(selected)
     return with_policy({"complete_menu": True, **_strict_evaluation(selected, targets, profile)})

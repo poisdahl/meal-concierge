@@ -1590,6 +1590,10 @@ Each addition has its own 1–100 person portions. Every recipe category is
 accepted as `meal_type`: breakfast, brunch, lunch, dinner, starter, side, dessert,
 snack, baking, bread, drink, sauce, dressing, condiment and preserve. For example,
 add a sauce and two different side dishes as three additional slots on the dinner
+date. Set `served_with:"dinner"` on a side to associate it with that date's
+dinner; `"lunch"` or `"other"` keeps it separate. Dinner-associated sides must
+cover the dinner's portions to count fully toward the leafy-green target;
+partial coverage is reported as uncertain. There is at most one dinner slot per
 date. Recipes retain their source yield; unknown source servings are not replaced
 by the requested person count, including recipes measured in jars, loaves or volume.
 
@@ -1598,11 +1602,14 @@ by the requested person count, including recipes measured in jars, loaves or vol
 Every edit creates an immutable successor with exact predecessor history. A
 repeated recipe key creates another independent preparation snapshot. Linked
 later servings instead use `source_slot_id` or `source_edit_index` pointing to
-an earlier fresh add in the same request, with exact date and portions. The
+an earlier fresh add in the same request, with exact date and portions. Each
+linked side serving needs its own `served_with` value if served at dinner. The
 service sums the preparation portions and shops once. Its allocation makes no
 storage-safety assertion; the agent must judge suitability and report unknowns.
 Changing a source with linked servings requires changing its full future
-component together. Past, cooked and locked slots remain immutable. A menu
+component together. Editing an unrecorded confirmed batch drops that batch's
+old confirmation and leaves its revised suitability unassessed. Past, cooked
+and locked slots remain immutable. A menu
 permits up to 31 slots, including multiple courses on one date. `add_slot`
 remains supported for simple additions and for the first slot of an empty menu.
 Returned
@@ -1612,8 +1619,8 @@ separate operations. An uncertain call reuses the exact original key and content
 
 Dinner `replan_prepare` interprets `remaining_dates` as dinner dates and carries
 desserts, brunches and other additional slots unchanged. Dinner coverage and
-weekly dietary targets count each dinner date once; explicitly associated side
-slots on that date can contribute leafy greens, while lunch-only sides do not.
+weekly dietary targets count each dinner date once; sides marked
+`served_with:"dinner"` on that date can contribute leafy greens.
 Recipe
 delivery shows the date, meal type and portions for every saved slot.
 

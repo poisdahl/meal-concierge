@@ -125,14 +125,21 @@ def shopping_menu(menu, historical_ids=None):
     historical = set(menu.get("historical_slot_ids", []) if historical_ids is None else historical_ids)
     result["dishes"], result["salads"] = [], []
     batches = {b["source_slot_id"]: b for b in batch_planning.sources(menu)}
+    sources = {}
     for slot in preparation_slots(menu):
-        if slot["slot_id"] in historical:
-            continue
-        recipe = deepcopy(recipe_for_slot(menu, slot))
-        batch = batches.get(slot["slot_id"])
-        if batch:
-            batch_planning.scale_preparation(recipe, batch)
-        result["dishes"].append(recipe)
+        recipe = recipe_for_slot(menu, slot)
+        if id(recipe) in sources:
+            raise HouseholdError("two preparations share one recipe snapshot; exact occurrence accounting is unavailable")
+        sources[id(recipe)] = slot
+    for collection in ("dishes", "salads"):
+        for original in menu[collection]:
+            slot = sources.get(id(original))
+            if slot is None or slot["slot_id"] in historical:
+                continue
+            recipe = deepcopy(original)
+            if batch := batches.get(slot["slot_id"]):
+                batch_planning.scale_preparation(recipe, batch)
+            result[collection].append(recipe)
     return result
 
 
