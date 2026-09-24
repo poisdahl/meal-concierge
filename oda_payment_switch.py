@@ -234,10 +234,16 @@ def _native_vipps_binding(browser, url, context):
         observed = browser._invoke("network", "request", str(row["requestId"]))
         if not same_poll(observed) or observed.get("requestId") != row["requestId"]:
             return None
-        body = json.loads(observed.get("responseBody", ""))
-        status = body.get("status") if isinstance(body, dict) else None
-        if status not in {"PENDING", "SUBMITTED", "ACCEPTED", "REJECTED", "FAILED", "TIMEOUT"}:
-            return None
+        # Closed reader tabs may lose the body while retaining the exact
+        # observed request. Preserve its routing for a fresh native read;
+        # absent content establishes no outcome and never revives older proof.
+        raw_body = observed.get("responseBody")
+        status = None
+        if raw_body is not None:
+            body = json.loads(raw_body)
+            status = body.get("status") if isinstance(body, dict) else None
+            if status not in {"PENDING", "SUBMITTED", "ACCEPTED", "REJECTED", "FAILED", "TIMEOUT"}:
+                return None
         headers = {key: value for key, value in row["headers"].items()
                    if isinstance(key, str) and isinstance(value, str) and not key.startswith(":")
                    and key.lower() not in {"host", "content-length", "connection", "accept-encoding"}}
