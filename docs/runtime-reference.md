@@ -624,18 +624,25 @@ token is not proof of a terminal payment. Legacy attempts are adopted only when
 retained native evidence binds the same gateway, payment and independently
 verified order; missing evidence remains unresolved.
 
-For an explicit Oda cancellation with an active unresolved card or Vipps payment,
+For an explicit new-order Oda cancellation with an active unresolved card or Vipps payment,
 `orders cancel_prepare` returns the exact current checkout confirmation to
 `checkout abort_payment`. The abort journals its native cancellation fence before
 the click and retains the checkout; an uncertain result can only be observed on
 the same attempt. If the retained card tab is gone, an authenticated Oda
 inspection tab may read the same known payment ID's native terminal response;
 it never starts another cancellation. Positive payment acceptance is reconciled as a purchase.
-Positive closure permits a new same-order cancellation review, bound to the
-unchanged checkout and rechecked before the merchant cancellation click. Only
-verified merchant cancellation archives both original and recovery confirmations
-as cancelled. Refund and authorization release remain unknown without separate
-evidence.
+Positive closure permits a new same-order cancellation review for a new order. An
+unresolved Oda addition can proceed to exact original-order cancellation while
+its payment remains uncertain. The review binds the original receipt, account,
+order change and checkout journals, and uses an inspection tab so the hosted
+payment page survives. A changed receipt requires a new review. The final
+cancellation click rechecks both journals. Unknown cancellation keeps them for
+reconciliation and never repeats the click. Positive cancellation clears the
+matching order change and preserves any separate new-menu usage. The review is bound to the
+unchanged checkout and the full merchant receipt is read again before the final
+click. Only verified merchant cancellation archives both original
+and recovery confirmations as cancelled. Refund and authorization release remain
+unknown without separate evidence.
 
 Oda retry discount labels are descriptive data, not a promotion grammar. The
 parser reads signed itemized amounts from the bound summary, checks full bill

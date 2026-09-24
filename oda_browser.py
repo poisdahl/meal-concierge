@@ -3317,19 +3317,14 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         elif deadline is not None:
             self._cancellation_deadline = min(previous, deadline)
         operation = {"final_dispatched": False}
-        started = False
         try:
             if outer:
-                self._invoke("close", browser_args=CANCELLATION_BROWSER_ARGS)
-                self._clear_cancellation_cache()
-            started = True
-            yield operation
+                with self._inspection_tab():
+                    yield operation
+            else:
+                yield operation
         finally:
-            try:
-                if outer and started and operation["final_dispatched"] is not True:
-                    self._invoke("close", browser_args=CANCELLATION_BROWSER_ARGS)
-            finally:
-                self._cancellation_deadline = previous
+            self._cancellation_deadline = previous
 
     def _clear_cancellation_cache(self) -> None:
         profile = getattr(self, "profile", None)

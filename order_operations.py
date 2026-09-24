@@ -98,8 +98,19 @@ class OrderOperations:
     def _exact_checkout_order_for_cancellation(self, pending, order_id, deadline):
         """Bind an order to the frozen checkout, regardless of payment status."""
         if (self.provider != "oda" or not isinstance(pending, Mapping)
-                or pending.get("order_change") or pending.get("automatic_checkout")
-                or pending.get("unpaid_order_id") != order_id):
+                or pending.get("automatic_checkout")
+                or pending.get("unpaid_order_id") not in {None, order_id}):
+            raise HouseholdError("Cancellation requires the exact pending Oda order")
+        change = pending.get("order_change")
+        if change:
+            if (not isinstance(change, Mapping) or change.get("order_id") != order_id
+                    or change.get("kind") not in {None, "addition"}
+                    or change.get("requested_delivery") or change.get("delivery_only")
+                    or not pending.get("summary", {}).get("items")
+                    or (money_cents(pending["summary"].get("total")) or 0) <= 0
+                    or canonical(self.store.read().get("order_change")) != canonical(change)):
+                raise HouseholdError("Cancellation requires the exact pending Oda addition")
+        elif pending.get("unpaid_order_id") != order_id:
             raise HouseholdError("Cancellation requires the exact pending Oda order")
         child = pending.get("recovery")
         if isinstance(child, Mapping) and child.get("order_id") != order_id:
@@ -108,15 +119,24 @@ class OrderOperations:
         order = current["order"]
         require_provider_identity(order, order_id)
         require_provider_identity(current["tracking"], order_id, tracking=True)
-        delivery = pending["summary"]["delivery"]
-        expected_binding = require_order_binding({
-            "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
-            "receipt_address": delivery["address"],
-        })
-        addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
-            **order, "deliveryAddress": delivery["address"]}
-        if not order_matches_checkout(addressed, pending["summary"], provider="oda"):
-            raise HouseholdError("The merchant order differs from the pending checkout")
+        if change:
+            expected_binding = require_order_binding(change.get("binding"))
+            if canonical(require_order_binding(pending["browser_review"].get("binding"))) != canonical(expected_binding):
+                raise HouseholdError("The addition account differs from the original order")
+            original = change["before"]["order"]
+            if not (oda_order_matches_addition(original, order, {"items": [], "total": 0}, provider="oda")
+                    or oda_order_matches_addition(original, order, pending["summary"], provider="oda")):
+                raise HouseholdError("The merchant order differs from the pending addition")
+        else:
+            delivery = pending["summary"]["delivery"]
+            expected_binding = require_order_binding({
+                "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
+                "receipt_address": delivery["address"],
+            })
+            addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
+                **order, "deliveryAddress": delivery["address"]}
+            if not order_matches_checkout(addressed, pending["summary"], provider="oda"):
+                raise HouseholdError("The merchant order differs from the pending checkout")
         observed_binding = self.browser.read_order_binding(
             order_id, order, deadline=deadline, expected_binding=expected_binding)
         if canonical(require_order_binding(observed_binding)) != canonical(expected_binding):
@@ -221,7 +241,12 @@ class OrderOperations:
                                          target_id=order_id,
                                          intent_signature=checkout_intent_signature(pending["summary"]))
             state["protected_results"][confirmation_id]["cancelled_attempt"] = deepcopy(attempt)
-        self._release_detached_checkout_usage(state, pending)
+        if pending.get("order_change"):
+            if canonical(state.get("order_change")) != canonical(pending["order_change"]):
+                raise HouseholdError("The order change changed while closing the cancelled order")
+            state["order_change"] = None
+        else:
+            self._release_detached_checkout_usage(state, pending)
         state["pending_checkout"] = None
 
     @staticmethod
@@ -265,8 +290,11 @@ class OrderOperations:
         if (not isinstance(checkout, Mapping)
                 or self._checkout_cancellation_digest(checkout) != digest
                 or (checkout.get("recovery") or checkout).get("confirmation_id") != cancellation.get("checkout_confirmation_id")
-                or checkout.get("unpaid_order_id") != cancellation.get("order_id")
-                or not self._checkout_payment_closed(checkout)):
+                or checkout.get("unpaid_order_id") not in ({None, cancellation.get("order_id")} if checkout.get("order_change") else {cancellation.get("order_id")})
+                or (checkout.get("order_change") and
+                    (canonical(state.get("order_change")) != canonical(checkout["order_change"])
+                     or self._checkout_cancellation_digest(state.get("order_change")) != cancellation.get("order_change_digest")))
+                or (not checkout.get("order_change") and not self._checkout_payment_closed(checkout))):
             raise HouseholdError("the bound payment changed before order cancellation")
         return checkout
 
@@ -1575,37 +1603,48 @@ class OrderOperations:
                 baseline = deepcopy(state.get("pending_cancellation"))
                 if baseline and baseline.get("status") in {"clicking", "uncertain"}:
                     raise HouseholdError("reconcile the pending cancellation before preparing another")
-                if state.get("order_change"):
-                    raise HouseholdError("finish or abort the active order change before cancellation")
                 pending_checkout = deepcopy(state.get("pending_checkout"))
+                active_change = deepcopy(state.get("order_change"))
+                if active_change and not (self.provider == "oda" and pending_checkout
+                        and pending_checkout.get("status") in UNRESOLVED_CHECKOUT_STATUSES
+                        and pending_checkout.get("order_change")
+                        and canonical(active_change) == canonical(pending_checkout["order_change"])
+                        and active_change.get("order_id") == order_id
+                        and active_change.get("kind") in {None, "addition"}
+                        and not active_change.get("requested_delivery")
+                        and not active_change.get("delivery_only")):
+                    raise HouseholdError("finish or abort the active order change before cancellation")
             if (pending_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                if (self.provider != "oda" or pending_checkout.get("order_change")
-                        or pending_checkout.get("unpaid_order_id") != order_id
+                if (self.provider != "oda"
+                        or pending_checkout.get("unpaid_order_id") not in
+                           ({None, order_id} if pending_checkout.get("order_change") else {order_id})
                         or (pending_checkout.get("recovery") or {}).get("order_id", order_id) != order_id):
                     raise HouseholdError("reconcile the pending checkout before preparing cancellation")
                 attempt = pending_checkout.get("recovery") or pending_checkout
                 confirmation_id = attempt.get("confirmation_id")
-                abort = attempt.get("payment_abort") or {}
-                if (abort.get("closure") or {}).get("status") == "paid":
-                    return {"available": False, "order_id": order_id, "retry_allowed": False,
-                            "next_action": {"operation": "checkout", "action": "reconcile",
-                                            "confirmation_id": confirmation_id},
-                            "next": "The exact payment reports acceptance. Reconcile it before any order cancellation."}
-                if not self._checkout_payment_closed(pending_checkout):
-                    method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is not pending_checkout else (pending_checkout.get("checkout_payment") or {}).get("method")
-                    context = attempt.get("authentication_context") if method == "saved_card" else attempt.get("vipps_request_context")
-                    next_action = {"operation": "checkout", "action": "abort_payment" if isinstance(context, Mapping) else "reconcile",
-                                   "confirmation_id": confirmation_id}
-                    return {"available": False, "order_id": order_id, "retry_allowed": False,
-                            "next_action": next_action,
-                            "next": "Close or observe this exact pending payment before preparing cancellation; preserve its checkout journal. A missing bank approval is not proof of failure."}
+                if not pending_checkout.get("order_change"):
+                    abort = attempt.get("payment_abort") or {}
+                    if (abort.get("closure") or {}).get("status") == "paid":
+                        return {"available": False, "order_id": order_id, "retry_allowed": False,
+                                "next_action": {"operation": "checkout", "action": "reconcile",
+                                                "confirmation_id": confirmation_id},
+                                "next": "The exact payment reports acceptance. Reconcile it before any order cancellation."}
+                    if not self._checkout_payment_closed(pending_checkout):
+                        method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is not pending_checkout else (pending_checkout.get("checkout_payment") or {}).get("method")
+                        context = attempt.get("authentication_context") if method == "saved_card" else attempt.get("vipps_request_context")
+                        next_action = {"operation": "checkout", "action": "abort_payment" if isinstance(context, Mapping) else "reconcile",
+                                       "confirmation_id": confirmation_id}
+                        return {"available": False, "order_id": order_id, "retry_allowed": False,
+                                "next_action": next_action,
+                                "next": "Close or observe this exact pending payment before preparing cancellation; preserve its checkout journal. A missing bank approval is not proof of failure."}
             current = self._orders({"action": "get", "order_id": order_id, "_deadline": cancellation_deadline})
             with self._browser_operation(cancellation_deadline):
                 state = self.store.read()
                 active_checkout = deepcopy(state.get("pending_checkout"))
                 if (active_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
                     if (canonical(active_checkout) != canonical(pending_checkout)
-                            or not self._checkout_payment_closed(active_checkout)):
+                            or (not active_checkout.get("order_change")
+                                and not self._checkout_payment_closed(active_checkout))):
                         raise HouseholdError("the pending payment changed before cancellation review")
                     current = self._exact_checkout_order_for_cancellation(
                         active_checkout, order_id, cancellation_deadline)
@@ -1618,7 +1657,9 @@ class OrderOperations:
                             self._archive_cancelled_checkout(locked, active_checkout, order_id)
                         return {"cancelled": True, "order_id": order_id, "retry_allowed": False,
                                 "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"}}
-                if state.get("order_change"):
+                if canonical(state.get("order_change")) != canonical(active_change):
+                    raise HouseholdError("the order change changed before cancellation review")
+                if state.get("order_change") and not active_checkout.get("order_change"):
                     raise HouseholdError("finish or abort the active order change before cancellation")
                 browser = self.browser.review_cancellation(order_id, current["order"], deadline=cancellation_deadline)
                 if browser.get("available") is not True:
@@ -1627,9 +1668,12 @@ class OrderOperations:
                 with self.store.locked() as state:
                     if canonical(state.get("pending_cancellation")) != canonical(baseline):
                         raise HouseholdError("cancellation state changed while preparing the summary")
+                    if canonical(state.get("pending_checkout")) != canonical(active_checkout) or canonical(state.get("order_change")) != canonical(active_change):
+                        raise HouseholdError("the payment or order change changed while preparing cancellation")
                     state["pending_cancellation"] = {"order_id": order_id, "confirmation_id": confirmation_id, "before": current, "browser": browser, "expires_at": (self._now() + timedelta(minutes=30)).isoformat(), "status": "awaiting_confirmation",
                                                      **({"checkout_digest": self._checkout_cancellation_digest(active_checkout),
-                                                         "checkout_confirmation_id": (active_checkout.get("recovery") or active_checkout)["confirmation_id"]}
+                                                         "checkout_confirmation_id": (active_checkout.get("recovery") or active_checkout)["confirmation_id"],
+                                                         **({"order_change_digest": self._checkout_cancellation_digest(active_change)} if active_checkout.get("order_change") else {})}
                                                         if (active_checkout or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES else {})}
                 return {
                     "available": True,
@@ -1734,6 +1778,13 @@ class OrderOperations:
             def before_click() -> None:
                 if self._now() >= datetime.fromisoformat(pending["expires_at"]):
                     raise CancellationPreconditionError("cancellation confirmation expired before the final click")
+                if pending.get("order_change_digest"):
+                    try:
+                        fresh_order = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
+                    except HouseholdError as exc:
+                        raise CancellationPreconditionError(str(exc)) from exc
+                    if canonical(fresh_order) != canonical(pending["before"]):
+                        raise CancellationPreconditionError("the merchant order changed before the final cancellation click")
                 with self.store.locked() as state:
                     current_pending = state.get("pending_cancellation")
                     if not current_pending or current_pending.get("status") != "clicking":
@@ -5285,6 +5336,23 @@ class OrderOperations:
         current_id = str((current.get("order") or {}).get("orderNumber") or (current.get("order") or {}).get("order_number") or "")
         tracking_id = str((current.get("tracking") or {}).get("order_id") or (current.get("tracking") or {}).get("orderNumber") or "")
         status = str((current.get("tracking") or {}).get("status") or "").casefold()
+        if (self.provider == "oda" and status in {"cancelled", "canceled"}
+                and current_id == tracking_id == order_id
+                and not self.store.read().get("pending_cancellation")):
+            verified = self._exact_checkout_order_for_cancellation(pending, order_id, deadline)
+            if str((verified.get("tracking") or {}).get("status") or "").casefold() not in {"cancelled", "canceled"}:
+                raise HouseholdError("Merchant cancellation status changed during verification; preserve the payment and order-change journals and reconcile again")
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("The checkout changed while verifying merchant cancellation")
+                self._mark_order_cancelled(state, order_id, provider=self.provider,
+                                           active_provider=self.provider)
+                self._archive_cancelled_checkout(state, pending, order_id)
+            return {"confirmed": False, "cancelled": True, "order_id": order_id,
+                    "confirmation_id": (pending.get("recovery") or pending)["confirmation_id"],
+                    "retry_allowed": False,
+                    "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
+                    "next": "The exact merchant order is cancelled. Do not confirm or retry its payment."}
         if self.provider == "meny":
             matched = confirmation_order_id == order_id and meny_order_matches_checkout(current["order"], pending["summary"])
             if change.get("requested_delivery"):

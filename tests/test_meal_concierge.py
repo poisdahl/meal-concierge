@@ -1371,6 +1371,33 @@ process.stdout.write(eval(script));
         self.assertFalse(oda_order_matches_addition(before, {**after, "grossAmount": 124.0}, additions))
         self.assertFalse(oda_order_matches_addition(before, {**after, "deliveryDate": "2026-09-12", "deliverySlotDisplay": "Lør 12. sep 18:00 - 20:00"}, additions))
 
+    def test_cancellation_operation_preserves_retained_payment_tab(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser._cancellation_deadline = None
+        selected = ["payment-tab"]
+        calls = []
+
+        def invoke(*arguments, **kwargs):
+            calls.append(arguments)
+            if arguments == ("tab", "list"):
+                return {"tabs": [
+                    {"tabId": "payment-tab", "active": selected[0] == "payment-tab"},
+                    {"tabId": "inspection-tab", "label": "meal-concierge-order-inspection",
+                     "active": selected[0] == "inspection-tab"},
+                ]}
+            if arguments == ("tab", "inspection-tab"):
+                selected[0] = "inspection-tab"
+            if arguments == ("tab", "payment-tab"):
+                selected[0] = "payment-tab"
+            return {}
+
+        browser._invoke = invoke
+        with browser._cancellation_operation():
+            self.assertEqual(selected[0], "inspection-tab")
+        self.assertEqual(selected[0], "payment-tab")
+        self.assertNotIn(("close",), calls)
+        self.assertNotIn(("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), calls)
+
     def test_cancellation_review_checks_normalized_delivery_before_click(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         binding = {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}
@@ -1391,10 +1418,11 @@ process.stdout.write(eval(script));
         self.assertEqual(browser.review_cancellation("test-oda-order", order), {"available": True, "consequence": None, "binding": binding})
         self.assertEqual(opened, ["test-oda-order"])
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
             (("click", "[data-oda-household-cancel-review]"), CANCELLATION_BROWSER_ARGS),
             (("click", "[data-oda-household-cancel-dismiss]"), CANCELLATION_BROWSER_ARGS),
-            (("close",), CANCELLATION_BROWSER_ARGS),
         ])
         self.assertTrue(all(browser_args == CANCELLATION_BROWSER_ARGS for _script, browser_args in scripts))
         self.assertIn("document.querySelectorAll('[data-oda-household-cancel-review]')", scripts[0][0])
@@ -1405,8 +1433,9 @@ process.stdout.write(eval(script));
         invoked.clear()
         self.assertFalse(browser.review_cancellation("test-oda-order", order)["available"])
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
         ])
 
         with self.assertRaisesRegex(HouseholdError, "delivery is unavailable"):
@@ -1421,8 +1450,9 @@ process.stdout.write(eval(script));
         invoked.clear()
         self.assertFalse(browser.review_cancellation("test-oda-order", order)["available"])
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
         ])
 
 
@@ -1513,7 +1543,7 @@ process.stdout.write(eval(script));
         with self.assertRaisesRegex(HouseholdError, "left the requested order page"):
             browser._open_order("test-oda-order")
 
-    def test_cancellation_submit_relaunches_once_and_keeps_final_dispatch_alive(self):
+    def test_cancellation_submit_uses_inspection_tab_and_keeps_final_dispatch_alive(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         review = {"available": True, "consequence": None, "binding": {"account_reference_digest": "a" * 64, "receipt_address": "Eksempelveien 1"}}
         browser._review_cancellation = lambda *_arguments, **_kwargs: review
@@ -1526,7 +1556,9 @@ process.stdout.write(eval(script));
         browser.submit_cancellation("test-oda-order", {}, review)
 
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
             (("click", "[data-oda-household-cancel-submit-open]"), CANCELLATION_BROWSER_ARGS),
             (("click", "[data-oda-household-cancel-submit-final]"), CANCELLATION_BROWSER_ARGS),
         ])
@@ -1554,7 +1586,9 @@ process.stdout.write(eval(script));
             browser.submit_cancellation("test-oda-order", {}, review)
 
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
             (("click", "[data-oda-household-cancel-submit-open]"), CANCELLATION_BROWSER_ARGS),
             (("click", "[data-oda-household-cancel-submit-final]"), CANCELLATION_BROWSER_ARGS),
         ])
@@ -1575,9 +1609,10 @@ process.stdout.write(eval(script));
                 browser.submit_cancellation("test-oda-order", {}, review, deadline=20.0)
 
         self.assertEqual(invoked, [
-            (("close",), CANCELLATION_BROWSER_ARGS),
+            (("tab", "list"), None),
+            (("tab", "list"), None),
+            (("tab", "new", "--label", "meal-concierge-order-inspection", "https://oda.com/no/"), None),
             (("click", "[data-oda-household-cancel-submit-open]"), CANCELLATION_BROWSER_ARGS),
-            (("close",), CANCELLATION_BROWSER_ARGS),
         ])
         self.assertIsNone(browser._cancellation_deadline)
 
@@ -9047,7 +9082,7 @@ class FlowTests(unittest.TestCase):
 
             provider.call = racing_call
             app = Application(store, provider, self.browser)
-            with self.assertRaisesRegex(HouseholdError, "active order change"):
+            with self.assertRaisesRegex(HouseholdError, "order change changed before cancellation review"):
                 app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "99990001"})
             self.assertEqual(provider.cancellation_review_deadlines, [])
             self.assertIsNone(store.read()["pending_cancellation"])
