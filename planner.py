@@ -19,7 +19,7 @@ from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v5"
+PLANNER_VERSION = "weekly-menu-v6"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
@@ -150,10 +150,27 @@ def normalize_candidate_facts(value: Any) -> dict[str, Any]:
     if value is None:
         value = {}
     if not isinstance(value, Mapping) or set(value).difference(
-        {"active_minutes", "dietary_facets", "variety_facets", "perishability", "batch_guidance"}
+        {"active_minutes", "dietary_facets", "variety_facets", "perishability", "batch_guidance", "leafy_green"}
     ):
         raise PlannerError("candidate facts have unknown fields")
     result: dict[str, Any] = {}
+    if "leafy_green" in value:
+        raw = value["leafy_green"]
+        _source(raw, "facts.leafy_green", {"assessment", "ingredient_indices", "basis"})
+        assessment = raw.get("assessment")
+        indices = raw.get("ingredient_indices")
+        basis = raw.get("basis")
+        if assessment not in {"substantial", "does_not_count", "unknown"}:
+            raise PlannerError("facts.leafy_green.assessment is invalid")
+        if (not isinstance(indices, list) or len(indices) > 20
+                or any(type(index) is not int or not 0 <= index < 200 for index in indices)
+                or len(set(indices)) != len(indices)
+                or (assessment == "substantial" and not indices)):
+            raise PlannerError("substantial leafy assessment needs exact ingredient indices")
+        if not isinstance(basis, str) or not 1 <= len(basis.strip()) <= 500:
+            raise PlannerError("facts.leafy_green.basis must be bounded text")
+        result["leafy_green"] = {"source": "explicit", "assessment": assessment,
+                                 "ingredient_indices": indices, "basis": basis.strip()}
     if "batch_guidance" in value:
         guidance = value['batch_guidance']
         if not isinstance(guidance, dict) or set(guidance) != {'basis', 'suitability', 'storage', 'reheating'} or any(not isinstance(v, str) or not 1 <= len(v.strip()) <= 1000 for v in guidance.values()) or guidance['suitability'] not in {'suitable', 'unsuitable', 'unknown'}:
@@ -297,6 +314,7 @@ def _effective_facts(recipe: Mapping[str, Any], supplied: Any) -> dict[str, Any]
         "perishability": facts.get(
             "perishability", {"source": "unknown", "value": "unknown"}
         ),
+        "leafy_green": facts.get("leafy_green", {"source": "heuristic"}),
     }
 
 
@@ -503,11 +521,9 @@ def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping
         reasons.append(_reason("diet:prioritise", 4 if facet in facets else 0,
                                {"preference": preference, "evidence": "positive_ingredient_match" if facet in facets else "unknown" if facet else "unsupported"}))
     if diet.get("leafy_green_days"):
-        grams = _listed_leafy_mass(recipe)
-        reasons.append(_reason("diet:leafy_green_dinner", 5 if grams is not None and grams >= MIN_LEAFY_GRAMS_PER_SERVING else 0,
-                               {"day": day, "listed_grams_per_serving": grams,
-                                "minimum_grams_per_serving": MIN_LEAFY_GRAMS_PER_SERVING,
-                                "evidence": "substantial_listed_amount" if grams is not None and grams >= MIN_LEAFY_GRAMS_PER_SERVING else "insufficient_or_unknown"}))
+        leafy = _leafy_dinner(candidate)
+        reasons.append(_reason("diet:leafy_green_dinner", 5 if leafy["counts"] is True else 0,
+                               {"day": day, **leafy}))
     return reasons
 
 
@@ -539,43 +555,94 @@ def _listed_fish_mass(recipe: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _listed_leafy_mass(recipe: Mapping[str, Any]) -> float | None:
-    """Count a dinner only from a substantial listed leaf quantity per serving."""
+    """Conservative legacy hint for unassessed, plainly named leaves."""
     try:
         scaled = scale_recipe(recipe, 1)
     except RecipeError:
         return None
     grams = 0.0
-    unknown = False
+    found = False
     for item in scaled["ingredients"]:
         if item.get("optional") or item.get("pantry"):
             continue
         identity = _text(item.get("item"))
-        if not _contains_term(identity, LEAFY_TERMS):
+        if identity not in LEAFY_TERMS:
+            # A mixed product such as spinach pasta is not its full weight in
+            # leaves. Unfamiliar names require a culinary assessment too.
+            if _contains_term(identity, LEAFY_TERMS):
+                return None
             continue
+        found = True
         unit = UNITS.get(normalized_unit(item.get("unit")))
         if unit is None or unit[0] != "g":
-            unknown = True
-            continue
+            return None
         try:
             grams += float(read_quantity(item.get("quantity"), legacy_float=recipe.get("schema_version") == 1) * unit[1])
         except ValueError:
-            unknown = True
-    return None if unknown and grams < MIN_LEAFY_GRAMS_PER_SERVING else grams
+            return None
+    return grams if found else None
+
+
+def _leafy_dinner(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep agent culinary judgment distinct from checked recipe arithmetic."""
+    recipe = candidate["recipe"]
+    fact = (candidate.get("facts") or {}).get("leafy_green") or {"source": "heuristic"}
+    if fact["source"] == "unavailable":
+        return {"source": "unavailable", "counts": None, "detail": "saved_assessment_missing_or_stale"}
+    if fact["source"] == "heuristic":
+        grams = _listed_leafy_mass(recipe)
+        return {"source": "legacy_heuristic", "counts": True if grams is not None and grams >= MIN_LEAFY_GRAMS_PER_SERVING else None,
+                "listed_grams_per_serving": grams,
+                "detail": "plain_leaf_mass_hint" if grams is not None else "unassessed_or_ambiguous_ingredient"}
+    assessment = fact["assessment"]
+    result = {"source": "agent_assessment", "assessment": assessment,
+              "ingredient_indices": deepcopy(fact["ingredient_indices"]), "basis": fact["basis"]}
+    if any(index >= len(recipe.get("ingredients", [])) for index in fact["ingredient_indices"]):
+        return {**result, "counts": None, "quantity_evidence": "ingredient_index_missing"}
+    if assessment != "substantial":
+        return {**result, "counts": False if assessment == "does_not_count" else None,
+                "quantity_evidence": "not_needed_for_nonpositive_assessment"}
+    try:
+        scaled = scale_recipe(recipe, 1)
+    except RecipeError:
+        return {**result, "counts": None, "quantity_evidence": "unavailable"}
+    checked = []
+    for index in fact["ingredient_indices"]:
+        if index >= len(scaled["ingredients"]):
+            return {**result, "counts": None, "quantity_evidence": "ingredient_index_missing"}
+        item = scaled["ingredients"][index]
+        if item.get("optional") or item.get("pantry") or item.get("scalable") is not True:
+            return {**result, "counts": None, "quantity_evidence": "ingredient_not_required_or_scalable"}
+        unit = UNITS.get(normalized_unit(item.get("unit")))
+        if unit is None or unit[0] != "g":
+            return {**result, "counts": None, "quantity_evidence": "mass_unit_unavailable"}
+        try:
+            mass = read_quantity(item.get("quantity"), legacy_float=recipe.get("schema_version") == 1) * unit[1]
+        except ValueError:
+            return {**result, "counts": None, "quantity_evidence": "quantity_unavailable"}
+        if mass <= 0:
+            return {**result, "counts": None, "quantity_evidence": "quantity_unavailable"}
+        grams = float(mass)
+        checked.append({"ingredient_index": index, "item": item.get("item"), "listed_grams_per_serving": grams})
+    return {**result, "counts": True,
+            "listed_grams_per_serving": sum(item["listed_grams_per_serving"] for item in checked),
+            "quantity_evidence": "mechanically_verified"}
 
 
 def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]) -> dict[str, Any] | None:
     target = (profile.get("diet") or {}).get("leafy_green_days")
     if not target:
         return None
-    amounts = [_listed_leafy_mass(candidate["recipe"]) for candidate in selected]
-    counted = sum(amount is not None and amount >= MIN_LEAFY_GRAMS_PER_SERVING for amount in amounts)
-    unknown = sum(amount is None for amount in amounts)
+    assessments = [_leafy_dinner(candidate) for candidate in selected]
+    counted = sum(item["counts"] is True for item in assessments)
+    unknown = sum(item["counts"] is None for item in assessments)
     minimum, maximum = target
     status = ("fail" if counted > maximum or counted + unknown < minimum else
-              "pass" if unknown == 0 and minimum <= counted <= maximum else "unknown")
+              "pass" if counted >= minimum and counted + unknown <= maximum else "unknown")
     return {"target_range": [minimum, maximum], "counted_dinners": counted,
-            "unknown_dinners": unknown, "listed_grams_per_serving": amounts,
-            "minimum_grams_per_serving": MIN_LEAFY_GRAMS_PER_SERVING, "status": status}
+            "unknown_dinners": unknown, "dinner_assessments": assessments,
+            "listed_grams_per_serving": [item.get("listed_grams_per_serving") for item in assessments],
+            "status": status}
 
 
 def _positive_int(profile: Mapping[str, Any], field: str, default: int) -> int:
@@ -709,6 +776,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         [recipes.get(slot.get("recipe_key")) for slot in dinner_slots]
         if has_explicit_slots else list(recipes.values())
     )
+    selected_slots = dinner_slots if has_explicit_slots else [None] * len(selected_recipes)
     expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
@@ -716,6 +784,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
         } for target in targets]})
     planned_facts = {}
+    new_assessment_slots = set()
     for field in ("planner_selection", "replan_selection"):
         planner_selection = menu.get(field)
         selection = planner_selection.get("selection") if isinstance(planner_selection, Mapping) else None
@@ -723,6 +792,9 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         if not isinstance(slots, list):
             continue
         for slot in slots:
+            if (planner_selection.get("planner_version") == PLANNER_VERSION
+                    and isinstance(slot, Mapping)):
+                new_assessment_slots.add((slot.get("date"), slot.get("recipe_key")))
             facets = slot.get("dietary_facets") if isinstance(slot, Mapping) else None
             recipe_key = slot.get("recipe_key") if isinstance(slot, Mapping) else None
             if (
@@ -732,9 +804,19 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 and isinstance(facets.get("complete"), bool)
             ):
                 planned_facts[recipe_key] = deepcopy(dict(facets))
-    selected = tuple({"recipe": recipe, "facts": {"dietary_facets": deepcopy(
-        planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)
-    )}} for recipe in selected_recipes)
+    selected = tuple({"recipe": recipe, "facts": {
+        "dietary_facets": deepcopy(planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)),
+        "leafy_green": (
+            deepcopy(slot["leafy_green"])
+            if isinstance(slot, Mapping) and isinstance(slot.get("leafy_green"), Mapping)
+            and slot.get("snapshot_digest") == digest(recipe)
+            else {"source": "heuristic"}
+            if isinstance(slot, Mapping) and "leafy_green" not in slot
+            and slot.get("snapshot_digest") == digest(recipe)
+            and (slot.get("date"), slot.get("recipe_key")) not in new_assessment_slots
+            else {"source": "unavailable"} if has_explicit_slots else {"source": "heuristic"}
+        ),
+    }} for slot, recipe in zip(selected_slots, selected_recipes, strict=True))
     return with_policy({"complete_menu": True, **_strict_evaluation(selected, targets, profile)})
 
 
@@ -906,6 +988,7 @@ def _selection(
             "portions": portions,
             "hard_constraints": deepcopy(candidate["hard_constraints"]),
             "dietary_facets": deepcopy(candidate["facts"]["dietary_facets"]),
+            "leafy_green": deepcopy(candidate["facts"]["leafy_green"]),
             "reason_contributions": reasons,
             "score": sum(reason["weight"] for reason in reasons),
         })

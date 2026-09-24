@@ -89,17 +89,48 @@ establish meal completeness. Explicitly requested other meals use menu
 Unknown/non-scalable ingredient measures remain visible in saved menus with
 `scaling_ready=false`, and products remain unresolved without invented amounts.
 
-Planner version `weekly-menu-v4` adds category-aware dinner selection and retains exact recipe-tag matches for
+Planner version `weekly-menu-v6` adds attributed leafy-green assessment to
+category-aware dinner selection and retains exact recipe-tag matches for
 `cuisine.wanted`/`flavours`, personal favorites, documented English/Norwegian
 food-category matches for `diet.prioritise`, and a weekly range in
 `diet.leafy_green_days`. `[4,5]` means four or five dinners on any days of
-the week; the days can vary between menus. Positive evidence requires at least
-25 g of listed leafy greens (such as spinach, kale, chard or salad leaves) per person in a dinner. Optional herbs and
-small garnish quantities do not satisfy the target; unknown quantities remain
-unknown. Whole grains and potatoes
+the week; the days can vary between menus. The agent judges whether actual
+leafy greens form a meaningful part of dinner. Herbs, small garnishes and the
+total weight of mixed products such as spinach pasta do not establish a leafy
+serving. Whole grains and potatoes
 are distinct for whole-grain preference scoring. Existing time, feedback,
 variety and dinner/vegetable targets remain assessed; agent-mode numerical
 goals are advisory unless explicitly strict.
+
+Supply that judgment through the existing candidate facts, for example:
+
+```json
+{"leafy_green":{"source":"explicit","assessment":"substantial","ingredient_indices":[0],"basis":"The tatsoi in ingredient 0 is a vegetable component of the dinner, not a garnish."}}
+```
+
+`assessment` is `substantial`, `does_not_count` or `unknown`. Indices are
+zero-based positions in the exact candidate recipe. A positive assessment needs
+actual required, non-pantry ingredient lines with supported positive mass
+quantities. The service calculates their listed amount per person; unsupported
+units remain unknown rather than receiving an invented conversion. Ingredient
+identity and culinary relevance are attributed to the agent, while the quantity
+calculation is derived from the recipe. A rationale without those ingredient
+references and usable quantities cannot establish a positive strict result.
+
+The assessment travels with the existing frozen menu recipe/slot and is bound to
+its content. Relevant edits require a fresh assessment; stale evidence must not
+silently become a positive fallback result. Ordinary numeric goals remain
+advisory in agent mode. An explicit strict leafy-day target uses the assessed
+count and still rejects an unresolved result; it does not certify nutrition or
+allergen safety.
+
+Recipes without an agent assessment use a conservative, attributed heuristic.
+Its existing 25 g per-person threshold is a fallback, not a universal definition
+of a substantial serving or a veto on an explicit culinary assessment. Ambiguous
+mixed ingredients and unrecognized possible greens cannot be credited with their
+whole weight. Weekly evaluation tracks the interval from confirmed qualifying
+dinners to confirmed plus unresolved dinners: it passes only when that entire
+interval is inside the requested range.
 
 Recognized plain fish ingredients with usable mass/serving evidence contribute
 listed grams per serving toward the weekly fish range. Mixed products and

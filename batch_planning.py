@@ -268,5 +268,6 @@ def attach_recurring(menu, layout, resolved):
         batches.append(spec)
     menu['batches'] = batches
     menu['slots'].sort(key=lambda s: s['date'])
-    menu['planning_scope'] = {'dates': [s['date'] for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
+    menu['planning_scope'] = {**menu.get('planning_scope', {}),
+        'dates': [s['date'] for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
     menu['schedule'] = mp.schedule(menu)

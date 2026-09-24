@@ -661,7 +661,8 @@ class PlanningOperations:
         carried = [deepcopy(s) for s in current["slots"] if s["slot_id"] not in replaced]
         leftover_slots = [{"slot_id":d["slot_id"], "date":d["date"], "meal_type":d["meal_type"], "kind":"leftover",
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
-            "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"]} for d in spec["leftovers"]]
+            "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"],
+            **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {})} for d in spec["leftovers"]]
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=mp.slot_order),
             "dishes":[], "salads":[], "batch":spec, "batches":deepcopy(bp.sources(current))+[spec], "supersedes":mp.menu_ref(current),
             "planner_selection":deepcopy(current.get("planner_selection")),
@@ -1336,8 +1337,13 @@ class PlanningOperations:
             "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": slot["date"]})[:32],
             "date": slot["date"], "meal_type": "dinner", "portions": slot["portions"], "recipe_key": slot["recipe_key"],
             "reference": deepcopy(slot["reference"]), "snapshot_digest": mp.digest(recipe),
+            "leafy_green": deepcopy(slot["leafy_green"]),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
         if handoff['request'].get('recurring_batch'):
+            menu["planning_scope"] = {
+                "selection_mode": handoff["request"].get("selection_mode", "ranked"),
+                "strict_targets": deepcopy(handoff["request"].get("strict_targets", [])),
+            }
             bp.attach_recurring(menu, handoff['request']['recurring_batch'], resolved)
         if handoff["request"].get("available_ingredients"):
             menu["available_ingredients"] = deepcopy(handoff["request"]["available_ingredients"])

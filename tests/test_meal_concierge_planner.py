@@ -111,7 +111,11 @@ class WeeklyPlannerTests(unittest.TestCase):
                               ingredient="spinat" if day in leafy_days else "gulrot")
                 dish["ingredients"].append({"item": "koriander", "quantity": 10,
                                             "unit": "g", "scalable": True})
-                selected.append({"recipe": dish})
+                selected.append({"recipe": dish, "facts": {"leafy_green": {
+                    "source": "explicit", "assessment": "substantial" if day in leafy_days else "does_not_count",
+                    "ingredient_indices": [0] if day in leafy_days else [],
+                    "basis": "A leafy vegetable component" if day in leafy_days else "No leafy component",
+                }}})
             return planner._leafy_week(tuple(selected), profile)
 
         first = week({0, 1, 3, 5})
@@ -120,6 +124,13 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual((second["status"], second["counted_dinners"]), ("pass", 5))
         self.assertEqual(week({0, 1, 2})["status"], "fail")
         self.assertEqual(week({0, 1, 2, 3, 4, 5})["status"], "fail")
+        self.assertEqual(planner._leafy_week(tuple(
+            {"recipe": recipe(f"Range {day}", f"range-{day}",
+                              ingredient="spinat" if day < 4 else "gulrot"), "facts": {"leafy_green": {
+                "source": "explicit", "assessment": "substantial" if day < 4 else "unknown" if day == 4 else "does_not_count",
+                "ingredient_indices": [0] if day < 4 else [], "basis": "Uncertain dinner range",
+            }}} for day in range(7)
+        ), profile)["status"], "pass")
         garnish = recipe("Garnish", "garnish", ingredient="spinat")
         garnish["ingredients"][0]["quantity"] = 20  # 10 g per serving.
         self.assertEqual(planner._listed_leafy_mass(garnish), 10)

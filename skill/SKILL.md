@@ -76,9 +76,14 @@ meal selection and product preparation need no additional reference loading.
    `diet.leafy_green_days=[minimum,maximum]` means that many dinners with a
    substantial amount of named leafy greens per week, on any weekdays.
    The days may differ between weekly menus. Check ingredient quantities;
-   herbs or a small garnish do not count. The service counts at least 25 g
-   listed leafy greens per person as positive evidence and reports unknown
-   amounts separately.
+   herbs or a small garnish do not count. Assess selected recipes with candidate
+   `facts.leafy_green={source:"explicit",assessment:"substantial"|"does_not_count"|"unknown",ingredient_indices:[0],basis:"..."}`.
+   Use zero-based ingredient indices for actual leafy greens, not the full weight
+   of a mixed product such as spinach pasta. You judge culinary relevance; the
+   service checks the referenced quantities and counts dinners. Unsupported
+   quantities remain unknown: do not invent gram conversions. This is an
+   attributed model assessment, not independently verified nutrition. Reassess
+   edited recipes. The legacy 25 g check is only a fallback heuristic.
 5. Save the exact returned handoff or save reference. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
    To save a requested distinct whole new draft during a pending purchase,
