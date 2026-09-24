@@ -187,7 +187,39 @@ class OrderOperations:
                                          target_id=order_id,
                                          intent_signature=checkout_intent_signature(pending["summary"]))
             state["protected_results"][confirmation_id]["cancelled_attempt"] = deepcopy(attempt)
+        self._release_detached_checkout_usage(state, pending)
         state["pending_checkout"] = None
+
+    @staticmethod
+    def _menu_usage_still_active(state, menu_id):
+        current = state.get("menu")
+        if not isinstance(current, Mapping):
+            return False
+        if current.get("menu_id") == menu_id:
+            return True
+        owners = current.get("slot_owners") or {}
+        return isinstance(owners, Mapping) and menu_id in owners.values()
+
+    def _release_detached_checkout_usage(self, state, pending):
+        menu = pending.get("menu")
+        if not isinstance(menu, Mapping):
+            return
+        if ((pending.get("summary") or {}).get("menu_attribution")
+                or self._checkout_menu_attribution(menu, pending.get("cart_plan"))) != "menu_bound":
+            return
+        self._release_detached_menu_usage(state, menu)
+
+    def _release_detached_menu_usage(self, state, menu):
+        owners = {menu.get("menu_id")}
+        owners.update((menu.get("slot_owners") or {}).values())
+        for menu_id in owners - {None}:
+            if self._menu_usage_still_active(state, menu_id):
+                continue
+            usage = state.get("recipe_usage", {}).get(menu_id)
+            if (isinstance(usage, dict) and usage.get("status") == "planned"
+                    and not usage.get("order_id")):
+                usage["status"] = "cancelled"
+                usage["updated_at"] = self._now().isoformat()
 
     def _cancellation_checkout_guard(self, state, cancellation):
         checkout = state.get("pending_checkout")
@@ -1779,10 +1811,15 @@ class OrderOperations:
             return
         state['recurring_fulfilled'] = {key: value for key, value in state.get('recurring_fulfilled', {}).items()
             if not (value.get('order_id') == order_id and value.get('provider', active_provider) == active_provider)}
-        for usage in state.get("recipe_usage", {}).values():
+        snapshot = state.get("order_snapshots", {}).get(order_id)
+        snapshot_menu_id = snapshot.get("menu_id") if isinstance(snapshot, Mapping) else None
+        for menu_id, usage in state.get("recipe_usage", {}).items():
             if isinstance(usage, dict) and usage.get("order_id") == order_id and usage.get("status") == "ordered":
                 usage["previous_status"] = "ordered"
-                usage["status"] = "planned"
+                usage["status"] = (
+                    "cancelled" if menu_id == snapshot_menu_id
+                    and not self._menu_usage_still_active(state, menu_id) else "planned"
+                )
                 usage["cancelled_order_id"] = order_id
                 usage["order_id"] = None
                 usage["updated_at"] = self._now().isoformat()
@@ -1790,6 +1827,8 @@ class OrderOperations:
         if isinstance(current, dict) and current.get("order_id") == order_id:
             current["phase"] = "draft"
             current.pop("order_id", None)
+        if isinstance(snapshot, Mapping):
+            self._release_detached_menu_usage(state, snapshot)
         OrderOperations._prune_order_snapshots(state)
 
     def _cancel_reconcile(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
@@ -2928,11 +2967,9 @@ class OrderOperations:
                 raise HouseholdError(
                     "The exact merchant order is no longer payment-started"
                 )
-            page_state = str(
-                self.browser.order_payment_state(order_id, deadline=deadline).get("status")
-                or "unknown"
-            )
-            if page_state != "payment_started":
+            page = self.browser.order_payment_state(order_id, deadline=deadline)
+            page_state = str(page.get("status") or "unknown")
+            if page_state != "payment_started" or page.get("payment_started_page") is not True:
                 raise HouseholdError(
                     "The exact unpaid order does not show the non-actionable payment-started page"
                 )
@@ -2962,6 +2999,7 @@ class OrderOperations:
                     raise HouseholdError(
                         "The pending checkout changed while abandoning the unpaid order"
                     )
+                self._release_detached_checkout_usage(state, pending)
                 state["pending_checkout"] = None
                 intent_signature = checkout_intent_signature(pending["summary"])
                 self._store_protected_result(
@@ -3012,6 +3050,7 @@ class OrderOperations:
         return (
             original_status in {"expired", "verifying", "not_sent"}
             or self._closed_payment_switch(pending) is not None
+            or self._checkout_payment_closed(pending)
             or prior_recovery_closed
             or legacy_offer
         )
@@ -3371,7 +3410,7 @@ class OrderOperations:
                 update_switch({"target": target, "status": "ready"})
             return self._checkout_recovery_prepare_unlocked(deadline, payment)
 
-    def _checkout_recovery_target(self, pending, deadline, requested_order_id=None, *, verify_retry_page=True):
+    def _checkout_recovery_target(self, pending, deadline, requested_order_id=None):
         if self.provider not in {"oda", "mathem"} or self.browser is None:
             raise HouseholdError("Merchant payment recovery is unavailable for this installation")
         requested = safe_order_id(requested_order_id) if requested_order_id is not None else None
@@ -3501,25 +3540,38 @@ class OrderOperations:
                 )
             )
         )
-        payment_page_state = None
+        payment_page = {}
+        payment_closed = self._checkout_payment_closed(pending)
         needs_page_binding = (
             self.provider == "oda"
             and (pending.get("checkout_payment") or {}).get("method") == "vipps"
             and binding_source not in ODA_VIPPS_ORDER_BINDING_SOURCES
         )
-        requires_retry_page = needs_page_binding or binding_source == "oda_retry_available_page"
-        if self.provider == "oda" and requires_retry_page and verify_retry_page:
-            payment_page_state = self.browser.order_payment_state(order_id, deadline=deadline).get("status")
-        verified_payment_started = payment_page_state in {"retry_available", "payment_started"}
+        requires_retry_page = (needs_page_binding or binding_source == "oda_retry_available_page") and not payment_closed
+        contextless_legacy = (
+            self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps"
+            and pending.get("vipps_request_status") in {None, "not_sent"}
+            and pending.get("vipps_request_context") is None
+            and pending.get("vipps_request_attempted_at") is None
+            and pending.get("payment_requested_at") is None
+            and not payment_closed and self._closed_payment_switch(pending) is None
+        )
+        if self.provider == "oda" and (requires_retry_page
+                                        or tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
+                                        and owner_reported_no_request):
+            payment_page = self.browser.order_payment_state(order_id, deadline=deadline)
+        verified_retry_control = payment_page.get("status") in {"retry_available", "payment_started"}
+        verified_payment_started = payment_page.get("payment_started_page") is True
         misleading_paid_status = (
             self.provider == "oda"
             and owner_reported_no_request
             and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
-            and (verified_payment_started if verify_retry_page else True)
+            and verified_payment_started
         )
         if (order_identity != order_id or tracking_identity != order_id
                 or tracking_status != "unpaid_order" and not misleading_paid_status
-                or requires_retry_page and verify_retry_page and not verified_payment_started):
+                or requires_retry_page and not verified_retry_control
+                or contextless_legacy and not verified_payment_started):
             raise HouseholdError("The original order is no longer unpaid; reconcile it before recovery")
         # MCP omits an unpaid order's address. The native retry review below
         # independently verifies it and the original account reference.
@@ -3858,9 +3910,7 @@ class OrderOperations:
                 raise HouseholdError(
                     "The original Oda/Vipps request is not positively closed; do not retry payment"
                 )
-            target = self._checkout_recovery_target(
-                pending, deadline, verify_retry_page=False,
-            )
+            target = self._checkout_recovery_target(pending, deadline)
             if target != child["order_id"]:
                 raise HouseholdError("Recovery merchant target changed")
             with self.store.locked() as state:
@@ -4824,10 +4874,9 @@ class OrderOperations:
             and candidate_id == details_id == tracking_id
             and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
         ):
-            payment_page_status = str(
-                self.browser.order_payment_state(candidate_id, deadline=deadline).get("status") or "unknown"
-            )
-            tracking_conflict = payment_page_status in {"retry_available", "payment_started"}
+            payment_page = self.browser.order_payment_state(candidate_id, deadline=deadline)
+            payment_page_status = str(payment_page.get("status") or "unknown")
+            tracking_conflict = payment_page.get("payment_started_page") is True
         # An original pre-request failure has no frozen retry review yet. Its
         # exact provider order and payment-started page authorize preparing
         # that review; all account/items/fees are checked before any new click.
@@ -4974,6 +5023,7 @@ class OrderOperations:
                     self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
                         target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
             elif expired_unpaid or undispatched_retryable:
+                self._release_detached_checkout_usage(state, pending)
                 state["pending_checkout"] = None
             else:
                 if candidate_ambiguous:
