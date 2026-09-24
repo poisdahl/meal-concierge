@@ -4697,7 +4697,7 @@ class RecipeFlowTests(unittest.TestCase):
         self.assertEqual(len([value for value in outcomes if "exact menu_ref" in value]), 1)
         self.assertEqual(len([value for value in state["recipe_usage"].values() if value["status"] == "planned"]), 1)
 
-    def test_predispatch_can_be_abandoned_but_uncertain_checkout_blocks(self):
+    def test_predispatch_can_be_abandoned_but_uncertain_checkout_is_retained(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         self.prepare_checkout_with_current_cart()
         second = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Annen fisk")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
@@ -4709,8 +4709,12 @@ class RecipeFlowTests(unittest.TestCase):
         self.prepare_checkout_with_current_cart()
         with self.store.locked() as locked:
             locked["pending_checkout"]["status"] = "uncertain"
-        with self.assertRaisesRegex(HouseholdError, "may have been dispatched"):
-            self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W42", full_recipe("Tredje fisk")), "menu_ref": self.app._cart_menu_ref(second)})
+        pending = deepcopy(self.store.read()["pending_checkout"])
+        third = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W42", full_recipe("Tredje fisk")), "menu_ref": self.app._cart_menu_ref(second)})["menu"]
+        state = self.store.read()
+        self.assertNotEqual(third["menu_id"], second["menu_id"])
+        self.assertEqual(state["pending_checkout"], pending)
+        self.assertEqual(state["menu"], third)
 
     def test_ordered_menu_cannot_be_revised_in_place(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]

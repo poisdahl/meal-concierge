@@ -602,18 +602,21 @@ def _oda_order_payment_state_script(order_id: str) -> str:
  });
  const retryCandidates=[...document.querySelectorAll('a[href]')].filter(visible).filter(e=>{
   const url=new URL(e.href,location.href);
-  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'||
-   url.origin===location.origin&&url.pathname===RETRY_PATH;
+  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'||url.pathname===RETRY_PATH;
  });
  const retries=retryCandidates.filter(e=>{
   const url=new URL(e.href,location.href);
-  return norm(e.innerText||e.getAttribute('aria-label')||'')==='Betal'&&
+  return e.getAttribute('aria-disabled')!=='true'&&
    url.origin===location.origin&&url.pathname===RETRY_PATH&&!url.hash&&
    [...url.searchParams.keys()].length===1&&url.searchParams.get('orderNumber')===ORDER_ID;
  });
  const paymentStarted=headings.length===1&&receipts.length===1;
- const retryable=paymentStarted&&retryCandidates.length===1&&retries.length===1;
- return JSON.stringify({status:retryable?'retry_available':paymentStarted&&retryCandidates.length===0?'payment_started':'unknown'});
+ // This is an exact retry offer, not proof of an unpaid or failed payment.
+ // The heading and link text change after payment failure; the bound target
+ // stays the same. Payment closure and dispatch authority are checked later.
+ const retryable=receipts.length===1&&retryCandidates.length===1&&retries.length===1;
+ const startedPage=paymentStarted&&(retryable||retryCandidates.length===0);
+ return JSON.stringify({status:retryable?'retry_available':startedPage?'payment_started':'unknown',payment_started_page:startedPage});
 })()
 """.replace("ORDER_URL", json.dumps(order_url)).replace("RECEIPT_PATH", json.dumps(receipt_path)).replace(
         "RETRY_PATH", json.dumps(retry_path),

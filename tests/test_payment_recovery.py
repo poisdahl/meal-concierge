@@ -52,7 +52,8 @@ class MerchantBrowser:
         self.lost_response = False
         self.precondition_failure = False
         self.review_change = None
-        self.payment_state = "unknown"
+        self._payment_state = "unknown"
+        self.payment_started_page = False
         self.vipps_request_state = "unknown"
         self.recovery_surface = "unknown"
         self.binding_reads = 0
@@ -84,7 +85,18 @@ class MerchantBrowser:
 
     def order_payment_state(self, order_id, **kwargs):
         self.recovery_surface = "order"
-        return {"status": self.payment_state}
+        return {"status": self.payment_state, "payment_started_page": self.payment_started_page}
+
+    @property
+    def payment_state(self):
+        return self._payment_state
+
+    @payment_state.setter
+    def payment_state(self, status):
+        self._payment_state = status
+        # Most older fixtures model the original verified page. Tests for a
+        # bare retry control explicitly set payment_started_page=False.
+        self.payment_started_page = status in {"retry_available", "payment_started"}
 
     def checkout_vipps_request_state(self, context, **kwargs):
         self.recovery_surface = "vipps"
@@ -293,6 +305,7 @@ class RecoveryTests(unittest.TestCase):
                         pending.pop("unpaid_order_binding_source")
                     self.merchant.status = tracking_status
                     self.browser.payment_state = page_state
+                    self.browser.payment_started_page = True
 
                     prepared = self.call("prepare", recovery=True, order_id="order-1")
 
@@ -308,7 +321,8 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
         self.merchant.status = "paid_and_not_modifiable"
-        self.browser.payment_state = "unknown"
+        self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = False
 
         with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
             self.call("prepare", recovery=True, order_id="order-1")
@@ -325,12 +339,65 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
         self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = True
 
         prepared = self.call("prepare", recovery=True, order_id="order-1")
 
         self.assertTrue(prepared["recovery"])
         self.assertEqual(prepared["order_id"], "order-1")
         self.assertEqual(self.browser.clicks, 0)
+
+    def test_contextless_retry_control_without_payment_started_proof_cannot_prepare(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = False
+
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call("prepare", recovery=True, order_id="order-1")
+
+        self.assertEqual(self.browser.clicks, 0)
+        self.assertNotIn("recovery", self.app.store.read()["pending_checkout"])
+
+    def test_payment_started_proof_is_rechecked_before_recovery_dispatch(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = True
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+        self.browser.payment_started_page = False
+
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+
+        self.assertEqual(self.browser.clicks, 0)
+        child = self.app.store.read()["pending_checkout"]["recovery"]
+        self.assertEqual(child["status"], "awaiting_confirmation")
+
+    def test_paid_tracking_exception_is_rechecked_before_recovery_dispatch(self):
+        with self.app.store.locked() as state:
+            pending = state["pending_checkout"]
+            pending["status"] = "awaiting_user_payment"
+            pending.pop("vipps_request_status")
+            pending.pop("unpaid_order_id")
+            pending.pop("unpaid_order_binding_source")
+        self.browser.payment_state = "retry_available"
+        prepared = self.call("prepare", recovery=True, order_id="order-1")
+        self.merchant.status = "paid_and_not_modifiable"
+        self.browser.payment_started_page = False
+
+        with self.assertRaisesRegex(HouseholdError, "no longer unpaid"):
+            self.call("confirm", confirmation_id=prepared["confirmation_id"])
+
+        self.assertEqual(self.browser.clicks, 0)
+        self.assertEqual(self.app.store.read()["pending_checkout"]["recovery"]["status"],
+                         "awaiting_confirmation")
 
     def legacy_original(self):
         with self.app.store.locked() as state:
@@ -339,6 +406,7 @@ class RecoveryTests(unittest.TestCase):
             for key in ("vipps_request_status", "unpaid_order_id", "unpaid_order_binding_source"):
                 pending.pop(key, None)
         self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = True
 
     def test_legacy_reconcile_exposes_non_submitting_recovery_then_same_order_card_review(self):
         self.legacy_original()
@@ -919,6 +987,7 @@ class RecoveryTests(unittest.TestCase):
             pending.pop("unpaid_order_id")
             pending.pop("unpaid_order_binding_source")
         self.browser.payment_state = "retry_available"
+        self.browser.payment_started_page = True
         prepared = self.call("prepare", recovery=True, order_id="order-1")
         with self.app.store.locked() as state:
             state["pending_checkout"]["recovery"]["status"] = "clicking"

@@ -3251,13 +3251,14 @@ const node=(text='')=>({innerText:text,getAttribute:()=>null,getBoundingClientRe
 global.location=new URL(c.url);
 global.getComputedStyle=()=>({display:'block',visibility:'visible'});
 const heading=node(c.heading),extraHeading=node(c.extraHeading),receipt=node('Last ned kvittering (PDF)');receipt.href=c.receipt;
-const retry=node(c.retryText);retry.href=c.retry;
-global.document={querySelector:s=>s==='input[type="password"]'?null:null,querySelectorAll:s=>s==='h1'?[heading,...(c.extraHeading?[extraHeading]:[])]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[])]:[]};
+const retry=node(c.retryText);retry.href=c.retry;retry.getAttribute=name=>name==='aria-disabled'&&c.disabled?'true':null;
+const extras=(c.extraLinks||[]).map(x=>Object.assign(node(x.text),{href:x.href}));
+global.document={querySelector:s=>s==='input[type="password"]'&&c.login?{}:null,querySelectorAll:s=>s==='h1'?[heading,...(c.extraHeading?[extraHeading]:[])]:s==='a[href]'?[...(c.hasReceipt?[receipt]:[]),...(c.hasRetry?[retry]:[]),...extras]:[]};
 process.stdout.write(eval(script));
 """
         script = _oda_order_payment_state_script("order-1")
 
-        def evaluate(**changes):
+        def evaluate(with_evidence=False, **changes):
             context = {
                 "url": "https://oda.com/no/account/orders/order-1/",
                 "heading": "Betaling påbegynt",
@@ -3276,18 +3277,44 @@ process.stdout.write(eval(script));
             )
             if result.returncode:
                 self.fail(result.stderr)
-            return json.loads(result.stdout)
+            observed = json.loads(result.stdout)
+            return observed if with_evidence else {"status": observed["status"]}
 
         self.assertEqual(evaluate(), {"status": "retry_available"})
+        self.assertTrue(evaluate(with_evidence=True)["payment_started_page"])
+        self.assertTrue(evaluate(with_evidence=True, hasRetry=False)["payment_started_page"])
         self.assertEqual(
             evaluate(extraHeading="Sopps Fusilli fullkorn 500 g"),
             {"status": "retry_available"},
         )
-        self.assertEqual(evaluate(heading="Betalt"), {"status": "unknown"})
+        # This reads an order-bound action's availability, never payment outcome.
+        # In particular, a successful/failed heading is not dispatch authority.
+        for heading in ("Betaling feilet", "Prøv betalingen igjen", "", "Betalt"):
+            with self.subTest(heading=heading):
+                self.assertEqual(evaluate(heading=heading), {"status": "retry_available"})
+                self.assertFalse(evaluate(with_evidence=True, heading=heading)["payment_started_page"])
         self.assertEqual(evaluate(hasReceipt=False), {"status": "unknown"})
         self.assertEqual(evaluate(hasRetry=False), {"status": "payment_started"})
         self.assertEqual(evaluate(retry="https://oda.com/no/checkout/retry/?orderNumber=other"), {"status": "unknown"})
-        self.assertEqual(evaluate(retryText="Fortsett"), {"status": "unknown"})
+        self.assertEqual(evaluate(retryText="Fortsett"), {"status": "retry_available"})
+        self.assertEqual(evaluate(heading="Betaling feilet", hasRetry=False), {"status": "unknown"})
+        self.assertEqual(evaluate(heading="Betalt", hasRetry=False), {"status": "unknown"})
+        invalid = [
+            {"disabled": True}, {"login": True},
+            {"receipt": "https://oda.com/api/v1/orders/other/receipt"},
+            {"receipt": "https://example.test/api/v1/orders/order-1/receipt"},
+            {"retry": "https://example.test/no/checkout/retry/?orderNumber=order-1"},
+            {"retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1&orderNumber=order-1"},
+            {"retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1&extra=1"},
+            {"retry": "https://oda.com/no/checkout/retry/?orderNumber=order-1#different"},
+            {"extraLinks": [{"text": "Fortsett", "href": "https://oda.com/no/checkout/retry/?orderNumber=order-1"}]},
+            {"extraLinks": [{"text": "Betal", "href": "https://oda.com/no/checkout/retry/?orderNumber=other"}]},
+            {"extraLinks": [{"text": "Receipt", "href": "https://oda.com/api/v1/orders/order-1/receipt"}]},
+        ]
+        for case in invalid:
+            with self.subTest(case=case):
+                self.assertEqual(evaluate(**case), {"status": "unknown"})
+                self.assertFalse(evaluate(with_evidence=True, **case).get("payment_started_page", False))
         self.assertEqual(
             evaluate(url="https://oda.com/no/account/orders/other/"),
             {"status": "unknown"},
