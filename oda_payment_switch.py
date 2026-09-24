@@ -108,7 +108,14 @@ const chooser=`(()=>{
 try{
  const targets=(await send('Target.getTargets')).targetInfos.filter(t=>t.type==='page'&&t.url===cfg.url);require(targets.length===1);
  session=(await send('Target.attachToTarget',{targetId:targets[0].targetId,flatten:true})).sessionId;
- if(cfg.mode==='cancel'){
+ if(cfg.poll_seed){
+  const seed=cfg.poll_seed;
+  require(candidate(seed.url)&&new URL(seed.url).pathname===cfg.poll_path&&
+   typeof seed.payment_id==='string'&&/^[1-9][0-9]*$/.test(seed.payment_id)&&
+   seed.headers&&authorized(seed.headers));
+  paymentId=seed.payment_id;
+  polls.set(seed.url,{url:seed.url,method:'GET',headers:safeHeaders(seed.headers),http:200,status:null});
+ }else if(cfg.mode==='cancel'){
   phase='source_identity';
   paymentId=await evaluate(`(()=>{const link=${chooser};return link?new URL(link.href).pathname.split('/')[3]:null})()`);
   require(typeof paymentId==='string'&&/^[1-9][0-9]*$/.test(paymentId));
@@ -130,12 +137,13 @@ try{
   await prepareReader();
   phase='initial_status';
   const state=await read(poll);
-  if(['ACCEPTED','REJECTED','FAILED','TIMEOUT'].includes(state)){emit(result(state,poll,{cancel_attempted:false,payment_id:paymentId}));}
+  if(cfg.mode==='state'){emit(result(state,poll,{payment_id:paymentId}));}
+  else if(['ACCEPTED','REJECTED','FAILED','TIMEOUT'].includes(state)){emit(result(state,poll,{cancel_attempted:false,payment_id:paymentId}));}
   else if(cfg.prior_attempted){emit(result(state,poll,{cancel_attempted:true,payment_id:paymentId}));}
   else{
    require(['PENDING','SUBMITTED'].includes(state));
    phase='cancel_surface';
-   require(await evaluate(`Boolean(${chooser})`)===true);
+   require(await evaluate(`(()=>{const link=${chooser};return link?new URL(link.href).pathname.split('/')[3]:null})()`)===paymentId);
    emit({ready:true,poll_url_digest:digest(poll.url),observed_status:state,payment_id:paymentId});
    phase='await_authorization';
    const command=await input.next();require(!command.done&&command.value==='cancel_once');
@@ -176,8 +184,8 @@ def _line(process, seconds):
     return value
 
 
-def _native_vipps_terminal(browser, url, context):
-    """Read retained native HTTP evidence without exporting its credentials."""
+def _native_vipps_binding(browser, url, context):
+    """Bind one observed native poll to the validated token, amount, and Oda return."""
     from urllib.parse import parse_qs
     token = parse_qs(urlsplit(url).query).get("token", [])
     if len(token) != 1 or not token[0]:
@@ -224,15 +232,70 @@ def _native_vipps_terminal(browser, url, context):
         if not same_poll(observed) or observed.get("requestId") != row["requestId"]:
             return None
         body = json.loads(observed.get("responseBody", ""))
-        terminal = body.get("status") if isinstance(body, dict) else None
-        if terminal not in {"ACCEPTED", "REJECTED", "FAILED", "TIMEOUT"}:
+        status = body.get("status") if isinstance(body, dict) else None
+        if status not in {"PENDING", "SUBMITTED", "ACCEPTED", "REJECTED", "FAILED", "TIMEOUT"}:
             return None
-        return {"status": "paid" if terminal == "ACCEPTED" else "closed", "terminal_status": terminal,
-                "source": "native_http200", "payment_id": match[1],
-                "poll_url_digest": hashlib.sha256(row["url"].encode()).hexdigest(),
-                "gateway_url_digest": context["gateway_url_digest"], "cancel_attempted": False}
+        headers = {key: value for key, value in row["headers"].items()
+                   if isinstance(key, str) and isinstance(value, str) and not key.startswith(":")
+                   and key.lower() not in {"host", "content-length", "connection", "accept-encoding"}}
+        return {"url": row["url"], "headers": headers, "payment_id": match[1], "status": status,
+                "poll_url_digest": hashlib.sha256(row["url"].encode()).hexdigest()}
     except (HouseholdError, KeyError, TypeError, ValueError):
         return None
+
+
+def _native_vipps_terminal(browser, url, context):
+    """Return only a positive terminal response from the exact native poll."""
+    binding = _native_vipps_binding(browser, url, context)
+    if not binding or binding["status"] not in {"ACCEPTED", "REJECTED", "FAILED", "TIMEOUT"}:
+        return None
+    terminal = binding["status"]
+    return {"status": "paid" if terminal == "ACCEPTED" else "closed", "terminal_status": terminal,
+            "source": "native_http200", "payment_id": binding["payment_id"],
+            "poll_url_digest": binding["poll_url_digest"],
+            "gateway_url_digest": context["gateway_url_digest"], "cancel_attempted": False}
+
+
+def native_vipps_request_state(browser, url, context, *, deadline):
+    """Observe a fresh native status; a gateway timeout screen proves nothing."""
+    terminal = _native_vipps_terminal(browser, url, context)
+    if terminal:
+        return {"status": "sent" if terminal["status"] == "paid" else "expired",
+                "terminal_status": terminal["terminal_status"]}
+    binding = _native_vipps_binding(browser, url, context)
+    if not binding:
+        return {"status": "unknown"}
+    fallback = {"status": "sent" if binding["status"] == "SUBMITTED" else "unknown"}
+    node = shutil.which("node")
+    if not node:
+        return fallback
+    try:
+        endpoint = browser._invoke("get", "cdp-url").get("cdpUrl")
+        parsed = urlsplit(str(endpoint or ""))
+        if parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return fallback
+        process = subprocess.Popen([node, "--input-type=module", "-e", _VIPPS_OBSERVER_SCRIPT],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   text=True, env={"PATH": os.environ.get("PATH", os.defpath)})
+        try:
+            process.stdin.write(json.dumps({"endpoint": endpoint, "url": url, "mode": "state",
+                "poll_path": _VIPPS_POLL_PATH, "poll_seed": binding, "observe_ms": 1000}) + "\n")
+            process.stdin.flush()
+            observed = _line(process, min(25, deadline-time.monotonic()))
+            if observed.get("terminal_status") == "ACCEPTED" and observed.get("status") == "paid":
+                return {"status": "sent", "terminal_status": "ACCEPTED"}
+            if (observed.get("terminal_status") in {"REJECTED", "FAILED", "TIMEOUT"}
+                    and observed.get("status") == "closed"):
+                return {"status": "expired", "terminal_status": observed["terminal_status"]}
+            if observed.get("terminal_status") == "SUBMITTED":
+                return {"status": "sent"}
+            return fallback
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+    except (OSError, ValueError, HouseholdError):
+        return fallback
 
 
 def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None):
@@ -265,6 +328,9 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
             return {**terminal, "cancel_attempted": bool((prior or {}).get("cancel_attempted"))}
         if current_url != url:
             return unknown
+        binding = _native_vipps_binding(browser, url, context)
+        if not binding:
+            return unknown
         node = shutil.which("node")
         if not node:
             return unknown
@@ -284,6 +350,7 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
         try:
             process.stdin.write(json.dumps({"endpoint": endpoint, "url": url, "mode": "cancel",
                 "prior_attempted": attempted, "poll_path": _VIPPS_POLL_PATH,
+                "poll_seed": binding,
                 "observe_ms": 15000, "after_ms": 15000}) + "\n")
             process.stdin.flush()
             first = _line(process, min(25, deadline-time.monotonic()))

@@ -47,15 +47,15 @@ that intent. `manual_checkout_required` is a handoff, not success.
 
 Oda supports saved cards and Vipps, including an explicit switch in either
 direction. A prepared review can change method before dispatch without changing
-the household default. After dispatch, preserve the current confirmation and
-use `switch_payment`; it reconciles that attempt before returning any replacement
-review. Card replacement requires the exact native terminal failure. Vipps
+the household default. Once a payment request has been sent or may have been
+sent, preserve the current confirmation and use `switch_payment`; it reconciles
+that attempt before returning any replacement review. Card replacement requires the exact native terminal failure. Vipps
 replacement requires verified native closure (and may cancel that exact request
 once when the user asks to switch). Never describe an unsubmitted hosted form as
 a sent notification.
 
 For Oda Vipps, preserve the bound pending attempt while awaiting user payment or
-when its outcome is unknown. A missing phone notification or merchant unpaid
+when its outcome is unknown. A missing phone notification, expired hosted page or merchant unpaid
 label does not establish expiry. An explicit payment switch first reconciles
 that original attempt; only its verified terminal state can unlock the returned
 new review. Do not submit another order to solve a missing notification.
@@ -72,7 +72,7 @@ For an exact Oda order left payment-started by a legacy Vipps attempt with no
 request context or dispatch timestamp, an owner report that no Vipps request or
 manual payment occurred can accompany a read-only same-order recovery review.
 Use `checkout prepare`
-with `recovery=true`, the original `confirmation_id`, the exact `order_id`,
+with `recovery=true`, the original or exact current `confirmation_id`, the exact `order_id`,
 `vipps_request_not_received=true`, and the requested existing
 `checkout_payment` (`saved_card` or `vipps`). The service must independently
 verify the same order, account, goods, delivery and payable amount before it
@@ -81,6 +81,13 @@ retry or a new order. Preserve the original journal and confirm only that fresh
 review if its existing authorization policy permits; reconcile uncertainty.
 `retry_allowed=false` still forbids another payment attempt from the old
 confirmation; it does not forbid this non-submitting review.
+
+When reconciliation establishes `payment_request_state=not_sent` and
+`payment_dispatched=false`, prepare recovery with the requested payment method
+for that same order. A new order or a method-switch cancellation is unnecessary
+for a request that never reached Next. Finding its hosted page later does not
+itself mean the request was sent; renew the exact no-request report only when
+it is still true, then follow the service's fresh review.
 
 For bank/device approval, follow the returned handoff. Never collect BankID
 passwords or repeat payment because the chooser is unavailable. Owner-reported

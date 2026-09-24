@@ -1,15 +1,18 @@
 """A new menu must not rewrite the frozen purchase or its recipe reservation."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import HouseholdError, StateStore
+import planner
 from service import Application
 from test_meal_concierge_recipes import CONFIG, FakeBrowser, FakeOda, full_recipe
 import test_payment_recovery as recovery_fixtures
@@ -46,6 +49,123 @@ class MenuDuringPaymentTests(unittest.TestCase):
         return self.app.handle({"operation": "menu", "action": "save",
                                 "menu_ref": self.app._cart_menu_ref(self.store.read()["menu"]),
                                 "menu": {"week": "2026-W40", "dishes": [full_recipe(name)], "salads": []}})["menu"]
+
+    def agent_input(self, name):
+        recipe = full_recipe(name, external_id=name.lower().replace(" ", "-"))
+        recipe["ingredients"] = recipe["ingredients"][:1]
+        recipe["times"] = {"active_minutes": 30}
+        saved = self.app.handle({"operation": "recipes", "action": "save",
+                                 "recipe": recipe, "idempotency_key": "save-" + name})["recipe"]
+        return {"week": "2026-W40", "dates": ["2026-09-28"],
+                "selection_mode": "agent",
+                "candidates": [{"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}}]}
+
+    def allow_single_dinner_plan(self):
+        with self.store.locked() as state:
+            state["profile"]["meals"]["dinner_days"] = 1
+            for target in planner.SAVED_MINIMUM_TARGETS:
+                state["profile"]["diet"][target] = 0
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_planner_draft_needs_current_reference_and_preserves_pending_purchase(self):
+        self.allow_single_dinner_plan()
+        planned = self.app.handle({"operation": "menu", "action": "plan",
+                                   "planner_input": self.agent_input("Independent fish")})["plan"]
+        self.assertEqual(planned["status"], "planned")
+        before = self.store.read()
+        with self.assertRaises(HouseholdError):
+            self.app.handle({"operation": "menu", "action": "save",
+                             "planner_ref": planned["save_ref"]})
+        self.assertEqual(self.store.read(), before)
+        current = self.app.handle({"operation": "menu", "action": "get"})["menu"]
+        saved = self.app.handle({"operation": "menu", "action": "save",
+                                 "planner_ref": planned["save_ref"],
+                                 "menu_ref": self.app._cart_menu_ref(current)})["menu"]
+        after = self.store.read()
+        self.assertNotEqual(saved["menu_id"], current["menu_id"])
+        self.assertEqual(saved["revision"], 1)
+        self.assertEqual(after["pending_checkout"], before["pending_checkout"])
+        self.assertEqual(after["cart_plan"], before["cart_plan"])
+        self.assertEqual(after["recipe_usage"][current["menu_id"]],
+                         before["recipe_usage"][current["menu_id"]])
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_targeted_replan_remains_blocked_without_mutating_frozen_checkout(self):
+        self.allow_single_dinner_plan()
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["cart_plan"] = None
+        first_input = self.agent_input("Planner first")
+        first_plan = self.app.handle({"operation": "menu", "action": "plan",
+                                      "planner_input": first_input})["plan"]
+        self.assertEqual(first_plan["status"], "planned")
+        source = self.app.handle({"operation": "menu", "action": "save",
+                                  "planner_ref": first_plan["save_ref"],
+                                  "menu_ref": self.app._cart_menu_ref(self.original)})["menu"]
+        with self.store.locked() as state:
+            pending = deepcopy(self.pending)
+            pending["menu"] = deepcopy(source)
+            pending["cart_plan"]["menu_ref"] = self.app._cart_menu_ref(source)
+            state["pending_checkout"] = pending
+            state["cart_plan"] = deepcopy(pending["cart_plan"])
+        replacement = self.agent_input("Planner second")
+        prepared = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                                    "menu_ref": self.app._cart_menu_ref(source),
+                                    "remaining_dates": ["2026-09-28"],
+                                    "planner_input": replacement})
+        self.assertEqual(prepared["replan"]["status"], "prepared")
+        before = self.store.read()
+        with self.assertRaises(HouseholdError) as waiting_error:
+            self.app.handle({"operation": "menu", **prepared["apply_arguments"]})
+        self.assertIn("menu plan", str(waiting_error.exception))
+        self.assertEqual(self.store.read(), before)
+
+        def rejected_replan_during_blocked_save():
+            fresh = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                                     "menu_ref": self.app._cart_menu_ref(source),
+                                     "remaining_dates": ["2026-09-28"],
+                                     "planner_input": replacement})
+            blocked_before = self.store.read()
+            with self.assertRaises(HouseholdError) as replan_error:
+                self.app.handle({"operation": "menu", **fresh["apply_arguments"]})
+            self.assertNotIn("menu plan", str(replan_error.exception))
+            with self.assertRaises(HouseholdError):
+                self.save_new()
+            self.assertEqual(self.store.read(), blocked_before)
+
+        with self.store.locked() as state:
+            state["pending_checkout"]["recovery"] = {"status": "awaiting_confirmation"}
+        rejected_replan_during_blocked_save()
+        with self.store.locked() as state:
+            state["pending_checkout"]["recovery"] = {"status": "clicking"}
+        rejected_replan_during_blocked_save()
+        with self.store.locked() as state:
+            state["pending_checkout"].pop("recovery")
+        fresh = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                                 "menu_ref": self.app._cart_menu_ref(source),
+                                 "remaining_dates": ["2026-09-28"],
+                                 "planner_input": replacement})
+        handler_before = self.store.read()
+        self.app.browser_lock.acquire()
+        try:
+            with self.assertRaises(HouseholdError) as handler_error:
+                self.app.handle({"operation": "menu", **fresh["apply_arguments"]})
+            self.assertNotIn("menu plan", str(handler_error.exception))
+            with self.assertRaises(HouseholdError):
+                self.save_new()
+        finally:
+            self.app.browser_lock.release()
+        self.assertEqual(self.store.read(), handler_before)
+
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["cart_plan"] = None
+        ordinary = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                                    "menu_ref": self.app._cart_menu_ref(source),
+                                    "remaining_dates": ["2026-09-28"],
+                                    "planner_input": replacement})
+        applied = self.app.handle({"operation": "menu", **ordinary["apply_arguments"]})
+        self.assertNotEqual(applied["menu"]["menu_id"], source["menu_id"])
 
     def test_post_dispatch_save_preserves_frozen_checkout_and_settles_original_usage(self):
         newer = self.save_new()
