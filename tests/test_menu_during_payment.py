@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import HouseholdError, StateStore
 import planner
+from service_common import menu_digest
 from service import Application
 from test_meal_concierge_recipes import CONFIG, FakeBrowser, FakeOda, full_recipe
 import test_payment_recovery as recovery_fixtures
@@ -66,6 +67,46 @@ class MenuDuringPaymentTests(unittest.TestCase):
             for target in planner.SAVED_MINIMUM_TARGETS:
                 state["profile"]["diet"][target] = 0
 
+    def planned_menu(self, name, *, menu_ref=None):
+        planned = self.app.handle({"operation": "menu", "action": "plan",
+                                   "planner_input": self.agent_input(name)})["plan"]
+        self.assertEqual(planned["status"], "planned")
+        return self.app.handle({"operation": "menu", "action": "save",
+                                "planner_ref": planned["save_ref"],
+                                "menu_ref": menu_ref})["menu"]
+
+    def independent_addition(self):
+        self.allow_single_dinner_plan()
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["cart_plan"] = None
+        ordered = self.planned_menu("Ordered fish", menu_ref=self.app._cart_menu_ref(self.original))
+        order_id = "synthetic-order"
+        with self.store.locked() as state:
+            pending = deepcopy(self.pending)
+            pending["menu"] = deepcopy(ordered)
+            pending["cart_plan"]["menu_ref"] = self.app._cart_menu_ref(ordered)
+            state["pending_checkout"] = pending
+            state["cart_plan"] = deepcopy(pending["cart_plan"])
+        newer = self.planned_menu("Independent fish", menu_ref=self.app._cart_menu_ref(ordered))
+        with self.store.locked() as state:
+            snapshot = deepcopy(ordered)
+            snapshot.update(phase="ordered", order_id=order_id)
+            state["order_snapshots"][order_id] = snapshot
+            state["recipe_usage"][ordered["menu_id"]].update(status="ordered", order_id=order_id)
+            change = {"provider": "oda", "status": "editing", "order_id": order_id,
+                      "before": {"order": {"orderNumber": order_id}}}
+            state["order_change"] = deepcopy(change)
+            pending = deepcopy(self.pending)
+            pending.update(menu=deepcopy(newer), order_change=deepcopy(change),
+                           cart_plan={"product_plan_digest": "frozen-addition-plan",
+                                      "approved_cart_digest": "frozen-cart",
+                                      "menu_ref": self.app._cart_menu_ref(newer)})
+            pending["summary"]["menu_attribution"] = "cart_only"
+            state["pending_checkout"] = pending
+            state["cart_plan"] = deepcopy(pending["cart_plan"])
+        return ordered, newer
+
     @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
     def test_planner_draft_needs_current_reference_and_preserves_pending_purchase(self):
         self.allow_single_dinner_plan()
@@ -117,7 +158,7 @@ class MenuDuringPaymentTests(unittest.TestCase):
         before = self.store.read()
         with self.assertRaises(HouseholdError) as waiting_error:
             self.app.handle({"operation": "menu", **prepared["apply_arguments"]})
-        self.assertIn("menu plan", str(waiting_error.exception))
+        self.assertIn("linked", str(waiting_error.exception))
         self.assertEqual(self.store.read(), before)
 
         def rejected_replan_during_blocked_save():
@@ -129,8 +170,6 @@ class MenuDuringPaymentTests(unittest.TestCase):
             with self.assertRaises(HouseholdError) as replan_error:
                 self.app.handle({"operation": "menu", **fresh["apply_arguments"]})
             self.assertNotIn("menu plan", str(replan_error.exception))
-            with self.assertRaises(HouseholdError):
-                self.save_new()
             self.assertEqual(self.store.read(), blocked_before)
 
         with self.store.locked() as state:
@@ -151,8 +190,6 @@ class MenuDuringPaymentTests(unittest.TestCase):
             with self.assertRaises(HouseholdError) as handler_error:
                 self.app.handle({"operation": "menu", **fresh["apply_arguments"]})
             self.assertNotIn("menu plan", str(handler_error.exception))
-            with self.assertRaises(HouseholdError):
-                self.save_new()
         finally:
             self.app.browser_lock.release()
         self.assertEqual(self.store.read(), handler_before)
@@ -274,19 +311,21 @@ class MenuDuringPaymentTests(unittest.TestCase):
     def test_running_click_and_prepared_recovery_still_block_menu_save(self):
         with self.store.locked() as state:
             state["pending_checkout"]["status"] = "clicking"
-        with self.assertRaisesRegex(HouseholdError, "active payment submission"):
-            self.save_new()
+        frozen = deepcopy(self.store.read()["pending_checkout"])
+        self.save_new()
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
         with self.store.locked() as state:
             state["pending_checkout"]["status"] = "uncertain"
             state["pending_checkout"]["recovery"] = {"status": "awaiting_confirmation"}
-        with self.assertRaisesRegex(HouseholdError, "prepared recovery review"):
-            self.save_new()
+        frozen = deepcopy(self.store.read()["pending_checkout"])
+        self.save_new("Another independent fish")
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
         with self.store.locked() as state:
             state["pending_checkout"] = None
             state["pending_cancellation"] = {"confirmation_id": "cancellation-review"}
         with self.assertRaisesRegex(HouseholdError, "pending order cancellation"):
             self.save_new()
-        self.assertEqual(self.store.read()["menu"], self.original)
+        self.assertNotEqual(self.store.read()["menu"]["menu_id"], self.original_id)
 
     def test_retained_post_submit_card_child_can_save_after_browser_handler_finishes(self):
         with self.store.locked() as state:
@@ -294,14 +333,178 @@ class MenuDuringPaymentTests(unittest.TestCase):
                 "status": "clicking", "authentication_context": {"tab_id": "retained-3ds"}}
         self.assertNotEqual(self.save_new()["menu_id"], self.original_id)
 
-    def test_browser_handler_lock_is_nonblocking_and_does_not_mutate_menu(self):
+    def test_browser_handler_lock_allows_proven_independent_menu_only(self):
+        frozen = deepcopy(self.store.read()["pending_checkout"])
         self.app.browser_lock.acquire()
         try:
-            with self.assertRaisesRegex(HouseholdError, "active provider operation"):
-                self.save_new()
+            newer = self.save_new()
         finally:
             self.app.browser_lock.release()
-        self.assertEqual(self.store.read()["menu"], self.original)
+        self.assertNotEqual(newer["menu_id"], self.original_id)
+        self.assertEqual(self.store.read()["pending_checkout"], frozen)
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_addition_pending_menu_can_be_newer_menu_and_replanned_twice(self):
+        ordered, newer = self.independent_addition()
+        frozen = self.store.read()
+        self.assertEqual(frozen["pending_checkout"]["menu"]["menu_id"], newer["menu_id"])
+        for name in ("First replacement", "Second replacement"):
+            source = self.store.read()["menu"]
+            prepared = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                "menu_ref": self.app._cart_menu_ref(source), "remaining_dates": ["2026-09-28"],
+                "planner_input": self.agent_input(name)})
+            self.assertEqual(prepared["replan"]["status"], "prepared")
+            self.app.browser_lock.acquire()
+            try:
+                applied = self.app.handle({"operation": "menu", **prepared["apply_arguments"]})["menu"]
+            finally:
+                self.app.browser_lock.release()
+            self.assertNotEqual(applied["menu_id"], source["menu_id"])
+            current = self.store.read()
+            for key in ("pending_checkout", "order_change", "cart_plan"):
+                self.assertEqual(current[key], frozen[key])
+            self.assertEqual(current["order_snapshots"], frozen["order_snapshots"])
+            self.assertEqual(current["recipe_usage"][ordered["menu_id"]],
+                             frozen["recipe_usage"][ordered["menu_id"]])
+            self.assertNotIn(ordered["menu_id"], current["menu_planning"]["retired"])
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["order_change"] = None
+        self.assertEqual(self.store.read()["menu"]["menu_id"], applied["menu_id"])
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_independent_save_preserves_prepared_addition_recovery_and_old_order(self):
+        ordered, newer = self.independent_addition()
+        with self.store.locked() as state:
+            state["pending_checkout"]["recovery"] = {
+                "status": "awaiting_confirmation", "confirmation_id": "synthetic-recovery"}
+        before = self.store.read()
+        self.app.browser_lock.acquire()
+        try:
+            saved = self.save_new("Fresh independent draft")
+        finally:
+            self.app.browser_lock.release()
+        after = self.store.read()
+        self.assertNotEqual(saved["menu_id"], newer["menu_id"])
+        self.assertEqual(saved["revision"], 1)
+        for key in ("pending_checkout", "order_change", "cart_plan", "order_snapshots"):
+            self.assertEqual(after[key], before[key])
+        self.assertEqual(after["recipe_usage"][ordered["menu_id"]],
+                         before["recipe_usage"][ordered["menu_id"]])
+        self.assertNotIn(ordered["menu_id"], after["menu_planning"]["retired"])
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["order_change"] = None
+            self.app._mark_order_cancelled(state, "synthetic-order",
+                                           provider="oda", active_provider="oda")
+        settled = self.store.read()
+        self.assertEqual(settled["menu"], saved)
+        self.assertEqual(settled["recipe_usage"][saved["menu_id"]]["status"], "planned")
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_addition_replan_preserves_own_predecessor_owner_and_rejects_stale_plan(self):
+        ordered, newer = self.independent_addition()
+        with self.store.locked() as state:
+            state["pending_checkout"] = None
+            state["order_change"] = None
+            state["cart_plan"] = None
+        recipe_ref = self.agent_input("Extra independent dish")["candidates"][0]["recipe_ref"]
+        successor = self.app.handle({"operation": "menu", "action": "add_slot",
+            "menu_ref": self.app._cart_menu_ref(newer),
+            "slot_input": {"date": "2026-09-29", "meal_type": "dinner", "portions": 2,
+                           "reference": {"recipe_ref": recipe_ref}},
+            "idempotency_key": "synthetic-extra-meal"})["menu"]
+        self.assertIn(newer["menu_id"], successor["slot_owners"].values())
+        with self.store.locked() as state:
+            change = deepcopy(self.pending["order_change"]) if "order_change" in self.pending else {
+                "provider": "oda", "status": "editing", "order_id": "synthetic-order"}
+            state["order_change"] = change
+            pending = deepcopy(self.pending)
+            pending.update(menu=deepcopy(successor), order_change=deepcopy(change),
+                           cart_plan={"product_plan_digest": "still-frozen"})
+            state["pending_checkout"] = pending
+            state["cart_plan"] = deepcopy(pending["cart_plan"])
+        replacement = self.agent_input("Another extra dish")
+        replacement["dates"] = ["2026-09-29"]
+        prepared = self.app.handle({"operation": "menu", "action": "replan_prepare",
+            "menu_ref": self.app._cart_menu_ref(successor), "remaining_dates": ["2026-09-29"],
+            "planner_input": replacement})
+        self.assertEqual(prepared["replan"]["status"], "prepared")
+        frozen = self.store.read()
+        with self.store.locked() as state:
+            state["profile"]["meals"]["portions"] = 3
+        with self.assertRaisesRegex(HouseholdError, "state changed|stale"):
+            self.app.handle({"operation": "menu", **prepared["apply_arguments"]})
+        with self.store.locked() as state:
+            state["profile"]["meals"]["portions"] = frozen["profile"]["meals"]["portions"]
+        fresh = self.app.handle({"operation": "menu", "action": "replan_prepare",
+            "menu_ref": self.app._cart_menu_ref(successor), "remaining_dates": ["2026-09-29"],
+            "planner_input": replacement})
+        applied = self.app.handle({"operation": "menu", **fresh["apply_arguments"]})["menu"]
+        self.assertEqual(applied["slot_owners"][newer["slots"][0]["slot_id"]], newer["menu_id"])
+        self.assertEqual(self.store.read()["recipe_usage"][ordered["menu_id"]],
+                         frozen["recipe_usage"][ordered["menu_id"]])
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_addition_linked_or_ambiguous_menu_cannot_replan(self):
+        ordered, newer = self.independent_addition()
+        snapshot = deepcopy(self.store.read()["order_snapshots"]["synthetic-order"])
+        for defect in ("owner", "slot", "missing_snapshot", "missing_usage", "changed_change"):
+            with self.subTest(defect=defect):
+                with self.store.locked() as state:
+                    state["menu"] = deepcopy(newer)
+                    state["order_snapshots"]["synthetic-order"] = deepcopy(snapshot)
+                    state["recipe_usage"][ordered["menu_id"]]["order_id"] = "synthetic-order"
+                    state["pending_checkout"]["order_change"] = deepcopy(state["order_change"])
+                    if defect == "owner":
+                        state["menu"]["slot_owners"] = {newer["slots"][0]["slot_id"]: ordered["menu_id"]}
+                    elif defect == "slot":
+                        state["menu"]["slots"][0]["slot_id"] = ordered["slots"][0]["slot_id"]
+                    elif defect == "missing_snapshot":
+                        state["order_snapshots"].pop("synthetic-order")
+                    elif defect == "missing_usage":
+                        state["recipe_usage"][ordered["menu_id"]]["order_id"] = None
+                    else:
+                        state["pending_checkout"]["order_change"]["order_id"] = "other-order"
+                    state["menu"]["digest"] = menu_digest(state["menu"])
+                before = self.store.read()
+                prepared = self.app.handle({"operation": "menu", "action": "replan_prepare",
+                    "menu_ref": self.app._cart_menu_ref(before["menu"]),
+                    "remaining_dates": ["2026-09-28"], "planner_input": self.agent_input("Blocked replacement " + defect)})
+                self.assertEqual(prepared["replan"]["status"], "prepared")
+                with self.assertRaisesRegex(HouseholdError, "linked|unidentified"):
+                    self.app.handle({"operation": "menu", **prepared["apply_arguments"]})
+                self.assertEqual(self.store.read()["pending_checkout"], before["pending_checkout"])
+                self.assertEqual(self.store.read()["cart_plan"], before["cart_plan"])
+                if defect not in {"owner", "slot"}:
+                    with self.assertRaisesRegex(HouseholdError, "linked|unidentified"):
+                        self.save_new("Blocked new draft " + defect)
+                    self.assertEqual(self.store.read()["pending_checkout"], before["pending_checkout"])
+
+    @mock.patch("service.now", new=lambda: datetime(2026, 9, 24, 12, tzinfo=timezone.utc))
+    def test_whole_save_cannot_retire_inherited_owner_shared_with_frozen_order(self):
+        ordered, newer = self.independent_addition()
+        inherited = "menu_shared_planned_owner"
+        ordered_slot = ordered["slots"][0]
+        newer_slot = newer["slots"][0]
+        with self.store.locked() as state:
+            state["order_snapshots"]["synthetic-order"]["slot_owners"] = {
+                ordered_slot["slot_id"]: inherited}
+            state["recipe_usage"][inherited] = {
+                "week": ordered["week"], "status": "planned", "order_id": None,
+                "recipe_keys": [ordered_slot["recipe_key"], newer_slot["recipe_key"]],
+                "slots": [deepcopy(ordered_slot), deepcopy(newer_slot)],
+                "cooked_keys": [], "not_cooked_keys": [],
+            }
+            state["menu"]["slot_owners"] = {newer_slot["slot_id"]: inherited}
+            state["menu"]["digest"] = menu_digest(state["menu"])
+        before = self.store.read()
+        with self.assertRaisesRegex(HouseholdError, "shares protected order slots"):
+            self.save_new("Another distinct whole menu")
+        after = self.store.read()
+        self.assertEqual(after, before)
+        self.assertEqual(after["recipe_usage"][inherited], before["recipe_usage"][inherited])
+        self.assertEqual(after["menu_planning"]["retired"], before["menu_planning"]["retired"])
 
     def test_real_recovery_reconcile_orders_frozen_menu_after_new_menu_save(self):
         fixture = recovery_fixtures.RecoveryTests()
