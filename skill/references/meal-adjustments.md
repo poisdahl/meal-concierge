@@ -27,17 +27,19 @@ reuse old stock after possible cooking.
 
 ## Remaining-week changes
 
-An unresolved payment blocks applying a targeted replan because it would
-retire slots reserved by the frozen purchase. If the request is instead for a
-distinct whole new menu draft and checkout is in a waiting-payment state that
-permits menu saving, read the current menu with `get`, choose it with `plan`,
-and `save` the plan's unchanged `save_ref` as `planner_ref` together with the
-current `menu_ref` returned by `get`. This drafts meals while leaving the
-pending purchase and cart untouched. An active provider handler, prepared
-recovery review, order change or cancellation must follow its own status and
-recovery path first; do not confirm payment merely to unlock planning. Do not
-use this route to bypass a cooked, locked or batch-dependent slot in a targeted
-change.
+A pending purchase or order change protects its own slots, cart and payment,
+but a menu-only change to a separate menu can proceed when the service proves
+the menus are independent. For a requested distinct whole menu, read the
+current menu with `get`, choose it with `plan`, and `save` the unchanged
+`save_ref` as `planner_ref` together with the exact current `menu_ref`. For a
+targeted change to an already independent menu, use `replan_prepare` and
+`replan_apply`, even if the older order has a prepared recovery review or an
+active provider handler. Neither menu action resolves, retries or changes the
+older payment; do not prepare or apply new cart goods until it resolves. If
+the service reports linked or unidentified protected work, reconcile that
+operation before changing its slots. Do not confirm payment merely to unlock
+planning, or replace a whole menu to bypass a cooked, locked or batch-dependent
+slot.
 
 Read the current `menu_ref={menu_id,revision,digest}` and stable slot IDs. Use
 `replan_prepare` with `remaining_dates`, current `planner_input`, and any actual

@@ -1512,8 +1512,12 @@ Pass the exact `apply_arguments` from `replan_prepare` unchanged to
 the service regenerates the full replan and requires the same digest before saving.
 Large MCP results may omit those full details while retaining these exact apply
 arguments. A missing reference or stale date, menu, profile, usage, lock or recipe
-selection requires fresh preparation; pending checkout/cancellation/order-change
-state blocks apply. An oversized apply result returns the committed `menu_ref` and
+selection requires fresh preparation. A pending checkout or order change allows
+menu-only save or replan apply only when the service proves the new menu is
+independent of the protected order snapshot, slot owners and recipe usage. The
+pending payment, cart plan and order change remain frozen; a linked or
+unidentified menu and a pending cancellation still block apply. An oversized
+apply result returns the committed `menu_ref` and
 compact slot summary for exact follow-up operations. The complete unchanged legacy
 `replan` remains accepted. Apply is idempotent and
 creates an exact `supersedes` successor. Predecessor menu/order/email and usage

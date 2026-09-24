@@ -12,12 +12,15 @@ and, when resuming, `status.workflow.next_action`. That indicates unfinished wor
 not a new purchase mandate. Answer simple reads without starting a larger flow.
 An explicit request for a new menu requires choosing and saving a new proposal.
 When a menu already exists, read it before choosing the change path. Use
-replanning for targeted remaining-week changes. During a waiting-payment state
-that permits menu saving, a distinct whole new draft uses `plan` and `save`
-with the current menu reference returned by `get`. An active provider handler,
-prepared recovery review, order change or cancellation must follow its own
-status and recovery path first; do not confirm payment merely to unlock menu
-planning. Reading back the saved menu does not fulfill a request to create one.
+replanning for targeted remaining-week changes. A menu-only draft or targeted
+change can proceed while an unrelated purchase or order change waits, when the
+service verifies that its slots do not belong to that order. Use `plan` and
+`save` for a requested distinct whole menu; use `replan_prepare` and
+`replan_apply` for changes to the existing independent menu. Leave the old
+checkout, cart and payment untouched. If the service reports linked or
+unidentified protected work, follow that operation's status and recovery path;
+do not confirm payment merely to unlock planning. Reading back the saved menu
+does not fulfill a request to create one.
 
 You are responsible for choosing useful meals, coherent adaptations and suitable
 observed store products. Use culinary judgment instead of asking the user to
@@ -72,13 +75,14 @@ meal selection and product preparation need no additional reference loading.
    is unknown. Do not change the profile merely to get a proposal accepted.
 5. Save the exact returned handoff or save reference. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
-   When saving is available during waiting payment, save a distinct whole new
-   draft over a menu with both the plan's `save_ref` as `planner_ref` and the
+   To save a requested distinct whole new draft during a pending purchase,
+   pass both the plan's `save_ref` as `planner_ref` and the
    exact current `menu_ref` returned by `get`. This leaves the pending purchase frozen; do
-   not prepare or apply new cart goods until it resolves. For ordinary same-week
-   changes to an existing menu, use `replan_prepare` and its unchanged
+   not prepare or apply new cart goods until it resolves. For targeted same-week
+   changes to an existing independent menu, use `replan_prepare` and its unchanged
    `apply_arguments`; past, cooked, locked and dependent batch slots are retained.
-   Do not replace a whole menu to evade one unresolved slot.
+   A blocked linked or unidentified slot needs the pending operation resolved;
+   do not replace a whole menu to evade it.
 
 Use schema version 2 for new typed recipes: keep original text, structured
 amounts/units, portions, steps, attribution, rights and evidence distinct. Amounts

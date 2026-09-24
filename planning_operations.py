@@ -266,6 +266,96 @@ class PlanningOperations:
     def _replan_ref(replan_digest: str) -> str:
         return "replan_" + replan_digest
 
+    def _independent_menu_protection(self, state, candidate):
+        """Return the frozen menu owners when a menu has no link to protected work.
+
+        An addition's pending menu is merely the menu current at prepare time;
+        the paid order snapshot, rather than that incidental copy, owns its slots.
+        """
+        if state.get("pending_cancellation") or not isinstance(candidate, Mapping):
+            return None
+        pending = state.get("pending_checkout")
+        change = state.get("order_change")
+        if pending is not None and not isinstance(pending, Mapping):
+            return None
+        if change is not None and not isinstance(change, Mapping):
+            return None
+        if not change and (not pending or pending.get("status") not in UNRESOLVED_CHECKOUT_STATUSES):
+            return None
+        if change:
+            order_id = change.get("order_id")
+            if (not isinstance(order_id, str) or not order_id
+                    or pending and canonical(pending.get("order_change")) != canonical(change)):
+                return None
+            frozen = (state.get("order_snapshots") or {}).get(order_id)
+            if (not isinstance(frozen, Mapping) or frozen.get("order_id") != order_id
+                    or not isinstance(frozen.get("menu_id"), str) or not frozen["menu_id"]
+                    or not isinstance(frozen.get("slots", []), list)):
+                return None
+            linked_usage = {
+                menu_id: usage for menu_id, usage in (state.get("recipe_usage") or {}).items()
+                if isinstance(usage, Mapping) and usage.get("order_id") == order_id
+            }
+            if frozen["menu_id"] not in linked_usage:
+                return None
+        else:
+            frozen = pending.get("menu")
+            attribution = (pending.get("summary") or {}).get("menu_attribution")
+            if attribution is None:
+                attribution = self._checkout_menu_attribution(frozen, pending.get("cart_plan"))
+            if (attribution != "menu_bound" or not isinstance(frozen, Mapping)
+                    or not isinstance(frozen.get("menu_id"), str) or not frozen["menu_id"]
+                    or not isinstance(frozen.get("slots", []), list)):
+                return None
+            linked_usage = {}
+        protected_ids = {frozen["menu_id"]}
+        protected_slots = set()
+        for record in [frozen, *linked_usage.values()]:
+            slots = record.get("slots", [])
+            if not isinstance(slots, list):
+                return None
+            owners = record.get("slot_owners") or {}
+            if not isinstance(owners, Mapping) or any(not isinstance(owner, str) for owner in owners.values()):
+                return None
+            protected_ids.update(owners.values())
+            for slot in slots:
+                if not isinstance(slot, Mapping) or not isinstance(slot.get("slot_id"), str):
+                    return None
+                protected_slots.add(slot["slot_id"])
+        protected_ids.update(linked_usage)
+        if (candidate.get("menu_id") in protected_ids
+                or change and candidate.get("order_id") == change["order_id"]):
+            return None
+        candidate_usage = (state.get("recipe_usage") or {}).get(candidate.get("menu_id"))
+        if change and isinstance(candidate_usage, Mapping) and candidate_usage.get("order_id") == change["order_id"]:
+            return None
+        owners = candidate.get("slot_owners") or {}
+        slots = candidate.get("slots") or []
+        if not isinstance(owners, Mapping) or not isinstance(slots, list):
+            return None
+        if any(not isinstance(owner, str) or owner in protected_ids for owner in owners.values()):
+            return None
+        if any(not isinstance(slot, Mapping) or not isinstance(slot.get("slot_id"), str)
+               or slot["slot_id"] in protected_slots for slot in slots):
+            return None
+        ancestor = candidate.get("supersedes")
+        seen = set()
+        while ancestor is not None:
+            if not isinstance(ancestor, Mapping) or not isinstance(ancestor.get("menu_id"), str):
+                return None
+            ancestor_id = ancestor["menu_id"]
+            if ancestor_id in protected_ids:
+                return None
+            key = f'{ancestor_id}:{ancestor.get("revision")}'
+            if key in seen:
+                return None
+            seen.add(key)
+            prior = (state.get("menu_planning") or {}).get("history", {}).get(key)
+            if not isinstance(prior, Mapping) or canonical(mp.menu_ref(prior)) != canonical(ancestor):
+                return None
+            ancestor = prior.get("supersedes")
+        return protected_ids
+
     def _store_prepared_replan(self, prepared: Mapping[str, Any]) -> str:
         replan_digest = str(prepared.get("replan_digest") or "")
         replan_ref = self._replan_ref(replan_digest)
@@ -531,26 +621,22 @@ class PlanningOperations:
             if canonical(fresh) != canonical(supplied):
                 raise HouseholdError("replan is stale or altered; prepare again")
         with self.store.locked() as state:
-            if any(state.get(k) for k in ("pending_cancellation", "order_change")):
-                raise HouseholdError("reconcile pending protected operations before replan apply")
             if self._household_today(state).isoformat() != supplied["as_of_date"] or self._replan_state_digest(state) != supplied["state_digest"]:
                 raise HouseholdError("replan date or state changed; prepare again")
             if replan_ref is not None:
                 _digest, current_record = self._prepared_replan_record(state, replan_ref)
                 if canonical(current_record) != canonical(record):
                     raise HouseholdError("replan_ref changed before apply; prepare again")
-            if (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                if self.browser_lock.locked():
-                    raise HouseholdError("finish the active provider operation before changing a menu")
-                self._menu_save_pending_payment(state)
-                raise HouseholdError(
-                    "Targeted replan waits for the pending checkout to resolve. "
-                    "For a distinct whole new menu draft, read menu get, run menu plan, "
-                    "then save its unchanged save_ref as planner_ref with the exact current "
-                    "menu_ref returned by get; the pending purchase remains frozen."
-                )
-            self._abandon_predispatch(state, reason="menu replanned before checkout")
-            result = self._commit_successor(state, supplied)
+            protected = bool(
+                state.get("pending_cancellation") or state.get("order_change")
+                or (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES
+            )
+            independent = self._independent_menu_protection(state, state.get("menu")) if protected else None
+            if protected and independent is None:
+                raise HouseholdError("reconcile the linked or unidentified protected operation before replan apply")
+            if independent is None:
+                self._abandon_predispatch(state, reason="menu replanned before checkout")
+            result = self._commit_successor(state, supplied, preserve_cart_plan=independent is not None)
             state["menu_planning"]["prepared"].pop(
                 self._replan_ref(supplied["replan_digest"]), None
             )
@@ -628,7 +714,7 @@ class PlanningOperations:
             commit["successor"]["batches"][-1]["confirmation"]=deepcopy(confirmation)
             return self._commit_successor(state,commit)
 
-    def _commit_successor(self, state, supplied):
+    def _commit_successor(self, state, supplied, *, preserve_cart_plan=False):
         planning = state["menu_planning"]
         if any(len(v) >= mp.MAX_PLANNING_MENUS for v in planning.values()):
             raise HouseholdError("planning history limit reached")
@@ -661,7 +747,8 @@ class PlanningOperations:
         planning["locks"][mp.lock_key(successor)] = carried_locks
         planning["applied"][supplied["replan_digest"]] = mp.menu_ref(successor)
         state["menu"] = successor
-        self._clear_persisted_product_plan(state.get("cart_plan"))
+        if not preserve_cart_plan:
+            self._clear_persisted_product_plan(state.get("cart_plan"))
         return {"menu": deepcopy(successor), "shopping_comparison": deepcopy(supplied["shopping_comparison"])}
 
     def _add_slot(self, request):
@@ -1280,27 +1367,41 @@ class PlanningOperations:
         state["pending_checkout"] = None
 
     @contextmanager
-    def _menu_save_commit(self):
-        # A payment handler holds the browser lock through its final journal
-        # write. Fail fast rather than changing the menu during that handler.
+    def _menu_save_commit(self, candidate):
+        # The state lock serializes this menu write with a payment handler's
+        # journal writes. A held browser lock is safe only for a proven
+        # independent menu; linked and unidentified work retains its fence.
         with self.product_plan_lock:
-            if not self.browser_lock.acquire(blocking=False):
-                raise HouseholdError("finish the active provider operation before saving a menu")
+            acquired = self.browser_lock.acquire(blocking=False)
             try:
                 with self.store.locked() as state:
+                    if not acquired and self._independent_menu_protection(state, candidate) is None:
+                        raise HouseholdError("finish the active provider operation before saving a menu")
                     yield state
             finally:
-                self.browser_lock.release()
+                if acquired:
+                    self.browser_lock.release()
 
-    def _menu_save_pending_payment(self, state):
+    def _menu_save_pending_payment(self, state, candidate):
         if state.get("pending_cancellation"):
             raise HouseholdError("finish the pending order cancellation before saving a menu")
         pending = state.get("pending_checkout")
-        if not isinstance(pending, Mapping) or pending.get("status") == "awaiting_confirmation":
-            return None
+        change = state.get("order_change")
+        if not change and (not isinstance(pending, Mapping) or pending.get("status") == "awaiting_confirmation"):
+            return None, set()
+        independent = self._independent_menu_protection(state, candidate)
+        if independent is not None:
+            return pending or {"order_change": change}, independent
+        if change:
+            raise HouseholdError("reconcile the linked or unidentified order change before saving a menu")
         if (pending.get("status") not in UNRESOLVED_CHECKOUT_STATUSES
                 or pending.get("order_change")):
             raise HouseholdError("reconcile the pending protected operation before saving a menu")
+        attribution = (pending.get("summary") or {}).get("menu_attribution")
+        if attribution is None:
+            attribution = self._checkout_menu_attribution(pending.get("menu"), pending.get("cart_plan"))
+        if attribution == "menu_bound":
+            raise HouseholdError("reconcile the linked or unidentified pending purchase before saving a menu")
         child = pending.get("recovery")
         if isinstance(child, Mapping) and child.get("status") == "awaiting_confirmation":
             raise HouseholdError("resolve the prepared recovery review through checkout before saving a menu")
@@ -1308,7 +1409,7 @@ class PlanningOperations:
         if attempt.get("status") == "clicking" and not (
                 attempt.get("authentication_context") or self._checkout_payment_closed(pending)):
             raise HouseholdError("reconcile the active payment submission before saving a menu")
-        return pending
+        return pending, set()
 
     def _menu(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "get")
@@ -1443,7 +1544,7 @@ class PlanningOperations:
                 seen_keys.update(aliases)
             if duplicate_key:
                 raise HouseholdError("the same recipe cannot appear twice in one menu")
-            with self._menu_save_commit() as state:
+            with self._menu_save_commit(menu) as state:
                 meals = (state.get("profile") or {}).get("meals") or {}
                 expected_dinners = meals.get("dinner_days")
                 has_explicit_slots = isinstance(menu.get("slots"), list)
@@ -1460,17 +1561,16 @@ class PlanningOperations:
                 current = state.get("menu")
                 if isinstance(current, Mapping) and current.get("digest") == digest:
                     return {"menu": deepcopy(current), "idempotent": True}
-                pending_payment = self._menu_save_pending_payment(state)
-                protected_menu = (pending_payment or {}).get("menu")
-                protected_menu_id = (
-                    protected_menu.get("menu_id") if isinstance(protected_menu, Mapping)
-                    and ((pending_payment.get("summary") or {}).get("menu_attribution")
-                         or self._checkout_menu_attribution(protected_menu, pending_payment.get("cart_plan"))) == "menu_bound"
-                    else None
-                )
+                pending_payment, protected_menu_ids = self._menu_save_pending_payment(state, menu)
                 if isinstance(current, Mapping) and supplied_ref is None:
                     raise HouseholdError(
                         "replacing the current menu requires its exact menu_ref from menu get"
+                    )
+                if (protected_menu_ids and isinstance(current, Mapping)
+                        and current.get("menu_id") not in protected_menu_ids
+                        and self._independent_menu_protection(state, current) is None):
+                    raise HouseholdError(
+                        "current menu shares protected order slots; reconcile the linked operation before replacing it"
                     )
                 if planner_context is None:
                     for collection in ("dishes", "salads"):
@@ -1526,14 +1626,14 @@ class PlanningOperations:
                     self._abandon_predispatch(state, reason="menu replaced")
                 blocked = []
                 cooldown_state = deepcopy(state)
-                if isinstance(current, Mapping) and current.get("menu_id") != protected_menu_id:
+                if isinstance(current, Mapping) and current.get("menu_id") not in protected_menu_ids:
                     mp.retire_planned_slots(cooldown_state, current)
                 current_usage = state.setdefault("recipe_usage", {}).get(current.get("menu_id")) if isinstance(current, Mapping) else None
                 for key in keys:
                     ignored_menu_id = (
                         current.get("menu_id")
                         if isinstance(current_usage, Mapping)
-                        and current.get("menu_id") != protected_menu_id
+                        and current.get("menu_id") not in protected_menu_ids
                         and current_usage.get("status") == "planned"
                         and self._matching_recipe_key(key, current_usage.get("cooked_keys")) is None
                         and not library_recipe_key_aliases(key).intersection(
@@ -1547,11 +1647,11 @@ class PlanningOperations:
                 if blocked:
                     raise HouseholdError(f"recipe cooldown blocks this menu: {canonical(blocked)}")
                 if isinstance(current, Mapping):
-                    if current.get("menu_id") != menu_id and current.get("menu_id") != protected_menu_id:
+                    if current.get("menu_id") != menu_id and current.get("menu_id") not in protected_menu_ids:
                         mp.retire_planned_slots(state, current)
                     old_usage = state.setdefault("recipe_usage", {}).get(current.get("menu_id"))
                     if (isinstance(old_usage, dict) and old_usage.get("status") == "planned"
-                            and current.get("menu_id") not in {menu_id, protected_menu_id}):
+                            and current.get("menu_id") not in {menu_id, *protected_menu_ids}):
                         old_usage["status"] = "cancelled"
                 menu.update({"menu_id": menu_id, "revision": revision, "digest": digest, "phase": "draft"})
                 state["menu"] = deepcopy(menu)
