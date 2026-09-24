@@ -2054,6 +2054,12 @@ class OdaBrowser:
                 self._invoke("reload")
                 self._invoke("snapshot")
         if action != "continue":
+            if action == "blocked" and surface.get("unavailable_message"):
+                raise HouseholdError(
+                    f"{self.checkout_provider.title()} reports an unavailable cart item: "
+                    f"{surface['unavailable_message']} "
+                    "Remove or replace that item in the cart before preparing checkout again."
+                )
             raise HouseholdError("Oda cart cannot continue to checkout")
         self._click_action("continue", mouse=True)
         return "continue"
@@ -2066,17 +2072,26 @@ class OdaBrowser:
  const norm=v=>(v||'').normalize('NFC').replace(/\s+/g,' ').trim();
  const visible=x=>{const style=getComputedStyle(x),box=x.getBoundingClientRect();return style.display!=='none'&&style.visibility!=='hidden'&&box.width>0&&box.height>0};
  const unavailable=new RegExp(UNAVAILABLE_LABELS,'i');
+ const stockMessage=root=>{
+   const lines=(root.innerText||'').split(/\n+/).map(norm).filter(Boolean);
+   const line=lines.find(text=>unavailable.test(text));
+   if(!line)return null;
+   // Return only the merchant's stock sentence, not the rest of the cart.
+   const sentence=line.match(/(?:^|[.!?]\s+)([^.!?]{1,180}?(?:utsolgt|utilgjengelig|ikke tilgjengelig|slut i lager|inte tillgänglig|unavailable))/i);
+   return (sentence?.[1]||line).slice(0,180);
+ };
  const storefrontLinkOnly=ALLOW_STOREFRONT_LINK;
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
  if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked'});
  if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
- const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
- if(dialogs.some(root=>unavailable.test(norm(root.innerText||''))))return JSON.stringify({action:'blocked'});
+ const dialogs=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
+ for(const root of dialogs){const message=stockMessage(root);if(message)return JSON.stringify({action:'blocked',unavailable_message:message});}
  let roots=[];
  if(location.href===CART){
    const main=document.querySelector('main');
    roots=[main||document];
-   if(unavailable.test(norm((main||document.body).innerText||'')))return JSON.stringify({action:'blocked'});
+   const message=stockMessage(main||document.body);
+   if(message)return JSON.stringify({action:'blocked',unavailable_message:message});
  }else{
    const candidates=dialogs.length?dialogs:(storefrontLinkOnly?[document]:[]);
    roots=candidates.filter(root=>{
