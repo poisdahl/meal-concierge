@@ -768,7 +768,8 @@ class OdaDirectCardPersistenceTests(unittest.TestCase):
         browser.verify_oda_addition_retry = lambda *args, **kwargs: None
         binding = {"account_reference_digest": "a" * 64, "receipt_address": "Example street 1"}
         browser._order_cart = lambda cart, *args: cart
-        browser._cart_expectation = lambda cart: {"delivery_address": binding["receipt_address"]}
+        browser._cart_expectation = lambda cart: {"delivery_address": binding["receipt_address"],
+                                                  "total_minor": 2040, "product_count": 1}
         digest = "d" * 64
         label = "meal-concierge-payment-recovery-" + digest
         tabs = [{"tabId": "failed", "label": "meal-concierge-payment-recovery"}]

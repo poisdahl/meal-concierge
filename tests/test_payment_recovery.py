@@ -3206,6 +3206,18 @@ class OdaAdditionPaymentTests(unittest.TestCase):
         self.assertIsNone(self.app.store.read()["order_change"])
         self.assertEqual(self.app.store.read()["order_snapshots"], self.snapshots)
 
+    def test_addition_reports_native_charge_separately_from_reviewed_delta(self):
+        self.context_change = {"provider_charge_minor": 1200, "payment_id": "123456",
+                               "order_change_id": "7654321"}
+        prepared = self.call("prepare")
+        sent = self.call("confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(sent["summary"]["total"], 16.70)
+        self.assertEqual(sent["summary"]["provider_charge_total"], 12.00)
+        followup = self.call("reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(followup["summary"]["total"], 16.70)
+        self.assertEqual(followup["summary"]["provider_charge_total"], 12.00)
+        self.assertEqual(self.browser.clicks, 1)
+
     def test_saved_card_override_is_frozen_without_changing_global_vipps(self):
         prepared = self.call("prepare", checkout_payment={"method": "saved_card", "card_last4": "1234"})
         self.assertEqual(prepared["summary"]["payment_method"], "saved_card")
@@ -3353,6 +3365,44 @@ class OdaAdditionBrowserTests(unittest.TestCase):
 
 
 class RetryAmountTests(unittest.TestCase):
+    def test_oda_addition_retry_freezes_overview_and_native_charge_separately(self):
+        import json
+        import shutil
+        import subprocess
+        from test_payment_setup import PAYMENT_DOM
+        from oda_browser import _oda_checkout_amount_script
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node is required for the native retry amount parser')
+        url = 'https://oda.com/no/checkout/retry/?orderNumber=order-1&orderChangeId=7654321'
+        config = {'url': url, 'button': 'Betal med 16,40 kr',
+                  'rows': [['1 vare', '12,90 kr'], ['Leveringsemballasje', '7,50 kr'],
+                           ['Total inkl. MVA', '20,41 kr']]}
+        def evaluate(script, changes=None):
+            result = subprocess.run([node, '-e', PAYMENT_DOM],
+                input=json.dumps({'script': script, 'c': {**config, **(changes or {})}}),
+                text=True, capture_output=True, check=True, timeout=10)
+            return json.loads(result.stdout)
+        read = _oda_checkout_amount_script(1640, expected_product_count=1,
+                                            retry=True, addition_retry=True, addition_goods_minor=1290,
+                                            native_charge_retry=True)
+        observed = evaluate(read)['result']
+        self.assertTrue(observed['amounts_valid'])
+        self.assertEqual(observed['amounts']['provider_total'], 2041)
+        self.assertEqual(observed['amounts']['bags'], 750)
+        click = _oda_checkout_amount_script(1640, expected_product_count=1, retry=True,
+            addition_retry=True, addition_goods_minor=1290, native_charge_retry=True, vipps=True,
+            expected_amounts=observed['amounts'], expected_url=url,
+            expected_itemized_discounts=observed['itemized_discount_rows'])
+        self.assertEqual(evaluate(click)['clicks'], ['PAY'])
+        for changes in ({'button': 'Betal med 20,40 kr'},
+                        {'rows': [['1 vare', '12,90 kr'], ['Leveringsemballasje', '7,51 kr'],
+                                  ['Total inkl. MVA', '20,41 kr']]},
+                        {'rows': [['1 vare', '13,00 kr'], ['Leveringsemballasje', '7,50 kr'],
+                                  ['Total inkl. MVA', '20,41 kr']]}):
+            with self.subTest(changes=changes):
+                self.assertEqual(evaluate(click, changes)['clicks'], [])
+
     def test_late_item_expansion_waits_for_controls_and_items_without_toggling_twice(self):
         import json
         import shutil

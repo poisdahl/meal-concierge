@@ -213,11 +213,14 @@ def _native_vipps_binding(browser, url, context):
             return None
         claims = json.loads(validation.get("responseBody", ""))
         if (not isinstance(claims, dict) or type(claims.get("amount")) is not int
-                or claims["amount"] != context["expected_total"] or claims.get("currency") != "NOK"):
+                or claims["amount"] != context.get("provider_charge_minor", context["expected_total"])
+                or claims.get("currency") != "NOK"):
             return None
         fallback = urlsplit(str(claims.get("fallback") or ""))
         match = re.fullmatch(r"/no/checkout/([1-9][0-9]*)/[A-Za-z0-9_-]+/redirect-return/", fallback.path)
         if fallback.scheme != "https" or fallback.netloc != "oda.com" or fallback.fragment or not match:
+            return None
+        if context.get("payment_id") is not None and context["payment_id"] != match[1]:
             return None
         def same_poll(row):
             if not exact_api(row, _VIPPS_POLL_PATH) or row.get("url") != claims.get("url"):
@@ -298,6 +301,93 @@ def native_vipps_request_state(browser, url, context, *, deadline):
         return fallback
 
 
+def validated_addition_charge(browser, url, order_id, reviewed_minor, *, prior_request_ids=None,
+                              expected_mode=None, required_charge=None):
+    """Bind the hosted charge to one native addition pay POST and its retry target.
+
+    The pay response body can disappear after the cross-origin navigation, so
+    the validated Vipps fallback supplies the payment ID. Its Oda retry GET
+    must resolve to this addition, and the pay POST must precede validation.
+    """
+    parsed_url = urlsplit(url)
+    query = parse_qs(parsed_url.query, keep_blank_values=True)
+    token = query.get("token", [])
+    if (parsed_url.scheme != "https" or parsed_url.netloc != "pay.vipps.no"
+            or parsed_url.path != "/" or parsed_url.fragment or set(query) != {"token"}
+            or len(token) != 1 or not token[0]
+            or type(reviewed_minor) is not int or reviewed_minor <= 0):
+        return None
+    mode = expected_mode or {"type": "confirm_modification", "orderNumber": order_id}
+    if mode.get("orderNumber") != order_id or mode.get("type") not in {"confirm_modification", "retry_modification"}:
+        return None
+    try:
+        rows = browser._invoke("network", "requests", "--filter", "/api/v1/checkout/pay/", "--method", "POST").get("requests")
+        if not isinstance(rows, list):
+            return None
+        pays = []
+        for row in rows:
+            if (not isinstance(row, dict) or row.get("method") != "POST"
+                    or row.get("url") != "https://oda.com/api/v1/checkout/pay/"
+                    or row.get("status") != 200 or not isinstance(row.get("requestId"), str)
+                    or type(row.get("timestamp")) not in (int, float)):
+                continue
+            if prior_request_ids is not None and row["requestId"] in prior_request_ids:
+                continue
+            request = browser._invoke("network", "request", row["requestId"])
+            if (request.get("requestId") != row["requestId"] or request.get("url") != row["url"]
+                    or request.get("method") != "POST" or request.get("status") != 200
+                    or request.get("timestamp") != row["timestamp"]):
+                return None
+            body = json.loads(request.get("postData", ""))
+            primary = body.get("primaryPayment")
+            if (body.get("mode") == mode and isinstance(primary, dict)
+                    and type(primary.get("methodId")) is int and primary["methodId"] == 25
+                    and isinstance(primary.get("paymentMethodData"), dict)):
+                pays.append(row)
+        if len(pays) != 1:
+            return None
+        validations = browser._invoke("network", "requests", "--filter", "api.vipps.no", "--method", "GET").get("requests")
+        if not isinstance(validations, list):
+            return None
+        matching = [row for row in validations if isinstance(row, dict) and row.get("method") == "GET"
+                    and row.get("status") == 200 and type(row.get("timestamp")) in (int, float)
+                    and row["timestamp"] > pays[0]["timestamp"]
+                    and (parsed := urlsplit(str(row.get("url") or ""))).scheme == "https"
+                    and parsed.netloc == "api.vipps.no" and parsed.path == _VIPPS_POLL_PATH + "/validate-token"
+                    and not parsed.fragment and parse_qs(parsed.query).get("token") == token]
+        if len(matching) != 1:
+            return None
+        row = matching[0]
+        validation = browser._invoke("network", "request", row["requestId"])
+        if (validation.get("requestId") != row["requestId"] or validation.get("url") != row["url"]
+                or validation.get("method") != "GET" or validation.get("status") != 200):
+            return None
+        claims = json.loads(validation.get("responseBody", ""))
+        charge = claims.get("amount") if isinstance(claims, dict) else None
+        if (type(charge) is not int or not 0 < charge <= reviewed_minor
+                or required_charge is not None and charge != required_charge
+                or claims.get("currency") != "NOK"):
+            return None
+        poll_url = urlsplit(str(claims.get("url") or ""))
+        if (poll_url.scheme != "https" or poll_url.netloc != "api.vipps.no"
+                or poll_url.path != _VIPPS_POLL_PATH or poll_url.query or poll_url.fragment):
+            return None
+        fallback = urlsplit(str(claims.get("fallback") or ""))
+        payment = re.fullmatch(r"/no/checkout/([1-9][0-9]*)/[A-Za-z0-9_-]+/redirect-return/", fallback.path)
+        if fallback.scheme != "https" or fallback.netloc != "oda.com" or fallback.fragment or not payment:
+            return None
+        with browser._inspection_tab():
+            browser._open(browser._order_url(order_id))
+            target = _payment_retry(browser, payment[1], order_id)
+        if (mode["type"] == "retry_modification"
+                and target["order_change_id"] != str(mode.get("orderChangeId"))):
+            return None
+        return {"provider_charge_minor": charge, "payment_id": payment[1],
+                "order_change_id": target["order_change_id"]}
+    except (HouseholdError, AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None):
     """Close only the retained request; callback must durably journal the click."""
     from oda_browser import _oda_vipps_gateway_script
@@ -334,7 +424,7 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
         node = shutil.which("node")
         if not node:
             return unknown
-        surface = browser._eval(_oda_vipps_gateway_script(context["expected_total"], browser.vipps_phone_number,
+        surface = browser._eval(_oda_vipps_gateway_script(context.get("provider_charge_minor", context["expected_total"]), browser.vipps_phone_number,
                                 expected_url=url, allow_post_dispatch_ack=True, allow_source_bound_amountless=True))
         if not surface.get("identity") or not (surface.get("sent") or surface.get("expired") or surface.get("fillable")):
             return unknown
@@ -361,7 +451,7 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
                 latest = str(browser._invoke("get", "url").get("url") or "")
                 if latest != url:
                     return unknown
-                observed = browser._eval(_oda_vipps_gateway_script(context["expected_total"], browser.vipps_phone_number,
+                observed = browser._eval(_oda_vipps_gateway_script(context.get("provider_charge_minor", context["expected_total"]), browser.vipps_phone_number,
                                       expected_url=url, allow_post_dispatch_ack=True, allow_source_bound_amountless=True))
                 if not observed.get("identity") or not (observed.get("sent") or observed.get("fillable")):
                     return unknown
@@ -382,7 +472,7 @@ def close_vipps_request(browser, context, before_cancel, *, deadline, prior=None
             process.wait()
 
 
-def adopt_vipps_request(browser, cart, review, *, deadline, order_id):
+def adopt_vipps_request(browser, cart, review, *, deadline, order_id, addition=False):
     """Recover missing context only from a retained, provider-bound request.
 
     Old journals without a hosted tab and native validation response stay
@@ -420,31 +510,46 @@ def adopt_vipps_request(browser, cart, review, *, deadline, order_id):
         if (observed.get("url") != validations[0]["url"] or observed.get("status") != 200
                 or observed.get("method") != "GET" or observed.get("requestId") != validations[0]["requestId"]
                 or not isinstance(claims, dict) or type(claims.get("amount")) is not int
-                or claims["amount"] != expected["total_minor"] or claims.get("currency") != "NOK"):
+                or (not addition and claims["amount"] != expected["total_minor"])
+                or (addition and not 0 < claims["amount"] <= expected["total_minor"])
+                or claims.get("currency") != "NOK"):
             return None
         fallback = urlsplit(str(claims.get("fallback") or ""))
         match = re.fullmatch(r"/no/checkout/([1-9][0-9]*)/[A-Za-z0-9_-]+/redirect-return/", fallback.path)
         if fallback.scheme != "https" or fallback.netloc != "oda.com" or fallback.fragment or not match:
             return None
-        surface = browser._eval(_oda_vipps_gateway_script(expected["total_minor"], browser.vipps_phone_number,
+        charge = validated_addition_charge(browser, url, order_id, expected["total_minor"]) if addition else None
+        if addition and not charge:
+            return None
+        surface = browser._eval(_oda_vipps_gateway_script(claims["amount"], browser.vipps_phone_number,
                                 expected_url=url, allow_source_bound_amountless=True, allow_post_dispatch_ack=True))
         if not surface.get("identity") or not (surface.get("fillable") or surface.get("sent") or surface.get("expired")):
             return None
         # A native payment ID must resolve to the independently verified order;
         # equal amount alone cannot identify a payment after a lost handoff.
-        with browser._inspection_tab():
-            value = browser._eval(r"""(async()=>{
+        if addition:
+            value = {"type": "checkout-payment-retry", "params": {
+                "order_number": order_id, "order_change_id": int(charge["order_change_id"])}}
+        else:
+            with browser._inspection_tab():
+                browser._open(browser._order_url(order_id))
+                value = browser._eval(r"""(async()=>{
  if(location.origin!=='https://oda.com')return JSON.stringify({});
  const r=await fetch('/api/v1/checkout/payment/'+PAYMENT+'/retry/',{method:'GET',credentials:'same-origin',cache:'no-store',redirect:'error'});
  return r.ok?JSON.stringify({retry:await r.json()}):JSON.stringify({});
 })()""".replace("PAYMENT", json.dumps(match[1]))).get("retry")
         params = value.get("params") if isinstance(value, dict) else None
         if (not isinstance(params, dict) or value.get("type") != "checkout-payment-retry"
-                or params.get("order_number") != order_id or params.get("order_change_id") is not None):
+                or params.get("order_number") != order_id
+                or (addition and str(params.get("order_change_id")) != charge["order_change_id"])
+                or (not addition and params.get("order_change_id") is not None)):
             return None
         return {"tab_id": hosted[0]["tabId"], "expected_total": expected["total_minor"],
                 "gateway_url_digest": hashlib.sha256(url.encode()).hexdigest(),
-                "order_id": order_id if review.get("order_id") else None}
+                "order_id": order_id if review.get("order_id") or addition else None,
+                **({"provider_charge_minor": charge["provider_charge_minor"],
+                    "payment_id": charge["payment_id"], "order_change_id": charge["order_change_id"]}
+                   if addition else {})}
 
 
 def _current_retry_target(browser, order_id):
