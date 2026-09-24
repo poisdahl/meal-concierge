@@ -4865,6 +4865,84 @@ class VippsNativeTerminalTests(unittest.TestCase):
                 self.assertIsNone(_native_vipps_terminal(browser, "https://pay.vipps.no/?token=source",
                                                        {"expected_total": 4370, "gateway_url_digest": "a" * 64}))
 
+    def test_missing_latest_body_retains_only_binding_not_older_terminal_proof(self):
+        from oda_payment_switch import _native_vipps_binding, _native_vipps_terminal
+        browser, _, poll = self.fixture()
+        browser.rows.append({**poll, "timestamp": 3, "requestId": "closed-reader", "responseBody": None})
+        context = {"expected_total": 4370, "gateway_url_digest": "a" * 64}
+        url = "https://pay.vipps.no/?token=source"
+        binding = _native_vipps_binding(browser, url, context)
+        self.assertEqual(binding["payment_id"], "456")
+        self.assertEqual(binding["headers"], poll["headers"])
+        self.assertIsNone(binding["status"])
+        self.assertIsNone(_native_vipps_terminal(browser, url, context))
+        for invalid in ("", "not-json", "{}", '{"status":"UNRECOGNIZED"}'):
+            with self.subTest(body=invalid):
+                browser.rows[-1]["responseBody"] = invalid
+                self.assertIsNone(_native_vipps_binding(browser, url, context))
+
+    def test_missing_body_outcome_requires_fresh_successful_native_read(self):
+        from unittest import mock
+        from oda_payment_switch import native_vipps_request_state
+        browser, _, poll = self.fixture()
+        poll["responseBody"] = None
+        native_invoke = browser._invoke
+        browser._invoke = lambda *args: ({"cdpUrl": "ws://localhost/synthetic"}
+                                         if args == ("get", "cdp-url") else native_invoke(*args))
+        context = {"expected_total": 4370, "gateway_url_digest": "a" * 64}
+        url = "https://pay.vipps.no/?token=source"
+        cases = [({"status": "closed", "terminal_status": "TIMEOUT"}, {"status": "expired", "terminal_status": "TIMEOUT"}),
+                 ({"status": "paid", "terminal_status": "ACCEPTED"}, {"status": "sent", "terminal_status": "ACCEPTED"}),
+                 ({"status": "unknown", "terminal_status": "SUBMITTED"}, {"status": "sent"}),
+                 ({"status": "unknown", "read_http_status": 401}, {"status": "unknown"}),
+                 ({"status": "unknown", "read_content_json": False}, {"status": "unknown"})]
+        for observed, expected in cases:
+            with self.subTest(observed=observed), mock.patch("oda_payment_switch.shutil.which", return_value="node"), \
+                    mock.patch("oda_payment_switch.subprocess.Popen") as spawn, \
+                    mock.patch("oda_payment_switch._line", return_value=observed):
+                spawn.return_value.poll.return_value = 0
+                result = native_vipps_request_state(browser, url, context, deadline=999999999)
+                self.assertEqual(result, expected)
+                import json
+                cfg = json.loads(spawn.return_value.stdin.write.call_args.args[0])
+                self.assertEqual(cfg["mode"], "state")
+                self.assertIsNone(cfg["poll_seed"]["status"])
+                self.assertEqual(cfg["poll_seed"]["payment_id"], "456")
+        with mock.patch("oda_payment_switch.shutil.which", return_value=None):
+            self.assertEqual(native_vipps_request_state(browser, url, context, deadline=999999999),
+                             {"status": "unknown"})
+
+    def test_missing_body_close_observes_without_repeating_cancellation(self):
+        import hashlib
+        from contextlib import nullcontext
+        from unittest import mock
+        from oda_payment_switch import close_vipps_request
+        browser, _, poll = self.fixture()
+        poll["responseBody"] = None
+        url = "https://pay.vipps.no/?token=source"
+        native_invoke = browser._invoke
+        browser._invoke = lambda *args: ({"url": url} if args == ("get", "url") else
+                                         {"cdpUrl": "ws://localhost/synthetic"} if args == ("get", "cdp-url") else native_invoke(*args))
+        browser.checkout_provider = "oda"
+        browser.vipps_phone_number = "12345678"
+        browser._checkout_operation = lambda *args, **kwargs: nullcontext()
+        browser._checkout_dispatch_tab = lambda: "owned"
+        browser._select_payment_tab = lambda tab_id: tab_id == "owned"
+        browser._eval = lambda script: {"identity": True, "expired": True}
+        context = {"expected_total": 4370, "gateway_url_digest": hashlib.sha256(url.encode()).hexdigest(), "tab_id": "owned"}
+        for status, terminal in (("closed", "TIMEOUT"), ("paid", "ACCEPTED"), ("unknown", "UNKNOWN")):
+            with self.subTest(status=status), mock.patch("oda_payment_switch.shutil.which", return_value="node"), \
+                    mock.patch("oda_payment_switch.subprocess.Popen") as spawn, \
+                    mock.patch("oda_payment_switch._line", return_value={"status": status, "terminal_status": terminal, "payment_id": "456"}):
+                spawn.return_value.poll.return_value = 0
+                clicks = []
+                result = close_vipps_request(browser, context, clicks.append, deadline=999999999,
+                                            prior={"cancel_attempted": True})
+                self.assertEqual(result["status"], status)
+                self.assertEqual(clicks, [])
+                self.assertEqual(spawn.return_value.stdin.write.call_count, 1)
+                self.assertTrue(result["cancel_attempted"])
+
     def test_recorded_submitted_remains_sent_when_fresh_reader_unavailable(self):
         from unittest import mock
         from oda_payment_switch import native_vipps_request_state
