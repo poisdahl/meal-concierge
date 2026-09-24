@@ -29,6 +29,7 @@ MAX_FACT_TOKEN = 80
 
 SUPPORTED_STRICT_TARGETS = {
     "active_minutes",
+    "leafy_green_days",
     "minimum_fish_portions",
     "minimum_legume_dinners",
     "minimum_wholegrain_or_potato_dinners",
@@ -85,7 +86,13 @@ PRIORITY_FACETS = {
     "fish": "fish", "fisk": "fish", "legumes": "legume", "belgfrukter": "legume",
     "vegetables": "vegetable", "grønnsaker": "vegetable", "whole grains": "wholegrain", "fullkorn": "wholegrain",
 }
-LEAFY_TERMS = {"spinach", "spinat", "kale", "grønnkål", "mangold", "chard"}
+LEAFY_TERMS = {
+    "spinach", "spinat", "babyspinat", "kale", "grønnkål", "mangold", "chard",
+    "lettuce", "romaine", "romanosalat", "hjertesalat", "salatblader",
+    "arugula", "rocket", "ruccola", "rucola", "watercress", "brønnkarse",
+    "pak choi", "bok choy",
+}
+MIN_LEAFY_GRAMS_PER_SERVING = 25
 WHOLEGRAIN_TERMS = {"wholegrain", "wholewheat", "fullkorn", "brown rice", "havre", "oats", "quinoa"}
 
 
@@ -495,12 +502,12 @@ def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping
         facet = PRIORITY_FACETS.get(preference)
         reasons.append(_reason("diet:prioritise", 4 if facet in facets else 0,
                                {"preference": preference, "evidence": "positive_ingredient_match" if facet in facets else "unknown" if facet else "unsupported"}))
-    weekdays = {name: index for index, name in enumerate(("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"), 1)}
-    wanted_days = {value if type(value) is int else weekdays.get(_text(value)) for value in diet.get("leafy_green_days", [])}
-    if date.fromisoformat(day).isoweekday() in wanted_days:
-        present = any(_contains_term(identity, LEAFY_TERMS) for identity in identities)
-        reasons.append(_reason("diet:leafy_green_day", 5 if present else 0,
-                               {"day": day, "evidence": "positive_ingredient_match" if present else "unknown"}))
+    if diet.get("leafy_green_days"):
+        grams = _listed_leafy_mass(recipe)
+        reasons.append(_reason("diet:leafy_green_dinner", 5 if grams is not None and grams >= MIN_LEAFY_GRAMS_PER_SERVING else 0,
+                               {"day": day, "listed_grams_per_serving": grams,
+                                "minimum_grams_per_serving": MIN_LEAFY_GRAMS_PER_SERVING,
+                                "evidence": "substantial_listed_amount" if grams is not None and grams >= MIN_LEAFY_GRAMS_PER_SERVING else "insufficient_or_unknown"}))
     return reasons
 
 
@@ -529,6 +536,46 @@ def _listed_fish_mass(recipe: Mapping[str, Any]) -> dict[str, Any]:
         except ValueError:
             unknown.append(identity)
     return {"grams_per_serving": float(grams), "unknown": unknown}
+
+
+def _listed_leafy_mass(recipe: Mapping[str, Any]) -> float | None:
+    """Count a dinner only from a substantial listed leaf quantity per serving."""
+    try:
+        scaled = scale_recipe(recipe, 1)
+    except RecipeError:
+        return None
+    grams = 0.0
+    unknown = False
+    for item in scaled["ingredients"]:
+        if item.get("optional") or item.get("pantry"):
+            continue
+        identity = _text(item.get("item"))
+        if not _contains_term(identity, LEAFY_TERMS):
+            continue
+        unit = UNITS.get(normalized_unit(item.get("unit")))
+        if unit is None or unit[0] != "g":
+            unknown = True
+            continue
+        try:
+            grams += float(read_quantity(item.get("quantity"), legacy_float=recipe.get("schema_version") == 1) * unit[1])
+        except ValueError:
+            unknown = True
+    return None if unknown and grams < MIN_LEAFY_GRAMS_PER_SERVING else grams
+
+
+def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]) -> dict[str, Any] | None:
+    target = (profile.get("diet") or {}).get("leafy_green_days")
+    if not target:
+        return None
+    amounts = [_listed_leafy_mass(candidate["recipe"]) for candidate in selected]
+    counted = sum(amount is not None and amount >= MIN_LEAFY_GRAMS_PER_SERVING for amount in amounts)
+    unknown = sum(amount is None for amount in amounts)
+    minimum, maximum = target
+    status = ("fail" if counted > maximum or counted + unknown < minimum else
+              "pass" if unknown == 0 and minimum <= counted <= maximum else "unknown")
+    return {"target_range": [minimum, maximum], "counted_dinners": counted,
+            "unknown_dinners": unknown, "listed_grams_per_serving": amounts,
+            "minimum_grams_per_serving": MIN_LEAFY_GRAMS_PER_SERVING, "status": status}
 
 
 def _positive_int(profile: Mapping[str, Any], field: str, default: int) -> int:
@@ -579,6 +626,10 @@ def _strict_evaluation(
                     "target": target, "status": "pass",
                     "detail": {"target_range": [low, high], "values": values},
                 }
+        elif target == "leafy_green_days":
+            leafy = _leafy_week(selected, profile)
+            result = {"target": target, "status": leafy["status"] if leafy else "pass",
+                      "detail": leafy or {"target_range": [], "counted_dinners": 0}}
         elif target == "minimum_vegetable_types":
             wanted = _positive_int(profile, target, 0)
             values = sorted({item for facts in dietary for item in facts["vegetable_types"]})
@@ -620,6 +671,8 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         target for target in SAVED_MINIMUM_TARGETS
         if isinstance(diet, Mapping) and type(diet.get(target)) is int and diet[target] > 0
     )
+    if isinstance(diet, Mapping) and diet.get("leafy_green_days"):
+        targets.append("leafy_green_days")
     planner_selection = menu.get("planner_selection") if isinstance(menu, Mapping) else None
     planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
     scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
@@ -679,7 +732,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 and isinstance(facets.get("complete"), bool)
             ):
                 planned_facts[recipe_key] = deepcopy(dict(facets))
-    selected = tuple({"facts": {"dietary_facets": deepcopy(
+    selected = tuple({"recipe": recipe, "facts": {"dietary_facets": deepcopy(
         planned_facts.get(recipe.get("recipe_key")) or _derived_dietary(recipe)
     )}} for recipe in selected_recipes)
     return with_policy({"complete_menu": True, **_strict_evaluation(selected, targets, profile)})
@@ -768,6 +821,13 @@ def _plan_reasons(
     selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = []
+    leafy = _leafy_week(selected, profile)
+    if leafy:
+        distance = max(0, leafy["target_range"][0] - leafy["counted_dinners"],
+                       leafy["counted_dinners"] - leafy["target_range"][1])
+        reasons.append(_reason("weekly_target:leafy_green_days",
+                               10 if leafy["status"] == "pass" else -min(10, distance * 3) if leafy["status"] == "fail" else 0,
+                               leafy))
     fish_range = (profile.get("diet") or {}).get("fish_grams_per_person")
     if isinstance(fish_range, list) and len(fish_range) == 2:
         mass = [candidate["facts"].get("listed_fish_mass", {"grams_per_serving": None, "unknown": ["not_loaded"]}) for candidate in selected]
@@ -866,8 +926,9 @@ def _selection(
     for field in ("patterns", "plate", "nutrition", "exceptions", "legumes"):
         if diet.get(field):
             relaxations.add("unsupported:diet." + field)
-    if diet.get("leafy_green_days"):
-        relaxations.add("leafy_green_absence_unknown")
+    leafy = _leafy_week(selected, profile)
+    if leafy and leafy["unknown_dinners"]:
+        relaxations.add("leafy_green_quantity_unknown")
     if any(cuisine.get(field) for field in ("base_style", "quality")):
         relaxations.add("cuisine_free_text")
     if any(cuisine.get(field) for field in ("wanted", "flavours")):
@@ -1192,6 +1253,9 @@ def plan_week(
                     any(value is None for value in values),
                     any(value is not None and not low <= value <= high for value in values),
                 ))
+            elif target == "leafy_green_days":
+                leafy = _leafy_week(evaluated, profile)
+                signature.append((target, leafy["counted_dinners"], leafy["unknown_dinners"]))
             elif target == "minimum_vegetable_types":
                 # Duplicate batch servings do not change a set of vegetable types.
                 continue

@@ -52,7 +52,9 @@ class ReviewAcceptanceTests(unittest.TestCase):
     def test_profile_and_recurring_invalid_writes_are_atomic(self):
         self.store.update_profile({"diet": {"leafy_green_days": [1, 4]}})
         before = self.store.read()
-        for change in ({"meals": {"portions": 0}}, {"meals": {"people": "two"}}, {"diet": {"avoid": "fish"}}, {"diet": {"leafy_green_days": [0, 8]}}):
+        for change in ({"meals": {"portions": 0}}, {"meals": {"people": "two"}}, {"diet": {"avoid": "fish"}},
+                       {"diet": {"leafy_green_days": [0, 8]}}, {"diet": {"leafy_green_days": [5, 4]}},
+                       {"diet": {"leafy_green_days": ["Monday", "Friday"]}}):
             with self.subTest(change=change), self.assertRaises(HouseholdError):
                 self.app.handle({"operation": "profile", "action": "update", "changes": change})
             self.assertEqual(before, self.store.read())

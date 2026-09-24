@@ -3140,9 +3140,31 @@ class OrderOperations:
         return (switch.get("source_confirmation_id") == attempt.get("confirmation_id")
                 and (switch.get("closure") or {}).get("status") == "closed")
 
+    def _same_order_payment_probe(self, pending):
+        """Identify a recorded attempt whose local outcome cannot decide merchant actions."""
+        if pending.get("order_change") or not pending.get("unpaid_order_id"):
+            return False
+        if not (pending.get("browser_review") or {}).get("account_reference_digest"):
+            return False
+        # The exact retained order ID is a candidate, never payment authority.
+        # Recovery verifies its fresh merchant state, account, goods and amount.
+        if self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps":
+            child = pending.get("recovery")
+            return (pending.get("unpaid_order_binding_source") in ODA_VIPPS_ORDER_BINDING_SOURCES
+                    or isinstance(child, Mapping) and child.get("order_id") == pending["unpaid_order_id"])
+        return self.provider in {"oda", "mathem"}
+
     def _recovery_old_request_allows_dispatch(self, pending, child):
         if self.provider != "oda":
             return True
+        if child.get("payment_action") == "same_order_payment":
+            # A new-order retry pays the merchant's *same* identified order.
+            # Its current payable page, exact order/account/amount review and
+            # the durable dispatch claim own this decision. An old Vipps poll
+            # may remain unknown after the owner closes the phone request;
+            # that journal observation is not merchant payment authority.
+            return (child.get("order_id") == pending.get("unpaid_order_id")
+                    and (child.get("browser_review") or {}).get("order_id") == child.get("order_id"))
         if (child.get("prior_vipps_request_status") == "expired"
                 and not self._vipps_expiry_proven(child.get("closed_source") or {})):
             return False
@@ -3408,7 +3430,7 @@ class OrderOperations:
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                         "next": "The exact payment is closed. For an explicit same-order cancellation, use orders cancel_prepare; a different payment method requires a separately reviewed switch."}
             return {**result, "payment_closed": False,
-                    "next": "The payment closure is unknown. Resume abort_payment with this confirmation to observe it; do not click or pay again."}
+                    "next": "The old payment closure is unknown. Resume abort_payment to observe that exact request. For payment of this same unpaid order, checkout prepare recovery=true may inspect the merchant's current payment page; a fresh review is required before any new payment. Do not create another order or repeat this abort click."}
 
     def _checkout_switch_payment(self, deadline, confirmation_id, checkout_payment):
         if self.provider != "oda" or self.browser is None:
@@ -3465,6 +3487,12 @@ class OrderOperations:
             pending = deepcopy(self.store.read().get("pending_checkout"))
             attempt = pending["recovery"] if source_child else pending
             change = pending.get("order_change") or {}
+            if not change and self._same_order_payment_probe(pending):
+                # Switching the method on an existing new order uses its
+                # current merchant payment review. The old request remains in
+                # the journal; its locally unknown outcome cannot suppress a
+                # different supported method offered for this same order.
+                return self._checkout_recovery_prepare_unlocked(deadline, payment)
             abort = attempt.get("payment_abort") or {}
             abort_closure = abort.get("closure") or {}
             closed_abort = abort_closure.get("status") == "closed" and self._checkout_payment_closed(pending)
@@ -3697,14 +3725,13 @@ class OrderOperations:
         )
         payment_page = {}
         payment_closed = self._checkout_payment_closed(pending)
+        same_order_probe = self._same_order_payment_probe(pending)
         needs_page_binding = (
             self.provider == "oda"
             and (pending.get("checkout_payment") or {}).get("method") == "vipps"
             and binding_source not in ODA_VIPPS_ORDER_BINDING_SOURCES
         )
-        requires_retry_page = (requested is not None or (
-            (needs_page_binding or binding_source == "oda_retry_available_page"
-             or owner_reported_no_request) and not payment_closed))
+        requires_retry_page = (requested is not None or needs_page_binding and not payment_closed)
         current_attempt = (active_recovery if active_recovery
                            and active_recovery.get("status") != "awaiting_confirmation" else pending)
         current_payment = ((current_attempt.get("browser_review") or {}).get("payment_choice")
@@ -3717,25 +3744,29 @@ class OrderOperations:
             and current_attempt.get("payment_requested_at") is None
             and not payment_closed and self._closed_payment_switch(pending) is None
         )
-        if self.provider == "oda" and (requires_retry_page
+        if self.provider == "oda" and (requires_retry_page or contextless_legacy
+                                        or owner_reported_no_request and not payment_closed
                                         or tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
-                                        and owner_reported_no_request):
+                                        and (owner_reported_no_request or same_order_probe)):
             payment_page = self.browser.order_payment_state(order_id, deadline=deadline)
         verified_retry_control = payment_page.get("status") in {"retry_available", "payment_started"}
         verified_payment_started = payment_page.get("payment_started_page") is True
         misleading_paid_status = (
             self.provider == "oda"
-            and owner_reported_no_request
+            and (owner_reported_no_request or same_order_probe)
             and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
-            and verified_payment_started
+            and verified_retry_control
         )
-        if (order_identity != order_id or tracking_identity != order_id
-                or tracking_status != "unpaid_order" and not misleading_paid_status
-                or requires_retry_page and not verified_retry_control
-                or (requested is not None or contextless_legacy
-                    or owner_reported_no_request and not payment_closed)
+        if order_identity != order_id or tracking_identity != order_id:
+            raise HouseholdError("Meal Concierge rejected recovery: merchant order and tracking IDs differ from the retained order")
+        if tracking_status != "unpaid_order" and not misleading_paid_status:
+            raise HouseholdError("Oda reports the original order is no longer unpaid; reconcile it before recovery")
+        if requires_retry_page and not verified_retry_control:
+            raise HouseholdError("Oda did not expose a payable retry control for this exact order")
+        if ((requested is not None or contextless_legacy
+                or owner_reported_no_request and not payment_closed)
                 and not verified_payment_started):
-            raise HouseholdError("The original order is no longer unpaid; reconcile it before recovery")
+            raise HouseholdError("Oda did not show the exact order's payment-started page required for this legacy attempt")
         # MCP omits an unpaid order's address. The native retry review below
         # independently verifies it and the original account reference.
         addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
@@ -3820,15 +3851,18 @@ class OrderOperations:
             and active_attempt.get("vipps_request_attempted_at") is None
             and active_attempt.get("payment_requested_at") is None
         )
+        same_order_probe = self._same_order_payment_probe(pending)
         if (self.provider == "oda" and (pending.get("checkout_payment") or {}).get("method") == "vipps"
                 and (active_attempt is pending or active_attempt.get("status") != "awaiting_confirmation")
                 and active_attempt.get("vipps_request_status") not in {"expired", "verifying", "not_sent"}
                 and not active_attempt.get("payment_failure")
                 and not self._switch_closes_active_attempt(pending)
-                and not legacy_retry_offer):
+                and not legacy_retry_offer and not same_order_probe):
             return self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
         child = pending.get("recovery")
-        if child and child.get("status") != "awaiting_confirmation" and not self._switch_closes_active_attempt(pending):
+        if (child and child.get("status") != "awaiting_confirmation"
+                and not same_order_probe
+                and not self._switch_closes_active_attempt(pending)):
             result = self._checkout_reconcile_unlocked(deadline, pending["confirmation_id"])
             pending = deepcopy(self.store.read().get("pending_checkout"))
             child = (pending or {}).get("recovery")
@@ -3836,7 +3870,7 @@ class OrderOperations:
                     or not child.get("payment_failure")):
                 return result
         authentication = self._checkout_authentication_wait(pending, deadline)
-        if authentication:
+        if authentication and not same_order_probe:
             return authentication
         order_id = self._checkout_recovery_target(pending, deadline, requested_order_id)
         stored_pending = deepcopy(pending)
@@ -3951,6 +3985,8 @@ class OrderOperations:
                  "expires_at": (self._now() + timedelta(minutes=20)).isoformat(),
                  "status": "awaiting_confirmation", "order_id": order_id,
                  "browser_review": review, "dietary_assessment": assessment}
+        if same_order_probe:
+            child["payment_action"] = "same_order_payment"
         source_attempt = previous if isinstance(previous, Mapping) else pending
         if (self.provider == "oda" and not pending.get("order_change")
                 and self._checkout_payment_closed(pending)):
@@ -3997,15 +4033,15 @@ class OrderOperations:
             previous_switch = (previous or {}).get("payment_switch") or {}
             switched_previous = bool(previous and previous_switch.get("source_confirmation_id") == previous.get("confirmation_id")
                                      and (previous_switch.get("closure") or {}).get("status") == "closed")
-            if previous and (previous.get("payment_failure") or switched_previous):
-                # Only a positively closed or failed payment can be replaced. Keep its
-                # complete private evidence outside the replayed result.
+            if previous and previous.get("status") != "awaiting_confirmation":
+                # Preserve every dispatched attempt, including an unknown
+                # result, before replacing the active same-order review.
                 self._store_protected_result(state, previous["confirmation_id"], "checkout", {
                     "confirmed": False, "payment_failed": bool(previous.get("payment_failure")),
                     **({"payment_closed": True} if switched_previous else {}), "retry_allowed": False,
                     "confirmation_id": previous["confirmation_id"],
                     "original_confirmation_id": pending["confirmation_id"], "order_id": previous["order_id"],
-                    "next": "This payment is closed and was superseded by a fresh recovery review. Use the current confirmation; never resend this payment.",
+                    "next": "This same-order payment attempt was superseded by a fresh merchant review. Its outcome remains recorded; use only the current confirmation.",
                 }, target_id=previous["order_id"])
                 state["protected_results"][previous["confirmation_id"]]["failed_attempt"] = deepcopy(previous)
             if defer_order_binding:
@@ -4028,7 +4064,7 @@ class OrderOperations:
             if child["status"] != "awaiting_confirmation":
                 return self._checkout_reconcile_unlocked(deadline, child["confirmation_id"])
             authentication = self._checkout_authentication_wait(pending, deadline)
-            if authentication:
+            if authentication and child.get("payment_action") != "same_order_payment":
                 return authentication
             if self._now() >= datetime.fromisoformat(child["expires_at"]):
                 raise HouseholdError("Recovery confirmation expired; prepare recovery again for the original order")
@@ -5035,6 +5071,7 @@ class OrderOperations:
         )
         payment_page_status = None
         tracking_conflict = False
+        merchant_payable_conflict = False
         active_abort = active_attempt.get("payment_abort") or {}
         paid_card_closure = active_abort.get("closure") or {}
         card_context = active_attempt.get("authentication_context") or {}
@@ -5062,6 +5099,10 @@ class OrderOperations:
         page_bound_before_retry = (
             self.provider == "oda"
             and pending.get("unpaid_order_binding_source") == "oda_retry_available_page"
+            and not (recovery_dispatched
+                     and pending["recovery"].get("payment_action") == "same_order_payment"
+                     and (pending["recovery"].get("order_id") == pending.get("unpaid_order_id"))
+                     and (pending["recovery"].get("browser_review") or {}).get("order_id") == pending.get("unpaid_order_id"))
             and not exact_retry_payment_authorized
             and not (exact_paid_card_abort or exact_paid_vipps_abort)
             and not owner_payment_completed
@@ -5084,6 +5125,16 @@ class OrderOperations:
             payment_page = self.browser.order_payment_state(candidate_id, deadline=deadline)
             payment_page_status = str(payment_page.get("status") or "unknown")
             tracking_conflict = payment_page.get("payment_started_page") is True
+        if (self.provider == "oda" and self._same_order_payment_probe(pending)
+                and order is not None and candidate_id == details_id == tracking_id
+                and tracking_status in {"paid_and_modifiable", "paid_and_not_modifiable"}
+                and not owner_payment_completed
+                and not tracking_conflict):
+            payment_page = self.browser.order_payment_state(candidate_id, deadline=deadline)
+            merchant_payable_conflict = payment_page.get("status") in {"retry_available", "payment_started"}
+            if merchant_payable_conflict:
+                payment_page_status = str(payment_page.get("status"))
+                tracking_conflict = True
         # An original pre-request failure has no frozen retry review yet. Its
         # exact provider order and payment-started page authorize preparing
         # that review; all account/items/fees are checked before any new click.
@@ -5137,6 +5188,7 @@ class OrderOperations:
             fulfillable = {"paid_and_modifiable", "paid_and_not_modifiable", "picking", "shipped", "delivered"}
             confirmed = (order is not None and candidate_id and candidate_id == details_id == tracking_id
                          and tracking_status in fulfillable and oda_vipps_bound
+                         and not merchant_payable_conflict
                          and (tracking_status in {"picking", "shipped", "delivered"}
                               or not page_bound_before_retry and not vipps_before_dispatch)
                          and order_matches_checkout(receipt_order, pending["summary"], provider=self.provider))
@@ -5176,7 +5228,24 @@ class OrderOperations:
                     **order, "deliveryAddress": (pending["summary"].get("delivery") or {}).get("address")},
                 pending["summary"], provider=self.provider)
         )
-        recovery_target_matches = unpaid_matches or exact_payment_started_matches
+        merchant_payable_matches = (
+            merchant_payable_conflict and order is not None
+            and candidate_id == details_id == tracking_id
+            and order_matches_checkout(
+                order if "deliveryAddress" in order or "delivery_address" in order else {
+                    **order, "deliveryAddress": (pending["summary"].get("delivery") or {}).get("address")},
+                pending["summary"], provider=self.provider)
+        )
+        recovery_target_matches = unpaid_matches or exact_payment_started_matches or merchant_payable_matches
+        same_order_payment_review = (
+            not confirmed and recovery_target_matches
+            and self.provider in {"oda", "mathem"}
+            and not pending.get("order_change")
+            and not pending.get("automatic_checkout")
+            and not candidate_ambiguous and not candidate_evidence_unresolved
+            and self._same_order_payment_probe(pending)
+            and not owner_payment_completed
+        )
         authentication = self._checkout_authentication_wait(pending, deadline) if not confirmed else {}
         # Offer the existing non-submitting legacy recovery review, not a
         # payment retry. Its owner report and merchant/browser proof are still
@@ -5321,6 +5390,12 @@ class OrderOperations:
                                 "order_id": candidate_id, "confirmation_id": pending["confirmation_id"]},
                 "next": "No Vipps request context or dispatch timestamp was recorded for this original attempt. If the owner confirms no Vipps request or manual payment for this exact order, prepare its same-order recovery review with the returned next_action plus vipps_request_not_received=true and the requested checkout_payment. Preparation independently verifies the merchant retry page, account, goods, delivery and amounts without paying. A missing request record or owner report alone does not authorize payment; confirm only the fresh review under the existing authorization. Do not delete the journal, recreate the cart, or treat retry_allowed=false as a ban on this non-submitting review."}
                if legacy_recovery_review else {}),
+            **({"recovery_preparation_available": True,
+                "available_actions": ["inspect_same_order_payment"],
+                "next_action": {"operation": "checkout", "action": "prepare",
+                                "recovery": True},
+                "next": "Inspect the merchant's current payment review for this exact unpaid order. The original payment outcome remains recorded. A fresh review does not submit payment; confirm only its returned confirmation after checking the account, goods, delivery, amount and selected method."}
+               if same_order_payment_review and not legacy_recovery_review and not authentication else {}),
             **authentication,
         }
 
