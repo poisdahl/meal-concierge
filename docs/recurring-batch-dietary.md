@@ -27,8 +27,10 @@ approval. Consumption and dates remain unchanged, as does the saved preference.
 The actual cooking amounts remain visible in the plan, recipes and shopping.
 
 Optional candidate `facts.batch_guidance` carries `basis`, `suitability`
-(`suitable`, `unsuitable`, `unknown`), `storage` and `reheating`. Copy actual
-recipe-specific guidance and its attribution; never invent it. Missing guidance
+(`suitable`, `unsuitable`, `unknown`), `storage` and `reheating`. The host model
+assesses the exact recipe and serving dates and authors practical cooling,
+storage and reheating guidance. This is an agent assessment, not a source fact
+or a user report. Missing guidance
 remains visibly unknown. A household freezer preference establishes no safe
 storage life. Planned leftovers remain separate from reported cooking and
 remaining food. Marking a source cooked requires actual prepared/consumed
@@ -51,6 +53,12 @@ compatible approved candidates before comparing their costs; it preserves
 unresolved requirements when no compatible approved product exists. Existing
 candidate authority, pantry decisions and partial-order scope still apply.
 Required goods are never silently omitted.
+
+An explicitly plant-qualified cream/sour-cream phrase, such as "plantebasert
+fløte", is not itself positive evidence of dairy cream. The original retail
+text remains intact; unqualified dairy ingredients, allergens and traces still
+count, and a negated plant claim grants no exception. Plant wording establishes
+neither allergen absence nor nutritional superiority.
 
 Oda's and Mathem's exact numeric product routes resolve only to the same product's canonical
 public URL. The anonymous reader retains the visible ingredient/allergen rows,
@@ -176,10 +184,25 @@ replan retains the whole-menu policy in `planning_scope`; a full replacement can
 adopt a new one. This distinction continues through product preparation and
 checkout and does not relax allergies, never-buy rules or retail uncertainty.
 
-Ordinary preferences remain advisory to the deterministic planner, but the host
-model must resolve obvious conflicts before saving a menu. It reads ingredients
-and method, adapts a dish first when requested, and verifies current replacement
-products during preparation. Plant-based is not a nutritional guarantee. Narrow
-cream/sour-cream preferences do not imply a milk allergy or a ban on all dairy;
+Ordinary `diet.avoid` and `preference` rules remain advisory to the deterministic
+planner, but are selection instructions for the host model. It must prefer
+recipes that already fit, or proactively adapt a suitable dish before saving.
+The existing recipe adaptation operation records measured replacement ingredients
+and a coherent method, then product preparation checks observed store candidates.
+No separate "allow plant substitutions" preference is required. If neither a
+fitting recipe nor a good adaptation is available, the model explains the conflict
+and asks about an alternative or an exception for that meal. It must not silently
+use an avoided ingredient. An explicit meal-specific exception can apply to an
+ordinary preference; it cannot override an allergy or `never_buy` rule.
+
+For cream, sour cream and butter, a plant alternative must fit the heat, acidity,
+texture and flavor of the dish. Prefer lower saturated fat where observed product
+information supports the comparison; coconut/palm fat or a vegan label does not
+make a product healthier. Unsaturated oil can suit sautéing but cannot replace
+cream in every recipe. This follows the general direction of the
+[Norwegian dietary guidance](https://www.helsenorge.no/kosthold-og-ernaring/kostradene/).
+Other household restrictions still apply, and unknown nutrition stays unknown.
+The menu briefly explains the recorded substitution. Narrow cream/sour-cream
+preferences and `never_buy` rules do not imply a milk allergy or a ban on all dairy;
 only explicit user intent changes stored rules. Numeric goals with missing
 evidence stay visibly unverified rather than being silently certified.

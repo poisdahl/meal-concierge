@@ -1106,6 +1106,54 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(normalize_recipe(self.app.recipes.get(saved['id'], saved['revision'])), normalize_recipe(saved))
         self.assertTrue(all(name == 'product_search' for name, _ in self.provider.calls))
 
+    def test_cream_adaptation_supports_avoid_preferences_and_hard_exclusions(self):
+        for mode in ('avoid', 'preference', 'never_buy'):
+            with self.subTest(mode=mode):
+                diet = {'avoid': ['fløte', 'rømme'] if mode == 'avoid' else [],
+                        'rules': [] if mode == 'avoid' else [
+                            {'kind': mode, 'term': term} for term in ('fløte', 'rømme')]}
+                self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': diet}})
+                profile = self.store.read()['profile']
+                original = authored_recipe()
+                original.update(name=f'Synthetic carrot soup {mode}', portions=2,
+                    ingredients=[{'item': 'fløte', 'quantity': 100, 'unit': 'ml', 'raw': '100 ml fløte'},
+                                 {'item': 'gulrot', 'quantity': 400, 'unit': 'g', 'raw': '400 g gulrot'}],
+                    steps=['Cook the carrots, blend, then stir in cream.'])
+                source = self.save(original, key=f'cream-{mode}')
+                planner_input = {'selection_mode': 'agent', 'week': '2026-W40',
+                                 'dates': ['2026-09-28'], 'portions': 2}
+                before = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                    **planner_input, 'candidates': [{'recipe_ref': {'id': source['id'], 'revision': 1}}]}})['plan']
+                self.assertEqual(before['status'], 'no_plan' if mode == 'never_buy' else 'planned')
+                if mode != 'never_buy':
+                    reasons = before['selection']['slots'][0]['reason_contributions']
+                    self.assertTrue(any(row['code'] == 'dietary_preference' for row in reasons))
+                adapted = self.app.handle({'operation': 'recipes', 'action': 'adapt',
+                    'recipe_ref': {'id': source['id'], 'revision': 1},
+                    'recipe_digest': recipe_digest(source), 'source_schema_version': 2,
+                    'changes': {'ingredients': [{'index': 0, 'item': 'plantebasert fløte',
+                        'quantity': 100, 'unit': 'ml', 'assumptions': 'Use the observed oat cooking alternative for a mild blended soup.'}],
+                        'steps': ['Cook and blend the carrots, then stir in the oat cooking alternative over gentle heat.']}})
+                after = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                    **planner_input, 'candidates': [{'discovery_ref': adapted['discovery_ref']}]}})['plan']
+                self.assertEqual(after['status'], 'planned', after)
+                self.assertFalse(any(row['code'] == 'dietary_preference'
+                    for row in after['selection']['slots'][0]['reason_contributions']))
+                previous = self.store.read().get('menu')
+                menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': after['save_ref'],
+                    **({'menu_ref': self.app._cart_menu_ref(previous)} if previous else {})})['menu']
+                needs, unresolved = menu_requirements(menu)
+                self.assertEqual(unresolved, [])
+                result = self.app.handle({'operation': 'products', 'action': 'prepare',
+                    'menu_ref': self.app._cart_menu_ref(menu), 'candidate_approvals': [
+                        {'requirement_id': row['requirement_id'], 'candidate_refs': [row['item']]} for row in needs]})['product_plan']
+                self.assertEqual(result['status'], 'prepared', result['unresolved_requirements'])
+                self.assertIn('plantebasert fløte', [row['item'] for row in needs])
+                self.assertIn('oat cooking alternative over gentle heat', menu_email_html(menu))
+                self.assertEqual(self.store.read()['profile'], profile)
+                self.assertEqual(normalize_recipe(self.app.recipes.get(source['id'], 1)), normalize_recipe(source))
+        self.assertTrue(all(name == 'product_search' for name, _ in self.provider.calls))
+
     def test_adaptation_accepts_exact_legacy_bank_revision_without_migrating_it(self):
         original = json.loads(LEGACY)
         saved = self.save(original, key="legacy-adaptation-source")

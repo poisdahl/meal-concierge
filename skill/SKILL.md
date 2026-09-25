@@ -62,19 +62,26 @@ meal selection and product preparation need no additional reference loading.
    candidate per cooking date; accepted batch settings derive leftover dates.
    This path validates your order without ranking it again. `ranked` remains
    available when you actually want the service to suggest an ordering.
-4. Resolve obvious conflicts with saved preferences before saving. Preferences
-   are your selection responsibility even when the service reports them as
-   advisory. Check ingredients and cooking steps, not only titles or keyword
-   findings. If the user asks to keep a dish, try a suitable ingredient
-   substitution first; replace the dish only when adaptation is unsuitable.
-   Judge taste, cooking behavior and nutrition together. “Plant-based” alone
-   does not establish a healthier choice. Never infer an allergy or ban all
-   dairy from a narrower cream/sour-cream preference.
-   Prefer recipes that already fit saved preferences. If a chosen recipe uses
-   butter and the household avoids cream, inspect the actual ingredients and
-   cooking method. When it conflicts, adapt with a suitable unsaturated plant
-   oil or spread, or choose another dish. Do not treat that narrow preference
-   as a general dairy allergy or override a hard restriction.
+4. Honor `diet.avoid` and `preference` rules before saving, even when the service
+   labels them advisory. Prefer recipes that already fit. You may proactively
+   adapt a promising dish with measured replacements and a complete revised
+   method; no separate substitution preference or approval is needed for an
+   ordinary culinary repair. If a good adaptation is unavailable, choose another
+   recipe. Do not knowingly include an avoided ingredient just to complete a
+   menu. If neither route works, explain the specific conflict and ask about an
+   alternative or an exception for that meal; never silently relax the profile.
+   An explicit user exception applies only to an ordinary preference, not an
+   allergy or `never_buy` rule. If the user wants to keep a dish, try adaptation
+   first. Check ingredients and method, not just titles or keyword findings.
+   For cream, sour cream or butter substitutions, choose a plant alternative
+   that fits the dish's heat, acidity, texture and flavor. Prefer options lower
+   in saturated fat when the observed label supports that comparison; do not
+   assume coconut/palm products or a vegan label make an option healthier.
+   Unsaturated plant oil may fit sautéing but is not a universal cream replacement.
+   Verify the actual replacement product and any other household restrictions;
+   missing nutrition information stays unknown. Record the replacement in the
+   recipe and explain it briefly with the menu. A narrow cream/sour-cream rule
+   is not a milk allergy or a ban on all dairy.
    Numeric dietary targets are visible goals in agent mode. Put a target in
    `strict_targets` only when it is an explicit requirement. Allergies and
    never-buy rules remain binding. Do not claim a target was met when evidence

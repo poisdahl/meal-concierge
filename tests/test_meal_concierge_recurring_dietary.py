@@ -337,6 +337,39 @@ class RecurringDietaryTests(unittest.TestCase):
         self.assertTrue(self.call('confirm', confirmation_id=prepared['confirmation_id'], dietary_review=[finding['finding_id']])['dietary_review_required'])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    def test_explicit_plant_cream_names_preserve_other_dairy_evidence(self):
+        from dietary_assessment import assess
+        cases = [('fløte', 'Plantebasert fløte'), ('rømme', 'Vegansk rømme'),
+                 ('cream', 'Plant-based cream'), ('cream', 'Vegan sour cream'),
+                 ('sour cream', 'Vegan sour cream'), ('grädde', 'Växtbaserad grädde')]
+        for term, name in cases:
+            for kind in ('preference', 'never_buy', 'allergy'):
+                with self.subTest(term=term, kind=kind):
+                    profile = {'diet': {'rules': [{'kind': kind, 'term': term}]}}
+                    item = {'product_ref': '10', 'name': name,
+                            'dietary_evidence': {'ingredients': 'vann, havre, rapsolje'}}
+                    finding = assess(profile, item)[0]
+                    self.assertEqual(finding['condition'], 'unknown')
+                    self.assertEqual(finding['evidence']['product_name'], name)
+                    for field in ('ingredients', 'allergens', 'may_contain'):
+                        dairy = deepcopy(item)
+                        dairy['dietary_evidence'][field] = term
+                        actual = assess(profile, dairy)[0]
+                        self.assertEqual(actual['condition'], 'preference_deviation' if kind == 'preference' else 'conflict')
+                    for dairy_name in (term, f'Laktosefri {term}', f'{name} og {term}'):
+                        actual = assess(profile, {**item, 'name': dairy_name})[0]
+                        self.assertEqual(actual['condition'], 'preference_deviation' if kind == 'preference' else 'conflict')
+                    for negation in ('not ', 'non-', 'ikke helt ', 'inte ', 'not a ',
+                                     'not completely ', 'not 100% ', 'ikke en ', 'ej '):
+                        actual = assess(profile, {**item, 'name': negation + name})[0]
+                        self.assertEqual(actual['condition'], 'preference_deviation' if kind == 'preference' else 'conflict')
+        milk = {'diet': {'rules': [{'kind': 'allergy', 'term': 'melk'}]}}
+        self.assertTrue(assess(milk, {'name': 'Plantebasert fløte',
+            'dietary_evidence': {'allergens': ['melk']}})[0]['blocked'])
+        # Coconut ingredients never confer a nutritional or allergen-free label.
+        self.assertEqual(assess({'diet': {'rules': [{'kind': 'never_buy', 'term': 'fløte'}]}},
+            {'name': 'Plantebasert fløte', 'dietary_evidence': {'ingredients': 'kokosfett'}})[0]['condition'], 'unknown')
+
     def test_product_title_allergen_compounds_are_bounded_positive_evidence(self):
         from dietary_assessment import assess
         positives = (
