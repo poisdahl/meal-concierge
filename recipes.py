@@ -1176,8 +1176,8 @@ def adapt_recipe_input(value: Any, *, prior: Mapping[str, Any]) -> dict[str, Any
     candidate = deepcopy(dict(value))
     candidate["source"] = deepcopy(original["source"])
     candidate["rights"] = deepcopy(original["rights"])
-    # The original fetch hash describes the source page, not the authored dish.
-    candidate.pop("external_snapshot", None)
+    # Validate inherited evidence against the exact original, including its snapshot.
+    candidate["external_snapshot"] = deepcopy(original.get("external_snapshot"))
     adapted = prepare_recipe_input(candidate, prior=original)
     for path, evidence in recipe_evidence_fields(adapted).items():
         current = _evidence_value(adapted, path)
@@ -1188,6 +1188,8 @@ def adapt_recipe_input(value: Any, *, prior: Mapping[str, Any]) -> dict[str, Any
         if evidence["basis"] != "estimate" or not evidence.get("assumptions"):
             raise RecipeError(f"{path}: changed adaptation quantities need an estimate with assumptions")
     adapted["source"]["relationship"] = "adapted"
+    # The original fetch hash describes the source page, not the authored dish.
+    adapted.pop("external_snapshot", None)
     return normalize_recipe(adapted, trusted_store_product_hints=True)
 
 

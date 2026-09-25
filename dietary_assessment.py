@@ -74,6 +74,19 @@ def matches(term, value, *, milk_ambiguity=False):
         for match in re.finditer(r'(?<!\w)' + re.escape(text(term)) + r'(?!\w)', normalized):
             before = normalized[max(0, match.start() - 35):match.start()]
             after = normalized[match.end():match.end() + 12]
+            # An explicitly plant-qualified dairy alternative is not positive
+            # evidence of cream itself. Other matches/label fields still count;
+            # this does not establish allergen absence or nutritional suitability.
+            if text(term) in {'cream', 'sour cream', 'fløte', 'rømme', 'grädde', 'gräddfil'}:
+                prefix = normalized[max(0, match.start() - 80):match.start()]
+                plant = re.search(
+                    r'\b(?:plant[- ]based|vegan|plantebasert|vegansk|växtbaserad)'
+                    r'(?:\s+(?:alternative\s+to|alternativ\s+til|alternativ\s+till))?'
+                    r'\s+(?:sour\s+)?$', prefix)
+                if plant:
+                    clause = re.split(r'[,;.!?]', prefix[:plant.start()])[-1]
+                    if not re.search(r'\b(?:not|ikke|inte|ej)\b|\bnon[- ]*$', clause):
+                        continue
             if milk_ambiguity and re.search(
                 r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
                 r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',

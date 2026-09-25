@@ -89,6 +89,36 @@ class BatchTests(unittest.TestCase):
                 with self.assertRaises(HouseholdError): bp.fraction(value)
         self.assertEqual(bp.fraction('0.5000000000000000'),bp.fraction({'numerator':1,'denominator':2}))
 
+    def test_batch_guidance_rejects_invalid_text_before_any_state_change(self):
+        for source in ('current_user', 'agent'):
+            for field in ('basis', 'reheating'):
+                for invalid in (None, {}, ['text'], True, 42, '', '  ', 'x' * 1001):
+                    with self.subTest(source=source, field=field, invalid=invalid):
+                        spec = deepcopy(self.spec)
+                        spec['suitability']['source'] = spec['storage']['source'] = source
+                        spec['storage'].update(basis='Cool promptly.', reheating='Reheat each portion.')
+                        spec['storage'][field] = invalid
+                        before = self.store.path.read_bytes()
+                        self.assertEqual(self.prepare(spec)['status'], 'needs_input')
+                        self.assertEqual(self.store.path.read_bytes(), before)
+        self.assertEqual(self.fixture.provider.calls, [])
+
+    def test_user_batch_guidance_survives_apply_restart_and_render(self):
+        spec = deepcopy(self.spec)
+        spec['storage'].update(basis='  Cool promptly <covered>.  ', reheating=' Reheat once & serve. ')
+        prepared = self.prepare(spec)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.apply(prepared)
+        reopened = Application(self.store, self.fixture.provider, object())
+        menu = reopened.handle({'operation': 'menu', 'action': 'get'})['menu']
+        storage = menu['batches'][0]['storage']
+        self.assertEqual(storage['source'], 'current_user')
+        self.assertEqual(storage['basis'], 'Cool promptly <covered>.')
+        self.assertEqual(spec['storage']['basis'], '  Cool promptly <covered>.  ')
+        html = menu_email_html(menu)
+        self.assertIn('Cool promptly &lt;covered&gt;.', html)
+        self.assertIn('Reheat once &amp; serve.', html)
+
     def test_unknown_conflicting_overconsumed_intervals_and_locks_need_input(self):
         bads=[]
         for field,value in [('suitability',True),('storage',{'method':'fridge'}),('prepared_portions','4'),('prepared_portions','-1'),('consumed_at_source','3')]:
