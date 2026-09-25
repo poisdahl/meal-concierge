@@ -988,6 +988,124 @@ class RecipeContractTests(unittest.TestCase):
                 self.assertIn("hvitløk", names)
                 self.assertNotIn("ingefær- og hvitløkspasta", names)
 
+    def test_complete_external_adaptation_validates_original_then_drops_snapshot(self):
+        for kind in ('themealdb', 'wikibooks'):
+            with self.subTest(kind=kind):
+                original = authored_recipe()
+                original['source'] = {'kind': kind, 'relationship': 'original',
+                                      'url': f'https://example.org/{kind}/bread'}
+                original['external_snapshot'] = {'fetched_at': '2026-09-25T08:00:00+00:00',
+                    'content_hash': 'a' * 64, 'changes': 'Synthetic source snapshot.'}
+                original['portions_evidence'] = {'basis': 'source', 'input': 'Serves 12'}
+                for row in original['ingredients']:
+                    row['evidence'] = {field: {'basis': 'source', 'input': row['raw']}
+                                       for field in ('quantity', 'unit')}
+                frozen = self.app.recipes.persist_discovery(original)
+                candidate = deepcopy(frozen['recipe'])
+                candidate['source']['relationship'] = 'adapted'
+                candidate['ingredients'][2].update(item='havremel', raw='700 g havremel',
+                    evidence={field: {'basis': 'estimate', 'input': '700 g mel',
+                        'assumptions': 'Use the same measured amount of oat flour.'}
+                              for field in ('quantity', 'unit')})
+                candidate['steps'] = ['Mix the oat flour, then bake at 180 C for 30 minutes.']
+                request = {'operation': 'recipes', 'action': 'adapt',
+                           'discovery_ref': frozen['discovery_ref'],
+                           'recipe_digest': frozen['recipe_digest'], 'source_schema_version': 2}
+                forged = deepcopy(candidate)
+                forged['external_snapshot']['content_hash'] = 'b' * 64
+                with self.assertRaisesRegex(RecipeError, 'source snapshot'):
+                    self.app.handle({**request, 'recipe': forged})
+                forged = deepcopy(candidate)
+                forged['ingredients'][2]['evidence']['quantity']['basis'] = 'source'
+                with self.assertRaisesRegex(RecipeError, 'trusted source'):
+                    self.app.handle({**request, 'recipe': forged})
+                with_snapshot = self.app.handle({**request, 'recipe': candidate})
+                candidate.pop('external_snapshot')
+                adapted_ref = self.app.handle({**request, 'recipe': candidate})['discovery_ref']
+                self.assertEqual(adapted_ref, with_snapshot['discovery_ref'])
+                reopened = Application(self.store, self.provider, object())
+                adapted = reopened.recipes.resolve_discovery(adapted_ref)['recipe']
+                self.assertNotIn('external_snapshot', adapted)
+                self.assertEqual(adapted['source'], {**frozen['recipe']['source'], 'relationship': 'adapted'})
+                self.assertEqual(adapted['portions_evidence'], frozen['recipe']['portions_evidence'])
+                self.assertEqual(adapted['ingredients'][2]['evidence']['quantity']['basis'], 'estimate')
+                self.assertEqual(reopened.recipes.resolve_discovery(frozen['discovery_ref'])['recipe'], frozen['recipe'])
+                plan = reopened.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                    'selection_mode': 'agent', 'week': '2026-W40', 'dates': ['2026-09-28'],
+                    'portions': 2, 'candidates': [{'discovery_ref': adapted_ref}]}})['plan']
+                self.assertEqual(plan['status'], 'planned', plan)
+                previous = self.store.read().get('menu')
+                menu = reopened.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref'],
+                    **({'menu_ref': reopened._cart_menu_ref(previous)} if previous else {})})['menu']
+                self.assertIn('havremel', [row['item'] for row in menu_requirements(menu)[0]])
+                self.assertIn('Mix the oat flour', menu_email_html(menu))
+
+    def test_butter_to_plant_oil_repair_preserves_cream_exclusions_through_products(self):
+        # These are ingredient exclusions, not a general milk allergy.
+        rules = [{'kind': 'never_buy', 'term': term} for term in ('fløte', 'rømme')]
+        self.app.handle({'operation': 'profile', 'action': 'update', 'changes': {'diet': {'rules': rules}}})
+        for ingredient, expected in (('fløte', 'no_plan'), ('rømme', 'no_plan'), ('melk', 'planned')):
+            dish = authored_recipe()
+            dish.update(name=f'Synthetic dish with {ingredient}', portions=2,
+                        ingredients=[{'item': ingredient, 'quantity': 100, 'unit': 'ml'}])
+            entry = self.save(dish, key=ingredient)
+            planned = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                'selection_mode': 'agent', 'week': '2026-W40', 'dates': ['2026-09-28'],
+                'portions': 2, 'candidates': [{'recipe_ref': {'id': entry['id'], 'revision': entry['revision']}}]}})['plan']
+            self.assertEqual(planned['status'], expected, planned)
+        original = authored_recipe()
+        original.update(name='Synthetic sautéed carrots', portions=2,
+            ingredients=[{'item': 'smør', 'raw': '20 g smør', 'quantity': 20, 'unit': 'g'},
+                         {'item': 'gulrot', 'raw': '400 g gulrot', 'quantity': 400, 'unit': 'g'}],
+            steps=['Sauté the carrots gently in butter.'])
+        saved = self.save(original)
+        source_ref = {'id': saved['id'], 'revision': saved['revision']}
+        before_profile = self.store.read()['profile']
+        provider_call = self.provider.call
+        def observed_products(name, arguments, **kwargs):
+            if name != 'product_search':
+                return provider_call(name, arguments, **kwargs)
+            self.provider.calls.append((name, deepcopy(arguments)))
+            query = arguments['queries'][0]
+            unit = 'ml' if query == 'rapsolje' else 'g'
+            observed = product(query, query, 500, unit, [option(1000)])
+            observed['dietary_evidence'] = {'ingredients': 'fløte, salt' if query == 'smør' else query}
+            return observation(query, [observed])
+        self.provider.call = observed_products
+        def plan_and_prepare(reference):
+            plan = self.app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+                'selection_mode': 'agent', 'week': '2026-W40', 'dates': ['2026-09-28'],
+                'portions': 2, 'candidates': [reference]}})['plan']
+            self.assertEqual(plan['status'], 'planned', plan)
+            previous = self.store.read().get('menu')
+            menu = self.app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref'],
+                **({'menu_ref': self.app._cart_menu_ref(previous)} if previous else {})})['menu']
+            requirements, unresolved = menu_requirements(menu)
+            self.assertEqual(unresolved, [])
+            prepared = self.app.handle({'operation': 'products', 'action': 'prepare',
+                'menu_ref': self.app._cart_menu_ref(menu), 'candidate_approvals': [
+                    {'requirement_id': row['requirement_id'], 'candidate_refs': [row['item']]}
+                    for row in requirements]})['product_plan']
+            return menu, prepared
+        _, blocked = plan_and_prepare({'recipe_ref': source_ref})
+        self.assertEqual(blocked['status'], 'needs_input')
+        self.assertIn('dietary_conflict_no_compatible_candidate',
+                      [issue['reason'] for issue in blocked['unresolved_requirements']])
+        adapted = self.app.handle({'operation': 'recipes', 'action': 'adapt',
+            'recipe_ref': source_ref, 'recipe_digest': recipe_digest(saved), 'source_schema_version': 2,
+            'changes': {'ingredients': [{'index': 0, 'item': 'rapsolje', 'quantity': 15, 'unit': 'ml',
+                'assumptions': 'For gentle sautéing, use 15 ml rapeseed oil instead of 20 g butter.'}],
+                'steps': ['Warm the rapeseed oil and sauté the carrots gently until tender.']}})
+        menu, prepared = plan_and_prepare({'discovery_ref': adapted['discovery_ref']})
+        self.assertEqual(prepared['status'], 'prepared', prepared['unresolved_requirements'])
+        self.assertEqual({row['item'] for row in prepared['requirements']}, {'rapsolje', 'gulrot'})
+        oil = next(row for row in menu['dishes'][0]['ingredients'] if row['item'] == 'rapsolje')
+        self.assertEqual(oil['evidence']['quantity']['basis'], 'estimate')
+        self.assertIn('Warm the rapeseed oil', menu_email_html(menu))
+        self.assertEqual(self.store.read()['profile'], before_profile)
+        self.assertEqual(normalize_recipe(self.app.recipes.get(saved['id'], saved['revision'])), normalize_recipe(saved))
+        self.assertTrue(all(name == 'product_search' for name, _ in self.provider.calls))
+
     def test_adaptation_accepts_exact_legacy_bank_revision_without_migrating_it(self):
         original = json.loads(LEGACY)
         saved = self.save(original, key="legacy-adaptation-source")

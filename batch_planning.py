@@ -64,10 +64,12 @@ def normalize(state, menu, value, today):
             or not isinstance(storage.get('source'),str) or storage.get('source') != suitability['source']
             or not isinstance(storage.get('method'),str) or storage.get('method') not in {'refrigerated','frozen'}):
         raise HouseholdError('explicit structured refrigerated/frozen storage facts are required')
-    if storage['source'] == 'agent':
-        for field in ('basis','reheating'):
+    storage = deepcopy(storage)
+    for field in ('basis','reheating'):
+        if storage['source'] == 'agent' or field in storage:
             if not isinstance(storage.get(field),str) or not 1 <= len(storage[field].strip()) <= 1000:
-                raise HouseholdError(f'agent batch storage needs bounded {field} text')
+                raise HouseholdError(f'batch storage needs bounded {field} text')
+            storage[field] = storage[field].strip()
     days=storage.get('max_interval_days'); use_by=storage.get('use_by_date')
     if days is None and use_by is None:
         raise HouseholdError('an explicit maximum interval or use-by date is required')
