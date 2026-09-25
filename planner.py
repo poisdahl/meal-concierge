@@ -775,16 +775,19 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
 
     def with_policy(evaluation: dict[str, Any]) -> dict[str, Any]:
         enforced = [row["status"] for row in evaluation["results"]
-                    if row["target"] in enforced_targets]
+                    if row["target"] in enforced_targets or row["target"] == "dinner_day_coverage"]
         return {
             **evaluation,
             "enforced_status": "fail" if "fail" in enforced else "unknown" if "unknown" in enforced else "pass",
         }
 
-    if not targets:
-        return with_policy({"status": "pass", "complete_menu": True, "results": []})
+    # Only a previously complete week binds coverage; explicit partial menus
+    # retain their existing advisory/strict nutrition policy.
+    incomplete_targets = [*targets]
+    if isinstance(menu, Mapping) and menu.get("weekly_plan_complete") is True:
+        incomplete_targets.append("dinner_day_coverage")
     if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
-        return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]})
+        return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in incomplete_targets]})
     import menu_planning as mp
     import batch_planning as bp
     recipes = {recipe.get("recipe_key"): recipe for recipe in menu["dishes"]
@@ -806,7 +809,9 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
             "target": target, "status": "unknown",
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
-        } for target in targets]})
+        } for target in incomplete_targets]})
+    if not targets:
+        return with_policy({"status": "pass", "complete_menu": True, "results": []})
     new_assessment_slots = set()
     planned_by_occurrence = {}
     planned_by_key = {}
