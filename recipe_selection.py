@@ -258,7 +258,8 @@ def context_queries(profile: Mapping[str, Any], provider: str) -> list[str]:
     cuisine = profile.get("cuisine") or {}
     diet = profile.get("diet") or {}
     values = [*cuisine.get("wanted", []), *cuisine.get("flavours", []), *diet.get("prioritise", [])]
-    values += ["middag", "fisk", "kyckling" if provider == "mathem" else "kylling", "vegetar", "pasta", "suppe"]
+    values += (["middag", "gryta", "soppa", "ugnsrätt"] if provider == "mathem"
+               else ["middag", "gryte", "suppe", "ovnsrett"])
     result = []
     for value in values:
         query = " ".join(str(value).split())[:200]

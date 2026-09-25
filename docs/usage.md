@@ -26,6 +26,30 @@ One installation belongs to one store and household. To shop at another store,
 use a separate installation; do not change the provider on an existing bank of
 orders and shopping settings. Multiple trusted agents can share one installation.
 
+## Dietary goals and substitutions
+
+New installations start with an editable goal: follow national dietary guidelines
+for the household country. Confirm that country during setup, or change/remove
+the goal. The retailer does not determine which country's advice applies.
+You can instead specify other patterns, nutritional goals and food preferences.
+The agent interprets those saved goals when selecting recipes and products;
+there is no universal food-group bonus or preferred nutrient balance.
+
+Optional numeric targets start disabled: zero minima, an empty fish-gram range
+and all-zero plate fractions mean no additional target. They are not an
+instruction to eat zero of those foods. An explicit fish range `[0, 0]` is a
+zero-fish target, distinct from an empty range. Existing profiles keep all their
+saved values during upgrades; changing a dietary pattern does not erase separate
+saved targets. Ask to change those too if they no longer fit. An explicit profile
+reset restores the installation's configured defaults for the selected fields.
+
+Avoided ingredients should be left out or replaced with something that works in
+the dish. Any nutritional reason for choosing one replacement over another must
+come from your saved goals and available product information. A plant-based label
+alone establishes neither nutritional fit nor allergy safety. The agent explains
+material substitutions; it does not silently relax avoid preferences or turn them
+into allergies.
+
 ## Plan, save and adjust meals
 
 Review the proposed dishes, dates, portions and any missing information, then

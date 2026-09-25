@@ -82,21 +82,22 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "quality": "Complete, practical recipes with clear ingredients and steps.",
     },
     "diet": {
-        "patterns": ["Norwegian dietary guidelines"],
+        "patterns": ["National dietary guidelines for the household country"],
         "allergies_or_sensitivities": [],
         "rules": [],
         "uncertainty_permissions": [],
         "avoid": [],
-        "prioritise": ["vegetables", "whole grains", "fish", "legumes"],
-        "fish_grams_per_person": [300, 450],
-        "minimum_fish_portions": 2,
+        # Optional numeric goals start disabled; existing saved profiles are retained.
+        "prioritise": [],
+        "fish_grams_per_person": [],
+        "minimum_fish_portions": 0,
         "leafy_green_days": [],
-        "minimum_legume_dinners": 1,
-        "minimum_wholegrain_or_potato_dinners": 2,
-        "minimum_vegetable_types": 5,
-        "plate": {"vegetables": 0.5, "protein": 0.25, "wholegrain_or_potato": 0.25},
-        "nutrition": "Prefer balanced everyday meals and sensible portions.",
-        "legumes": "Use cooked legumes.",
+        "minimum_legume_dinners": 0,
+        "minimum_wholegrain_or_potato_dinners": 0,
+        "minimum_vegetable_types": 0,
+        "plate": {"vegetables": 0.0, "protein": 0.0, "wholegrain_or_potato": 0.0},
+        "nutrition": "",
+        "legumes": "",
         "exceptions": [],
     },
     "products": {
@@ -107,7 +108,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "brands": [],
         "offers": "use when compatible with preferences, shelf life and real need",
         "shelf_life": "buy larger packs only when later use or freezing is realistic",
-        "processing": "prefer less processed when otherwise suitable",
+        "processing": "",
     },
     "pantry": {
         "assume": ["salt", "pepper", "cooking oil"],
@@ -267,6 +268,8 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
                 if value and (len(value) != 2 or any(type(x) is not int or not 0 <= x <= 7 for x in value)
                               or value[0] > value[1]):
                     raise HouseholdError("profile diet.leafy_green_days must be [minimum, maximum] dinner days per week, from 0 to 7")
+                return
+            if path == "diet.fish_grams_per_person" and not value:
                 return
             numeric = path in {"meals.target_active_minutes", "meals.prepared_portion_range", "diet.fish_grams_per_person"}
             if numeric:

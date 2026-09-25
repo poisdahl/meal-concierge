@@ -1156,9 +1156,9 @@ legacy/ranked full-week request; agent mode enforces only explicit strict target
 perishability factors remain named in `soft_relaxations` and are never described
 as compliant.
 
-Planner version `weekly-menu-v1` uses integer reason contributions. Each slot
-receives +9/+8/+5/+3 for positive fish/legume/wholegrain-or-potato/vegetable
-facets; active time receives +8 inside the saved target range, -2 outside it but
+Planner version `weekly-menu-v1` uses integer reason contributions. Dietary
+facets provide evidence for saved priorities and targets, not unconditional
+food-group bonuses. Active time receives +8 inside the saved target range, -2 outside it but
 within the maximum on weekdays, +2 for that same extra effort on weekends, -12
 above the soft maximum and zero when unknown. A fresh
 meal receives `2 * later-slot-count` for earlier placement; a shelf-stable meal
@@ -1169,7 +1169,7 @@ exact variety facet and -10 per duplicate. Exact normalized non-pantry,
 non-optional ingredient identity with the same explicit unit earns +4 per
 additional meal using it (at most two repeats per ingredient and +16 total);
 duplicate rows inside one recipe count once, while use beyond two meals incurs
--6 each up to -24. Meeting each supported weekly diet minimum through positive
+-6 each up to -24. Meeting each enabled positive weekly diet minimum through positive
 evidence adds +10; shortfalls receive the reason-coded bounded penalty shown in
 the result. Ingredient reuse never means pantry stock or fuzzy product
 equivalence. Every returned slot and plan reason has a signed integer weight;

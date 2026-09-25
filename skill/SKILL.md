@@ -47,7 +47,12 @@ meal selection and product preparation need no additional reference loading.
 ## Choose and save meals
 
 1. On first interactive use, present setup's single keep-all-or-change question,
-   including its payment choices, then apply the answer once. Reuse accepted
+   including its payment choices and editable dietary goals, then apply the answer once.
+   New households start with national dietary guidelines as a saved pattern.
+   Resolve the country from explicit household context or include it in that
+   setup question; do not infer it from the retailer. Record the chosen country
+   in `diet.patterns`. An unresolved country needs clarification before claiming
+   guideline alignment. Preserve existing or explicitly cleared goals. Reuse accepted
    settings and standing authorization. Account connection is separate from
    preferences and optional email. Local recipes remain usable without a store
    account. Never create a purchase just to test setup.
@@ -73,15 +78,23 @@ meal selection and product preparation need no additional reference loading.
    An explicit user exception applies only to an ordinary preference, not an
    allergy or `never_buy` rule. If the user wants to keep a dish, try adaptation
    first. Check ingredients and method, not just titles or keyword findings.
-   For cream, sour cream or butter substitutions, choose a plant alternative
-   that fits the dish's heat, acidity, texture and flavor. Prefer options lower
-   in saturated fat when the observed label supports that comparison; do not
-   assume coconut/palm products or a vegan label make an option healthier.
-   Unsaturated plant oil may fit sautéing but is not a universal cream replacement.
-   Verify the actual replacement product and any other household restrictions;
-   missing nutrition information stays unknown. Record the replacement in the
-   recipe and explain it briefly with the menu. A narrow cream/sour-cream rule
-   is not a milk allergy or a ban on all dairy.
+   Derive nutritional priorities for recipes and replacement products from the
+   saved `diet.patterns`, `diet.nutrition`, explicit targets/preferences and
+   `products` preferences. Interpret the named dietary patterns using relevant
+   authoritative guidance; verify current guidance when needed. Apply that
+   reasoning yourself, including to substitutions. Do not turn an ingredient
+   avoidance into an unstated nutrition goal, or apply a universal preferred
+   nutrient balance, food group, processing level or plant-based replacement.
+   A substitution must fit the dish's heat, acidity, texture and flavor and all
+   household restrictions. Compare observed product information against the
+   saved goals; a marketing label alone establishes neither nutritional fit
+   nor allergy safety. Missing nutrition information stays unknown. Record the
+   replacement in the recipe and explain it briefly with the menu, connecting
+   nutritional choices to the applicable saved goal. A narrow cream/sour-cream
+   rule is not a milk allergy or a ban on all dairy. Empty lists/text, zero minima
+   and an all-zero `diet.plate` mean no corresponding additional target; an empty
+   fish range disables that target. Do not invent numeric quotas from a pattern
+   or persist your interpretation as a user preference without user direction.
    Numeric dietary targets are visible goals in agent mode. Put a target in
    `strict_targets` only when it is an explicit requirement. Allergies and
    never-buy rules remain binding. Do not claim a target was met when evidence
