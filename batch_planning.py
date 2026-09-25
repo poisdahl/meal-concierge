@@ -56,10 +56,18 @@ def normalize(state, menu, value, today):
     if consumed != fraction(str(recipe['portions'])) or prepared <= consumed:
         raise HouseholdError('source consumption must match its exact meal portions, with explicit extra preparation')
     suitability=value['suitability']; storage=value['storage']
-    if suitability != {'source':'current_user','value':'suitable'}:
-        raise HouseholdError('structured current-user batch suitability is missing; prose/boolean inference is unsupported')
-    if not isinstance(storage,dict) or set(storage).difference({'source','method','max_interval_days','use_by_date'}) or storage.get('source')!='current_user' or storage.get('method') not in {'refrigerated','frozen'}:
+    if (not isinstance(suitability,dict) or not isinstance(suitability.get('source'),str)
+            or suitability.get('source') not in {'current_user','agent'}
+            or suitability != {'source':suitability['source'],'value':'suitable'}):
+        raise HouseholdError('batch suitability needs an explicit current-user or agent assessment')
+    if (not isinstance(storage,dict) or set(storage).difference({'source','method','max_interval_days','use_by_date','basis','reheating'})
+            or not isinstance(storage.get('source'),str) or storage.get('source') != suitability['source']
+            or not isinstance(storage.get('method'),str) or storage.get('method') not in {'refrigerated','frozen'}):
         raise HouseholdError('explicit structured refrigerated/frozen storage facts are required')
+    if storage['source'] == 'agent':
+        for field in ('basis','reheating'):
+            if not isinstance(storage.get(field),str) or not 1 <= len(storage[field].strip()) <= 1000:
+                raise HouseholdError(f'agent batch storage needs bounded {field} text')
     days=storage.get('max_interval_days'); use_by=storage.get('use_by_date')
     if days is None and use_by is None:
         raise HouseholdError('an explicit maximum interval or use-by date is required')
@@ -251,6 +259,7 @@ def attach_recurring(menu, layout, resolved):
         source = by_day[allocation['source_date']]
         candidate = candidates[source['recipe_key']]
         guidance = deepcopy(candidate.get('supplied_facts', {}).get('batch_guidance'))
+        guidance_source = 'agent' if guidance is not None else 'unknown'
         if guidance is None:
             guidance = {'basis': 'unknown', 'suitability': 'unknown', 'storage': 'Recipe-specific storage life not established; plan prompt cooling and freezing only if suitable.',
                         'reheating': 'Check recipe-specific reheating instructions before using leftovers.'}
@@ -258,8 +267,9 @@ def attach_recurring(menu, layout, resolved):
                 'prepared_portions': rational(Fraction(allocation['prepared_portions'])),
                 'consumed_at_source': rational(Fraction(allocation['consumed_at_source'])),
                 'unallocated_portions': rational(Fraction(allocation['prepared_portions'] - len(allocation['eating_dates']) * allocation['consumed_at_source'])),
-                'suitability': {'source': guidance['basis'], 'value': guidance['suitability']},
-                'storage': guidance, 'leftovers': [], 'recurring_settings': deepcopy(layout['accepted_settings'])}
+                'suitability': {'source': guidance_source, 'value': guidance['suitability']},
+                'storage': {**guidance, 'source': guidance_source}, 'leftovers': [],
+                'recurring_settings': deepcopy(layout['accepted_settings'])}
         for day in allocation['eating_dates'][1:]:
             slot = {**deepcopy(source), 'date': day, 'kind': 'leftover', 'source_slot_id': source['slot_id'],
                     'portions': rational(Fraction(allocation['consumed_at_source']))}

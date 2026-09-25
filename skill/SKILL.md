@@ -70,6 +70,11 @@ meal selection and product preparation need no additional reference loading.
    Judge taste, cooking behavior and nutrition together. “Plant-based” alone
    does not establish a healthier choice. Never infer an allergy or ban all
    dairy from a narrower cream/sour-cream preference.
+   Prefer recipes that already fit saved preferences. If a chosen recipe uses
+   butter and the household avoids cream, inspect the actual ingredients and
+   cooking method. When it conflicts, adapt with a suitable unsaturated plant
+   oil or spread, or choose another dish. Do not treat that narrow preference
+   as a general dairy allergy or override a hard restriction.
    Numeric dietary targets are visible goals in agent mode. Put a target in
    `strict_targets` only when it is an explicit requirement. Allergies and
    never-buy rules remain binding. Do not claim a target was met when evidence
@@ -113,6 +118,17 @@ meal selection and product preparation need no additional reference loading.
    A blocked linked or unidentified slot needs the pending operation resolved;
    do not replace a whole menu to evade it.
 
+For each recurring batch dish, include
+`facts.batch_guidance={basis,suitability,storage,reheating}` in its planner
+candidate. Assess the exact recipe, cooking date and last leftover date. Write
+practical cooling, refrigerator/freezer and reheating instructions in your own
+words, including when a later portion should be frozen. If the dish cannot
+reasonably be stored and reheated across those dates, mark it `unsuitable` and
+choose another. If safe storage remains uncertain, mark it `unknown` and state
+what is unresolved. Treat this as your assessment, not a source recipe fact or
+a report from the user. Include the guidance when presenting the weekly menu
+and recipes.
+
 Use schema version 2 for new typed recipes: keep original text, structured
 amounts/units, portions, steps, attribution, rights and evidence distinct. Amounts
 use exact fractions; temperatures and cooking times are not portion multipliers.
@@ -126,6 +142,12 @@ use recipe discovery `adapt` with its exact original `discovery_ref` or
 complete coherent `steps`. Optional `quantity` and `unit` change an amount;
 omitting them retains the amount. Optional top-level `portions` scales the
 source first, so quantities in your edits apply to that target serving count.
+For a ready-made ingredient that is unavailable but simple to prepare, use
+`ingredients=[{index,replace_with:[{item,quantity,unit,assumptions},...]}]`
+to replace its single row with two to five separate measured ingredients.
+For ginger-garlic paste, select observed fresh ginger and garlic, estimate
+their amounts, and add a short paste-making step in the complete adapted
+method. A combined "ginger and garlic" row cannot be shopped as two products.
 The service preserves attribution, rights, provider binding and untouched
 amount evidence. Explain practical replacement assumptions; do not reconstruct
 the recipe's evidence. Use the returned frozen `discovery_ref` in planning.
@@ -160,6 +182,11 @@ invent `semantic_authorization` from the user for normal culinary choices.
 
 The service computes quantified coverage, package rounding and cost. For a
 practical package estimate, give `package_count` and an honest `quantity_basis`.
+For chicken thighs listed by piece while the store sells gram-labelled packs,
+estimate a plausible per-piece weight and edible yield, choose enough observed
+whole packs, and state the arithmetic and uncertainty in `quantity_basis`.
+This remains a practical estimate, not an exact conversion. Check the observed
+pack size, availability and package limit; report unresolved uncertainty.
 For one package serving several requirements, each member carries the same exact
 `shared_package` group and sole candidate ref; `authorized_by` can be omitted or
 `agent`. Keep distinct foods distinct. If the product changes how the dish must

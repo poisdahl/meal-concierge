@@ -19,6 +19,7 @@ from core import HouseholdError, StateStore
 import planner
 from planner import MAX_EXPLORED_STATES, MAX_HISTORY_RECORDS, PlannerError
 from service import Application, Server
+from service_common import menu_email_html
 
 
 CONFIG = {
@@ -382,6 +383,13 @@ class WeeklyPlannerTests(unittest.TestCase):
 
     def test_agent_batch_assigns_candidates_to_chronological_cook_days(self):
         candidates = self.save_candidates(6)
+        for candidate in candidates:
+            candidate.setdefault("facts", {})["batch_guidance"] = {
+                "basis": "Synthetic recipe is suitable across the selected dates.",
+                "suitability": "suitable",
+                "storage": "Cool promptly and refrigerate or freeze later portions.",
+                "reheating": "Reheat the synthetic meal thoroughly before serving.",
+            }
         chosen = list(reversed(candidates))
         with self.store.locked() as state:
             state["profile"]["meals"].update({
@@ -402,9 +410,17 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertEqual(result["status"], "planned")
         sources = result["selection"]["source_slots"]
         self.assertEqual(len(sources), 6)
-        self.assertEqual([slot["reference"] for slot in sources], chosen)
+        self.assertEqual([slot["reference"] for slot in sources],
+                         [{"recipe_ref": candidate["recipe_ref"]} for candidate in chosen])
         self.assertEqual([slot["date"] for slot in sources], sorted(slot["date"] for slot in sources))
         self.assertEqual(len(result["selection"]["slots"]), 7)
+        saved = self.app.handle({"operation": "menu", "action": "save",
+                                 "planner_ref": result["save_ref"]})["menu"]
+        self.assertEqual(saved["batches"][0]["suitability"]["source"], "agent")
+        html = menu_email_html(saved)
+        self.assertIn("Oppbevaring for denne ukens batch", html)
+        self.assertIn("Cool promptly and refrigerate", html)
+        self.assertIn("Reheat the synthetic meal thoroughly", html)
 
     def test_explicit_lunch_slots_never_count_as_legacy_dinners(self):
         facts = {

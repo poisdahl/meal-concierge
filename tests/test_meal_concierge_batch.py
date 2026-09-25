@@ -11,6 +11,7 @@ from service import Application
 import menu_planning as mp
 import batch_planning as bp
 from product_planner import menu_requirements
+from service_common import menu_email_html
 import test_meal_concierge_planner as fixtures
 
 
@@ -53,6 +54,34 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(self.store.read()['profile']['meals']['batch_dishes'],0)
         self.assertEqual(self.store.read()['menu_planning']['history'][mp.lock_key(self.menu)],self.menu)
         self.assertEqual(self.fixture.provider.calls,[])
+
+    def test_agent_assesses_exact_batch_interval_and_guidance_reaches_recipe(self):
+        spec = deepcopy(self.spec)
+        spec['suitability'] = {'source': 'agent', 'value': 'suitable'}
+        spec['storage'] = {'source': 'agent', 'method': 'refrigerated',
+            'max_interval_days': 2,
+            'basis': 'The cooked synthetic dish is divided and cooled promptly for two later dinners.',
+            'reheating': 'Reheat each portion thoroughly before serving.'}
+        prepared = self.prepare(spec)
+        self.assertEqual(prepared['status'], 'prepared')
+        without_reheating = deepcopy(spec)
+        without_reheating['storage'].pop('reheating')
+        self.assertEqual(self.prepare(without_reheating)['status'], 'needs_input')
+        malformed = deepcopy(spec)
+        malformed['suitability']['source'] = []
+        self.assertEqual(self.prepare(malformed)['status'], 'needs_input')
+        malformed = deepcopy(spec)
+        malformed['storage']['method'] = []
+        self.assertEqual(self.prepare(malformed)['status'], 'needs_input')
+        too_short = deepcopy(spec)
+        too_short['storage']['max_interval_days'] = 1
+        self.assertEqual(self.prepare(too_short)['status'], 'needs_input')
+        menu = self.apply(prepared)['menu']
+        self.assertEqual(menu['batches'][0]['suitability']['source'], 'agent')
+        html = menu_email_html(menu)
+        self.assertIn('Oppbevaring for denne ukens batch', html)
+        self.assertIn('Oppvarming for denne ukens batch', html)
+        self.assertIn('Reheat each portion thoroughly', html)
 
     def test_huge_decimal_exponents_fail_before_fraction_construction(self):
         for value in ('1e1000000000','1e-1000000000','0e1000000000'):

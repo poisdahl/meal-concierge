@@ -904,7 +904,7 @@ def _practical_packages(requirement, observation, approval, price_mode):
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
     size = _package_quantity(package, requirement['unit'])
-    if requirement['unit'] in {'g', 'ml'} and size is not None and count * size < _read_fraction(requirement['quantity'], positive=True):
+    if size is not None and count * size < _read_fraction(requirement['quantity'], positive=True):
         return None  # Even the full observed package cannot cover this amount.
     options = product.get('purchase_options', [])
     if not options:
@@ -915,18 +915,25 @@ def _practical_packages(requirement, observation, approval, price_mode):
         cost = None
     if cost is None and price_mode == 'estimate' and len(options) == 1:
         option = options[0]
-        if (option.get('price_kind') == 'exact' and option.get('eligibility') == 'confirmed'
+        price_kind = option.get('price_kind')
+        amount = option.get('merchandise_ore') if price_kind == 'exact' else option.get('estimated_merchandise_ore')
+        if (price_kind in {'exact', 'estimate'} and option.get('eligibility') == 'confirmed'
                 and option.get('offer_kind') == 'regular' and option.get('package_count') == 1
-                and type(option.get('merchandise_ore')) is int and option['merchandise_ore'] >= 0
+                and type(amount) is int and amount >= 0
                 and option.get('mandatory_deposit_ore') is None):
-            cost = {'merchandise_ore': count * option['merchandise_ore'],
-                    'mandatory_deposit_ore': None, 'total_payable_ore': None, 'bundles': []}
+            cost = {'merchandise_ore': count * amount,
+                    'mandatory_deposit_ore': None, 'total_payable_ore': None,
+                    'bundles': [{'option_index': 0, 'package_count': count,
+                                 'offer_kind': 'regular', 'price_kind': price_kind}],
+                    'price_status': price_kind}
     if cost is None:
         return None
     amounts = {k: cost[k] for k in ('merchandise_ore', 'mandatory_deposit_ore', 'total_payable_ore')}
     return {'products': [{'product_ref': refs[0], 'name': product['name'], 'quantity': count,
                          'dietary_assessments': deepcopy(product.get('dietary_findings', [])),
-                         'purchase_options': cost['bundles'], **amounts}],
+                         'purchase_options': cost['bundles'],
+                         **({'price_status': cost['price_status']} if 'price_status' in cost else {}),
+                         **amounts}],
             'coverage_status': 'practical_estimate', 'quantity_basis': approval['quantity_basis'],
             'observed_package': deepcopy(package),
             'observed_package_description': product.get('display', {}).get('package'), 'coverage': None,
@@ -1054,6 +1061,19 @@ def build_product_plan(
             diagnostics = _candidate_diagnostics(requirement, evaluated_observation, filtered)
             if diagnostics:
                 problem["candidate_diagnostics"] = diagnostics
+                convertible = next((row for row in diagnostics
+                                    if row.get('reason') == 'unit_conversion_required'
+                                    and any(product['product_ref'] == row['product_ref']
+                                            and product.get('availability') == 'available'
+                                            and product.get('purchase_options')
+                                            for product in evaluated_observation['products'])), None)
+                if convertible and 'package_count' not in approval:
+                    problem['repair'] = {
+                        'kind': 'practical_package_estimate',
+                        'candidate_ref': convertible['product_ref'],
+                        'fields': ['package_count', 'quantity_basis'],
+                        'note': ('Choose observed whole packs and state the culinary estimate; coverage remains an estimate. '
+                                 'Use price_mode=estimate if only an estimated product price is observed.')}
             unresolved.append(problem)
             item["status"] = "needs_input"
         else:

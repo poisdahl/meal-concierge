@@ -393,13 +393,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
     from batch_planning import sources, fraction
     from recipes import scale_recipe
     import menu_planning as mp
-    cooking_batches = {}
-    for batch in sources(menu):
-        source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
-        cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, source_slot.get('date', '')))
-        recipe = mp.recipe_for_slot(menu, source_slot, allow_stale=True) if source_slot else {}
-        parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source_slot.get('date', ''))}</p>")
-        guidance = batch.get('storage', {})
+    def batch_guidance(batch):
+        guidance = batch.get('storage') or {}
         method = {'refrigerated': 'Oppbevares i kjøleskap.', 'frozen': 'Oppbevares fryst.'}.get(guidance.get('method'))
         if method:
             details = [method]
@@ -407,13 +402,25 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 details.append(f"Planlagt oppbevaring: høyst {guidance['max_interval_days']} dager.")
             if guidance.get('use_by_date'):
                 details.append(f"Bruk innen {guidance['use_by_date']}.")
-            parts.append(f"<p>{escape(' '.join(details))}</p>")
-        elif guidance.get('basis') == 'unknown':
-            parts.append('<p>Holdbarheten for denne retten er ikke fastslått. Følg oppskriftens råd om avkjøling, oppbevaring og oppvarming.</p>')
-        else:
-            for key, label in (('storage', 'Oppbevaring'), ('reheating', 'Oppvarming')):
-                if isinstance(guidance.get(key), str) and guidance[key]:
-                    parts.append(f"<p>{label}: {escape(guidance[key])}</p>")
+            if guidance.get('basis'):
+                details.append(guidance['basis'])
+            return ' '.join(details), guidance.get('reheating') or ''
+        if guidance.get('basis') == 'unknown':
+            return ('Holdbarheten for denne retten er ikke fastslått. Følg oppskriftens råd om avkjøling, oppbevaring og oppvarming.',
+                    guidance.get('reheating') or '')
+        return guidance.get('storage') or '', guidance.get('reheating') or ''
+
+    cooking_batches = {}
+    for batch in sources(menu):
+        source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
+        cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, source_slot.get('date', '')))
+        recipe = mp.recipe_for_slot(menu, source_slot, allow_stale=True) if source_slot else {}
+        parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source_slot.get('date', ''))}</p>")
+        storage_text, reheating_text = batch_guidance(batch)
+        if storage_text:
+            parts.append(f"<p>Oppbevaring: {escape(storage_text)}</p>")
+        if reheating_text:
+            parts.append(f"<p>Oppvarming: {escape(reheating_text)}</p>")
         prepared = batch["prepared_portions"]
         consumed = batch["consumed_at_source"]
         parts.append(f"<p><strong>Tilberedning:</strong> {escape(format_portions(prepared))} porsjoner totalt, "
@@ -432,7 +439,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 batches = [item for slot_id, values in cooking_batches.items()
                            if mp.recipe_for_slot(menu, mp.slot_by_id(menu, slot_id), allow_stale=True) is recipe for item in values]
             if not batches:
-                cooking_recipes.append((recipe, ''))
+                cooking_recipes.append((recipe, '', None))
             for batch, cooking_date in batches:
                 try:
                     cooked = scale_recipe(recipe, float(fraction(batch['prepared_portions'])))
@@ -442,8 +449,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 except RecipeError:
                     cooked = recipe
                     label = f"Grunnoppskrift for {format_portions(recipe.get('portions'))} porsjoner. Planen krever {format_portions(batch['prepared_portions'])} porsjoner {cooking_date}, men kildegrunnlaget kan ikke skaleres automatisk."
-                cooking_recipes.append((cooked, label))
-        for recipe, cooking_label in cooking_recipes:
+                cooking_recipes.append((cooked, label, batch))
+        for recipe, cooking_label, batch in cooking_recipes:
+            batch_storage, batch_reheating = batch_guidance(batch) if batch else ('', '')
             portions_text = f"{format_portions(recipe['portions'])} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
             portion_evidence = recipe.get("portions_evidence") or {}
             if portion_evidence.get("basis") == "estimate" and show_estimate_labels:
@@ -470,7 +478,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 steps(recipe.get("steps")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 "</ol>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 f"<p>{escape(recipe.get('notes'))}</p>" if recipe.get("notes") else "",
+                f"<p><strong>Oppbevaring for denne ukens batch:</strong> {escape(batch_storage)}</p>" if batch_storage else
                 f"<p><strong>Lagring:</strong> {escape(recipe.get('storage'))}</p>" if recipe.get("storage") else "",
+                f"<p><strong>Oppvarming for denne ukens batch:</strong> {escape(batch_reheating)}</p>" if batch_reheating else
                 f"<p><strong>Oppvarming:</strong> {escape(recipe.get('reheating'))}</p>" if recipe.get("reheating") else "",
                 "</section>",
             ])

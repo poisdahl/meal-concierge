@@ -492,7 +492,8 @@ def _rights(value: Any, *, version: int = 2) -> dict[str, Any]:
 
 
 def _external_snapshot(value: Any, source: Mapping[str, Any], *, version: int = 2) -> dict[str, Any] | None:
-    required = str(source.get("kind") or "").casefold() in {"themealdb", "wikibooks"}
+    required = (str(source.get("kind") or "").casefold() in {"themealdb", "wikibooks"}
+                and source.get("relationship") != "adapted")
     if value is None and not required:
         return None
     if not isinstance(value, Mapping):
@@ -1099,6 +1100,12 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
     value = bind_recipe_source(value, prior=prior)
     if isinstance(value, Mapping) and isinstance(value.get("source"), Mapping) and str(value["source"].get("relationship") or "").casefold() == "generated" and value.get("schema_version", 1) == 1:
         value = {**value, "schema_version": 2}
+    if (isinstance(value, Mapping) and isinstance(value.get("source"), Mapping)
+            and str(value["source"].get("kind") or "").strip().casefold() in {"themealdb", "wikibooks"}
+            and str(value["source"].get("relationship") or "").strip().casefold() == "adapted"
+            and value.get("external_snapshot") is None
+            and (prior is None or prior["source"] != value["source"])):
+        raise RecipeError("external adaptations without a source snapshot require an exact prior recipe")
     recipe = normalize_recipe(value)
     if prior is not None:
         prior_by_item: dict[str, list[Mapping[str, Any]]] = {}
@@ -1211,30 +1218,45 @@ def adapt_recipe_changes(changes: Any, *, prior: Mapping[str, Any], portions: An
         if "steps" not in changes:
             raise RecipeError("ingredient changes require complete adapted steps")
         seen = set()
+        replacements = {}
         for edit in edits:
-            if (not isinstance(edit, Mapping) or set(edit) - {"index", "item", "assumptions", "quantity", "unit"}
-                    or not {"index", "item", "assumptions"} <= set(edit)):
-                raise RecipeError("adaptation ingredient change requires index, item and assumptions only")
+            if not isinstance(edit, Mapping) or "index" not in edit:
+                raise RecipeError("adaptation ingredient change requires an index")
+            split = "replace_with" in edit
+            if split:
+                rows = edit["replace_with"]
+                if set(edit) != {"index", "replace_with"} or not isinstance(rows, list) or not 2 <= len(rows) <= 5:
+                    raise RecipeError("ingredient split needs two to five replacement ingredients")
+                if any(not isinstance(row, Mapping) or set(row) != {"item", "quantity", "unit", "assumptions"} for row in rows):
+                    raise RecipeError("each replacement needs item, quantity, unit and assumptions")
+            elif set(edit) - {"index", "item", "assumptions", "quantity", "unit"} or not {"item", "assumptions"} <= set(edit):
+                raise RecipeError("adaptation ingredient change requires index, item and assumptions")
             index = edit["index"]
             if type(index) is not int or not 0 <= index < len(candidate["ingredients"]) or index in seen:
                 raise RecipeError("adaptation ingredient index must be unique and in range")
             seen.add(index)
             ingredient = candidate["ingredients"][index]
             source_text = ingredient.get("original_text") or ingredient.get("raw")
-            ingredient["item"] = _bounded_text(edit["item"], f"ingredients[{index}].item", required=True, maximum=300)
-            assumptions = _bounded_text(edit["assumptions"], f"ingredients[{index}].assumptions", required=True, maximum=1000)
-            for field in ("quantity", "unit"):
-                if field in edit:
-                    ingredient[field] = edit[field]
-            if ingredient.get("quantity") is not None and ingredient.get("unit") is not None:
-                ingredient["scalable"] = True
-            ingredient["raw"] = ingredient["item"]
-            ingredient["evidence"] = {
-                field: {"basis": "estimate" if ingredient.get(field) is not None else "unknown",
-                        "input": source_text, "assumptions": assumptions}
-                for field in ("quantity", "unit")
-            }
-            ingredient.pop("_store_product_hint", None)
+            revised = []
+            for row in rows if split else [edit]:
+                replacement = deepcopy(ingredient)
+                replacement["item"] = _bounded_text(row["item"], f"ingredients[{index}].item", required=True, maximum=300)
+                assumptions = _bounded_text(row["assumptions"], f"ingredients[{index}].assumptions", required=True, maximum=1000)
+                for field in ("quantity", "unit"):
+                    if field in row:
+                        replacement[field] = row[field]
+                replacement["scalable"] = replacement.get("quantity") is not None and replacement.get("unit") is not None
+                replacement["raw"] = replacement["item"]
+                replacement["evidence"] = {
+                    field: {"basis": "estimate" if replacement.get(field) is not None else "unknown",
+                            "input": source_text, "assumptions": assumptions}
+                    for field in ("quantity", "unit")
+                }
+                replacement.pop("_store_product_hint", None)
+                revised.append(replacement)
+            replacements[index] = revised
+        candidate["ingredients"] = [row for index, ingredient in enumerate(candidate["ingredients"])
+                                    for row in replacements.get(index, [ingredient])]
     return normalize_recipe(candidate, trusted_store_product_hints=True)
 
 
