@@ -195,14 +195,15 @@ and asks about an alternative or an exception for that meal. It must not silentl
 use an avoided ingredient. An explicit meal-specific exception can apply to an
 ordinary preference; it cannot override an allergy or `never_buy` rule.
 
-For cream, sour cream and butter, a plant alternative must fit the heat, acidity,
-texture and flavor of the dish. Prefer lower saturated fat where observed product
-information supports the comparison; coconut/palm fat or a vegan label does not
-make a product healthier. Unsaturated oil can suit sautéing but cannot replace
-cream in every recipe. This follows the general direction of the
-[Norwegian dietary guidance](https://www.helsenorge.no/kosthold-og-ernaring/kostradene/).
-Other household restrictions still apply, and unknown nutrition stays unknown.
-The menu briefly explains the recorded substitution. Narrow cream/sour-cream
-preferences and `never_buy` rules do not imply a milk allergy or a ban on all dairy;
+Nutritional priorities come from saved household patterns, goals and preferences,
+including when comparing replacement products. The host interprets named patterns
+using relevant authoritative guidance and observed product information; the
+service does not embed a preferred nutrient balance or food-group bonus. Avoiding
+an ingredient alone does not imply a nutrient goal or a plant-based diet. A
+replacement must fit the dish's heat, acidity, texture and flavor. Marketing
+labels establish neither nutritional fit nor allergy safety, and missing facts
+remain unknown. The menu briefly explains substitutions and the saved goals
+behind nutritional choices. Narrow cream/sour-cream preferences and `never_buy`
+rules do not imply a milk allergy or a ban on all dairy;
 only explicit user intent changes stored rules. Numeric goals with missing
 evidence stay visibly unverified rather than being silently certified.

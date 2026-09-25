@@ -261,10 +261,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(_listed_fish_mass(recipe), {"grams_per_serving": 0.0, "unknown": ["salmon sauce"]})
 
     def test_wholegrain_preference_does_not_reward_potatoes(self):
+        profile = deepcopy(DEFAULT_PROFILE)
+        profile["diet"]["prioritise"] = ["whole grains"]
         item = candidate(1)
         item["recipe"]["ingredients"][0]["item"] = "potatoes"
-        prepared = prepare_candidate(item, DEFAULT_PROFILE, {})
-        reasons = _preference_reasons(prepared, "2026-09-07", DEFAULT_PROFILE)
+        prepared = prepare_candidate(item, profile, {})
+        reasons = _preference_reasons(prepared, "2026-09-07", profile)
         reason = next(reason for reason in reasons if reason["code"] == "diet:prioritise" and reason["detail"]["preference"] == "whole grains")
         self.assertEqual(reason["weight"], 0)
 

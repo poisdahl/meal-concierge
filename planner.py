@@ -775,16 +775,19 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
 
     def with_policy(evaluation: dict[str, Any]) -> dict[str, Any]:
         enforced = [row["status"] for row in evaluation["results"]
-                    if row["target"] in enforced_targets]
+                    if row["target"] in enforced_targets or row["target"] == "dinner_day_coverage"]
         return {
             **evaluation,
             "enforced_status": "fail" if "fail" in enforced else "unknown" if "unknown" in enforced else "pass",
         }
 
-    if not targets:
-        return with_policy({"status": "pass", "complete_menu": True, "results": []})
+    # Only a previously complete week binds coverage; explicit partial menus
+    # retain their existing advisory/strict nutrition policy.
+    incomplete_targets = [*targets]
+    if isinstance(menu, Mapping) and menu.get("weekly_plan_complete") is True:
+        incomplete_targets.append("dinner_day_coverage")
     if not isinstance(menu, Mapping) or not isinstance(menu.get("dishes"), list):
-        return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in targets]})
+        return with_policy({"status": "unknown", "complete_menu": False, "results": [{"target": target, "status": "unknown", "detail": "menu dishes are unavailable"} for target in incomplete_targets]})
     import menu_planning as mp
     import batch_planning as bp
     recipes = {recipe.get("recipe_key"): recipe for recipe in menu["dishes"]
@@ -806,7 +809,9 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
             "target": target, "status": "unknown",
             "detail": {"expected_dinners": expected, "observed_dinners": len(selected_recipes)},
-        } for target in targets]})
+        } for target in incomplete_targets]})
+    if not targets:
+        return with_policy({"status": "pass", "complete_menu": True, "results": []})
     new_assessment_slots = set()
     planned_by_occurrence = {}
     planned_by_key = {}
@@ -901,10 +906,6 @@ def _slot_reasons(
     explicit_feedback = candidate.get("planning_feedback")
     if explicit_feedback is not None:
         reasons.append(_reason("feedback:explicit-v1", explicit_feedback["weight"], deepcopy(explicit_feedback)))
-    facets = candidate["facts"]["dietary_facets"]["values"]
-    weights = {"fish": 9, "legume": 8, "wholegrain_or_potato": 5, "vegetable": 3}
-    for facet in sorted(facets):
-        reasons.append(_reason(f"dietary:{facet}", weights[facet], "positive structured evidence"))
     active = candidate["facts"]["active_minutes"]
     low, high, maximum = _active_window(profile)
     value = active["value"]
@@ -1019,6 +1020,8 @@ def _plan_reasons(
         ("minimum_wholegrain_or_potato_dinners", "wholegrain_or_potato"),
     ):
         wanted = _positive_int(profile, target, 0)
+        if not wanted:
+            continue
         observed = sum(facet in facts["values"] for facts in dietary)
         met = observed >= wanted
         reasons.append(_reason(
@@ -1026,13 +1029,14 @@ def _plan_reasons(
             {"minimum": wanted, "positive_evidence": observed, "met_by_positive_evidence": met},
         ))
     wanted_vegetables = _positive_int(profile, "minimum_vegetable_types", 0)
-    vegetables = sorted({item for facts in dietary for item in facts["vegetable_types"]})
-    reasons.append(_reason(
-        "weekly_target:minimum_vegetable_types",
-        10 if len(vegetables) >= wanted_vegetables else -min(10, wanted_vegetables - len(vegetables)),
-        {"minimum": wanted_vegetables, "positive_evidence": vegetables,
-         "met_by_positive_evidence": len(vegetables) >= wanted_vegetables},
-    ))
+    if wanted_vegetables:
+        vegetables = sorted({item for facts in dietary for item in facts["vegetable_types"]})
+        reasons.append(_reason(
+            "weekly_target:minimum_vegetable_types",
+            10 if len(vegetables) >= wanted_vegetables else -min(10, wanted_vegetables - len(vegetables)),
+            {"minimum": wanted_vegetables, "positive_evidence": vegetables,
+             "met_by_positive_evidence": len(vegetables) >= wanted_vegetables},
+        ))
     return reasons
 
 
@@ -1072,7 +1076,10 @@ def _selection(
     diet = profile.get("diet") if isinstance(profile.get("diet"), Mapping) else {}
     cuisine = profile.get("cuisine") if isinstance(profile.get("cuisine"), Mapping) else {}
     for field in ("patterns", "plate", "nutrition", "exceptions", "legumes"):
-        if diet.get(field):
+        value = diet.get(field)
+        if field == "plate" and isinstance(value, Mapping):
+            value = any(value.values())
+        if value:
             relaxations.add("unsupported:diet." + field)
     leafy = _leafy_week(selected, profile)
     if leafy and leafy["unknown_dinners"]:

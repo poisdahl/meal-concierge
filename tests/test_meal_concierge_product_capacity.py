@@ -797,6 +797,41 @@ class ProductCapacityTests(unittest.TestCase):
             self.prepare()
         self.assertFalse(any(name == "manipulate_cart" for name, _, _ in self.provider.calls))
 
+    def test_week_shape_still_binds_checkout_without_nutrition_targets(self):
+        self.save_week()
+        self.assertFalse(any(self.store.read()["profile"]["diet"][target]
+                             for target in ("minimum_fish_portions", "minimum_legume_dinners",
+                                            "minimum_wholegrain_or_potato_dinners", "minimum_vegetable_types")))
+        self.assertTrue(self.apply(self.complete())["applied"])
+        with self.store.locked() as state:
+            state["profile"]["meals"]["dinner_days"] = 6
+        gate = self.app._cart_checkout_gate(cart_summary(self.provider.cart()), self.store.read()["menu"])
+        self.assertEqual(gate["reason"], "weekly_menu_minimums_unsatisfied")
+        self.assertEqual(gate["minimum_evaluation"]["enforced_status"], "unknown")
+        self.assertEqual(gate["minimum_evaluation"]["results"][0]["target"], "dinner_day_coverage")
+
+    def test_agent_week_shape_guard_allows_an_explicit_partial_replacement(self):
+        refs = self.save_recipes([recipe(f"Dinner {i}", rows) for i, rows in enumerate(DINNERS)])
+        def plan(count):
+            return self.app.handle({"operation": "menu", "action": "plan", "planner_input": {
+                "selection_mode": "agent", "week": "2026-W37",
+                "dates": [f"2026-09-{day:02d}" for day in range(7, 7 + count)],
+                "candidates": [{"recipe_ref": item["recipe_ref"]} for item in refs[:count]],
+            }})["plan"]
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+                                     "planner_ref": plan(7)["save_ref"]})["menu"]
+        self.assertTrue(self.menu["weekly_plan_complete"])
+        with self.store.locked() as state:
+            state["profile"]["meals"]["dinner_days"] = 6
+        with self.assertRaisesRegex(HouseholdError, "complete weekly menu"):
+            self.prepare()
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+                                     "planner_ref": plan(1)["save_ref"],
+                                     "menu_ref": self.app._cart_menu_ref(self.menu)})["menu"]
+        self.assertFalse(self.menu["weekly_plan_complete"])
+        self.assertTrue(self.prepare()["requirements"])
+        self.assertFalse(any(name == "manipulate_cart" for name, _, _ in self.provider.calls))
+
     def test_selected_line_price_drift_blocks_partial_apply_without_cart_write(self):
         self.save_week()
         initial = self.prepare()
