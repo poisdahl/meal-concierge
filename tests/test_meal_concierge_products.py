@@ -838,6 +838,48 @@ class ProductPlannerTests(unittest.TestCase):
             for count in (True, 0, 101):
                 with self.assertRaises(HouseholdError): plan(choice={**approval, 'package_count': count})
 
+    def test_chicken_thigh_count_uses_observed_gram_packs_as_labeled_estimate(self):
+        value = menu({'item': 'kyllinglår', 'quantity': 6, 'unit': 'count'})
+        requirement = menu_requirements(value)[0][0]
+        thigh_pack = product('10', 'Kyllinglår', 900, 'g', [{
+            'package_count': 1, 'price_kind': 'estimate',
+            'estimated_merchandise_ore': 6900, 'offer_kind': 'regular',
+            'eligibility': 'confirmed'}])
+        thigh_pack['package']['quantity_kind'] = 'expected'
+        approval = {'requirement_id': requirement['requirement_id'],
+                    'candidate_refs': ['10'], 'package_count': 2,
+                    'quantity_basis': 'Estimate 250–300 g bone-in per thigh: six need roughly 1.5–1.8 kg; two observed 900 g packs.',
+                    'selection_reason': 'Bone-in chicken thighs match the recipe.'}
+        def prepare(selected=thigh_pack, choices=None):
+            return build_product_plan(provider='oda', binding={}, menu=value,
+                observations={requirement['requirement_id']: observation('kyllinglår', [selected])},
+                candidate_approvals=choices or [approval], price_mode='estimate')
+        unresolved = prepare(choices=[{'requirement_id': requirement['requirement_id'],
+                                       'candidate_refs': ['10']}])
+        self.assertEqual(unresolved['status'], 'needs_input')
+        repair = unresolved['unresolved_requirements'][0]['repair']
+        self.assertEqual(repair['kind'], 'practical_package_estimate')
+        self.assertEqual(repair['candidate_ref'], '10')
+        from mcp_server import _compact_product_issue
+        self.assertEqual(_compact_product_issue(unresolved['unresolved_requirements'][0],
+                         candidate_limit=2)['repair'], repair)
+        result = prepare()
+        self.assertEqual(result['status'], 'prepared', result['unresolved_requirements'])
+        self.assertEqual(result['coverage_status'], 'practical_estimate')
+        selection = result['requirements'][0]['selection']
+        self.assertEqual(selection['package_count'], 2)
+        self.assertIsNone(selection['coverage'])
+        self.assertEqual(selection['observed_package']['unit'], 'g')
+        self.assertEqual(selection['products'][0]['price_status'], 'estimate')
+        self.assertEqual(result['cost_status'], 'merchandise_estimate_only')
+        self.assertEqual(cart_requirements(result)[0]['quantity'], 2)
+        unavailable = deepcopy(thigh_pack)
+        unavailable['availability'] = 'unavailable'
+        self.assertEqual(prepare(unavailable)['status'], 'needs_input')
+        known_count = deepcopy(thigh_pack)
+        known_count['package']['contained_count'] = 2
+        self.assertEqual(prepare(known_count)['status'], 'needs_input')
+
     def test_practical_drained_count_is_honored_and_obvious_undercoverage_rejected(self):
         value = menu({'item':'hermetiske bønner, avrent vekt','quantity':600,'unit':'g'})
         req = menu_requirements(value)[0][0]

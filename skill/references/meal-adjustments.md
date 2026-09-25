@@ -74,14 +74,17 @@ reference and a `batch_spec` containing:
 
 - `source_slot_id` and its exact `source_snapshot_digest`;
 - `prepared_portions` and `consumed_at_source` (the source meal's portions);
-- `suitability={source:"current_user",value:"suitable"}` and
-  `storage={source:"current_user",method:"refrigerated"|"frozen",...}` with an
-  explicit `max_interval_days` or ISO `use_by_date`, only from the user's report;
+- `suitability={source:"agent"|"current_user",value:"suitable"}` and
+  `storage` with the same source, `method:"refrigerated"|"frozen"`, and an
+  explicit `max_interval_days` or ISO `use_by_date`;
+- for an `agent` assessment, a short recipe-specific `basis` and `reheating`
+  instruction in `storage`, assessed against the last leftover date;
 - `leftovers=[{slot_id,portions},...]` for one to six later dinner slots within
   that storage interval and the available portion remainder.
 
-This manual path requires those actual user-supplied suitability/storage facts;
-do not label model judgment as `current_user`. Pass its unchanged `batch_plan` to `batch_apply`.
+Model judgment is `agent`; only actual user-reported suitability or storage is
+`current_user`. The exact source snapshot, interval, portions and leftover dates
+are checked during preparation. Pass its unchanged `batch_plan` to `batch_apply`.
 Only when the user has authorized that exact arrangement, copy the plan's
 `batch_digest` and `confirmation_statement` into
 `batch_confirmation={batch_digest,statement}`. Do not invent a digest or claim

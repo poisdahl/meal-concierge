@@ -917,6 +917,77 @@ class RecipeContractTests(unittest.TestCase):
         self.assertEqual(reopened.recipes.get(saved_original["id"], 1)["source"]["relationship"], "original")
         self.assertEqual(len(reopened.recipes.search()), 2)
 
+    def test_external_bank_recipe_adapts_paste_into_separate_store_ingredients(self):
+        for kind in ("themealdb", "wikibooks"):
+            with self.subTest(kind=kind):
+                original = authored_recipe()
+                original["name"] = f"Synthetic {kind} curry"
+                original["source"] = {"kind": kind, "relationship": "original",
+                    "url": f"https://example.org/synthetic-curry-{kind}", "external_id": kind}
+                original["external_snapshot"] = {"fetched_at": "2026-09-25T08:00:00+00:00",
+                    "content_hash": "a" * 64, "changes": "Synthetic source retained for test."}
+                original["portions_evidence"] = {"basis": "source", "input": "Serves 12"}
+                original["ingredients"][2] = {"item": "ingefær- og hvitløkspasta",
+                    "raw": "1 ss ingefær- og hvitløkspasta", "quantity": 1, "unit": "ss"}
+                for ingredient in original["ingredients"]:
+                    ingredient["evidence"] = {field: {"basis": "source", "input": ingredient["raw"]}
+                                               for field in ("quantity", "unit")}
+                original["steps"] = ["Cook the source paste with the vegetables."]
+                for relationship in ("adapted", "Adapted", " adapted "):
+                    forged = deepcopy(original)
+                    forged["source"]["relationship"] = relationship
+                    if relationship == " adapted ":
+                        forged["source"]["kind"] = f" {kind} "
+                    forged.pop("external_snapshot")
+                    with self.assertRaisesRegex(RecipeError, "exact prior recipe"):
+                        self.app.handle({"operation": "recipes", "action": "save", "recipe": forged,
+                                         "idempotency_key": f"forged-{kind}-{relationship}"})
+                frozen = self.app.recipes.persist_discovery(original)
+                saved = self.app.handle({"operation": "recipes", "action": "save",
+                    "discovery_ref": frozen["discovery_ref"],
+                    "idempotency_key": f"save-{kind}"})["recipe"]
+                request = {"operation": "recipes", "action": "adapt",
+                    "recipe_ref": {"id": saved["id"], "revision": saved["revision"]},
+                    "recipe_digest": recipe_digest(saved), "source_schema_version": 2,
+                    "changes": {"ingredients": [{"index": 2, "replace_with": [
+                        {"item": "fersk ingefær", "quantity": 15, "unit": "g",
+                         "assumptions": "15 g grated ginger for one tablespoon of paste."},
+                        {"item": "hvitløk", "quantity": 2, "unit": "count",
+                         "assumptions": "Two cloves with the grated ginger."},
+                    ]}], "steps": ["Grate the ginger and crush the garlic into a paste.",
+                                    "Cook the fresh paste with the vegetables."]}}
+                incomplete = deepcopy(request)
+                del incomplete["changes"]["ingredients"][0]["replace_with"][1]["quantity"]
+                with self.assertRaisesRegex(RecipeError, "replacement needs"):
+                    self.app.handle(incomplete)
+                no_method = deepcopy(request)
+                del no_method["changes"]["steps"]
+                with self.assertRaisesRegex(RecipeError, "complete adapted steps"):
+                    self.app.handle(no_method)
+                adapted_ref = self.app.handle(request)["discovery_ref"]
+                adapted = self.app.recipes.resolve_discovery(adapted_ref)["recipe"]
+                self.assertEqual(adapted["source"]["relationship"], "adapted")
+                self.assertNotIn("external_snapshot", adapted)
+                self.assertEqual([row["item"] for row in adapted["ingredients"][2:4]],
+                                 ["fersk ingefær", "hvitløk"])
+                self.assertEqual([row["evidence"]["quantity"]["basis"]
+                                  for row in adapted["ingredients"][2:4]], ["estimate", "estimate"])
+                self.assertIn("Grate the ginger", adapted["steps"][0])
+                self.assertEqual(self.app.recipes.get(saved["id"], 1)["external_snapshot"],
+                                 frozen["recipe"]["external_snapshot"])
+                planned = self.app.handle({"operation": "menu", "action": "plan",
+                    "planner_input": {"week": "2026-W40", "dates": ["2026-09-28"],
+                                      "portions": 2, "candidates": [{"discovery_ref": adapted_ref}]}})["plan"]
+                self.assertEqual(planned["status"], "planned", planned)
+                previous = self.store.read().get("menu")
+                menu = self.app.handle({"operation": "menu", "action": "save",
+                    "planner_handoff": planned["save_handoff"],
+                    **({"menu_ref": self.app._cart_menu_ref(previous)} if previous else {})})["menu"]
+                names = [row["item"] for row in menu_requirements(menu)[0]]
+                self.assertIn("fersk ingefær", names)
+                self.assertIn("hvitløk", names)
+                self.assertNotIn("ingefær- og hvitløkspasta", names)
+
     def test_adaptation_accepts_exact_legacy_bank_revision_without_migrating_it(self):
         original = json.loads(LEGACY)
         saved = self.save(original, key="legacy-adaptation-source")
