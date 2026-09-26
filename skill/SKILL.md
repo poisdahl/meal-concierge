@@ -213,12 +213,30 @@ For one package serving several requirements, each member carries the same exact
 be cooked, adapt the recipe first. Known allergy/never-buy conflicts need another
 product, not a claim of culinary equivalence.
 
-Use only the user's reported stock. `available_ingredients` belongs to this
-planning request; unknown stock quantities do not subtract purchases. Use
-`record_ingredients` for later exact stock/omit/include decisions. Pantry labels,
-old orders and previous carts are not proof that something is at home. Aggregate
-stock once before package rounding. See [meal adjustments](references/meal-adjustments.md)
-for bounded inputs and batch layouts.
+Before selecting purchases, check the whole menu's aggregated needs for common
+staples such as butter, cooking oil, flour, sugar, spices and condiments. Ask one
+combined question about relevant staples with unknown stock, stating the total
+needed and asking whether the household has enough or how much remains. Do not
+buy a full pack for a small cooking amount without this check. Reuse current
+answers and explicit household standing instructions, including salt/pepper
+instructions; do not ask again during retries or continuation of the same menu.
+A default profile list, recipe pantry flag, old order or previous cart is not
+proof of stock. If the user explicitly says to buy all needed ingredients or
+skip the stock check and buy, honor that instruction.
+
+Record enough-for-this-menu answers with `have_all`, partial stock with
+`have_quantity`, and needs-buying answers with `include`, using the exact source
+positions and `record_ingredients`. Allocate a reported total once across the
+menu, not once per recipe. After recording stock, prepare the saved `menu_ref`
+with `continuation_mode="reset"`; do not reuse earlier apply arguments. For an
+unsaved preview, fresh prepare with its original `planner_ref` and decisions,
+without `product_plan_ref`. If the user only says "some", ask whether it covers
+the displayed total; do not invent an amount or treat silence as an answer.
+Wait for unresolved staple answers before cart apply. On a changed menu, review
+changed needs and bind any still-current answers to its new source positions.
+`available_ingredients` is request-scoped stock, not a persistent inventory.
+See [meal adjustments](references/meal-adjustments.md) for partial quantities,
+units and package choices.
 
 Every prepare returns a `product_plan_ref`, including unsaved previews. The whole
 menu is retained while provider reads run in bounded slices. Follow returned
