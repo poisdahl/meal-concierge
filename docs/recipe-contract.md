@@ -258,3 +258,40 @@ and can be explicitly saved as a separate bank entry without overwriting its
 source. Repeating the same adaptation deduplicates; later bank edits create
 normal revisions. Schema-1 originals remain readable; adaptation produces schema 2.
 Representation-only conversion remains `convert`.
+
+## Reviewed language variants
+
+A full recipe may have an optional `translations` object with at most eight
+language tags (for example `en` or `nb-NO`). Omission preserves the existing
+serialized recipe and digest. Each variant contains `name`, `steps`, ordered
+`ingredients` display objects (`item`, optional `notes`), and a
+`source_text_digest`. Include translated recipe `notes`, `storage`, `reheating`
+and ingredient `notes` whenever the canonical field is present. Unknown fields
+are rejected. Variants describe the **current reviewed adaptation**, including
+corrections, not an uncorrected source original. Quantities, units, evidence,
+rights, source identity and shopping ingredient identities are shared.
+
+Offline authors calculate `recipe_languages.source_text_digest(normalized_recipe)`
+after completing the canonical text and ingredient review, then normalize the
+complete document. The digest binds ordered ingredients, preparation notes,
+quantities per serving and method. Proportional scaling preserves it; substantive
+quantity, method or ingredient changes require renewed review and a new binding.
+Both adaptation APIs discard inherited translations. A binding establishes
+consistency, not an independent attestation of culinary or translation quality.
+
+`recipes get` exposes `available_languages` and `source_text_digest`; optional
+`language` adds a separate `presentation`, also preserved in bounded MCP pages.
+Canonical `item`, quantities and shopping queries remain unchanged. Exact language
+matches take precedence, then the same language family, then the canonical text.
+Presentation reports `requested_language`, `resolved_language`, and `fallback`.
+Unstructured quantities retain the source wording; translated presentations mark
+unknown quantities explicitly. No online translation is performed. Source
+attribution and quantity evidence remain in their original language.
+
+`menu save` accepts `language` to freeze the presentation choice for that menu;
+`menu get` accepts a read-only language override. `recipe_delivery request`
+accepts `language` to override the saved choice for that delivery only. Language
+is bound to delivery idempotency; a different choice needs a new request ID.
+Frozen snapshots retain reviewed variants and the resolved language metadata.
+Norwegian and English renderer labels are supported. Hosts choose search queries
+in the store's language independently of recipe display language.

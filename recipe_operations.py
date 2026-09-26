@@ -3577,6 +3577,12 @@ class RecipeOperations:
                 result["recipe_key"] = library_recipe_key(result["library_recipe_ref"])
             if request.get("week"):
                 result["usage"] = self._usage_summary(self.store.read(), result["recipe_key"], validate_week(request["week"]))
+            from recipe_languages import source_text_digest
+            result["source_text_digest"] = source_text_digest(result)
+            result["available_languages"] = [result["language"], *result.get("translations", {})]
+            if request.get("language") is not None:
+                from recipe_languages import recipe_presentation
+                result["presentation"] = recipe_presentation(result, request["language"])
             return {"recipe": result, "provider_eligibility": self._recipe_provider_eligibility(recipe)}
         if action == "list_labels":
             if request.get("library_id") is None:

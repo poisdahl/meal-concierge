@@ -1778,7 +1778,9 @@ class PlanningOperations:
         if action == "get":
             state = self.store.read()
             current = state.get("menu")
-            return {"menu": deepcopy(current), "assessment": assess_menu(state), "feedback_targets": feedback_targets(current), "slot_replan_available": bool(current and current.get("slots")),
+            from recipe_languages import menu_language
+            shown = menu_language(current, request["language"]) if current and request.get("language") is not None else deepcopy(current)
+            return {"menu": shown, "assessment": assess_menu(state), "feedback_targets": feedback_targets(current), "slot_replan_available": bool(current and current.get("slots")),
                     **({"minimum_evaluation": saved_menu_minimum_evaluation(current, state.get("profile") or {})}
                        if isinstance(current, Mapping) else {}),
                     "batch_dependencies": bp.dependency_status(state, current) if current else [],
@@ -1827,6 +1829,8 @@ class PlanningOperations:
             setup_gate = self._setup_gate(request)
             if setup_gate is not None:
                 return setup_gate
+            from recipe_languages import language_tag, menu_language
+            language = language_tag(request["language"]) if request.get("language") is not None else None
             baseline_menu = deepcopy(self.store.read().get("menu"))
             planner_handoff = request.get("planner_handoff")
             planner_context = None
@@ -1844,13 +1848,14 @@ class PlanningOperations:
                     if isinstance(baseline_menu, Mapping) else None
                 )
                 if planner_ref is not None:
-                    if isinstance(existing_planner, Mapping) and canonical(
+                    if isinstance(existing_planner, Mapping) and (language is None or baseline_menu.get("output_language") == language) and canonical(
                         self._planner_ref(existing_planner)
                     ) == canonical(planner_ref):
                         return {"menu": baseline_menu, "idempotent": True}
                     planner_handoff, resolved, planner_request = self._resolve_planner_ref(planner_ref)
                 if (
                     isinstance(existing_planner, Mapping)
+                    and (language is None or baseline_menu.get("output_language") == language)
                     and canonical(existing_planner) == canonical(planner_handoff)
                 ):
                     return {"menu": baseline_menu, "idempotent": True}
@@ -1887,6 +1892,8 @@ class PlanningOperations:
                     if aliases.intersection(library_recipe_key_aliases(supplied_key))
                 ), None)
 
+            if language is not None:
+                menu = menu_language(menu, language)
             digest = menu_digest(menu)
             keys = [recipe["recipe_key"] for collection in ("dishes", "salads") for recipe in menu[collection]]
             seen_keys: set[str] = set()

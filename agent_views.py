@@ -664,6 +664,12 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
         view["menu_ref"] = _fields(menu, ("menu_id", "revision", "digest"))
         view.update(_fields(menu, ("week", "phase", "weekly_plan_complete", "order_id", "supersedes")))
         view["menu"] = {**view["menu_ref"], **_fields(menu, ("week", "phase"))}
+        if menu.get("output_language"):
+            view["output_language"] = menu["output_language"]
+            view["recipe_languages"] = _page([
+                {"collection": group, "index": index, **_fields(recipe.get("presentation"), ("name", "requested_language", "resolved_language", "fallback"))}
+                for group in ("dishes", "salads") for index, recipe in enumerate(menu.get(group, []))
+            ], offset, limit, "items")
         summary = _menu_successor_summary(menu)
         raw_slots = [slot for slot in menu.get("slots", []) if isinstance(slot, dict)]
         slots = [{**_fields(slot, ("slot_id",)), **item}
@@ -882,7 +888,7 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
         return view
     view.update(_fields(recipe, ("name", "schema_version", "portions", "scaled_from_portions",
                                  "recipe_ref", "library_recipe_ref", "recipe_digest", "recipe_key",
-                                 "status", "revision", "notes", "storage", "reheating")))
+                                 "status", "revision", "notes", "storage", "reheating", "language", "available_languages", "source_text_digest")))
     view["times"] = _recipe_times(recipe.get("times"))
     if "recipe_ref" not in view and isinstance(recipe.get("id"), str) and type(recipe.get("revision")) is int:
         view["recipe_ref"] = {"id": recipe["id"], "revision": recipe["revision"]}
@@ -901,6 +907,13 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
                    for index, item in enumerate(recipe.get("ingredients", []))]
     steps = [{"index": index, "text": step}
              for index, step in enumerate(recipe.get("steps", []))]
+    presentation = recipe.get("presentation")
+    if isinstance(presentation, dict):
+        view["presentation"] = _fields(presentation, ("name", "notes", "storage", "reheating", "requested_language", "resolved_language", "fallback"))
+        if section in {"summary", "ingredients"}:
+            view["presentation"]["ingredients"] = _page(presentation.get("ingredients"), offset, limit, "items")
+        if section in {"summary", "steps"}:
+            view["presentation"]["steps"] = _page(presentation.get("steps"), offset, limit, "items")
     view["ingredient_count"] = len(ingredients)
     view["step_count"] = len(steps)
     if section in {"summary", "ingredients"}:

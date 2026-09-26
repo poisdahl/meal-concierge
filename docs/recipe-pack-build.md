@@ -161,3 +161,11 @@ Recipes without an actionable source method are excluded by a source-hash-bound
 curation decision, including previously completed placeholders. Short but real
 preparation methods remain eligible. Changed recipe yields retain their original
 value in attribution; covers that no longer represent an adaptation are omitted.
+
+Reviewed amendments may set `translations` using the language-variant contract
+in [recipe-contract.md](recipe-contract.md#reviewed-language-variants). Like
+language/storage edits, this requires the complete sealed source identity,
+source-payload hash and curated-recipe hash. Bind each variant's
+`source_text_digest` to the final normalized canonical recipe after other text
+edits. Portable pack import/export preserves these variants; it does not create
+translations or certify their culinary accuracy.

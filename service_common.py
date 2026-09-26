@@ -223,7 +223,9 @@ def menu_digest(menu: Mapping[str, Any]) -> str:
     import hashlib
     return hashlib.sha256(canonical(value).encode()).hexdigest()
 
-def meal_type_label(value: Any) -> str:
+def meal_type_label(value: Any, language: str | None = None) -> str:
+    if str(language or "").split("-")[0] == "en":
+        return str(value or "").replace("_", " ").capitalize()
     return {"breakfast": "Frokost", "brunch": "Brunsj", "lunch": "Lunsj", "dinner": "Middag",
             "starter": "Forrett", "side": "Tilbehør", "dessert": "Dessert", "snack": "Mellommåltid",
             "baking": "Bakst", "bread": "Brød", "drink": "Drikke", "sauce": "Saus",
@@ -240,6 +242,10 @@ def format_portions(value: Any) -> str:
 
 def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: Mapping[str, str] | None = None,
                     show_estimate_labels: bool = True) -> str:
+    from recipe_languages import display_recipe
+    english = str(menu.get("output_language") or "").split("-")[0] == "en"
+    def tr(no, en):
+        return en if english else no
     escape = lambda value: html.escape(str(value or ""))
 
     def ingredients(values: Any) -> str:
@@ -247,17 +253,23 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         for value in values if isinstance(values, list) else []:
             if isinstance(value, Mapping):
                 amount = str(value.get("amount") or "").strip()
-                item = str(value.get("item") or value.get("name") or "").strip()
+                item = str(value.get("display_item") or value.get("item") or value.get("name") or "").strip()
                 raw = str(value.get("raw") or "").strip()
+                if "display_item" in value:
+                    raw = item
+                display_notes = value.get("display_notes")
+                if display_notes:
+                    item += " (" + str(display_notes) + ")"
+                    raw += " (" + str(display_notes) + ")"
                 text = " ".join(part for part in (amount, item) if part) if amount else raw or item
                 estimates = [e for evidence in value.get("evidence", {}).values() for e in evidence_inputs(evidence) if e.get("basis") == "estimate"]
                 if estimates and show_estimate_labels:
                     if all(e.get("acceptance") for e in estimates):
-                        text += " (godkjent anslag)"
+                        text += tr(' (godkjent anslag)', ' (accepted estimate)')
                     elif all(e.get("acceptance") or e.get("project_review") for e in estimates):
-                        text += " (anslag fra Meal Concierge)"
+                        text += tr(' (anslag fra Meal Concierge)', ' (Meal Concierge estimate)')
                     else:
-                        text += " (anslag)"
+                        text += tr(' (anslag)', ' (estimate)')
             else:
                 text = str(value).strip()
             if text:
@@ -271,25 +283,25 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
 
     def source(value: Mapping[str, Any]) -> str:
         metadata = value.get("source") if isinstance(value.get("source"), Mapping) else {}
-        publisher = str(metadata.get("publisher") or metadata.get("kind") or "Kilde ikke registrert").strip()
+        publisher = str(metadata.get("publisher") or metadata.get("kind") or tr('Kilde ikke registrert', 'Source not recorded')).strip()
         source_title = str(metadata.get("title") or value.get("name") or "").strip()
         relationship = str(metadata.get("relationship") or "unknown").casefold()
         labels = {
-            "adapted": "Tilpasset",
-            "inspired_by": "Inspirert av",
-            "generated": "Generert oppskrift",
-            "user_supplied": "Familiens egen oppskrift",
-            "original": "Kilde",
-            "unknown": "Kilde",
+            "adapted": tr('Tilpasset', 'Adapted'),
+            "inspired_by": tr('Inspirert av', 'Inspired by'),
+            "generated": tr('Generert oppskrift', 'Generated recipe'),
+            "user_supplied": tr('Familiens egen oppskrift', 'Household recipe'),
+            "original": tr('Kilde', 'Source'),
+            "unknown": tr('Kilde', 'Source'),
         }
-        label = labels.get(relationship, "Kilde")
+        label = labels.get(relationship, tr('Kilde', 'Source'))
         try:
             url = normalize_source_url(metadata.get("url"))
         except RecipeError:
             url = None
         text = " – ".join(part for part in (publisher, source_title if source_title.casefold() != publisher.casefold() else "") if part)
         if relationship == "user_supplied" and publisher.casefold() in {"unknown", "user", "bruker"}:
-            text = "Familiens egen oppskrift"
+            text = tr('Familiens egen oppskrift', 'Household recipe')
         rendered = f'<a href="{escape(url)}">{escape(text)}</a>' if url else escape(text)
         rights = value.get("rights") if isinstance(value.get("rights"), Mapping) else {}
         snapshot = value.get("external_snapshot") if isinstance(value.get("external_snapshot"), Mapping) else {}
@@ -309,9 +321,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             provider = recipe_source_provider(value)
         except RecipeError:
             provider = None
-            details.append("Kildens butikktilknytning er uklar; historisk oppskrift beholdes.")
+            details.append(tr('Kildens butikktilknytning er uklar; historisk oppskrift beholdes.', 'The source store binding is unclear; the historical recipe is retained.'))
         if provider:
-            details.append(f"Privat oppskrift fra {provider.upper()}; nye menyer og innkjøp krever denne butikken.")
+            details.append(tr("Privat oppskrift fra {store}; nye menyer og innkjøp krever denne butikken.", "Private recipe from {store}; new menus and shopping require this store.").format(store=provider.upper()))
         if metadata.get("author"):
             details.append(escape(metadata["author"]))
         original = metadata.get("original")
@@ -323,7 +335,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 original_url = None
             original_credit = " – ".join(str(original[key]) for key in ("publisher", "author", "title") if original.get(key)) or original_url
             if original_credit:
-                details.append("Opprinnelig kilde: " + (f'<a href="{escape(original_url)}">{escape(original_credit)}</a>' if original_url else escape(original_credit)))
+                details.append(tr('Opprinnelig kilde: ', 'Original source: ') + (f'<a href="{escape(original_url)}">{escape(original_credit)}</a>' if original_url else escape(original_credit)))
         if credit:
             details.append(escape(credit))
         if license_name:
@@ -332,9 +344,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 if license_url else escape(license_name)
             )
         if permanent_url:
-            details.append(f'<a href="{escape(permanent_url)}">Frosset kilderevisjon</a>')
+            details.append(f'<a href="{escape(permanent_url)}">{tr("Frosset kilderevisjon", "Frozen source revision")}</a>')
         if snapshot.get("changes"):
-            details.append(f"Endringer: {escape(snapshot['changes'])}")
+            details.append(tr("Endringer: ", "Changes (source language): ") + escape(snapshot["changes"]))
         suffix = f". {' · '.join(details)}" if details else ""
         return f"<p><strong>{escape(label)}:</strong> {rendered}{suffix}</p>"
 
@@ -346,9 +358,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         details = []
         for field in ("creator", "credit", "changes"):
             if image.get(field):
-                label = "Endringer: " if field == "changes" else ""
+                label = tr('Endringer: ', 'Changes: ') if field == "changes" else ""
                 details.append(label + escape(image[field]))
-        for field, label in (("source_url", "Bildekilde"), ("license_url", image.get("license") or "Bildelisens")):
+        for field, label in (("source_url", tr('Bildekilde', 'Image source')), ("license_url", image.get("license") or tr('Bildelisens', 'Image license'))):
             try:
                 url = normalize_attribution_url(image.get(field))
             except RecipeError:
@@ -362,32 +374,32 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         if isinstance(cid, str) and re.fullmatch(r"recipe-[0-9a-f]{64}@meal-concierge\.local", cid):
             rendered = f'<img src="cid:{cid}" alt="{escape(image.get("alt") or value.get("name"))}" style="max-width:100%;height:auto">'
         if details:
-            rendered += "<p><strong>Bilde:</strong> " + " · ".join(details) + "</p>"
+            rendered += tr('<p><strong>Bilde:</strong> ', '<p><strong>Image:</strong> ') + " · ".join(details) + "</p>"
         return rendered
 
     week = menu_email_period(menu)
-    title = f"Ukesmeny og oppskrifter – {week}"
+    title = f"{tr('Ukesmeny og oppskrifter', 'Weekly menu and recipes')} – {week}"
     parts = [
-        "<!doctype html><html lang=\"no\"><head><meta charset=\"utf-8\">",
+        tr('<!doctype html><html lang="no"><head><meta charset="utf-8">', '<!doctype html><html lang="en"><head><meta charset="utf-8">'),
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         f"<title>{escape(title)}</title>",
         "<style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;line-height:1.55;max-width:820px;margin:24px auto;padding:0 16px;color:#202124}h1,h2{color:#173f35}.recipe{border-top:2px solid #d7e4df;padding-top:12px;margin-top:28px}li{margin:6px 0}.test{background:#fff4ce;border:1px solid #e0b400;border-radius:6px;padding:10px}</style>",
         "</head><body>",
-        f'<p class="test"><strong>TEST:</strong> Denne testmailen endrer ikke den planlagte utsendingen.</p>' if test else "",
+        tr('<p class="test"><strong>TEST:</strong> Denne testmailen endrer ikke den planlagte utsendingen.</p>', '<p class="test"><strong>TEST:</strong> This test email does not change the scheduled delivery.</p>') if test else "",
         f"<h1>{escape(title)}</h1>",
     ]
     schedule = menu.get("schedule")
     if isinstance(schedule, list) and schedule:
-        parts.append("<h2>Ukeplan</h2><ul>")
+        parts.append(tr('<h2>Ukeplan</h2><ul>', '<h2>Schedule</h2><ul>'))
         for item in schedule:
             if isinstance(item, Mapping):
                 day = escape(item.get("day"))
                 meal = escape(item.get("meal") or item.get("action"))
-                meal_type = escape(meal_type_label(item.get("meal_type")))
+                meal_type = escape(meal_type_label(item.get("meal_type"), menu.get("output_language")))
                 if meal_type:
                     meal = f"{meal_type}: {meal}"
                 portions = escape(format_portions(item.get("portions")))
-                suffix = f" ({portions} porsjoner)" if portions else ""
+                suffix = f" ({portions}{tr(' porsjoner', ' servings')})" if portions else ""
                 parts.append(f"<li><strong>{day}</strong>: {meal}{suffix}</li>")
         parts.append("</ul>")
     from batch_planning import sources, fraction
@@ -395,18 +407,18 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
     import menu_planning as mp
     def batch_guidance(batch):
         guidance = batch.get('storage') or {}
-        method = {'refrigerated': 'Oppbevares i kjøleskap.', 'frozen': 'Oppbevares fryst.'}.get(guidance.get('method'))
+        method = {'refrigerated': tr('Oppbevares i kjøleskap.', 'Keep refrigerated.'), 'frozen': tr('Oppbevares fryst.', 'Keep frozen.')}.get(guidance.get('method'))
         if method:
             details = [method]
             if guidance.get('max_interval_days'):
-                details.append(f"Planlagt oppbevaring: høyst {guidance['max_interval_days']} dager.")
+                details.append(tr("Planlagt oppbevaring: høyst {days} dager.", "Planned storage: at most {days} days.").format(days=guidance["max_interval_days"]))
             if guidance.get('use_by_date'):
-                details.append(f"Bruk innen {guidance['use_by_date']}.")
+                details.append(tr("Bruk innen {date}.", "Use by {date}.").format(date=guidance["use_by_date"]))
             if guidance.get('basis'):
                 details.append(guidance['basis'])
             return ' '.join(details), guidance.get('reheating') or ''
         if guidance.get('basis') == 'unknown':
-            return ('Holdbarheten for denne retten er ikke fastslått. Følg oppskriftens råd om avkjøling, oppbevaring og oppvarming.',
+            return (tr('Holdbarheten for denne retten er ikke fastslått. Følg oppskriftens råd om avkjøling, oppbevaring og oppvarming.', 'The storage life of this dish has not been established. Follow the recipe guidance for cooling, storage and reheating.'),
                     guidance.get('reheating') or '')
         return guidance.get('storage') or '', guidance.get('reheating') or ''
 
@@ -415,18 +427,18 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
         source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
         cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, source_slot.get('date', '')))
         recipe = mp.recipe_for_slot(menu, source_slot, allow_stale=True) if source_slot else {}
+        if menu.get("output_language") and recipe:
+            recipe = display_recipe(recipe, menu["output_language"])
         parts.append(f"<p><strong>{escape(recipe.get('name', 'Batch'))}</strong> — {escape(source_slot.get('date', ''))}</p>")
         storage_text, reheating_text = batch_guidance(batch)
         if storage_text:
-            parts.append(f"<p>Oppbevaring: {escape(storage_text)}</p>")
+            parts.append(f"<p>{tr('Oppbevaring:', 'Storage:')} {escape(storage_text)}</p>")
         if reheating_text:
-            parts.append(f"<p>Oppvarming: {escape(reheating_text)}</p>")
+            parts.append(f"<p>{tr('Oppvarming:', 'Reheating:')} {escape(reheating_text)}</p>")
         prepared = batch["prepared_portions"]
         consumed = batch["consumed_at_source"]
-        parts.append(f"<p><strong>Tilberedning:</strong> {escape(format_portions(prepared))} porsjoner totalt, "
-                     f"{escape(format_portions(consumed))} på tilberedningsdagen. "
-                     "Se ukeplanen for restemåltidene.</p>")
-    for heading, recipes in (("Middager", menu.get("dishes")), ("Salater", menu.get("salads"))):
+        parts.append(tr("<p><strong>Tilberedning:</strong> {prepared} porsjoner totalt, {consumed} på tilberedningsdagen. Se ukeplanen for restemåltidene.</p>", "<p><strong>Preparation:</strong> {prepared} servings total, {consumed} on the cooking day. See the schedule for leftover meals.</p>").format(prepared=escape(format_portions(prepared)), consumed=escape(format_portions(consumed))))
+    for heading, recipes in ((tr('Middager', 'Main dishes'), menu.get("dishes")), (tr('Salater', 'Salads'), menu.get("salads"))):
         if not isinstance(recipes, list) or not recipes:
             continue
         parts.append(f"<h2>{heading}</h2>")
@@ -445,24 +457,29 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                     cooked = scale_recipe(recipe, float(fraction(batch['prepared_portions'])))
                     if not cooked['readiness']['scaling_ready']:
                         raise RecipeError('batch recipe has unscalable quantities')
-                    label = f"Tilbered {format_portions(batch['prepared_portions'])} porsjoner {cooking_date}. Mengdene nedenfor gjelder hele tilberedningen."
+                    label = tr("Tilbered {portions} porsjoner {date}. Mengdene nedenfor gjelder hele tilberedningen.", "Prepare {portions} servings on {date}. The quantities below cover the whole batch.").format(portions=format_portions(batch["prepared_portions"]), date=cooking_date)
                 except RecipeError:
                     cooked = recipe
-                    label = f"Grunnoppskrift for {format_portions(recipe.get('portions'))} porsjoner. Planen krever {format_portions(batch['prepared_portions'])} porsjoner {cooking_date}, men kildegrunnlaget kan ikke skaleres automatisk."
+                    label = tr("Grunnoppskrift for {base} porsjoner. Planen krever {target} porsjoner {date}, men kildegrunnlaget kan ikke skaleres automatisk.", "Base recipe for {base} servings. The plan requires {target} servings on {date}, but source quantities cannot be scaled automatically.").format(base=format_portions(recipe.get("portions")), target=format_portions(batch["prepared_portions"]), date=cooking_date)
                 cooking_recipes.append((cooked, label, batch))
         for recipe, cooking_label, batch in cooking_recipes:
+            if menu.get("output_language"):
+                recipe = display_recipe(recipe, menu["output_language"])
             batch_storage, batch_reheating = batch_guidance(batch) if batch else ('', '')
-            portions_text = f"{format_portions(recipe['portions'])} porsjoner" if recipe.get("portions") else "Antall personporsjoner er ukjent"
+            portions_text = f"{format_portions(recipe['portions'])}{tr(' porsjoner', ' servings')}" if recipe.get("portions") else tr('Antall personporsjoner er ukjent', 'Number of servings is unknown')
+            fallback = (recipe.get("presentation") or {}).get("fallback")
+            if fallback:
+                portions_text += " — " + tr("Ønsket språk er ikke tilgjengelig; viser ", "Requested language unavailable; showing ") + recipe['presentation']['resolved_language']
             portion_evidence = recipe.get("portions_evidence") or {}
             if portion_evidence.get("basis") == "estimate" and show_estimate_labels:
                 if portion_evidence.get("acceptance"):
-                    portions_text += " (godkjent anslag)"
+                    portions_text += tr(' (godkjent anslag)', ' (accepted estimate)')
                 elif portion_evidence.get("project_review"):
-                    portions_text += " (anslag fra Meal Concierge)"
+                    portions_text += tr(' (anslag fra Meal Concierge)', ' (Meal Concierge estimate)')
                 else:
-                    portions_text += " (anslag)"
+                    portions_text += tr(' (anslag)', ' (estimate)')
                 if portion_evidence.get("assumptions"):
-                    portions_text += ": " + portion_evidence["assumptions"]
+                    portions_text += tr(": ", " (evidence, original language): ") + portion_evidence["assumptions"]
             source_yield = recipe.get("yield") or {}
             parts.extend([
                 '<section class="recipe">',
@@ -471,17 +488,17 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 cover(recipe),
                 f"<p><strong>{escape(cooking_label)}</strong></p>" if cooking_label else "",
                 f"<p>{escape(portions_text)}</p>",
-                f"<p>Kildens utbytte: {escape(source_yield['original_text'])}</p>" if source_yield.get("original_text") else "",
-                "<h3>Ingredienser</h3><ul>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
+                f"<p>{tr('Kildens utbytte:', 'Source yield:')} {escape(source_yield['original_text'])}</p>" if source_yield.get("original_text") else "",
+                tr('<h3>Ingredienser</h3><ul>', '<h3>Ingredients</h3><ul>') if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 ingredients(recipe.get("ingredients")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
-                "</ul><h3>Fremgangsmåte</h3><ol>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
+                tr('</ul><h3>Fremgangsmåte</h3><ol>', '</ul><h3>Method</h3><ol>') if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 steps(recipe.get("steps")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 "</ol>" if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 f"<p>{escape(recipe.get('notes'))}</p>" if recipe.get("notes") else "",
-                f"<p><strong>Oppbevaring for denne ukens batch:</strong> {escape(batch_storage)}</p>" if batch_storage else
-                f"<p><strong>Lagring:</strong> {escape(recipe.get('storage'))}</p>" if recipe.get("storage") else "",
-                f"<p><strong>Oppvarming for denne ukens batch:</strong> {escape(batch_reheating)}</p>" if batch_reheating else
-                f"<p><strong>Oppvarming:</strong> {escape(recipe.get('reheating'))}</p>" if recipe.get("reheating") else "",
+                f"<p><strong>{tr('Oppbevaring for denne ukens batch:', 'Storage for this batch:')}</strong> {escape(batch_storage)}</p>" if batch_storage else
+                f"<p><strong>{tr('Lagring:', 'Storage:')}</strong> {escape(recipe.get('storage'))}</p>" if recipe.get("storage") else "",
+                f"<p><strong>{tr('Oppvarming for denne ukens batch:', 'Reheating for this batch:')}</strong> {escape(batch_reheating)}</p>" if batch_reheating else
+                f"<p><strong>{tr('Oppvarming:', 'Reheating:')}</strong> {escape(recipe.get('reheating'))}</p>" if recipe.get("reheating") else "",
                 "</section>",
             ])
     parts.append("</body></html>")
