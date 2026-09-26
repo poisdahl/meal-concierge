@@ -39,22 +39,29 @@ def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
             if missing:
                 recipe["notes"] = "\n".join(filter(None, [recipe.get("notes"), *missing]))
                 warnings.extend(missing)
+    for group in ("dishes", "salads"):
+        for recipe in frozen.get(group, []):
+            presentation = recipe.get("presentation") or {}
+            if presentation.get("fallback"):
+                warnings.append("requested language unavailable: " + presentation["requested_language"] + "; showing " + presentation["resolved_language"])
     # Saved structured slots carry canonical dates; legacy schedule text alone
     # must not be mistaken for dated slots.
+    english = str(frozen.get("output_language") or "").split("-")[0] == "en"
     dates = []
     import menu_planning as mp
     for slot in frozen.get("slots", []):
-        recipe_name = mp.recipe_for_slot(frozen, slot, allow_stale=True).get("name", "") + (' (rester)' if slot.get('kind') == 'leftover' else '')
-        dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type")), recipe_name,
-                     f"{format_portions(slot['portions'])} porsjoner" if slot.get("portions") else None) if v))
+        recipe = mp.recipe_for_slot(frozen, slot, allow_stale=True)
+        recipe_name = (recipe.get("presentation") or recipe).get("name", "") + ((" (leftovers)" if english else " (rester)") if slot.get("kind") == "leftover" else "")
+        dates.append(" · ".join(str(v) for v in (slot.get("date"), meal_type_label(slot.get("meal_type"), frozen.get("output_language")), recipe_name,
+                     f"{format_portions(slot['portions'])} " + ("servings" if english else "porsjoner") if slot.get("portions") else None) if v))
     if dates:
         frozen['schedule'] = []  # The canonical dated slots already cover this plan.
     full = menu_email_html(frozen, image_cids=media["image_cids"], show_estimate_labels=show_estimate_labels)
     if dates:
         position = full.index("</h1>") + len("</h1>")
-        full = full[:position] + "<h2>Datoer</h2>" + "".join("<p>" + html.escape(v) + "</p>" for v in dates) + full[position:]
+        full = full[:position] + ("<h2>Dates</h2>" if english else "<h2>Datoer</h2>") + "".join("<p>" + html.escape(v) + "</p>" for v in dates) + full[position:]
     return {"html": full, "text": _plain_text(full), "covers": covers,
-            "warnings": list(dict.fromkeys(warnings))}
+            "warnings": list(dict.fromkeys(warnings)), "language": frozen.get("output_language")}
 
 
 def split_text(document, maximum):
@@ -189,7 +196,7 @@ def render_pdf(rendered):
         canvas.setFont("MCVera", 8)
         canvas.drawRightString(A4[0] - 48, 25, str(doc.page))
     SimpleDocTemplate(output, pagesize=A4, leftMargin=48, rightMargin=48, topMargin=38,
-                      bottomMargin=44, title="Ukesmeny og oppskrifter", author="Meal Concierge").build(
+                      bottomMargin=44, title="Weekly menu and recipes" if str(rendered.get("language") or "").split("-")[0] == "en" else "Ukesmeny og oppskrifter", author="Meal Concierge").build(
                           story, onFirstPage=footer, onLaterPages=footer)
     return output.getvalue()
 

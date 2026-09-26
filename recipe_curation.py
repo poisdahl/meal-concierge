@@ -545,11 +545,11 @@ def apply_amendment(recipe, credit, amendments, *, source_payload_hash=None):
     if set(amendment)-{'source_hash','source_identity','source_payload_hash','curated_recipe_hash','note','set','resolved_issues','omit_cover'} or ('omit_cover' in amendment and amendment['omit_cover'] is not True):
         raise ValueError('editorial amendment does not match the sealed recipe source')
     changes=amendment.get('set',{})
-    if set(changes)-{'name','ingredients','steps','portions','portions_evidence','yield','notes','language','storage','reheating'}:
+    if set(changes)-{'name','ingredients','steps','portions','portions_evidence','yield','notes','language','storage','reheating','translations'}:
         raise ValueError('editorial amendment cannot replace source identity, attribution or cover')
-    if reviewed and (set(changes)-{'name','steps','notes','language','storage','reheating'} or amendment.get('omit_cover')):
+    if reviewed and (set(changes)-{'name','steps','notes','language','storage','reheating','translations'} or amendment.get('omit_cover')):
         raise ValueError('reviewed active revision cannot replace protected recipe fields')
-    if {'language','storage','reheating'} & set(changes) and not reviewed:
+    if {'language','storage','reheating','translations'} & set(changes) and not reviewed:
         raise ValueError('reviewed active fields require complete source and curated recipe binding')
     if 'yield' in changes and recipe.get('yield'):
         credit['original_yield']=deepcopy(recipe['yield'])

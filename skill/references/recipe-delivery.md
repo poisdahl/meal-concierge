@@ -85,3 +85,12 @@ Pause/disable fences undispatched work but cannot recall sent messages. Resume
 uses the exact returned held-work list/digest and does not silently send its
 backlog; release a hold only for that original requested occurrence. Preserve
 pending sends, receipts and original identifiers throughout recovery.
+
+For English output, pass `language="en"` when saving the menu or requesting
+explicit recipe delivery. Recipe/menu reads accept the same optional language.
+Use the returned presentation text and report a `fallback` honestly; available
+variants may be incomplete across a collection. Never claim automatic translation.
+Recipe reads expose `available_languages` and `source_text_digest`, with translated
+ingredients/steps in bounded presentation pages. Keep canonical ingredient IDs,
+quantities, provenance and retailer matching unchanged; use host-chosen localized
+search queries. English variants must reflect the reviewed adapted recipe.

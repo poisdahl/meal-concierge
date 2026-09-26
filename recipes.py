@@ -940,6 +940,9 @@ def normalize_recipe(
                 raise RecipeError(f"{path}: calculation does not match the derived quantity")
             if "input_portions" in calculation and (result.get("portions") is None or read_quantity(calculation["input_portions"]) * read_quantity(calculation["factor"]) != read_quantity(result["portions"])):
                 raise RecipeError(f"{path}: calculation does not match the serving factor")
+    if "translations" in cleaned:
+        from recipe_languages import normalize_translations
+        result["translations"] = normalize_translations(cleaned["translations"], result)
     if len(_canonical(result).encode()) > MAX_RECIPE_BYTES:
         raise RecipeError("recipe is too large")
     return result
@@ -1174,6 +1177,7 @@ def adapt_recipe_input(value: Any, *, prior: Mapping[str, Any]) -> dict[str, Any
         raise RecipeError("adaptation cannot replace the original source snapshot")
 
     candidate = deepcopy(dict(value))
+    candidate.pop("translations", None)
     candidate["source"] = deepcopy(original["source"])
     candidate["rights"] = deepcopy(original["rights"])
     # Validate inherited evidence against the exact original, including its snapshot.
@@ -1205,6 +1209,7 @@ def adapt_recipe_changes(changes: Any, *, prior: Mapping[str, Any], portions: An
     target = _finite_positive(portions, "target portions") if portions is not None else None
     candidate = (scale_recipe(original, target)
                  if target is not None and target != original.get("portions") else deepcopy(original))
+    candidate.pop("translations", None)
     candidate["source"]["relationship"] = "adapted"
     # The source snapshot describes the fetched original, not the authored dish.
     candidate.pop("external_snapshot", None)

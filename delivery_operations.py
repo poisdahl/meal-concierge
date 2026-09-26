@@ -57,6 +57,8 @@ def summary(job, offset=0, part_id=None, *, include_parts=True):
         "next_offset": offset + 25 if part_id is None and offset + 25 < len(job["parts"]) else None,
         "all_accepted": bool(job["parts"]) and all(p["status"] == "accepted" for p in job["parts"]),
         "omissions_reported": bool(job["warnings"]),
+        "language": job.get("menu_snapshot", {}).get("output_language"),
+        "recipe_languages": [{k: r["presentation"][k] for k in ("requested_language", "resolved_language", "fallback")} for group in ("dishes", "salads") for r in job.get("menu_snapshot", {}).get(group, []) if "presentation" in r],
         "recipient_read": "unknown", "sender_binding": deepcopy(job.get("sender_binding"))}
 
 
@@ -309,6 +311,9 @@ class DeliveryOperations:
         if request.get("delivery_requested") is not True:
             raise HouseholdError("request requires an explicit user intent to deliver this saved menu")
         intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities")}
+        if request.get("language") is not None:
+            from recipe_languages import language_tag
+            intent["language"] = language_tag(request["language"])
         if request.get("channel") is not None:
             intent["channel"] = request["channel"]
         if request_id in delivery["jobs"]:
@@ -321,6 +326,9 @@ class DeliveryOperations:
         if len(delivery["jobs"]) >= 2000:
             raise HouseholdError("recipe delivery history is full; retain receipts and archive it explicitly")
         menu = deepcopy(exact_menu(state, request.get("menu_ref")))
+        if request.get("language") is not None:
+            from recipe_languages import menu_language
+            menu = menu_language(menu, request["language"])
         selected = {c for c, p in delivery["preferences"].items() if p["enabled"]}
         if request.get("channel") is not None:
             if request["channel"] not in selected:
@@ -412,11 +420,11 @@ class DeliveryOperations:
                         job["warnings"].append("chat: image exceeds native preview limit")
             else:
                 destination = destinations[channel]
-                raw = render_email(rendered, **destination, subject="Ukesmeny " + str(menu.get("week")), pdf=pdf)
+                raw = render_email(rendered, **destination, subject=("Weekly menu " if str(menu.get("output_language") or "").split("-")[0] == "en" else "Ukesmeny ") + str(menu.get("week")), pdf=pdf)
                 if len(raw) > cap["message_limit"]:
                     # One email is one dispatch. Do not truncate recipes or
                     # silently fan out emails when the actual sender rejects it.
-                    raw = render_email(cache[(False, show_estimate_labels)], **destination, subject="Ukesmeny " + str(menu.get("week")))
+                    raw = render_email(cache[(False, show_estimate_labels)], **destination, subject=("Weekly menu " if str(menu.get("output_language") or "").split("-")[0] == "en" else "Ukesmeny ") + str(menu.get("week")))
                     job["warnings"].append("email: attachments omitted to fit native message limit")
                 if len(raw) > cap["message_limit"]:
                     job["warnings"].append("email: complete recipe text exceeds native message limit; email not dispatched")
