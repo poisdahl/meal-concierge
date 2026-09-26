@@ -1119,6 +1119,45 @@ class ProductCapacityTests(unittest.TestCase):
             rows.extend(page["requirements"])
         return rows
 
+    def test_pantry_answers_survive_agent_review_recovery_and_refresh(self):
+        refs = self.save_recipes([
+            recipe("Dinner A", [("smør", 45), ("olivenolje", 20)]),
+            recipe("Dinner B", [("smør", 45)]),
+        ])
+        self.menu = self.app.handle({"operation": "menu", "action": "save",
+            "menu": {"week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
+        menu_ref = self.app._cart_menu_ref(self.menu)
+        first = self.agent_products(menu_ref=menu_ref)
+        butter = next(row for row in self.read_product_pages(first) if row["item"] == "smør")
+        self.assertEqual(butter["quantity"]["numerator"], 90)
+        self.assertNotIn("ingredient_decisions", butter)
+        # One 60 g stock report is allocated once across the two recipes.
+        partial = [{"source": source, "action": "have_quantity", "quantity": amount, "unit": "g"}
+                   for source, amount in zip(butter["sources"], (45, 15))]
+        self.app.handle({"operation": "products", "action": "record_ingredients",
+                         "menu_ref": menu_ref, "ingredient_decisions": partial})
+        refreshed = self.agent_products(menu_ref=menu_ref, continuation_mode="reset")
+        row = next(row for row in self.read_product_pages(refreshed) if row["item"] == "smør")
+        self.assertEqual(row["quantity"]["numerator"], 30)
+        self.assertEqual(row["confirmed_pantry_quantity"]["numerator"], 60)
+        self.assertEqual(row["ingredient_decisions"], partial)
+        # A later explicit buy answer must remain distinguishable from unknown stock.
+        buy = [{"source": source, "action": "include"} for source in butter["sources"]]
+        self.app.handle({"operation": "products", "action": "record_ingredients",
+                         "menu_ref": menu_ref, "ingredient_decisions": buy})
+        refreshed = self.agent_products(menu_ref=menu_ref, continuation_mode="reset")
+        self.app = Application(StateStore(Path(self.temp.name), self.store.config), self.provider, object())
+        recovered = self.agent_products("get", product_plan_ref=refreshed["product_plan_ref"])
+        row = next(row for row in self.read_product_pages(recovered) if row["item"] == "smør")
+        self.assertEqual(row["quantity"]["numerator"], 90)
+        self.assertEqual(row["ingredient_decisions"], buy)
+        enough = [{"source": source, "action": "have_all"} for source in butter["sources"]]
+        self.app.handle({"operation": "products", "action": "record_ingredients",
+                         "menu_ref": menu_ref, "ingredient_decisions": enough})
+        final = self.agent_products(menu_ref=menu_ref, continuation_mode="reset")
+        self.assertNotIn("smør", [row["item"] for row in self.read_product_pages(final)])
+        self.assertFalse(any(call[0] == "manipulate_cart" for call in self.provider.calls))
+
     def test_agent_large_week_recovers_pages_and_applies_short_handle(self):
         dinners = [rows + [(f"extra food {day}-{index}", 30) for index in range(3)]
                    for day, rows in enumerate(DINNERS)]

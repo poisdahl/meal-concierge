@@ -25,6 +25,49 @@ the same total separately to each dish. `include` means buy. In a replan, supply
 the current stock assertion for the whole remaining menu; omission does not
 reuse old stock after possible cooking.
 
+## One pantry check for the menu
+
+Read the whole menu and aggregate needs before asking about staples, rather than
+asking about or buying butter separately for each meal. Include only relevant
+items with unknown stock: for example butter, oil, flour, sugar, spices, vinegar
+and sauces. Ask whether there is enough for the total, or how much is available.
+A useful question is: "This menu needs 90 g butter and 2 tbsp oil. Do you have
+enough of either, or should I buy them?" Reuse an explicit answer or household
+standing instruction; salt and pepper are not automatically stocked by the
+shopping engine. Do not turn default profile suggestions into user assertions.
+An explicit request to buy everything needed can resolve the check as `include`.
+
+For a saved menu, `products record_ingredients` stores the reply against exact
+source positions. `have_all` covers each named source need; use it for every
+position covered by the user's enough-for-the-whole-menu answer. `include`
+records that the item needs buying. `omit` is only for optional ingredients.
+For two 45 g butter requirements and 60 g reported stock, allocate 45 g to the
+first position and 15 g to the second with `have_quantity`: buy only the remaining
+30 g. Never subtract 60 g from both. Product review rows retain their source-bound `ingredient_decisions`, including
+`include`, so recovering the plan does not lose an answered stock question.
+Existing current answers resolve subsequent
+preparations; do not repeat the question on retries. A new menu revision needs
+new source bindings and a recheck of changed demand, not a blind replay.
+After recording changed stock for a saved menu, start a fresh `prepare` with
+its exact `menu_ref` and `continuation_mode="reset"`. Do not reuse the earlier
+`product_plan_ref` or apply arguments: covered requirements may have disappeared.
+For an unsaved preview, start a fresh `prepare` with the original `planner_ref`
+and `ingredient_decisions`, without `product_plan_ref`. A product-plan
+continuation retains its frozen stock decisions; it cannot accept new stock.
+After saving, record the answers against the saved menu's returned source
+positions, then prepare the saved menu before cart apply.
+
+When reported stock uses incompatible units, distinguish "enough for the whole
+need" from an exact partial quantity. Do not pass grams as millilitres or invent
+exact stock conversions. Ask a practical sufficiency question when necessary.
+Once stock is resolved, use the existing `package_count` and `quantity_basis`
+agent estimate for source volumes versus gram-labelled packs, pieces versus
+weight, or bunches versus retail packs. Explain ingredient-specific size/yield
+assumptions and choose observed packs for the combined remaining need. This is
+not exact coverage. Preserve raw/cooked, drained/gross and edible/bone-in forms;
+a substitution that changes preparation needs a coherent recipe adaptation.
+Use `shared_package` when one selected pack serves distinct requirements.
+
 ## Remaining-week changes
 
 A pending purchase or order change protects its own slots, cart and payment,

@@ -3002,6 +3002,11 @@ class PlanningOperations:
                 "requirement_id", "item", "quantity", "unit", "status", "sources",
                 "gross_quantity", "confirmed_pantry_quantity", "candidate_approval",
             ) if key in requirement}
+            source_keys = {canonical(source) for source in requirement.get("sources", [])}
+            decisions = [deepcopy(decision) for decision in plan.get("ingredient_decisions", [])
+                         if canonical(decision["source"]) in source_keys]
+            if decisions:
+                row["ingredient_decisions"] = decisions
             observation = requirement.get("observation") or {}
             row["search_query"] = observation.get("query", requirement.get("search", requirement["item"]))
             row["observed_at"] = observation.get("observed_at")
@@ -3091,6 +3096,7 @@ class PlanningOperations:
                              **({"partial_apply": True} if key == "partial_apply_arguments" else {})}
         page["next"] = (
             "Read further pages with products get and this product_plan_ref; continue prepare with only new or changed candidate_approvals. "
+            "Before selecting staple purchases, resolve one combined whole-menu stock check using current user answers or explicit standing instructions; record stock/buy decisions and do not repeat answered questions. "
             + ("Save the exact planner selection, then prepare its menu_ref before cart apply."
                if page["preview"] else "Apply only the reviewed returned arguments with an explicit cart-change request."
               )

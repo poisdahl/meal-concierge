@@ -164,8 +164,10 @@ materialization, saved-menu assessment and bound checkout honor this constraint.
 Explicit dates preserve recurring batch planning. A one-plan
 `planner_input.prepared_portion_range` adjustment is retained in the handoff and
 does not mutate the permanent profile. Optional ingredient markers in source
-text are retained. Unconfirmed pantry stock is purchased by default, not assumed
-at home. Exact candidate selection accepts an optional localized `search_query`
+text are retained. The agent asks one combined stock question for relevant pantry
+staples before purchase, reusing current answers and explicit household standing
+instructions. Unconfirmed stock is not deducted by the engine; this is not an
+instruction to buy staples before the user answers. See [the pantry check](../skill/references/meal-adjustments.md#one-pantry-check-for-the-menu). Exact candidate selection accepts an optional localized `search_query`
 to recover irrelevant search results while retaining provider evidence binding.
 
 Partial replans preserve complete frozen batch components and their original eating
