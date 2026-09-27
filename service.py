@@ -851,6 +851,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _user_guide() -> dict[str, Any]:
         return {
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
+            "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
             "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
             "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",
             "overview_request": "Show me everything Meal Concierge can do and all my current settings, preferences, recurring items and delivery options.",

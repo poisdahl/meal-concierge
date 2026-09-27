@@ -73,17 +73,34 @@ def url_enabled(url, settings):
     return any(site["enabled"] for site in matches) or settings["broad"]
 
 
-def search_plan(settings, query):
+def effective_search_settings(settings, context=None):
+    """Recheck a trusted agent's request scope without changing household settings."""
+    settings = validate_web_search(settings)
+    if context is None:  # Existing imports with the household's saved scope.
+        return settings
+    if (not isinstance(context, dict) or set(context) != {"settings_digest", "scope", "one_off"}
+            or context["settings_digest"] != search_digest(settings)
+            or context["scope"] not in ("selected_sites", "broad")
+            or type(context["one_off"]) is not bool):
+        raise ValueError("invalid or stale recipe search context; request fresh scopes")
+    if context["scope"] == "broad" and not (settings["broad"] or context["one_off"]):
+        raise ValueError("broader recipe search needs saved permission or an explicit one-off user request")
+    settings["broad"] = context["scope"] == "broad"
+    return settings
+
+
+def search_plan(settings, query, *, scope="selected_sites", one_off=False):
     if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
         raise ValueError("web recipe search query must contain 1 to 200 characters")
-    settings = validate_web_search(settings)
+    context = {"settings_digest": search_digest(settings), "scope": scope, "one_off": one_off}
+    settings = effective_search_settings(settings, context)
     excluded = [site["domain"] for site in settings["sites"] if not site["enabled"]]
     scopes = [{"query": query.strip(), "domains": [site["domain"]]}
               for site in settings["sites"] if site["enabled"]] if settings["enabled"] else []
     if settings["enabled"] and settings["broad"]:
-        scopes.append({"query": query.strip(), "domains": [], "exclude_domains": excluded})
+        scopes = [{"query": query.strip(), "domains": [], "exclude_domains": excluded}]
     return {"status": "host_search_required" if scopes else "disabled", "settings": settings,
-            "settings_digest": search_digest(settings), "scopes": scopes,
+            "settings_digest": context["settings_digest"], "search_context": context, "scopes": scopes,
             "exclude_domains": excluded, "maximum_candidates": 8,
             "searched": False,
             "next": "Use the host's web search with these scopes. Read selected recipe pages and assess storage rights before import. Return exact discovery refs as planner_input.web_candidates. If search is unavailable, report unavailable and continue library/store selection."}
@@ -242,7 +259,7 @@ def _brave_search(settings, query, api_key):
     if len(scoped) > 600 or len(scoped.split()) > 75:
         raise RecipeImportSourceError("Brave query/scope is too long; shorten the query or select fewer sites")
     url = "https://api.search.brave.com/res/v1/web/search?" + urlencode({
-        "q": scoped, "count": 8, "country": "NO", "search_lang": "nb",
+        "q": scoped, "count": 8,
         "safesearch": "strict", "spellcheck": "false", "text_decorations": "false", "result_filter": "web",
     })
     raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, accept="application/json", search_api_key=api_key)
@@ -259,12 +276,13 @@ def _brave_search(settings, query, api_key):
         raise RecipeImportSourceError("Brave search response is unavailable or incompatible") from None
 
 
-def search_web(settings, query, backend=None, *, config=None):
+def search_web(settings, query, backend=None, *, config=None, scope="selected_sites", one_off=False):
     """No provider switching. Explicit coverage prevents false broad-search claims."""
     from recipe_import_sources import firecrawl_request, RecipeImportSourceError
     from recipe_search_setup import BACKENDS, GUIDE, search_configuration, load_search_key
     config = {} if config is None else config
-    plan = search_plan(settings, query)
+    plan = search_plan(settings, query, scope=scope, one_off=one_off)
+    settings = plan["settings"]
     unavailable = {**plan, "status": "unavailable", "searched": False, "results": [], "persisted": False,
                    "coverage": "none", "broad_searched": False, "pending_scopes": plan["scopes"],
                    "guide": GUIDE, "next": "Report unavailable and continue local/store planning. No provider fallback was attempted. Use setup guidance to repair the chosen provider."}
@@ -279,8 +297,12 @@ def search_web(settings, query, backend=None, *, config=None):
         except ValueError as exc:
             return {**unavailable, "backend": None, "reason": str(exc)}
     if backend == "host":
-        return {**plan, "backend": backend, "results": [], "persisted": False,
-                "coverage": "none", "broad_searched": False, "pending_scopes": plan["scopes"]}
+        scopes = plan["scopes"]
+        if scope == "selected_sites":
+            scopes = [{"query": query.strip(), "domains": [site["domain"] for site in settings["sites"] if site["enabled"]],
+                       "exclude_domains": plan["exclude_domains"]}]
+        return {**plan, "scopes": scopes, "backend": backend, "results": [], "persisted": False,
+                "coverage": "none", "broad_searched": False, "pending_scopes": scopes}
     next_step = ("Read selected original pages directly and assess culinary relevance; search hits are not ingredient evidence or storage permission. "
                  "Import only with a valid storage_decision. No automatic provider fallback. "
                  "For pending scopes select host search or an optional API explicitly; see " + GUIDE)
@@ -313,12 +335,10 @@ def search_web(settings, query, backend=None, *, config=None):
     try:
         key = load_search_key(config, backend)
         recipe_query = query.strip()
-        if "oppskrift" not in recipe_query.casefold():
-            recipe_query += " oppskrift"
         if backend == "brave":
             hits = _brave_search(settings, recipe_query, key)
         else:
-            payload = {"query": recipe_query, "limit": 8, "country": "NO", "excludeDomains": plan["exclude_domains"], "sources": ["web"]}
+            payload = {"query": recipe_query, "limit": 8, "excludeDomains": plan["exclude_domains"], "sources": ["web"]}
             if not settings["broad"]:
                 payload["includeDomains"] = [s["domain"] for s in settings["sites"] if s["enabled"]]
             hits = firecrawl_request("search", payload, **({"api_key": key} if key is not None else {})).get("web")

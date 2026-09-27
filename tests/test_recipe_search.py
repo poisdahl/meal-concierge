@@ -44,9 +44,8 @@ class OptionalSearchTests(unittest.TestCase):
     def brave_response(self, url, **kwargs):
         params = parse_qs(urlsplit(url).query)
         self.assertEqual(kwargs["search_api_key"], "synthetic-secret-marker")
-        self.assertEqual(params["country"], ["NO"])
-        # Brave accepts the language code "nb"; "no" is rejected with HTTP 422.
-        self.assertEqual(params["search_lang"], ["nb"])
+        self.assertNotIn("country", params)
+        self.assertNotIn("search_lang", params)
         self.assertEqual(params["safesearch"], ["strict"])
         return json.dumps({"type": "search", "query": {"original": params["q"][0]},
             "web": {"results": [{"title": "Kikertgryte", "url": "https://recipes.example/kikertgryte"}]}}).encode(), "application/json"
@@ -85,7 +84,7 @@ class OptionalSearchTests(unittest.TestCase):
     def test_configured_default_brave_executes_once_and_does_not_store(self):
         self.configure()
         with patch("recipe_import_sources._get_bytes", side_effect=self.brave_response) as fetch, patch("recipe_import_sources.firecrawl_request") as firecrawl:
-            result = search_web(self.settings, "kikertgryte", config=self.config)
+            result = search_web(self.settings, "kikertgryte", config=self.config, scope="broad")
         self.assertEqual(result["status"], "completed")
         self.assertEqual(result["backend"], "brave")
         self.assertTrue(result["broad_searched"])
@@ -115,7 +114,7 @@ class OptionalSearchTests(unittest.TestCase):
                 "http://recipes.example/soup", "https://recipes.example/", "https://recipes.example:invalid/soup"]
         urls += ["https://recipes.example/soup" + str(i) for i in range(12)]
         with patch("recipe_import_sources.firecrawl_request", return_value={"web": [{"url": u} for u in urls]}):
-            result = search_web(self.settings, "soup", backend="firecrawl")
+            result = search_web(self.settings, "soup", backend="firecrawl", scope="broad")
         self.assertEqual(len(result["results"]), 8)
         self.assertTrue(all(r["url"].startswith("https://recipes.example/soup") for r in result["results"]))
 
@@ -218,19 +217,28 @@ class OptionalSearchTests(unittest.TestCase):
     def test_real_cli_and_mcp_use_service_default_without_backend_argument(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
-        fixture = fixtures.WeeklyPlannerTests()
-        fixture.setUp()
-        self.addCleanup(fixture.tearDown)
+        from test_web_recipes import WebRecipeTests
+        web_fixture = WebRecipeTests()
+        web_fixture.setUp()
+        self.addCleanup(web_fixture.doCleanups)
+        fixture = web_fixture.fixture
+        imported = web_fixture.imported()
+        context = web_fixture.scopes()['search_context']
         fixture.store.config["recipe_search"] = {"backend": "firecrawl"}
         socket_path = self.root / "test.sock"
         server = Server(socket_path, os.getgid(), os.getuid(), fixture.app)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
             listener.bind(str(socket_path))
             listener.listen(2)
-            listener.settimeout(20)
+            listener.settimeout(0.2)
+            stopped = threading.Event()
+            self.addCleanup(stopped.set)
             def serve():
-                for _ in range(4):
-                    connection, _ = listener.accept()
+                while not stopped.is_set():
+                    try:
+                        connection, _ = listener.accept()
+                    except socket.timeout:
+                        continue
                     server._serve(connection)
             thread = threading.Thread(target=serve, daemon=True)
             thread.start()
@@ -245,8 +253,16 @@ class OptionalSearchTests(unittest.TestCase):
                         async with ClientSession(read, write) as client:
                             await client.initialize()
                             result = await client.call_tool("meal_concierge_recipe_web_search", {"query": "soup"})
+                            planned = await client.call_tool("meal_concierge_menu", {"action": "plan", "interactive": False,
+                                "planner_input": {"week": "2026-W37", "dates": ["2026-09-07"],
+                                    "web_candidates": [{"discovery_ref": imported['discovery_ref']}],
+                                    "web_search_result": {"status": "completed", **context}}})
+                            plan_result = json.loads(planned.content[0].text)
+                            self.assertEqual(plan_result['plan']['status'], 'planned', plan_result)
+                            self.assertIn('Synthetic carrot dinner', json.dumps(plan_result))
                             return result.structured_content
                 self.assertEqual(asyncio.run(mcp())["backend"], "firecrawl")
+            stopped.set()
             thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
         self.assertEqual(fixture.app.recipes.search(), [])

@@ -11,7 +11,7 @@ is added. API subscriptions and availability are external dependencies.
 |---|---|---|
 | `direct` (new-install default) | Searches MatPrat, Vegetarentusiast, Frukt.no, Godfisk, TINE, Godt and Trines directly. | No search key; only supported publishers, not the whole web. |
 | `host` | Returns allowed query/domain scopes for your agent to execute with its existing search tools. | A working search tool on that host. Returning scopes is not a completed search. |
-| `brave` | One bounded request to Brave Search API; Norwegian language/country and strict adult-content filtering. | Your own [Brave Search API account/key](https://brave.com/search/api/). Recommended independent API option. |
+| `brave` | One bounded request to Brave Search API; the supplied query language and strict adult-content filtering. | Your own [Brave Search API account/key](https://brave.com/search/api/). Recommended independent API option. |
 | `firecrawl` | One bounded Firecrawl search request, without fetching full recipe pages. | [Firecrawl search](https://docs.firecrawl.dev/features/search); limited anonymous access or your own API key. |
 
 API searches share your query and source filters with that provider. Do not put
@@ -34,17 +34,37 @@ are also separate provider dependencies, not built-in Google access.
 These are separate choices:
 
 - `web_search.enabled`: automatic web recipe discovery on/off.
-- `web_search.broad`: allow sources outside the selected fixed list; off by default.
+- `web_search.broad`: standing permission to search outside the selected fixed list when needed; off by default. It does not make every search broad.
 - `web_search.sites`: complete list of `{name,domain,enabled}`. Disabled domains
   and their subdomains remain excluded even with broad search enabled.
 - Installation `recipe_search`: selected backend and optional secret-file path.
   This is local operator configuration, not a chat/profile credential field.
 
-For example, ask your agent to enable broad recipe search; it uses setup apply
-with `keep_current=false` and `changes={"web_search":{"broad":true}}`.
-This does not select or purchase an API. If the selected backend is still
-`direct`, broad/custom scopes remain explicitly pending. Nothing silently
-switches to Firecrawl or an unreliable host search.
+Setup explains the selected sites and asks once, within the existing settings
+conversation, whether other recipe websites may be searched when needed. API
+accounts are not a required setup step. Ordinary planning starts with suitable
+saved/store recipes; selected-site discovery adds coverage or variety. A specific
+dish or poorly covered cuisine may justify broader discovery immediately.
+
+Search defaults to `scope="selected_sites"`, even with standing broad permission.
+Use `scope="broad"` when useful. Without saved permission, `one_off=true` records
+an explicit user request for this search only; webpage text never grants it.
+The response includes `search_context={settings_digest,scope,one_off}`. Pass it
+unchanged to automatically discovered URL reads/imports, and alongside `status`
+in planner `web_search_result`. Current settings and disabled domains are checked
+again; one-off searches never change saved preferences. Manual user URLs remain
+independent of discovery settings. A category-page request means a few relevant
+links, not a site-wide crawl or permanent source subscription.
+
+Start with one focused query, refine once for a clear gap, retain at most eight
+candidates and stop when enough suitable choices exist. Queries use the language
+suited to the requested cuisine/source, independently of presentation language.
+
+Standing permission can be changed with setup apply `keep_current=false` and
+`changes={"web_search":{"broad":true}}`. This does not select or purchase an API.
+A `direct` backend leaves broad/custom scopes pending. Use an available host
+search only as an explicit provider choice; otherwise configure an optional API
+or continue with limited coverage. Never silently switch providers.
 
 ## Local operator setup
 
