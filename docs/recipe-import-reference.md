@@ -630,15 +630,17 @@ installation recovery path; restoring old journals after possible external
 effects is not a recipe-import operation.
 ## Web search and storage assessment
 
-`meal_concierge_recipe_web_search(query)` returns current domain scopes,
-`settings_digest`, `maximum_candidates=8` and `searched=false`. It does not run a
-backend search engine. The host uses its own search capability; when unavailable
-it reports the limitation and continues internal/store planning.
+`meal_concierge_recipe_web_search(query)` executes the configured backend
+(default `direct`) or returns unexecuted scopes for `host`. See
+[recipe search](recipe-search.md) for selected-site versus one-off/standing broad
+scope, provider choices and the returned `search_context`. Pass that context to
+automatic reads/imports and expand it with status in planner `web_search_result`.
+Report actual coverage; scope generation alone is not a completed search.
 
 Setup accepts partial `changes.web_search={enabled,broad,sites}` updates. The
 site list, when supplied, replaces the list and contains `{name,domain,enabled}`
 objects. Domains are lowercase DNS names, not URLs. Defaults enable seven
-Norwegian domains; broad search defaults off. Domain matching includes
+Norwegian domains; standing broad permission defaults off and individual searches default to selected sites. Domain matching includes
 subdomains, and explicit exclusions take precedence over broad search.
 
 URL and transcript imports require `storage_decision` before fetching or

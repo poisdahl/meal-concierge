@@ -83,7 +83,7 @@ def search_status(config):
             result["status"] = "configured" if result["credential_available"] else "anonymous"
     except ValueError as exc:
         result.update({"status": "unavailable", "reason": str(exc)})
-    result["note"] = "Configuration is not a successful live test. API searches share query/domain filters and may incur charges. No automatic fallback. Broad search requires web_search.broad=true."
+    result["note"] = "Configuration is not a successful live test. API searches share query/domain filters and may incur charges. No automatic fallback. Search defaults to selected sites. Broad scope needs saved permission or an explicit one-off request."
     return result
 
 

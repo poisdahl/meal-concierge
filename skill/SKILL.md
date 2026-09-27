@@ -57,7 +57,7 @@ meal selection and product preparation need no additional reference loading.
    preferences and optional email. Local recipes remain usable without a store
    account. Never create a purchase just to test setup.
    Give the returned short guide at the relevant setup stages: meal plans or
-   grocery-only shopping; dietary/time and pantry choices; then optional recipe
+   grocery-only shopping; dietary/time, pantry and recipe-source choices; then optional recipe
    delivery. Offer salt, pepper and cooking oil as a standing pantry list, and
    record the actual answer with profile `review_pantry`. Keeping setup defaults
    alone is not consent to assume stock. At completion, tell the user they can
@@ -68,7 +68,16 @@ meal selection and product preparation need no additional reference loading.
 2. Read the saved preferences, recent meals and suitable real recipes. Search
    the bank and selected store with useful local food words; read full details
    for your choices. Empty results for one narrow query do not mean the catalog
-   is empty. Prefer sourced recipes; generate a recipe only when the user wants
+   is empty. Selected recipe websites are enabled by default: use a bounded
+   search when better coverage or variety would help. For an unusual cuisine,
+   specific dish or explicit website request, broader discovery may be more
+   useful immediately. Use scope=selected_sites ordinarily; scope=broad needs
+   saved permission or one_off=true for the user's explicit request. Honor the
+   selected provider; host search must actually be available and executed.
+   Start with one focused query, refine once only for a clear gap, retain at
+   most eight candidates, and stop when enough suitable choices exist. Read
+   [recipe sources](references/recipe-sources.md) for web extraction and review.
+   Exact user URLs need no global search-setting change. Prefer sourced recipes; generate a recipe only when the user wants
    that or the available real recipes cannot reasonably meet the request.
 3. Choose the menu yourself. Call menu `plan` with
    `planner_input.selection_mode="agent"`, chronological `dates`, and ordered

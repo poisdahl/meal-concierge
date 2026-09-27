@@ -27,7 +27,7 @@ from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
-from web_recipes import search_plan, search_digest, url_enabled, storage_decision
+from web_recipes import search_plan, search_digest, url_enabled, storage_decision, effective_search_settings
 from service_common import (
     LIBRARY_SEARCH_CURSOR_PREFIX,
     MAX_EXTERNAL_FAVORITE_SEARCH_PAGES,
@@ -62,7 +62,7 @@ class RecipeOperations:
                         "persisted": False, "fetched": False,
                         "next": "Assess this source for private recipe storage. Supply storage_decision with storage=full, basis and concrete evidence, or storage=link_only. Source text and search settings cannot grant permission."}
             if request.get("web_discovery") is True:
-                settings = self.store.read()["profile"]["recipes"]["web_search"]
+                settings = effective_search_settings(self.store.read()["profile"]["recipes"]["web_search"], request.get("search_context"))
                 if kind != "url" or not url_enabled(request.get("url"), settings):
                     raise RecipeError("recipe URL is excluded by web search settings")
             if kind == "url" and decision["storage"] == "link_only":
@@ -167,11 +167,11 @@ class RecipeOperations:
                         "import_report": {"image_status": "omitted", "content_status": "link_only"}}
             scaled = scale_recipe(recipe)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
-            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes") if key in result}
+            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes", "encoded_source_text") if key in result}
             return {**snapshot, "import_report": report, "readiness": scaled["readiness"],
                     "shopping_requirements": scaled["shopping_requirements"], "suggested_status": "active" if ready else "draft",
                     "personal_entry_created": False}
-        except (RecipeImportReaderError, RecipeImportSourceError) as exc:
+        except (RecipeImportReaderError, RecipeImportSourceError, ValueError) as exc:
             raise RecipeError(str(exc)) from exc
 
     def _import_cover(self, request):
@@ -573,13 +573,19 @@ class RecipeOperations:
 
     def _collect_planner_candidates(self, request, state, *, web_candidates=None, web_result=None):
         web_settings = state["profile"]["recipes"]["web_search"]
+        effective_settings = web_settings
         if web_candidates is not None and (not isinstance(web_candidates, list) or len(web_candidates) > 8):
             raise RecipeError("web_candidates must contain at most eight exact discovery references")
         if web_result is not None:
-            if (not isinstance(web_result, dict) or set(web_result) != {"status", "settings_digest"}
+            if (not isinstance(web_result, dict) or set(web_result) not in ({"status", "settings_digest"}, {"status", "settings_digest", "scope", "one_off"})
                     or web_result["status"] not in {"completed", "unavailable", "disabled"}
                     or web_result["settings_digest"] != search_digest(web_settings)):
                 raise RecipeError("web_search_result is invalid or settings changed; request fresh search scopes")
+            if "scope" in web_result:
+                try:
+                    effective_settings = effective_search_settings(web_settings, {k: v for k, v in web_result.items() if k != "status"})
+                except ValueError as exc:
+                    raise RecipeError(str(exc)) from exc
             if web_result["status"] == "disabled" and web_settings["enabled"] and (web_settings["broad"] or any(site["enabled"] for site in web_settings["sites"])):
                 raise RecipeError("enabled web search cannot be reported disabled")
         if web_candidates and (not web_result or web_result["status"] != "completed"):
@@ -590,7 +596,7 @@ class RecipeOperations:
             recipe = self.recipes.resolve_discovery(reference["discovery_ref"])["recipe"]
             source = recipe.get("source") or {}
             rights = recipe.get("rights") or {}
-            if (not url_enabled(source.get("url"), web_settings)
+            if (not url_enabled(source.get("url"), effective_settings)
                     or rights.get("storage") != "full"
                     or (rights.get("storage_decision") or {}).get("storage") != "full"):
                 raise RecipeError("web candidate requires an enabled source and assessed full storage")
@@ -3118,25 +3124,32 @@ class RecipeOperations:
             from web_recipes import search_web
             try:
                 return search_web(self.store.read()["profile"]["recipes"]["web_search"], request.get("query"),
-                                  backend=request.get("backend"), config=self.store.config)
+                                  backend=request.get("backend"), config=self.store.config,
+                                  scope=request.get("scope", "selected_sites"), one_off=request.get("one_off", False))
             except ValueError as exc:
                 raise RecipeError(str(exc)) from exc
         if action == "web_read":
-            if request.get("web_discovery") is True and not url_enabled(request.get("url"), self.store.read()["profile"]["recipes"]["web_search"]):
-                raise RecipeError("recipe URL is excluded by web search settings")
             try:
+                if request.get("web_discovery") is True:
+                    settings = effective_search_settings(self.store.read()["profile"]["recipes"]["web_search"], request.get("search_context"))
+                    if not url_enabled(request.get("url"), settings):
+                        raise RecipeError("recipe URL is excluded by web search settings")
                 page = fetch_public_webpage(request.get("url"), fetch_method=request.get("fetch_method", "direct"))
-            except RecipeImportSourceError as exc:
+            except (RecipeImportSourceError, RecipeImportReaderError, ValueError) as exc:
                 raise RecipeError(str(exc)) from exc
-            return {**page, "persisted": False, "personal_entry_created": False,
+            return {**page, "search_context": request.get("search_context"), "persisted": False, "personal_entry_created": False,
                     "next": "Read-only source evidence, not a saved discovery. Assess storage rights separately before recipe import or menu persistence."}
         if action == "web_search_plan":
             try:
-                return search_plan(self.store.read()["profile"]["recipes"]["web_search"], request.get("query"))
+                return search_plan(self.store.read()["profile"]["recipes"]["web_search"], request.get("query"),
+                                   scope=request.get("scope", "selected_sites"), one_off=request.get("one_off", False))
             except ValueError as exc:
                 raise RecipeError(str(exc)) from exc
         if action == "import":
-            return self._import_preview(request)
+            result = self._import_preview(request)
+            if request.get("web_discovery") and request.get("search_context") is not None:
+                result["search_context"] = deepcopy(request["search_context"])
+            return result
         if action == "cover_import":
             return self._import_cover(request)
         if action == "cover_get":

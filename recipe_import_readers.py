@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import contextmanager
+from html import unescape
 from html.parser import HTMLParser
 import json
 import hashlib
@@ -192,7 +193,7 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
     if size > MAX_RECORD_BYTES:
         raise RecipeImportReaderError("source recipe is too large")
     unsupported = set(raw) - _SUPPORTED_FIELDS
-    name = _text(raw.get("name"), "name", 300, required=True)
+    name = _text(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
     notes = []
     comments = raw.get("comment") or []
     if not isinstance(comments, list) or len(comments) > 100:
@@ -239,7 +240,7 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
                         _strings(raw.get("recipeIngredient"), "recipeIngredient", 500, 200)),
         "steps": ([] if allow_incomplete and raw.get("recipeInstructions") in (None, "", []) else
                   _instructions(raw.get("recipeInstructions"), unsupported)),
-        "yield_text": _text(raw.get("recipeYield"), "recipeYield", 500),
+        "yield_text": _web_yield_text(raw.get("recipeYield")),
         "description": _text(raw.get("description"), "description", MAX_TEXT),
         "notes": _text("\n\n".join(notes), "author notes", MAX_TEXT),
         "tags": [_text(tag, "recipeCategory", 80, required=True) for tag in tags],
@@ -254,9 +255,34 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
             "original": {"url": original_url, "publisher": credit or None},
         },
     }
+    encoded_source_text = {}
+    if kind == "web":
+        for field in ("name", "ingredients", "steps", "yield_text", "description", "notes", "tags"):
+            original = extracted[field]
+            decoded = ([_decoded_web_prose(item) for item in original] if isinstance(original, list)
+                       else _decoded_web_prose(original))
+            if decoded != original:
+                encoded_source_text[field] = original
+                extracted[field] = decoded
+        extracted["source"]["title"] = extracted["name"]
     return {"extracted": extracted, "image_candidates": image_candidates,
+            **({"encoded_source_text": encoded_source_text} if encoded_source_text else {}),
             "unsupported_fields": sorted(unsupported),
             "image_status": "requires_asset_import" if image_candidates else "none"}
+
+
+def _web_yield_text(value: Any) -> str:
+    # Publishers use numbers and multiple labels (e.g. servings and pieces).
+    # Preserve the labels together; a bare number is not proof of person portions.
+    if isinstance(value, list):
+        if not 1 <= len(value) <= 8 or any(isinstance(item, list) for item in value):
+            raise RecipeImportReaderError("recipeYield must be a bounded list of labels")
+        return _text("; ".join(_web_yield_text(item) for item in value), "recipeYield", 500)
+    if type(value) in (int, float):
+        if not math.isfinite(value) or value <= 0:
+            raise RecipeImportReaderError("recipeYield number must be finite and positive")
+        value = str(value)
+    return _text(value, "recipeYield", 500)
 
 
 def read_recipesage_export(data: bytes | str) -> list[dict[str, Any]]:
@@ -327,17 +353,21 @@ MAX_WEBPAGE_TEXT_BYTES = 64 * 1024
 
 class _WebpageText(HTMLParser):
     """Plain text fallback; no rendering, external resources or script execution."""
-    _ignored = {"head", "script", "style", "template", "noscript", "svg", "canvas", "iframe", "object"}
+    _ignored = {"head", "script", "style", "template", "noscript", "svg", "canvas", "iframe", "object", "nav", "footer", "aside"}
     _blocks = {"article", "section", "main", "div", "p", "li", "ul", "ol", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "td", "th", "dl", "dt", "dd", "caption"}
     _void = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, main_only: bool = False) -> None:
         super().__init__(convert_charrefs=True)
         self.stack: list[tuple[str, bool]] = []
         self.parts: list[str] = []
         self.size = 0
+        self.main_only = main_only
+        self.found_main = False
 
     def _append(self, data: str) -> None:
+        if self.main_only and not any(tag == "main" for tag, _ in self.stack):
+            return
         self.size += len(data.encode("utf-8"))
         if self.size > MAX_WEBPAGE_TEXT_BYTES:
             raise RecipeImportReaderError("webpage text exceeds the supported interpretation limit")
@@ -392,6 +422,8 @@ class _WebpageText(HTMLParser):
                   or visibility in {"hidden", "collapse"}
                   or content_visibility == "hidden")
         ignored = self.ignored or tag in self._ignored or hidden
+        if tag == "main" and not ignored:
+            self.found_main = True
         if not ignored and tag in self._blocks:
             self._append("\n")
         if tag not in self._void:
@@ -409,6 +441,23 @@ class _WebpageText(HTMLParser):
             self._append(data)
 
 
+def _decoded_web_prose(value: str) -> str:
+    """Decode publisher prose only; embedded HTML remains inert, never fetched."""
+    for _ in range(4):
+        decoded = unescape(value)
+        if decoded == value:
+            break
+        value = decoded
+    if re.search(r"</?[A-Za-z][^>]*>", value):
+        parser = _WebpageText()
+        parser.feed(value)
+        parser.close()
+        if any(tag in parser._ignored for tag, _ in parser.stack):
+            raise RecipeImportReaderError("structured recipe prose has an unclosed non-text element")
+        value = "\n".join(line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split())))
+    return value
+
+
 def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
     """Prefer structured recipes, otherwise expose bounded text for host interpretation.
 
@@ -423,15 +472,19 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
     # valid structured evidence even though person portions stay unresolved.
     complete, incomplete = [], []
     for record in recipes:
-        target = complete if (record["extracted"]["ingredients"] and record["extracted"]["steps"]
+        target = complete if (record["extracted"]["name"] and record["extracted"]["ingredients"] and record["extracted"]["steps"]
                               and record["extracted"]["yield_text"]) else incomplete
         target.append(record)
     if complete:
         return {"mode": "structured", "recipes": complete, "incomplete_recipes": incomplete,
                 "text": None, "requires_interpretation": False}
-    parser = _WebpageText()
+    parser = _WebpageText(main_only=True)
     parser.feed(raw)
     parser.close()
+    if not parser.found_main:
+        parser = _WebpageText()
+        parser.feed(raw)
+        parser.close()
     if any(tag in parser._ignored for tag, _ in parser.stack):
         raise RecipeImportReaderError("webpage text has an unclosed non-text element")
     visible_lines = [line for part in "".join(parser.parts).splitlines() if (line := " ".join(part.split()))]
