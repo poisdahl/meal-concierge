@@ -72,7 +72,8 @@ fetching their source pages. To **install it or update an existing copy**, send:
 > Synchronize the latest Optional Recipe Collection into my existing Meal
 > Concierge installation. Permanently remove collection recipes that are no
 > longer included. Preserve every other local recipe and favorite. Report the
-> imported version and any conflicts or incomplete results.
+> imported version and any conflicts or incomplete results. Follow docs/maintenance.md
+> and use the installer’s pack operation, not individual recipe tools.
 
 The agent uses `prepare-recipes` to download and validate the current published
 collection while the service remains available, without a GitHub API token.
@@ -81,7 +82,9 @@ archive offline, then starts the service again. You do not have to find a releas
 number or download the file yourself.
 
 **Updating the program does not update the collection.** If you have an older
-installation, update the program first and then request the collection separately.
+installation, update the program first. You can request both together using the
+[combined update prompt](../README.md#update-meal-concierge); program-only updates
+leave the collection unchanged.
 This includes installations with the old `2026-09-06.5` collection.
 
 Repeated imports do not create another copy of unchanged collection entries.
