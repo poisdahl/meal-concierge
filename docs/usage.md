@@ -74,9 +74,11 @@ Weekly planning and automation remain optional. The first saved-plan message
 names each recipe’s actual source with its link, marks adaptations, and offers
 full ingredients and steps, recipe swaps and using ingredients you already have. A short plan is assessed for the days it covers, not as a whole week's diet.
 
-Review the proposed dishes, dates, portions and any missing information, then
-ask to save the menu. Saved menus keep the recipes and amounts used for that
-plan, even if the original recipes later change.
+A normal meal-plan request creates an editable saved proposal. Review its dishes,
+dates, portions and any missing information, then ask for changes as needed. If
+saving is blocked, the agent should explain why and distinguish the unsaved
+proposal from the active plan. Saved menus keep the recipes and amounts used for
+that plan, even if the original recipes later change.
 
 - “Replace Wednesday's dinner with a quicker dish.”
 - “Add lunch for Saturday.”

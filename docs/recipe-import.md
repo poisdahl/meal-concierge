@@ -99,8 +99,9 @@ cleanup starts only after the complete record pass.
 
 For the exact command and recovery steps, see
 [manual collection import](runtime.md#versioned-recipe-package-integration).
-A local ZIP supplied to that command must match the latest published release
-and still needs internet access for verification.
+Preparing a local ZIP requires internet access to verify it against the latest
+published collection. Importing that exact prepared artifact with
+`import-recipes --prepared ID` is offline.
 
 ## PDF attachments without system packages
 
