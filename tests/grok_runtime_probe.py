@@ -25,8 +25,8 @@ def runtime():
     import mcp.types
     assert sys.version_info[:3] == (3, 12, 12)
     assert sys.flags.isolated and sys.prefix != sys.base_prefix
-    assert importlib.metadata.version('mcp') == '2.1.1'
-    assert importlib.metadata.version('mcp-types') == '2.1.1'
+    assert importlib.metadata.version('mcp') == '2.2.0'
+    assert importlib.metadata.version('mcp-types') == '2.2.0'
     assert all(Path(module.__file__).is_relative_to(sys.prefix) for module in (mcp, mcp.types))
 
 

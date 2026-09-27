@@ -245,8 +245,8 @@ class ProviderOAuthTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         for distribution in ("mcp", "mcp-types"):
-            if importlib.metadata.version(distribution) != "2.1.1":
-                raise AssertionError(f"{distribution} must be pinned to 2.1.1")
+            if importlib.metadata.version(distribution) != "2.2.0":
+                raise AssertionError(f"{distribution} must be pinned to 2.2.0")
         TEST_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def setUp(self):

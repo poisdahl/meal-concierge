@@ -585,7 +585,7 @@ def stage_release(code_root, uv_binary=None):
     run(uv, '--no-config', 'venv', '--python', PYTHON, release / 'venv')
     run(uv, '--no-config', 'pip', 'sync', '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
     # Check both versions AND the actual loaded modules inside this private venv.
-    run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.1.1'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
+    run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
     return release
 
 

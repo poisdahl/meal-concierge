@@ -46,9 +46,9 @@ def attestation():
     assert sys.version_info[:3] == (3, 12, 12)
     assert sys.flags.isolated and sys.prefix != sys.base_prefix
     for name, module in [("mcp", mcp), ("mcp-types", mcp.types)]:
-        assert importlib.metadata.version(name) == "2.1.1"
+        assert importlib.metadata.version(name) == "2.2.0"
         assert Path(module.__file__).is_relative_to(sys.prefix)
-    print(json.dumps({"python": sys.version.split()[0], "mcp": "2.1.1", "mcp-types": "2.1.1",
+    print(json.dumps({"python": sys.version.split()[0], "mcp": "2.2.0", "mcp-types": "2.2.0",
                       "imports": [mcp.__file__, mcp.types.__file__]}), flush=True)
 
 

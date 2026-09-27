@@ -14,7 +14,7 @@ schedulers, sends messages or performs grocery actions.
 Use Python 3.10+ for the installer and install `uv` on PATH, or pass its verified
 executable path with `--uv`. The installed runtime
 uses Python 3.12.12 and all versions in `runtime-requirements.txt`, including
-`mcp==2.1.1` and `mcp-types==2.1.1`. Installation verifies both SDK versions and
+`mcp==2.2.0` and `mcp-types==2.2.0`. Installation verifies both SDK versions and
 loaded module paths inside its own virtual environment. Hermes is not required.
 For Oda, Mathem and MENY, install `agent-browser@0.33.1` and a non-snap
 Chromium/Chrome.

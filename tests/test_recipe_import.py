@@ -3184,7 +3184,7 @@ class ImportMCPRuntimeTests(unittest.TestCase):
         import importlib.util
         import subprocess
         if importlib.util.find_spec('mcp') is None:
-            self.skipTest('requires pinned MCP 2.1.1 runtime')
+            self.skipTest('requires pinned MCP 2.2.0 runtime')
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
         source = Path(__file__).resolve().parents[1]
