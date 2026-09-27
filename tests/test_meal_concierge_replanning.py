@@ -98,6 +98,26 @@ class ReplanningTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, 'stale, missing|another menu'):
             restarted.handle({'operation':'menu', 'action':'replan_apply', 'replan_ref':forged})
 
+    def test_conflicting_retained_menu_key_blocks_successor_without_writing(self):
+        conflicting = deepcopy(self.menu)
+        conflicting['digest'] = '0' * 64
+        with self.store.locked() as state:
+            state['menu_planning']['history'][mp.lock_key(self.menu)] = conflicting
+        prepared = self.prepare(planner_input={'candidates': self.candidates[3:]})
+        before = self.store.path.read_bytes()
+        with self.assertRaisesRegex(HouseholdError, 'snapshot already exists with different content'):
+            self.apply(prepared)
+        self.assertEqual(self.store.path.read_bytes(), before)
+
+    def test_identical_retained_menu_key_allows_successor_and_replay(self):
+        with self.store.locked() as state:
+            state['menu_planning']['history'][mp.lock_key(self.menu)] = deepcopy(self.menu)
+        prepared = self.prepare(planner_input={'candidates': self.candidates[3:]})
+        result = self.apply(prepared)
+        self.assertEqual(result['menu']['supersedes'], mp.menu_ref(self.menu))
+        self.assertEqual(self.store.read()['menu_planning']['history'][mp.lock_key(self.menu)], self.menu)
+        self.assertTrue(self.apply(prepared)['idempotent'])
+
     def test_stale_date_revision_locks_and_payload_do_not_write(self):
         prepared = self.prepare(planner_input={'candidates':self.candidates[3:]})
         before = self.store.path.read_bytes()

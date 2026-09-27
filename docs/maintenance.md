@@ -91,5 +91,8 @@ build. Archive installations may have an unknown commit. Older releases report
 Status also warns when planning history or recipe-usage history approaches its
 existing capacity. These are planning diagnostics, not a complete storage audit.
 Do not delete history to silence a warning: retained menus, feedback and uncertain
-external operations can depend on it. A future archival migration needs explicit
-reference and recovery semantics before changing those records.
+external operations can depend on it. Explicit [history archival and recovery](runtime-reference.md#history-retention)
+can move eligible, detached history into a private archive after a stopped-service
+backup. It never trims records merely to meet the capacity limit. A new installation
+or an upgrade starts conservative last-change clocks; old menu dates alone do not
+establish eligibility. Ordinary maintenance does not run archival automatically.

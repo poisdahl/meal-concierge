@@ -65,6 +65,78 @@ paths remain supported by `service.py`; native adoption does not convert Compose
 or claim live parity. MENY login and the private `vipps_phone_number` used by
 Oda or MENY require the authorized provider setup.
 
+## History retention
+
+Recipe revisions, source snapshots and library journals remain in `recipes.sqlite3`.
+Menu/usage history stays in the existing JSON format in `state.json`.
+State reads decode a fresh private value under the state
+lock without serializing or copying the complete history again.
+
+The runtime records a content fingerprint and last-observed change time for each
+archivable history record in additive `history_retention` metadata. Existing
+records receive a new clock on upgrade: a menu's old week is not evidence that
+nobody recently recorded cooking, cancellation or feedback. Changed records start
+a new clock. No records are removed during startup, reading, planning or updates.
+
+The retention window is the larger of **52 weeks** and the household's configured
+recipe cooldown. A record must be older than that window by both its observed
+last change and any retained event/meal date. Missing or inconsistent clocks keep
+the record. Current menus, ancestry, carried slots, order snapshots, feedback,
+delivery/email journals and replay/uncertainty records retain their connected
+history regardless of age. Prepared planning references retain all history because
+their authority can bind the complete planning digest. Journals and recipe-bank
+data are never archival candidates. If protected or recent history reaches the
+2,000-record bound, report the limit; do not discard evidence to make room.
+
+For an explicitly requested archive, use the updated installation's exact home:
+
+```sh
+./install.sh history-preview --home /absolute/data-home
+# Inspect the returned counts, retention window and exact preview digest.
+# When idle, stop only this installation through its existing process owner.
+./install.sh history-archive --home /absolute/data-home \
+  --history-preview EXACT_PREVIEW_DIGEST --backup /private/new-history-backup
+```
+
+Preview does not change household data. Archive rechecks the state and UTC date,
+requires the exact preview, acquires stopped-service ownership, and makes a
+complete private state/config backup at the new destination. It writes and verifies
+`history-archive.json` durably before atomically removing eligible records from live
+JSON. Archives are not automatically deleted. Active ownership, a changed preview,
+failed backup or failed archive write stops the operation. Start the same service
+only after the command exits and its result is understood.
+
+Archival removes those old entries from ordinary history/feedback/cooldown queries;
+their exact contents remain in the archive and complete backup. No recipe revision,
+asset, frozen operation snapshot or external outcome is changed. The archive is
+private household data, never a public recipe pack.
+
+After interruption, inspect the original result, new preview and backup before
+retrying. The atomic state is either the original or compacted state, and a
+compacted state always has its verified archive. To undo archival, stop the same
+installation and merge the archived history back:
+
+```sh
+./install.sh history-restore --home /absolute/data-home \
+  --backup /private/new-history-backup
+```
+
+Recovery verifies the archive checksum and household/store, preserves current
+external journals, refuses conflicting current records or a capacity overflow,
+and gives newly restored records fresh clocks. Repeating completed recovery is
+safe. Never replace current state with the old full backup after further payments,
+cart changes or deliveries. Use the existing full-backup restore to a separate
+empty home for offline inspection when merge recovery refuses.
+
+If you temporarily run an older release or another writer that does not maintain
+these clocks, reestablish them after returning to this runtime, before archival:
+stop the exact service and run `./install.sh history-rebaseline --home
+/absolute/data-home`. This keeps every history record and external journal and
+starts a fresh retention window. It does not infer missing activity from old dates.
+Rebaselining discards the prior clock evidence; history contents and external
+journals are preserved. Menu succession refuses to replace an existing retained
+snapshot with different content; an identical existing snapshot is allowed.
+
 ## Externally managed hosts
 
 Use `--manager external` for a host such as the Grok cloud computer that can

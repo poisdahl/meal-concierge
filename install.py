@@ -3,7 +3,7 @@
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -574,6 +574,97 @@ def backup(meta, destination):
     return str(destination)
 
 
+def history_maintenance(meta, action, preview=None, destination=None):
+    """Run in the installed interpreter; the writer holds its own lifetime locks."""
+    from core import _atomic_json
+    import history_retention as history
+
+    path = Path(meta['paths']['state']) / 'state.json'
+
+    def load():
+        value = json.loads(path.read_text())
+        # Reject non-finite JSON and unsupported state before making a backup.
+        history.canonical(value)
+        return value
+
+    def report(plan):
+        return {key: plan[key] for key in ('preview', 'as_of_date', 'retention_weeks',
+                'cutoff_date', 'eligible_records', 'retained_records')}
+
+    if action == 'history-preview':
+        return report(history.plan(load()))
+    if destination is None and action != 'history-rebaseline':
+        raise RuntimeError('--backup is required for history archive/recovery')
+    destination = Path(destination).resolve() if destination is not None else None
+    with offline(meta), file_lock(path.parent / 'state.lock'):
+        state = load()
+        if action == 'history-rebaseline':
+            state.pop(history.CLOCKS, None)
+            history.track_changes(state)
+            _atomic_json(path, state)
+            return {'rebaselined': True, 'history_removed': False}
+        if action == 'history-restore':
+            document = json.loads((destination / 'history-archive.json').read_text())
+            original = json.loads((destination / 'state/state.json').read_text())
+            original_plan = history.plan(original, today=date.fromisoformat(document['preview']['as_of_date']))
+            if history.archive(original, original_plan) != document:
+                raise RuntimeError('history archive differs from its complete backup; nothing restored')
+            restored = history.recover(state, document)
+            _atomic_json(path, restored)
+            return {'restored': True, 'archive': str(destination / 'history-archive.json'),
+                    'external_journals_changed': False}
+        planned = history.plan(state)
+        if not preview or planned['preview'] != preview:
+            raise RuntimeError('history preview is stale; inspect a fresh history-preview before archiving')
+        if not planned['eligible_records']:
+            return {**report(planned), 'archived': False}
+        after = history.compact(state, planned)
+        document = history.archive(state, planned)
+        backup(meta, destination)
+        if json.loads((destination / 'state/state.json').read_text()) != state:
+            raise RuntimeError('history backup differs from the previewed state; nothing archived')
+        archive_path = destination / 'history-archive.json'
+        _atomic_json(archive_path, document)
+        if json.loads(archive_path.read_text()) != document:
+            raise RuntimeError('history archive verification failed; nothing archived')
+        # Recovery verifies the archive against its copied state. Make every
+        # backup file durable, then directories bottom-up, before compaction.
+        for root, _directories, files in os.walk(destination, topdown=False):
+            for name in files:
+                descriptor = os.open(Path(root) / name, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            descriptor = os.open(root, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        # backup() can create several missing parent directories as well.
+        for directory in destination.parents:
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        _atomic_json(path, after)
+        return {**report(planned), 'archived': True, 'archive': str(archive_path)}
+
+
+def history_command(meta, action, preview=None, destination=None):
+    release = Path(meta['release'])
+    if not (release / 'history_retention.py').is_file():
+        raise RuntimeError('update the installed runtime before history maintenance')
+    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import history_maintenance; print(json.dumps(history_maintenance(*json.loads(sys.argv[2]))))"
+    result = subprocess.run([str(release / 'venv/bin/python'), '-I', '-c', code,
+                             str(release), json.dumps([meta, action, preview, str(destination) if destination else None])],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError('history maintenance failed: ' + (result.stderr or result.stdout).strip()[-2000:])
+    return json.loads(result.stdout)
+
+
 def stage_release(code_root, uv_binary=None):
     uv = executable(uv_binary, ['uv'], 'uv')
     release = code_root / ('release-' + uuid.uuid4().hex)
@@ -659,7 +750,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -676,9 +767,12 @@ def main():
     parser.add_argument('--expected-sha256', help='exact digest pin for a local collection import/removal')
     parser.add_argument('--allow-recipe-removals', action='store_true', help='allow an authoritative local pack to remove absent recipes from its own pack_id')
     parser.add_argument('--backup', type=Path)
+    parser.add_argument('--history-preview', help='exact digest returned by history-preview, required for history-archive')
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
+    if args.history_preview is not None and args.action != 'history-archive':
+        raise RuntimeError('--history-preview applies only to history-archive')
     pack_actions = {'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'}
     if args.prepared is not None and (args.action != 'import-recipes' or args.recipe_pack is not None):
         raise RuntimeError('--prepared applies only to import-recipes and cannot be combined with --recipe-pack')
@@ -771,6 +865,11 @@ def main():
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
             if args.action in {'start', 'stop', 'restart', 'run'}:
                 lifecycle(meta, args.action); return
+            if args.action in {'history-preview', 'history-archive', 'history-restore', 'history-rebaseline'}:
+                if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
+                    raise RuntimeError('complete the runtime update before history maintenance')
+                print(json.dumps(history_command(meta, args.action, args.history_preview, args.backup)))
+                return
             if args.action == 'backup':
                 if not args.backup:
                     raise RuntimeError('--backup destination is required')
