@@ -2103,6 +2103,23 @@ candidate discovery so it cannot make a legitimate order ambiguous; ambiguity
 among non-abandoned entries remains blocking. Scheduled attempts, fulfillment
 states and any recorded dispatch remain ineligible.
 
+For an explicit owner instruction, an operator may use
+`checkout(action="retire_attempt", confirmation_id=..., order_id=...,
+expected_checkout_digest=..., owner_authorization=...)` to retire only the
+current interactive Oda new-order attempt. The digest is SHA-256 of
+`service_common.canonical(pending_checkout)`; authorization records
+`source="explicit_owner_instruction"`, the message `reference`, and its
+`instruction`. Read-only inspection must bind one post-baseline **delivered**
+order to the original goods, quantities, currency, delivery and account/address.
+Any difference between the original and observed totals is retained as evidence;
+it does not establish payment or merchant cancellation. `retired_locally=true`
+archives the full sent-payment journal and clears the pending checkout while
+preserving the menu, cart and preferences. Original/recovery confirmations and
+bound submit keys replay that disposition; the order ID stays excluded from
+future recovery. No payment, provider write or purchase follow-up is performed,
+and charge, authorization release and refund remain unknown. This is an exact
+owner-directed local disposition, never an automatic stale-payment rule.
+
 Oda and Mathem bind checkout accounts and original order receipts through the
 same reader with separate origins and receipt labels. Existing-order review and
 reconciliation retain the reference captured before editing. Missing binding

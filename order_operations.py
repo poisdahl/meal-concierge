@@ -365,7 +365,8 @@ class OrderOperations:
             isinstance(record, Mapping)
             and record.get("kind") == "checkout"
             and isinstance(record.get("result"), Mapping)
-            and record["result"].get("abandoned_unpaid") is True
+            and (record["result"].get("abandoned_unpaid") is True
+                 or record["result"].get("retired_locally") is True)
             and isinstance(record["result"].get("order_id"), str)
             and record.get("target_id") == record["result"]["order_id"]
             )
@@ -2216,6 +2217,8 @@ class OrderOperations:
 
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        if any(key in request for key in ("expected_checkout_digest", "owner_authorization")) and action != "retire_attempt":
+            raise HouseholdError("Local retirement evidence is available only for retire_attempt")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2273,7 +2276,7 @@ class OrderOperations:
             )
         if "order_id" in request and not (
                 action == "prepare"
-                or action == "abandon_unpaid"):
+                or action in {"abandon_unpaid", "retire_attempt"}):
             state = self.store.read()
             legacy_result = None
             if action == "confirm":
@@ -2287,6 +2290,8 @@ class OrderOperations:
             if (not isinstance(legacy_result, Mapping)
                     or str(legacy_result.get("order_id") or "") != str(request.get("order_id") or "")):
                 raise HouseholdError("order_id is available only for exact-order recovery preparation")
+        if action == "retire_attempt":
+            return self._checkout_retire_attempt(deadline, request)
         if action == "switch_payment":
             return self._checkout_switch_payment(deadline, request.get("confirmation_id"), request.get("checkout_payment"))
         if action == "abort_payment":
@@ -3013,6 +3018,123 @@ class OrderOperations:
                 else "Standing authorization is configured. If the current request explicitly asks to order, pay or check out, call checkout confirm now with this confirmation_id; do not ask again."
             ),
         }
+
+    def _checkout_retire_attempt(self, deadline, request):
+        """Archive an owner-retired attempt against one independently bound delivered order."""
+        confirmation_id = request.get("confirmation_id")
+        digest = request.get("expected_checkout_digest")
+        authorization = request.get("owner_authorization")
+        if (not isinstance(confirmation_id, str) or not confirmation_id
+                or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or not isinstance(authorization, Mapping)
+                or set(authorization) != {"source", "reference", "instruction"}
+                or authorization.get("source") != "explicit_owner_instruction"
+                or any(not isinstance(authorization.get(key), str)
+                       or not authorization[key].strip() or len(authorization[key]) > limit
+                       for key, limit in (("reference", 200), ("instruction", 2000)))):
+            raise HouseholdError("Local retirement requires the exact confirmation, journal digest and explicit owner instruction provenance")
+        order_id = safe_order_id(request.get("order_id"))
+        with self._browser_operation(deadline):
+            state = self.store.read()
+            recovered = self._read_protected_result(state, confirmation_id, "checkout")
+            if recovered:
+                if (recovered.get("retired_locally") is True
+                        and recovered.get("order_id") == order_id
+                        and recovered.get("retired_checkout_digest") == digest
+                        and recovered.get("owner_authorization") == authorization):
+                    return recovered
+                raise HouseholdError("The confirmation belongs to another checkout disposition")
+            pending = deepcopy(state.get("pending_checkout"))
+            if (self.provider != "oda" or self.browser is None
+                    or not isinstance(pending, Mapping)
+                    or pending.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}
+                    or any(pending.get(key) for key in ("order_change", "occurrence", "automatic_checkout", "scheduler_context"))
+                    or state.get("order_change") or state.get("pending_cancellation")
+                    or (pending.get("recovery") or pending).get("confirmation_id") != confirmation_id
+                    or self._checkout_cancellation_digest(pending) != digest):
+                raise HouseholdError("Local retirement requires the unchanged current interactive Oda new-order attempt")
+            attempts = [pending] + ([pending["recovery"]] if pending.get("recovery") else [])
+            for attempt in attempts:
+                retained_ids = [attempt.get("unpaid_order_id"), attempt.get("order_id")]
+                retained_ids.extend((attempt.get(key) or {}).get("order_id")
+                                    for key in ("vipps_request_context", "authentication_context", "payment_failure"))
+                if any(value is not None and value != order_id for value in retained_ids):
+                    raise HouseholdError("The retirement order differs from a retained payment identity")
+                if self._read_protected_result(state, attempt["confirmation_id"], "checkout"):
+                    raise HouseholdError("A checkout confirmation already has a protected result")
+
+            def listed_ids(value):
+                rows = value.get("orders") if isinstance(value, Mapping) else None
+                if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+                    raise HouseholdError("Retirement requires an exact merchant order list and retained baseline")
+                ids = []
+                for row in rows:
+                    identity = safe_order_id(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or ""))
+                    require_provider_identity(row, identity)
+                    ids.append(identity)
+                return ids
+
+            before = set(listed_ids(pending.get("orders_before")))
+            observed_orders = self.provider_client.call("get_orders", {"page": 1, "size": 20}, deadline=deadline)
+            candidates = [identity for identity in listed_ids(observed_orders) if identity not in before]
+            if candidates != [order_id] or self._order_was_abandoned(state, order_id):
+                raise HouseholdError("Retirement requires one new merchant order matching the exact requested identity")
+            order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
+            tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
+            require_provider_identity(order, order_id)
+            require_provider_identity(tracking, order_id, tracking=True)
+            if str(tracking.get("status") or "").casefold() != "delivered":
+                raise HouseholdError("Local retirement requires the bound merchant order to be delivered")
+            summary = pending["summary"]
+            expected_total = money_cents(summary.get("total"))
+            observed_total = money_cents(order.get("grossAmount"))
+            if not expected_total or not observed_total:
+                raise HouseholdError("Retirement requires both original and observed order totals")
+            binding = require_order_binding({
+                "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
+                "receipt_address": summary["delivery"].get("address"),
+            })
+            addressed = order if "deliveryAddress" in order or "delivery_address" in order else {
+                **order, "deliveryAddress": binding["receipt_address"]}
+            # Retirement verifies identity, not payment. Keep the actual discrepancy
+            # below; never relax the normal checkout reconciliation amount check.
+            if not order_matches_checkout(addressed, {**summary, "total": observed_total / 100}, provider="oda"):
+                raise HouseholdError("The retirement order goods, currency, delivery or address differ from the checkout")
+            observed_binding = self.browser.read_order_binding(
+                order_id, order, deadline=deadline, expected_binding=binding)
+            if canonical(require_order_binding(observed_binding)) != canonical(binding):
+                raise HouseholdError("The retirement order account differs from the checkout")
+            evidence = {
+                "orders": deepcopy(observed_orders), "order": deepcopy(order), "tracking": deepcopy(tracking),
+                "binding": deepcopy(observed_binding), "observed_at": self._now().isoformat(),
+                "original_total_ore": expected_total, "observed_total_ore": observed_total,
+                "difference_ore": observed_total - expected_total,
+            }
+            terminal = {
+                "confirmed": False, "retired_locally": True, "order_id": order_id,
+                "confirmation_id": confirmation_id, "original_confirmation_id": pending["confirmation_id"],
+                "retired_checkout_digest": digest, "owner_authorization": deepcopy(dict(authorization)),
+                "tracking_status": "delivered", "retry_allowed": False, "recovery_preparation_available": False,
+                "original_total_ore": expected_total, "observed_total_ore": observed_total,
+                "difference_ore": observed_total - expected_total,
+                "payment": self._payment_evidence("delivered"),
+                "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
+                "next": "The owner retired this local checkout attempt. The merchant reports its order delivered; payment settlement remains unknown. Do not confirm, retry or recover this attempt or order.",
+            }
+            with self.store.locked() as state:
+                if (canonical(state.get("pending_checkout")) != canonical(pending)
+                        or state.get("order_change") or state.get("pending_cancellation") or state.get("pending_cart_change")
+                        or any(self._read_protected_result(state, attempt["confirmation_id"], "checkout") for attempt in attempts)):
+                    raise HouseholdError("The checkout changed during local retirement inspection")
+                for attempt in attempts:
+                    self._store_protected_result(state, attempt["confirmation_id"], "checkout", terminal,
+                                                 target_id=order_id, intent_signature=checkout_intent_signature(summary))
+                    record = state["protected_results"][attempt["confirmation_id"]]
+                    record["retired_attempt"] = deepcopy(attempt)
+                    record["retirement_evidence"] = deepcopy(evidence)
+                self._release_detached_checkout_usage(state, pending)
+                state["pending_checkout"] = None
+            return terminal
 
     def _checkout_abandon_unpaid(self, deadline, confirmation_id, requested_order_id):
         """Release one exact Oda/Vipps journal only after proven non-dispatch."""
