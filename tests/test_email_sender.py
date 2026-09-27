@@ -318,7 +318,7 @@ class SenderTests(unittest.TestCase):
                         async with stdio_client(parameters, errlog=log) as (read, write):
                             async with ClientSession(read, write, read_timeout_seconds=30) as client:
                                 await client.initialize()
-                                configured = await client.call_tool("meal_concierge_email_sender", {"action": "configure", "recipient": "recipient@example.test"})
+                                configured = await client.call_tool("meal_concierge_email_sender", {"action": "configure", "recipient": "recipient@example.test", "timing": "on_request"})
                                 self.assertFalse(configured.is_error, configured.content)
                                 rejected = await client.call_tool("meal_concierge_email_sender", {
                                     "action": "send", "request_id": "missing-intent",

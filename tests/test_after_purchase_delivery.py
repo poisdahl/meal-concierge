@@ -5,10 +5,14 @@ from email.parser import BytesParser
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import HouseholdError
 from email_sender import EmailSender
 from menu_planning import menu_ref
+from menu_planning import digest
 from test_email_sender import Mailbox
 from test_recipe_delivery import fixture, chat_cap, DEST
 
@@ -80,6 +84,25 @@ class AfterPurchaseTests(unittest.TestCase):
         self.assertNotIn('Ukesmeny', str(message['Subject']))
         self.assertFalse(any(p.get_content_type() == 'application/pdf' for p in message.walk()))
         self.assertIn(self.menu['dishes'][0]['name'], str(message.get_body(('html',)).get_content()))
+
+    def test_enabling_purchase_delivery_does_not_retroactively_queue_reconciled_order(self):
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'on_request'})
+        self.purchase()
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'after_purchase'})
+        self.purchase()
+        self.assertEqual([], self.app.store.read()['email_jobs'])
+
+    def test_legacy_manual_request_keeps_original_intent_identity(self):
+        self.rpc('recipe_delivery', action='disable', channel='email')
+        intent = {'menu_ref': menu_ref(self.menu), 'destinations': {'chat': DEST['chat']},
+                  'capabilities': {'chat': chat_cap()}}
+        result = self.rpc('recipe_delivery', action='request', request_id='legacy-manual',
+                          delivery_requested=True, **intent)
+        with self.app.store.locked() as state:
+            state['recipe_delivery']['jobs']['legacy-manual']['intent_digest'] = digest(intent)
+        replay = self.rpc('recipe_delivery', action='request', request_id='legacy-manual',
+                          delivery_requested=True, provider=None, order_id=None, **intent)
+        self.assertEqual(result, replay)
 
     def test_grocery_only_and_unrequested_timing_do_not_enqueue(self):
         self.assertIsNone(self.purchase(menu_bound=False))

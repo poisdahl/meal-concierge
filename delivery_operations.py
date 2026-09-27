@@ -311,7 +311,9 @@ class DeliveryOperations:
         request_id = identifier(request.get("request_id"), "request_id")
         if request.get("delivery_requested") is not True:
             raise HouseholdError("request requires an explicit user intent to deliver this saved menu")
-        intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities", "provider", "order_id")}
+        intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities")}
+        if request.get("order_id") is not None:
+            intent.update(provider=request.get("provider"), order_id=request["order_id"])
         if request.get("language") is not None:
             from recipe_languages import language_tag
             intent["language"] = language_tag(request["language"])

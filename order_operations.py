@@ -4615,6 +4615,7 @@ class OrderOperations:
         if isinstance(delivery_date, str):
             snapshot["delivery_date"] = delivery_date
         snapshot["order_id"] = order_id
+        first_confirmation = order_id not in state.get("order_snapshots", {})
         state.setdefault("order_snapshots", {})[order_id] = snapshot
         state.setdefault("order_snapshot_times", {})[order_id] = self._now().isoformat()
         state.setdefault("order_snapshot_providers", {})[order_id] = self.provider
@@ -4628,7 +4629,8 @@ class OrderOperations:
         current = state.get("menu")
         if isinstance(current, Mapping) and current.get("menu_id") == snapshot.get("menu_id") and current.get("digest") == snapshot.get("digest"):
             state["menu"] = deepcopy(snapshot)
-        self._enqueue_purchase_email(state, snapshot, order_id)
+        if first_confirmation:
+            self._enqueue_purchase_email(state, snapshot, order_id)
         OrderOperations._prune_order_snapshots(state, keep_order_id=order_id)
 
     def _checkout_authentication_wait(self, pending, deadline):
