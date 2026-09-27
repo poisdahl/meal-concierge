@@ -60,6 +60,8 @@ class SenderTests(unittest.TestCase):
                        "connections": [{"id": "gmail", "type": "command", "unattended": True}]}
         self.runner = self.new_runner()
         self.runner.execute({"action": "configure", "recipient": "recipient@example.test", "timing": "both"})
+        # Attachment-integrity cases exercise an explicitly requested email PDF.
+        self.rpc("recipe_delivery", action="configure", changes={"email": {"pdf": True}})
 
     def rpc(self, operation, **request):
         return self.app.handle({"operation": operation, **request})
@@ -354,6 +356,7 @@ class OrderSenderTests(EmailSchedulerTests):
             return self.app.handle({"operation": operation, **request})
         runner = EmailSender(rpc, config, transport_factory=lambda c: self.mailbox)
         runner.execute({"action": "configure", "recipient": "synthetic@example.test", "timing": "delivery_day"})
+        rpc("recipe_delivery", action="configure", changes={"email": {"pdf": True}})
         runner.execute({"action": "adopt_order", "provider": "oda", "order_id": "test-order"})
         return runner
 

@@ -185,6 +185,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_both_channels_smtp_one_dispatch_and_identical_pdf(self):
         self.both()
+        self.call("configure", changes={"email": {"pdf": True}})
         job = self.request(destinations=DEST, capabilities={"chat": chat_cap(), "email": email_cap()})
         parts = self.parts(job)
         pdf = next(p for p in parts if p["kind"] == "pdf")

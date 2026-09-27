@@ -112,7 +112,7 @@ class RecipeLanguageTests(unittest.TestCase):
             self.assertNotIn('Fremgangsmåte', rendered['text'])
             pdf = render_pdf(rendered)
             self.assertTrue(pdf.startswith(b'%PDF'))
-            self.assertIn(b'Weekly menu and recipes', pdf)
+            self.assertIn(b'Menu and recipes', pdf)
             request = {'operation': 'recipe_delivery', 'action': 'request', 'request_id': 'english', 'delivery_requested': True,
                        'menu_ref': menu_ref(menu), 'destinations': {'chat': DEST['chat']}, 'capabilities': {'chat': chat_cap()}}
             job = app.handle(request)

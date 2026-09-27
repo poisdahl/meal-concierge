@@ -12,7 +12,7 @@ import re
 
 from recipe_assets import RecipeAssetError
 from recipe_email import _plain_text, prepare_recipe_media
-from service_common import format_portions, menu_email_html, meal_type_label
+from service_common import format_portions, menu_email_html, meal_type_label, menu_delivery_title
 
 
 def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
@@ -61,7 +61,8 @@ def render_menu(menu, assets, *, images=True, show_estimate_labels=True):
         position = full.index("</h1>") + len("</h1>")
         full = full[:position] + ("<h2>Dates</h2>" if english else "<h2>Datoer</h2>") + "".join("<p>" + html.escape(v) + "</p>" for v in dates) + full[position:]
     return {"html": full, "text": _plain_text(full), "covers": covers,
-            "warnings": list(dict.fromkeys(warnings)), "language": frozen.get("output_language")}
+            "warnings": list(dict.fromkeys(warnings)), "language": frozen.get("output_language"),
+            "title": menu_delivery_title(frozen)}
 
 
 def split_text(document, maximum):
@@ -196,7 +197,7 @@ def render_pdf(rendered):
         canvas.setFont("MCVera", 8)
         canvas.drawRightString(A4[0] - 48, 25, str(doc.page))
     SimpleDocTemplate(output, pagesize=A4, leftMargin=48, rightMargin=48, topMargin=38,
-                      bottomMargin=44, title="Weekly menu and recipes" if str(rendered.get("language") or "").split("-")[0] == "en" else "Ukesmeny og oppskrifter", author="Meal Concierge").build(
+                      bottomMargin=44, title=rendered.get("title", "Menu and recipes"), author="Meal Concierge").build(
                           story, onFirstPage=footer, onLaterPages=footer)
     return output.getvalue()
 
@@ -215,5 +216,5 @@ def render_email(rendered, *, recipient, sender, subject, pdf=None, message_id=N
     for cid, data in rendered["covers"].items():
         body.add_related(data, maintype="image", subtype="jpeg", cid="<" + cid + ">", disposition="inline")
     if pdf is not None:
-        message.add_attachment(pdf, maintype="application", subtype="pdf", filename="ukesmeny.pdf")
+        message.add_attachment(pdf, maintype="application", subtype="pdf", filename="meny.pdf")
     return message.as_bytes()

@@ -10,6 +10,7 @@ import re
 import secrets
 
 from core import HouseholdError, valid_email_address, mask_email
+from service_common import menu_delivery_title, safe_order_id
 from menu_planning import exact_menu, menu_ref, digest
 from recipe_assets import RecipeAssets, read_local_file
 from recipe_delivery import render_menu, render_pdf, render_email, split_text, limit_images
@@ -40,7 +41,7 @@ def legacy_id(job):
 
 
 def order_email_summary(state):
-    return [{"id": legacy_id(j), "purpose": "order_delivery_day",
+    return [{"id": legacy_id(j), "purpose": j.get("trigger", "order_delivery_day"),
              "recipient": mask_email(j.get("recipient_snapshot")), "status": j.get("status"),
              "held": j.get("status") in {"pending", "claimed", "sending"} and legacy_held(state, j), "delivery_date": j.get("delivery_date")}
             for j in state["email_jobs"]]
@@ -149,7 +150,7 @@ class DeliveryOperations:
                     evidence(binding["account"])
                     destination = {k: binding[k] for k in ("sender", "recipient")}
                     capabilities(binding["capabilities"], "email", destination)
-                    if type(binding["unattended"]) is not bool or binding["timing"] not in {"on_request", "delivery_day", "both"}:
+                    if type(binding["unattended"]) is not bool or binding["timing"] not in {"on_request", "delivery_day", "both", "after_purchase"}:
                         raise HouseholdError("invalid email timing or unattended support")
                     if binding["timing"] != "on_request" and not binding["unattended"]:
                         raise HouseholdError("this connection is not configured for unattended execution")
@@ -310,7 +311,7 @@ class DeliveryOperations:
         request_id = identifier(request.get("request_id"), "request_id")
         if request.get("delivery_requested") is not True:
             raise HouseholdError("request requires an explicit user intent to deliver this saved menu")
-        intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities")}
+        intent = {k: request.get(k) for k in ("menu_ref", "destinations", "capabilities", "provider", "order_id")}
         if request.get("language") is not None:
             from recipe_languages import language_tag
             intent["language"] = language_tag(request["language"])
@@ -325,7 +326,18 @@ class DeliveryOperations:
             raise HouseholdError("recipe delivery is explicitly paused")
         if len(delivery["jobs"]) >= 2000:
             raise HouseholdError("recipe delivery history is full; retain receipts and archive it explicitly")
-        menu = deepcopy(exact_menu(state, request.get("menu_ref")))
+        if request.get("order_id") is not None:
+            order_id = safe_order_id(request["order_id"])
+            provider = request.get("provider")
+            if provider not in {"oda", "meny", "mathem"} or state.get("order_snapshot_providers", {}).get(order_id) != provider:
+                raise HouseholdError("recipe delivery requires the exact confirmed menu order and provider")
+            menu = deepcopy(state.get("order_snapshots", {}).get(order_id))
+            if not isinstance(menu, dict) or menu.get("order_id") != order_id or menu.get("phase") != "ordered":
+                raise HouseholdError("the original purchased menu snapshot is unavailable")
+            if request.get("menu_ref") is not None and request["menu_ref"] != menu_ref(menu):
+                raise HouseholdError("menu_ref differs from the purchased menu")
+        else:
+            menu = deepcopy(exact_menu(state, request.get("menu_ref")))
         if request.get("language") is not None:
             from recipe_languages import menu_language
             menu = menu_language(menu, request["language"])
@@ -341,7 +353,7 @@ class DeliveryOperations:
         if not isinstance(caps, dict) or set(caps) != selected:
             raise HouseholdError("each selected channel needs its actual verified native capabilities")
         caps = {c: capabilities(caps[c], c, destinations[c]) for c in selected}
-        job = {"id": request_id, "purpose": "explicit_finalized_menu", "menu_ref": menu_ref(menu),
+        job = {"id": request_id, "purpose": "purchased_menu" if request.get("order_id") else "explicit_finalized_menu", "menu_ref": menu_ref(menu),
                "menu_snapshot": menu, "intent_digest": digest(intent), "destinations": deepcopy(destinations),
                "capabilities": caps, "preferences": deepcopy(delivery["preferences"]), "parts": [], "warnings": []}
         binding = delivery.get("sender_binding")
@@ -412,7 +424,7 @@ class DeliveryOperations:
                 for text in split_text(rendered["html"], cap["text_limit"]):
                     part(channel, "text", text)
                 if pdf is not None:
-                    part(channel, "pdf", pdf, "application/pdf", "ukesmeny.pdf")
+                    part(channel, "pdf", pdf, "application/pdf", "meny.pdf")
                 for cid, data in rendered["covers"].items():
                     if len(data) <= cap.get("attachment_limit", 0):
                         part(channel, "image_preview", data, "image/jpeg", "oppskriftsbilde.jpg")
@@ -420,11 +432,11 @@ class DeliveryOperations:
                         job["warnings"].append("chat: image exceeds native preview limit")
             else:
                 destination = destinations[channel]
-                raw = render_email(rendered, **destination, subject=("Weekly menu " if str(menu.get("output_language") or "").split("-")[0] == "en" else "Ukesmeny ") + str(menu.get("week")), pdf=pdf)
+                raw = render_email(rendered, **destination, subject=menu_delivery_title(menu), pdf=pdf)
                 if len(raw) > cap["message_limit"]:
                     # One email is one dispatch. Do not truncate recipes or
                     # silently fan out emails when the actual sender rejects it.
-                    raw = render_email(cache[(False, show_estimate_labels)], **destination, subject=("Weekly menu " if str(menu.get("output_language") or "").split("-")[0] == "en" else "Ukesmeny ") + str(menu.get("week")))
+                    raw = render_email(cache[(False, show_estimate_labels)], **destination, subject=menu_delivery_title(menu))
                     job["warnings"].append("email: attachments omitted to fit native message limit")
                 if len(raw) > cap["message_limit"]:
                     job["warnings"].append("email: complete recipe text exceeds native message limit; email not dispatched")
@@ -432,7 +444,7 @@ class DeliveryOperations:
                         part(channel, "text_fallback", text)
                         job["parts"][-1]["status"] = "unavailable"
                 else:
-                    part(channel, "email", raw, "message/rfc822", "ukesmeny.eml")
+                    part(channel, "email", raw, "message/rfc822", "meny.eml")
         job["warnings"] = list(dict.fromkeys(job["warnings"]))
         delivery["jobs"][request_id] = job
         return summary(job)

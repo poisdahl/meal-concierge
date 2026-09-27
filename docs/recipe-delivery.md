@@ -7,12 +7,27 @@ is not required.
 
 New installations use chat text by default, with PDF and available images where
 the agent supports them. You can choose formats and channels independently.
+Email includes the complete recipes without a duplicate PDF by default. If email
+is unavailable, ask for a PDF through the supported chat or file destination.
 Older installations keep their existing delivery preferences.
 
 `show_estimate_labels` controls whether internal estimate provenance is rendered
 next to a quantity or portion in future chat, PDF and email output. Turning it
 off does not remove or alter the stored evidence, nor does it change frozen
 outbound jobs.
+
+## After a purchase
+
+Choose after-purchase email to receive the purchased menu as soon as the grocery
+order is confirmed. It works for several purchases in one week and for scheduled
+orders. A grocery-only purchase does not send recipes. Pending payment is not a
+confirmed order, and a delayed email never causes another purchase.
+
+The title uses the delivery date when known. Each message contains the recipes
+and portions attached to that purchase, even if you have since planned another
+menu. Delivery-day reminders are separate and are not enabled automatically.
+Changing delivery timing affects future purchases; existing pending messages
+must be reviewed before moving them to avoid duplicate sends.
 
 ## Chat, PDF and images
 
@@ -39,7 +54,8 @@ successfully delivered attachment on another computer.
 ## Email connection setup
 
 > Set up recipe email using my existing email connection. Let me choose the
-> sender, recipient and whether to send on request, on delivery day, or both.
+> sender, recipient and whether to send after a confirmed menu purchase, on request,
+> or on delivery day.
 
 Email is optional and starts disabled in a new installation. Setup checks the
 agent host's existing email connection and records your choices; it does not
