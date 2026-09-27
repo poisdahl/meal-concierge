@@ -124,6 +124,14 @@ through thousands of recipe tool calls.
 
 Use the [runtime update procedure](runtime.md#updates-failures-and-recovery) and
 [external service ownership instructions](runtime-reference.md#externally-managed-hosts).
+For a locally approved collection archive larger than Grok's observed 100 MiB
+`CopyToBox` per-file limit, use the
+[verified split/reassembly procedure](runtime.md#versioned-recipe-package-integration)
+with the approved original size and SHA-256. Transfer its small manifest and
+parts as files into the exact installation's private download area, reassemble
+there, and inspect the verified whole ZIP before the separately approved import.
+Published Optional Recipe Collection releases use the runtime's direct HTTPS
+download and preparation path; do not route them through `CopyToBox`.
 From the new source, run `check-browser` against the existing home before stopping
 the healthy execution; repeat any explicit browser paths on `update`. This check
 does not open the browser or require store login. Stop only the exact installation

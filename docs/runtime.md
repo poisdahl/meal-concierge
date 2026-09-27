@@ -233,6 +233,38 @@ import has exited (including an error), restore the service through its owner
 when no update/recovery marker prevents starting it. Do not claim a partial import
 completed. See [preparation and recovery details](runtime-reference.md#versioned-recipe-package-integration).
 
+For an independently approved **local** collection archive that is not on the
+publisher channel, use the applicable reviewed import path for that pack. A
+user-selected pack follows the
+[local collection procedure](runtime-reference.md#user-selected-collection-packs);
+an unpublished candidate for the reserved publisher pack needs its separately
+reviewed maintenance path. If a host file transfer caps each file below the
+archive size, split it with the
+standard-library helper on the source host, transfer the manifest and every
+part as files, then reassemble on the destination host:
+
+```sh
+python3 recipe_pack_transfer.py split --source /absolute/approved.zip \
+  --parts-dir /absolute/transfer-parts --expected-bytes APPROVED_BYTES \
+  --expected-sha256 APPROVED_SHA256
+# Transfer transfer-parts/pack-transfer.json and every transfer-parts/part-* file.
+python3 recipe_pack_transfer.py assemble \
+  --manifest /absolute/transfer-parts/pack-transfer.json \
+  --output /absolute/inbox/approved.zip --expected-bytes APPROVED_BYTES \
+  --expected-sha256 APPROVED_SHA256
+```
+
+The expected whole-archive size and SHA-256 must come from the independent
+approval, not the transferred manifest. The default parts are 64 MiB, below
+Grok Bot's observed 100 MiB `CopyToBox` per-file cap; `--max-part-bytes` can
+be lowered for another transport. Reassembly checks part order, size and
+digest and the whole archive before exposing the output path. It refuses to
+overwrite an existing file. The helper does not import or publish the archive;
+after reassembly, use the appropriate read-only pack inspection and stopped
+import with the same approved SHA-256. Do not send archive bytes
+through model context or publish a private collection to work around a host
+transfer limit.
+
 ### Remove the recipe collection
 
 > Permanently remove the Optional Recipe Collection from my Meal Concierge
