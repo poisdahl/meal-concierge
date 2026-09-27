@@ -355,6 +355,28 @@ class RecipeContractTests(unittest.TestCase):
         cross["library_ids"] = ["builtin"]
         self.assertEqual(self.app.handle(cross)["recipes"][0]["entry_origin"], "bundled")
 
+    def test_builtin_search_defaults_to_active_recipes_and_explicit_browsing_keeps_drafts(self):
+        active_recipe = authored_recipe()
+        active_recipe["name"] = "Search status active"
+        active = self.save(active_recipe, "search-status-active")
+        draft_recipe = authored_recipe()
+        draft_recipe["name"] = "Search status draft"
+        draft = self.app.recipes.import_pack_record(
+            draft_recipe, pack_id="synthetic", recipe_id="draft", version="1", status="draft"
+        )["recipe"]
+        archived_recipe = authored_recipe()
+        archived_recipe["name"] = "Search status archived"
+        archived = self.save(archived_recipe, "search-status-archived")
+        self.app.recipes.archive(archived["id"], archived["revision"])
+
+        for library_selection in ({"library_id": "builtin"}, {"library_ids": ["builtin"]}):
+            query = {"operation": "recipes", "action": "search", "query": "Search status", "limit": 1, **library_selection}
+            self.assertEqual([row["id"] for row in self.app.handle(query)["recipes"]], [active["id"]])
+            ineligible = self.app.handle({**query, "include_ineligible": True, "limit": 10})["recipes"]
+            self.assertEqual({row["id"] for row in ineligible}, {active["id"], draft["id"]})
+            archived_results = self.app.handle({**query, "include_archived": True, "limit": 10})["recipes"]
+            self.assertEqual({row["id"] for row in archived_results}, {active["id"], draft["id"], archived["id"]})
+
     def test_historical_menu_replay_does_not_change_when_current_pack_metadata_changes(self):
         for kind in ("recipe_ref", "library_recipe_ref"):
             with self.subTest(kind=kind):
