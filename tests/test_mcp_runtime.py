@@ -166,7 +166,7 @@ async def call(client, tool, **args):
     result = await client.call_tool("meal_concierge_" + tool, args)
     assert not result.is_error, result
     text = json.loads(result.content[0].text)
-    if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders"}:
+    if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
         assert len(result.content) == 1 and result.content[0].type == "text", result
         assert result.structured_content is None, result
         assert isinstance(text, dict), result
@@ -210,7 +210,7 @@ async def sdk_checks(root, process):
             assert tool.input_schema["type"] == "object"
             description = (tool.description or "").casefold()
             assert "cli.py" not in description and "local cli" not in description, tool.name
-            if tool.name in {"meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products", "meal_concierge_status", "meal_concierge_recipes", "meal_concierge_recipe_discovery", "meal_concierge_cart", "meal_concierge_orders"}:
+            if tool.name in {"meal_concierge_profile", "meal_concierge_recipe_web_search", "meal_concierge_recipe_web_read", "meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products", "meal_concierge_status", "meal_concierge_recipes", "meal_concierge_recipe_discovery", "meal_concierge_cart", "meal_concierge_orders"}:
                 assert tool.output_schema is None
             else:
                 assert tool.output_schema["type"] == "object"

@@ -1842,7 +1842,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool("meal_concierge_" + tool, arguments)
         self.assertFalse(result.is_error, result)
         text = json.loads(result.content[0].text)
-        if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders"}:
+        if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
             self.assertEqual(len(result.content), 1)
             self.assertEqual(result.content[0].type, "text")
             self.assertIsNone(result.structured_content)
@@ -1970,6 +1970,17 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
                              await self.cli({"operation": "menu", "action": "plan", "interactive": True,
                                              "planner_input": {"week": self.week()}}))
             await self.call(client, "setup", action="apply", keep_current=True)
+            # Default cross-source discovery must stay cross-source, while full
+            # recipe prose stays behind exact follow-up reads on the agent wire.
+            discovered = await self.call(client, "recipe_discovery", limit=3)
+            self.assertIn("oda", {row["source"] for row in discovered["sources"]})
+            self.assertTrue(discovered["recipes"])
+            for row in discovered["recipes"]:
+                self.assertEqual(row["representation"], "summary")
+                self.assertNotIn("steps", row)
+                ref = row["recipe_ref"]
+                detail = await self.call(client, "recipes", action="get", recipe_id=ref["id"], revision=ref["revision"])
+                self.assertTrue(detail["steps"]["items"])
             page = await self.call(client, "recipe_discovery", projection="summary", source="internal", limit=3)
             self.assertIsNotNone(page["next_cursor"])
             following = await self.call(client, "recipe_discovery", projection="summary", source="internal",

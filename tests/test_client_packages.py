@@ -61,15 +61,15 @@ class ClientPackages(unittest.TestCase):
                     self.assertFalse(update.is_error, update)
                     result = await second.call_tool("meal_concierge_profile", {"action": "show"})
                     self.assertFalse(result.is_error, result)
-                    self.assertEqual(result.structured_content["profile"]["meals"]["portions"], 3)
-                    self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+                    self.assertEqual(json.loads(result.content[0].text)["profile"]["meals"]["portions"], 3)
+                    self.assertIsNone(result.structured_content)
             asyncio.run(exercise())
             self.assertIsNone(process.poll(), "bridge teardown stopped the shared service")
         with probe.service(self.root):
             async def reconnect():
                 async with connect(plugins[0]) as session:
                     result = await session.call_tool("meal_concierge_profile", {"action": "show"})
-                    self.assertEqual(result.structured_content["profile"]["meals"]["portions"], 3)
+                    self.assertEqual(json.loads(result.content[0].text)["profile"]["meals"]["portions"], 3)
             asyncio.run(reconnect())
 
     def test_unavailable_service_creates_no_package_and_no_core(self):

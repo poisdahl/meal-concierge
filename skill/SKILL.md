@@ -44,6 +44,16 @@ are relative to this installed skill directory; use the host's skill/file reader
 (on Hermes, `skill_view` with `file_path="references/…"`). Ordinary status,
 meal selection and product preparation need no additional reference loading.
 
+Reuse already-read results and exact references while their scope/version remains
+current. Fetch only missing pages: candidate summaries are not ingredient/method
+evidence, but complete details already read need no duplicate get. Review the
+selected recipes' ingredient, method and dietary fit; reassess affected parts
+after adaptation, scaling or changed preferences. Batch independent ingredient
+decisions up to the tool's limit and follow returned continuation/page arguments.
+Do not repeat setup, broad searches or whole-collection audits for routine planning.
+Refresh whenever an operation requires fresh provider evidence, the service reports
+stale data, or stock, price, payment or order facts may have changed.
+
 ## Choose and save meals
 
 1. On first interactive use, present setup's single keep-all-or-change question,
