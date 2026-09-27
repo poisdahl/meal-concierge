@@ -464,6 +464,8 @@ class PlanningOperations:
         if planner_input.get("dates", replacement_dates) != replacement_dates:
             raise HouseholdError("planner dates must exactly match the unlocked remaining dates")
         planner_input.update({"week": current["week"], "dates": replacement_dates, "as_of_date": today, "alternatives": 1})
+        if (current.get("planning_scope") or {}).get("planning_mode") == "ad_hoc":
+            planner_input["planning_mode"] = "ad_hoc"
         # Replacements inherit complete frozen batch components, not the full
         # household week. Retain the accepted prepared amount for this menu.
         replacement_state = deepcopy(planning_state)
@@ -817,7 +819,7 @@ class PlanningOperations:
             raise HouseholdError("new meals must be dated today or later")
         year, week_number, _ = day.isocalendar()
         week = f"{year}-W{week_number:02d}"
-        if current and current["week"] != week:
+        if current and current["week"] != week and (current.get("planning_scope") or {}).get("planning_mode") != "ad_hoc":
             raise HouseholdError("the added meal must belong to the current menu week")
         if current and len(current["slots"]) >= 31:
             raise HouseholdError("a menu supports at most 31 meal slots")
@@ -855,7 +857,7 @@ class PlanningOperations:
                 successor["replan_selection"] = deepcopy(handoff)
         scope = (current.get("planning_scope") or (current.get("planner_selection") or {}).get("request")) if current else None
         dinner_dates = sorted({s["date"] for s in successor["slots"] if s["meal_type"] == "dinner"})
-        successor["planning_scope"] = deepcopy(scope) if scope is not None else {"dates": dinner_dates, "portions": portions}
+        successor["planning_scope"] = deepcopy(scope) if scope is not None else {"planning_mode": "ad_hoc", "dates": dinner_dates, "portions": portions}
         if raw["meal_type"] == "dinner":
             successor["planning_scope"]["dates"] = sorted(set(successor["planning_scope"].get("dates", [])) | {raw["date"]})
         successor["schedule"] = mp.schedule(successor)
@@ -922,7 +924,7 @@ class PlanningOperations:
         def checked_day(value):
             try:
                 parsed = date.fromisoformat(value)
-                if parsed.isoformat() != value or value < today or parsed.isocalendar()[:2] != date.fromisoformat(current["slots"][0]["date"]).isocalendar()[:2]:
+                if parsed.isoformat() != value or value < today or ((current.get("planning_scope") or {}).get("planning_mode") != "ad_hoc" and parsed.isocalendar()[:2] != date.fromisoformat(current["slots"][0]["date"]).isocalendar()[:2]):
                     raise ValueError()
             except (ValueError, TypeError):
                 raise HouseholdError("edit date must be today or later in the current menu week") from None
@@ -1170,7 +1172,7 @@ class PlanningOperations:
         successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {})
         successor["planning_scope"]["dates"] = sorted(set(dinner_dates))
         expected = (snapshot.get("profile") or {}).get("meals", {}).get("dinner_days")
-        successor["weekly_plan_complete"] = type(expected) is int and expected > 0 and len(dinner_dates) == expected
+        successor["weekly_plan_complete"] = successor["planning_scope"].get("planning_mode") != "ad_hoc" and type(expected) is int and expected > 0 and len(dinner_dates) == expected
         if len(canonical(successor).encode()) > MAX_MENU_BYTES or len(menu_email_html(successor).encode()) > MAX_EMAIL_HTML_BYTES:
             raise HouseholdError("edited menu exceeds the recipe delivery size limit")
         before = deepcopy(current)
@@ -1316,12 +1318,11 @@ class PlanningOperations:
         self, value: Any, state: Mapping[str, Any], *, anchor_current_date: bool
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value).difference({
-            "week", "dates", "portions", "candidates", "strict_targets",
+            "week", "dates", "planning_mode", "period", "portions", "candidates", "strict_targets",
             "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode", "selection_mode",
         }):
             raise PlannerError("planner input has unknown fields")
         available = normalize_available_ingredients(value.get("available_ingredients"))
-        week = validate_week(value.get("week"))
         supplied_as_of_date = value.get("as_of_date")
         if anchor_current_date:
             as_of_date = self._household_today(state).isoformat()
@@ -1342,7 +1343,11 @@ class PlanningOperations:
         meals = profile.get("meals")
         if not isinstance(meals, Mapping):
             raise PlannerError("profile meals are invalid")
-        dates = deepcopy(value.get('dates')) if value.get('dates') is not None else self._default_planner_dates(week, profile)
+        from planner import planning_dates
+        planning_mode, week, dates = planning_dates(value, as_of_date, meals['dinner_days'])
+        week = validate_week(week)
+        if dates is None:
+            dates = self._default_planner_dates(week, profile)
         if not isinstance(dates, list) or not all(isinstance(d, str) for d in dates):
             raise PlannerError('planner dates must be ISO dates')
         selection_mode = value.get("selection_mode", "ranked")
@@ -1367,12 +1372,13 @@ class PlanningOperations:
                 raise PlannerError('prepared_portion_range must be two ordered positive portion counts')
             profile = deepcopy(profile)
             profile['meals']['prepared_portion_range'] = override
-        layout = bp.recurring_layout(profile, dates)
+        layout = bp.recurring_layout(profile, dates, relative=planning_mode == "ad_hoc")
         if layout and value.get('portions', meals['portions']) != meals['portions']:
             raise PlannerError('recurring batch consumption must match accepted profile portions; update that explicit setting or use fresh dates')
         if value.get('recurring_batch') is not None and canonical(layout) != canonical(value['recurring_batch']):
             raise PlannerError('recurring batch settings changed; plan again')
         return {
+            **({'planning_mode': 'ad_hoc'} if planning_mode == 'ad_hoc' else {}),
             **({'recurring_batch': layout} if layout else {}),
             **({'prepared_portion_range': deepcopy(override)} if override is not None else {}),
             **({'meal_mode': mode} if mode is not None else {}),
@@ -1679,8 +1685,12 @@ class PlanningOperations:
             "dietary_facets": deepcopy(slot["dietary_facets"]),
             "leafy_green": deepcopy(slot["leafy_green"]),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
+        if handoff["request"].get("planning_mode") == "ad_hoc":
+            menu["planning_scope"] = {k: deepcopy(handoff["request"][k]) for k in ("planning_mode", "dates", "portions", "strict_targets")}
+            menu["planning_scope"]["selection_mode"] = handoff["request"].get("selection_mode", "ranked")
         if handoff['request'].get('recurring_batch'):
             menu["planning_scope"] = {
+                **menu.get("planning_scope", {}),
                 "selection_mode": handoff["request"].get("selection_mode", "ranked"),
                 "strict_targets": deepcopy(handoff["request"].get("strict_targets", [])),
             }
@@ -1805,7 +1815,8 @@ class PlanningOperations:
                     {"save_ref": self._planner_ref(handoff), "selection": deepcopy(handoff["selection"])}
                     for handoff in result["save_handoffs"][1:]
                 ]
-            return {"plan": result}
+            return {"plan": result,
+                    "follow_up": "Offer full ingredients and cooking steps, recipe swaps or preference adjustments, and a check of ingredients already at home before shopping."}
         if action == "clear":
             with self.product_plan_lock, self.store.locked() as state:
                 current = state.get("menu")
@@ -1916,7 +1927,8 @@ class PlanningOperations:
                 ] if has_explicit_slots else []
                 observed_dinners = len(dinner_slots) if has_explicit_slots else len(menu.get("dishes", []))
                 menu["weekly_plan_complete"] = (
-                    type(expected_dinners) is int and expected_dinners > 0
+                    (menu.get("planning_scope") or {}).get("planning_mode") != "ad_hoc"
+                    and type(expected_dinners) is int and expected_dinners > 0
                     and observed_dinners == expected_dinners
                 )
                 digest = menu_digest(menu)
@@ -4332,7 +4344,8 @@ class PlanningOperations:
                 state["cart_plan"]["weekly_minimums_enforced"] = (
                     menu.get("weekly_plan_complete") is True
                     or (
-                    type(expected_dinners) is int and expected_dinners > 0
+                    (menu.get("planning_scope") or {}).get("planning_mode") != "ad_hoc"
+                    and type(expected_dinners) is int and expected_dinners > 0
                     and observed_dinners == expected_dinners
                     )
                 )
@@ -4640,8 +4653,7 @@ class PlanningOperations:
         menu = snapshot.get('menu') or {}
         recurring = []
         if request.get("_include_recurring", True) and snapshot['recurring_items']:
-            year, week = map(int, menu['week'].split('-W'))
-            recurring = self._due_recurring(snapshot, date.fromisocalendar(year, week, 1))
+            recurring = self._due_recurring(snapshot, self._household_today(snapshot))
         for item in recurring:
             key = self._product_id(item['product_id'])
             requirements[key] = requirements.get(key, 0) + item['quantity']

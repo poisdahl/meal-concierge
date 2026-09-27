@@ -38,7 +38,8 @@ def assess_menu(state):
     slots = menu.get("slots") or []
     covered_days = len({slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}) if slots else None
     issues = []
-    if slots and covered_days != expected_days:
+    actual_dates = {slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}
+    if slots and (covered_days != expected_days or ("dates" in requested and actual_dates != set(requested["dates"]))):
         issues.append({"code": "dinner_day_coverage", "expected": expected_days, "actual": covered_days})
     if not slots and len(dishes) != meals["dishes"]:
         issues.append({"code": "dish_coverage", "expected": meals["dishes"], "actual": len(dishes)})

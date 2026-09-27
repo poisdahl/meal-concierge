@@ -216,25 +216,36 @@ def sources(menu):
     return menu.get('batches', []) or ([menu['batch']] if menu.get('batch') else [])
 
 
-def recurring_layout(profile, eating_dates):
+def recurring_layout(profile, eating_dates, *, relative=False):
     """Cover accepted eating dates; preparation size is a preference, not a cap."""
     meals = profile['meals']
     if meals.get('meal_mode', 'fresh') == 'fresh':
         return None
     if not meals.get('recurring_batch_accepted'):
         raise HouseholdError('Accept the exact recurring batch settings before reusing them.')
-    cooking = [day for day in eating_dates if date.fromisoformat(day).strftime('%A').casefold() in {d.casefold() for d in meals['cook_days']}]
-    if not cooking or cooking[0] != eating_dates[0] or len(cooking) != meals['dishes']:
+    if relative:
+        # Reuse intervals between accepted cooking sessions, anchored to the
+        # requested first eating date rather than calendar weekday names.
+        weekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        template_eating = sorted({weekdays.index(d.casefold()) for d in meals['eat_days']})[:meals['dinner_days']]
+        template_cooking = {weekdays.index(d.casefold()) for d in meals['cook_days']}
+        starts = {i for i, day in enumerate(template_eating) if day in template_cooking}
+        if not starts or 0 not in starts:
+            raise HouseholdError('Accepted cooking template must start on its first eating day.')
+        cooking = [day for i, day in enumerate(eating_dates) if i % len(template_eating) in starts]
+    else:
+        cooking = [day for day in eating_dates if date.fromisoformat(day).strftime('%A').casefold() in {d.casefold() for d in meals['cook_days']}]
+    if not cooking or cooking[0] != eating_dates[0] or (not relative and len(cooking) != meals['dishes']):
         raise HouseholdError('Cooking days must start on the first eating day and match dishes; propose explicit cooking-day/dish settings.')
     count = meals['batch_dishes']
-    if not 1 <= count <= len(cooking) or (meals['meal_mode'] == 'batch' and count != len(cooking)):
+    if not relative and (not 1 <= count <= len(cooking) or (meals['meal_mode'] == 'batch' and count != len(cooking))):
         raise HouseholdError('Batch count must fit cooking days; batch mode requires every dish to be a batch.')
     low, _high = meals['prepared_portion_range']
     portions = meals['portions']
     intervals = {day: [d for d in eating_dates if day < d < (cooking[i + 1] if i + 1 < len(cooking) else '9999-12-31')] for i, day in enumerate(cooking)}
     # Repeated eating dates determine which cooking sessions need batches.
     batch_days = {day for day in cooking if intervals[day]}
-    if len(batch_days) != count:
+    if not relative and len(batch_days) != count:
         raise HouseholdError('batch_dishes must match cooking sessions with dependent eating days; adjust cooking days or batch count explicitly')
     result = []
     for index, day in enumerate(cooking):
