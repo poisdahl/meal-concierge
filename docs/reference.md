@@ -335,12 +335,20 @@ recover that same lost response; use a new key for a later user intent.
 
 The first interactive menu or recipe-discovery request returns one setup
 question with the current household, provider, people, portions, diet,
-confirmation policy, weekly-menu fields and six recipe-source switches. Keep
+confirmation policy, meal-plan fields and six recipe-source switches. Keep
 all values once, or send only the values to change. The operation is
 idempotent, and `setup rerun` makes the same review available later. It never
 asks for or returns provider credentials, API keys, Vipps details or recipient
 addresses. A non-interactive weekly run proceeds with the saved/default values
 and leaves an explicit `needs_review` status instead of blocking automation.
+
+Setup returns brief guidance for each stage and a phrase for requesting a full
+overview. `profile overview` returns effective household preferences, pantry
+review, recurring goods, schedule and delivery formats; separate sender/delivery
+status and library listings supply their detailed configuration. Proposed pantry
+basics are not stock until accepted with `profile review_pantry`. That action
+records the answered review date. Product prepare/get surfaces the next review;
+a due check is a conversation prompt, never a purchase instruction.
 
 Oda/MENY installations retain their five enabled sources; Mathem is initially
 disabled there. Mathem installations enable the local bank, Mathem, TheMealDB
@@ -1970,6 +1978,12 @@ anchors existing recurring intervals once in household time, and preserves older
 predispatch manual cart_ready confirmations. Newly added intervals persist their
 anchor; an unchanged upsert keeps it. Profile/setup/reset validate exact saved
 types and practical quantity/time ranges before any state write.
+
+Opt-in elapsed recurrence uses `unit=days` and an ISO-date anchor. It remains due
+until confirmed fulfillment, then advances by `every` days (default one). Calendar
+weeks/months retain their behavior. Cart preparation and checkout use the actual
+household shopping date. A confirmed cancellation restores eligibility from the
+remaining fulfillment evidence; retries do not advance the interval again.
 
 Cooking experience uses `feedback experience` with an exact menu-provided target
 and reported actual_active_minutes, portion_fit (too_small/right/too_large) and/or

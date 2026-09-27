@@ -473,7 +473,7 @@ def meal_concierge_recipe_pack(
 def meal_concierge_email_sender(
     action: Literal["status", "configure", "send", "reconcile", "retry", "send_order", "reconcile_order", "retry_order", "adopt_order"] = "status",
     connection_id: str | None = None, sender: str | None = None, recipient: str | None = None,
-    timing: Literal["on_request", "after_purchase", "delivery_day", "both"] = "on_request",
+    timing: Literal["on_request", "after_purchase", "delivery_day", "both"] | None = None,
     request_id: str | None = None, menu_ref: MenuRef | None = None,
     delivery_requested: bool = False, provider: Literal["oda", "meny", "mathem"] | None = None,
     order_id: str | None = None, scheduler: dict[str, Any] | None = None,

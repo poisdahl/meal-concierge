@@ -1278,7 +1278,7 @@ def recurring_due_on(item: Mapping[str, Any]) -> date:
     try:
         anchor = date.fromisoformat(schedule["anchor"])
         last = item.get("last_fulfilled_on")
-        return date.fromisoformat(last) + timedelta(days=schedule["every"]) if last else anchor
+        return date.fromisoformat(last) + timedelta(days=schedule.get("every", 1)) if last else anchor
     except (KeyError, TypeError, ValueError, OverflowError) as exc:
         raise HouseholdError("elapsed recurring dates must use YYYY-MM-DD") from exc
 

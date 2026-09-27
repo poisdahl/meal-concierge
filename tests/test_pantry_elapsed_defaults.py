@@ -71,6 +71,9 @@ class PantryElapsedTests(unittest.TestCase):
         self.assertFalse(due_recurring(saved, date(2026, 10, 17)))
         self.assertTrue(due_recurring(saved, date(2026, 10, 18)))
         self.assertTrue(due_recurring(saved, date(2026, 12, 31)))
+        daily = {'schedule': {'unit': 'days', 'anchor': '2026-09-01'}, 'last_fulfilled_on': '2026-09-27'}
+        self.assertFalse(due_recurring(daily, date(2026, 9, 27)))
+        self.assertTrue(due_recurring(daily, date(2026, 9, 28)))
 
     def test_defaults_overview_and_validation(self):
         self.assertEqual(DEFAULT_PROFILE['meals']['target_active_minutes'], [0, 45])
