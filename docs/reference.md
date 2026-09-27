@@ -392,7 +392,19 @@ observation is stored as durable price truth.
 The MCP bridge requests `response_view=agent`. The service projects normal status,
 menu, recipe, cart and order reads before the Unix response-size boundary; the
 raw local API defaults to `full`. MCP emits one textual representation for these
-views. Control references and actual mutation outcomes remain visible first.
+views. Profile and web-search/read tools also send one compact JSON text block,
+without an identical structured payload; profile fields and extracted source
+content remain complete. Clients should parse the JSON text as for menu tools.
+Control references and actual mutation outcomes remain visible first.
+
+Recipe search and discovery return shortlist summaries with exact follow-up
+references, source credit, collection membership and usage/eligibility findings.
+Read selected recipes through get/resolve/detail before assessing ingredient and
+method fit. `projection=full` still searches across enabled sources; the agent
+view summarizes its results without changing source coverage. The raw local API
+continues to expose full results. In recipe detail, `presentation.steps_from="steps"`
+means the presentation uses the identical canonical step page, including its
+continuation. Differing translations retain their separate step pages.
 Ordinary detail pages use `view_offset`, `view_limit` (1–20) and `view_section`;
 recipe ingredients/steps/provenance, cart items and menu issues are read through
 the same tools. Follow the returned continuation pointers. Product preparation

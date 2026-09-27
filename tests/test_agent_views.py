@@ -148,6 +148,57 @@ class AgentViewTests(unittest.TestCase):
         self.assertEqual(second["order_items"]["items"][0]["name"], "Synthetic beans")
         self.assertNotIn("next_offset", second["order_items"])
 
+    def test_candidate_projection_preserves_scope_and_exact_followups(self):
+        from copy import deepcopy
+        local = {"id": "local", "revision": 2, "name": "Beans", "portions": 2,
+                 "ingredients": [{"item": "beans", "quantity": 100, "unit": "g"}],
+                 "steps": ["Simmer the beans. " * 500],
+                 "image": {"data": "x" * 10000}, "content_fingerprint": "unused",
+                 "source": {"publisher": "Author", "url": "https://example.org/beans"},
+                 "rights": {"storage": "full", "credit": "Author"},
+                 "pack": {"pack_id": "optional", "version": "v1", "recipe_id": "beans", "baseline_hash": "unused"},
+                 "usage": {"eligible": False, "blocked_by": ["recently_used"]},
+                 "provider_eligibility": {"eligible": False}, "favorite_revision": 3}
+        discovered = {**local, "discovery_ref": "exact_frozen", "discovery_source": "themealdb",
+                      "pack": {"pack_id": "private", "version": "v2", "recipe_id": "beans"}}
+        result = {"recipes": [local, discovered], "sources": [{"source": "oda", "status": "unavailable"}],
+                  "next_cursor": {"opaque": "unchanged"}}
+        original = deepcopy(result)
+        for action in ("search", "discover"):
+            view = project_agent_result("recipes", action, result)
+            self.assertEqual(view["sources"], result["sources"])
+            self.assertEqual(view["next_cursor"], result["next_cursor"])
+            first, second = view["recipes"]
+            self.assertEqual(first["recipe_ref"], {"id": "local", "revision": 2})
+            self.assertEqual(second["discovery_ref"], "exact_frozen")
+            self.assertEqual(second["discovery_source"], "themealdb")
+            self.assertEqual(first["source"], local["source"])
+            self.assertEqual(first["usage"], local["usage"])
+            self.assertEqual(first["provider_eligibility"], local["provider_eligibility"])
+            self.assertEqual(first["favorite_revision"], 3)
+            self.assertEqual(first["pack"]["pack_id"], "optional")
+            self.assertEqual(second["pack"], discovered["pack"])
+            self.assertEqual(first["rights"], local["rights"])
+            self.assertEqual(first["detail_fields"]["steps"], "not_loaded")
+            self.assertNotIn("steps", first)
+            self.assertLess(len(json.dumps(view)), len(json.dumps(result)) / 4)
+        self.assertEqual(result, original)
+
+    def test_localized_steps_share_only_identical_text_and_keep_paging(self):
+        recipe = {"name": "Beans", "steps": ["Cook", "Serve"], "ingredients": [],
+                  "presentation": {"steps": ["Cook", "Serve"], "ingredients": [],
+                                   "requested_language": "en", "resolved_language": "en", "fallback": False}}
+        view = project_agent_result("recipes", "get", {"recipe": recipe}, limit=1)
+        self.assertEqual(view["presentation"]["steps_from"], "steps")
+        self.assertNotIn("steps", view["presentation"])
+        self.assertEqual(view["steps"]["next_offset"], 1)
+        self.assertFalse(view["presentation"]["fallback"])
+        recipe["presentation"]["steps"] = ["Kok", "Server"]
+        translated = project_agent_result("recipes", "get", {"recipe": recipe}, limit=1)
+        self.assertNotIn("steps_from", translated["presentation"])
+        self.assertEqual(translated["presentation"]["steps"]["items"], ["Kok"])
+        self.assertEqual(translated["steps"]["items"], [{"index": 0, "text": "Cook"}])
+
     def test_recipe_pages_retain_original_identity_indices_and_estimates(self):
         ingredients = [{"item": f"ingredient {index}", "quantity": {"numerator": index + 1, "denominator": 1},
                         "unit": "g", "original_text": f"source {index}",

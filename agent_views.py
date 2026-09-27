@@ -908,6 +908,34 @@ def _recipe_times(value: Any) -> dict[str, Any]:
     return result
 
 
+def _recipe_candidates_view(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep discovery scope and exact follow-up identities without full recipes."""
+    from recipe_selection import compact_candidate
+    view = {**result, "projection": "agent"}
+    rows = []
+    for recipe in result.get("recipes", []):
+        if not isinstance(recipe, dict):
+            continue
+        reference = _fields(recipe, ("recipe_ref", "discovery_ref", "library_recipe_ref"))
+        if not reference and isinstance(recipe.get("id"), str) and type(recipe.get("revision")) is int:
+            reference["recipe_ref"] = {"id": recipe["id"], "revision": recipe["revision"]}
+        # Preserve summary-only source extensions and their cursors unchanged.
+        if recipe.get("representation") == "summary":
+            rows.append(recipe)
+            continue
+        row = compact_candidate(recipe, reference)
+        row.update(_fields(recipe, ("recipe_key", "library_id", "provider_slug", "language",
+                                   "available_languages", "usage", "provider_eligibility",
+                                   "favorite_revision", "discovery_source", "already_saved")))
+        if isinstance(recipe.get("pack"), dict):
+            row["pack"] = _fields(recipe["pack"], ("pack_id", "recipe_id", "version"))
+        row["rights"] = _fields(recipe.get("rights"), ("storage", "credit", "license", "license_url"))
+        rows.append(row)
+    view["recipes"] = rows
+    view["next"] = "Shortlist candidates, then read ingredients and steps with recipes get for an exact recipe/library ref, or discovery resolve/detail for a discovery_ref. Summaries do not establish dietary fit."
+    return view
+
+
 def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, section: str) -> dict[str, Any]:
     view = {"projection": "agent", "operation": "recipes", "action": action}
     view.update(_fields(result, ("discovery_ref", "recipe_digest", "source_identity", "suggested_status",
@@ -942,7 +970,10 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
         if section in {"summary", "ingredients"}:
             view["presentation"]["ingredients"] = _page(presentation.get("ingredients"), offset, limit, "items")
         if section in {"summary", "steps"}:
-            view["presentation"]["steps"] = _page(presentation.get("steps"), offset, limit, "items")
+            if presentation.get("steps") == recipe.get("steps"):
+                view["presentation"]["steps_from"] = "steps"
+            else:
+                view["presentation"]["steps"] = _page(presentation.get("steps"), offset, limit, "items")
     view["ingredient_count"] = len(ingredients)
     view["step_count"] = len(steps)
     if section in {"summary", "ingredients"}:
@@ -980,6 +1011,8 @@ def _project_agent_result_once(operation: str, action: str | None, result: dict[
         return _cart_view(action or "get", result, offset, limit, section)
     if operation == "orders" and action in {None, "list", "get"}:
         return _orders_view(action or "list", result, offset, limit, section)
+    if operation == "recipes" and action in {None, "search", "discover"} and isinstance(result.get("recipes"), list):
+        return _recipe_candidates_view(result)
     if operation == "recipes" and action in {"get", "resolve", "detail", "adapt"}:
         return _recipe_view(action, result, offset, limit, section)
     return result
