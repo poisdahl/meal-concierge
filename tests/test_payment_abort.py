@@ -130,7 +130,7 @@ class PaymentAbortTests(unittest.TestCase):
 
     def test_closed_card_abort_allows_same_order_switch_without_second_abort_or_payment(self):
         self.abort()
-        self.assertIn("exact payment is closed", workflow_status(self.app.store.read())["next_action"]["reason"])
+        self.assertIn("exact payment is closed", workflow_status(self.app.store.read(), now=self.app._now())["next_action"]["reason"])
         self.browser.checkout_payment_authentication = lambda *a, **kw: {
             "active": True, "challenge": True}
         switched = self.flow.call("switch_payment", confirmation_id=self.confirmation,
@@ -176,7 +176,7 @@ class PaymentAbortTests(unittest.TestCase):
         self.browser.close_vipps_request = close_vipps
         closed = self.abort()
         self.assertEqual(closed["payment_abort_status"], "closed")
-        self.assertIn("exact payment is closed", workflow_status(self.app.store.read())["next_action"]["reason"])
+        self.assertIn("exact payment is closed", workflow_status(self.app.store.read(), now=self.app._now())["next_action"]["reason"])
         switched = self.flow.call("switch_payment", confirmation_id=self.confirmation,
                                   checkout_payment={"method": "saved_card"})
         self.assertTrue(switched["recovery"])
@@ -375,7 +375,7 @@ class PaymentAbortTests(unittest.TestCase):
     def test_pending_cancellation_blocks_recovery_payment_claim(self):
         self.abort()
         prepared = self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "order-1"})
-        workflow = workflow_status(self.app.store.read())
+        workflow = workflow_status(self.app.store.read(), now=self.app._now())
         self.assertEqual(workflow["next_action"]["action"], "cancel_confirm")
         self.assertEqual(workflow["next_action"]["confirmation_id"], prepared["confirmation_id"])
         with self.app.store.locked() as state:

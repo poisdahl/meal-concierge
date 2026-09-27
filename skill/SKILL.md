@@ -163,10 +163,18 @@ stale data, or stock, price, payment or order facts may have changed.
    quantities remain unknown: do not invent gram conversions. This is an
    attributed model assessment, not independently verified nutrition. Reassess
    edited recipes. The legacy 25 g check is only a fallback heuristic.
-5. Save the exact returned handoff or save reference. In your first saved-plan
+5. When the request includes shopping, check a bounded shortlist of costly or
+   unusual ingredients with catalog reads before settling the recommendation.
+   Consider availability, unsuitable substitutions and excessive package sizes.
+   For a requested budget or complete estimate, use the existing unsaved
+   `products.prepare(planner_ref=save_ref)` preview. Revise materially impractical
+   meals before saving. Partial checks are not a basket total; unavailable store
+   evidence means unverified feasibility, not an impossible recipe. Pure meal
+   planning needs no product search. Preview never authorizes cart writes.
+   Save the exact returned handoff or save reference. In your first saved-plan
    message follow `presentation_guidance`: credit each recipe's actual source/link,
    give dates/portions and known times, and offer the full ingredients and methods,
-   swaps and using food already at home. Do this before shopping. Preserve its dates,
+   swaps and using food already at home. Do this before cart changes. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
    To save a requested distinct whole new draft during a pending purchase,
    pass both the plan's `save_ref` as `planner_ref` and the
@@ -472,3 +480,14 @@ Retain the original occurrence and pending operation on recovery.
 Lead replies with what actually happened and the next real decision, if any.
 Keep tool references and internal checks out of ordinary meal conversation.
 Distinguish planned, staged, partly completed, confirmed and unknown outcomes.
+
+Use returned `household_experience` when choosing recipes: these are explicit
+reports about that exact recipe version. Weigh reported active time and portion
+fit with the report count and original portions; do not overwrite source times,
+scale portions automatically, or change preferences. Ask whether a reported
+“70 minutes” was active work before recording it as active time. Omit unreported
+fields: “portions too small” does not establish zero leftovers. No report is not
+positive feedback. Returned workflow `arguments` preserve exact continuation
+references; `needs_input` must be resolved under the existing policy; current conversation
+or standing authorization may already satisfy it, so do not ask again automatically. Guidance
+is not authorization and a saved meal plan does not itself request shopping.

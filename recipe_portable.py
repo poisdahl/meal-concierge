@@ -135,7 +135,22 @@ def _manifest(value: Any) -> dict:
     count = value.get("records_count")
     if type(count) is not int or not 0 <= count <= MAX_IMPORT_RECORDS:
         raise RecipeError("portable recipe count is invalid")
+    validate_withdrawals(value.get("withdrawals", {}))
     _inventory(value)
+    return value
+
+
+def validate_withdrawals(value):
+    """Cumulative stable IDs and publisher explanations, never executable policy."""
+    if not isinstance(value, dict) or len(value) > MAX_IMPORT_RECORDS:
+        raise RecipeError("withdrawals must be a bounded object keyed by stable recipe ID")
+    for identity, item in value.items():
+        if (not isinstance(identity, str) or not 1 <= len(identity) <= 256
+                or unicodedata.normalize("NFC", identity).strip() != identity
+                or not isinstance(item, dict) or set(item) != {"category", "reason"}
+                or not isinstance(item["category"], str) or item["category"] not in {"quality", "rights", "duplicate", "other"}
+                or not isinstance(item["reason"], str) or (not item["reason"].strip() or len(item["reason"]) > 300)):
+            raise RecipeError("withdrawal needs a stable ID, category and short nonempty reason")
     return value
 
 
@@ -972,6 +987,8 @@ def _preflight(archive: PortableArchive, *, trust: str) -> dict:
         if match := _ASSET.fullmatch(name):
             validate_managed(archive._read(name), "sha256:" + match[1])
     for record in archive.records():
+        if record["recipe_id"] in archive.manifest.get("withdrawals", {}):
+            raise RecipeError("a withdrawn recipe cannot also be present in the pack")
         if unicodedata.normalize("NFC", record["recipe_id"]).strip() != record["recipe_id"]:
             raise RecipeError("pack record identity must use canonical bank text")
         recipe = normalize_recipe(record["recipe"])
@@ -1479,8 +1496,11 @@ def apply_archive(
                     results.extend({"recipe_id": item["recipe_id"], "outcome": "deleted",
                                     "bank_recipe_id": item["bank_recipe_id"],
                                     "was_favorite": item["was_favorite"],
-                                    "locally_modified": item["locally_modified"]}
+                                    "locally_modified": item["locally_modified"],
+                                    "withdrawal": archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})}
                                    for item in deleted)
+                    report["withdrawals"] = [{"recipe_id": item["recipe_id"], **archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})} for item in deleted[:20]]
+                    report["withdrawals_truncated"] = len(deleted) > 20
                     _report_bytes(directory, "status.json", canonical_bytes(report))
             except (RecipeError, RecipeAssetError) as exc:
                 report["failed"] += 1

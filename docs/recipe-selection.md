@@ -226,3 +226,19 @@ missing search does not block local/store results or authorize AI fallback.
 The resulting save reference contains only the frozen combined candidates,
 not a request to repeat web search. See [import reference](recipe-import-reference.md)
 for settings and storage decisions.
+
+## Household cooking experience
+
+Recipe search, discovery and detail return a compact `household_experience` when
+there are explicit reports for that exact version. It includes the number of
+reports and the most recent reported values, date and original portions where
+known. Planner responses preserve this evidence. Reports do not replace source
+times, rewrite preferences or automatically resize meals. Undo/reset removes
+reports from future selection. A new recipe revision or adaptation does not
+inherit reports from a merely similar title or source.
+
+For a request that includes shopping, screen a small number of costly or unusual
+ingredients before settling the meals. For a budget or complete estimate, use the
+existing unsaved product preview. Revise material fit or package-cost problems;
+missing store evidence stays explicitly unverified. A plan-only request needs no
+product search, and a preview never authorizes a cart change.

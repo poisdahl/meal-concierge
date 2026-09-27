@@ -479,7 +479,7 @@ class Covers:
         return data
 
 
-def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None, reviewed_amendments=None, reviewed_amendments_sha256=None):
+def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: str, stop_after=None, covers_root=None, covers_manifest_sha256=None, curation=None, curation_sha256=None, reviewed_amendments=None, reviewed_amendments_sha256=None, withdrawals=None):
     from recipe_assets import RecipeAssetError
     from recipe_portable import AUTHORITATIVE_MEMBERSHIP, DEFAULT_COLLECTION_DISPLAY_NAME, canonical_bytes, write_archive
     from recipes import RecipeError, normalize_recipe, categories_from_tags
@@ -558,7 +558,16 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             raise PackBuildError('reviewed amendments contain unknown recipe identities')
     elif reviewed_amendments_sha256:
         raise PackBuildError('reviewed amendments checksum requires its file')
+    from recipe_portable import validate_withdrawals, MAX_MANIFEST_BYTES
+    withdrawal_reasons = {}
+    if withdrawals is not None:
+        path = Path(withdrawals)
+        if not path.is_absolute():
+            raise PackBuildError('withdrawals require an absolute reviewed file')
+        withdrawal_reasons = validate_withdrawals(load_json(read_file(path.parent, path.name, MAX_MANIFEST_BYTES)))
     versions = fingerprint()
+    if withdrawal_reasons:
+        versions['withdrawals_sha256'] = digest(encoded(withdrawal_reasons))
     if amendments is not None:
         versions['curation_input_sha256'] = curation_sha256
     if reviewed is not None:
@@ -577,6 +586,14 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
     for index, entry in enumerate(sorted(entries, key=lambda e: (e['source'], int(e['source_id'])))):
         identity = entry['source'] + ':' + entry['source_id']
         base = {'source': entry['source'], 'source_id': entry['source_id'], 'url': entry['url'], 'classification': entry['classification']}
+        if identity in withdrawal_reasons:
+            base.update(status='withdrawn', withdrawal=withdrawal_reasons[identity])
+            coverage_bytes += len(encoded(base)) + 1
+            if coverage_bytes > 16 * 1024 * 1024:
+                raise PackBuildError('coverage exceeds portable report bound')
+            coverage.append(base)
+            counts[(entry['source'], 'withdrawn')] += 1
+            continue
         if entry['classification'] != 'recipe':
             base['status'] = 'excluded_' + entry['classification']
             coverage_bytes += len(encoded(base)) + 1
@@ -711,8 +728,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         coverage.append(base)
         if stop_after is not None and index + 1 >= stop_after:
             return {'complete': False, 'processed': len(coverage), 'cache_reused': reused}
-    if reviewed is not None and reviewed_applied != set(reviewed):
-        missing = ', '.join(sorted(set(reviewed) - reviewed_applied))
+    if reviewed is not None and reviewed_applied != set(reviewed) - set(withdrawal_reasons):
+        missing = ', '.join(sorted(set(reviewed) - set(withdrawal_reasons) - reviewed_applied))
         raise PackBuildError('reviewed amendments were not applied: '+missing)
     release = f'{cache}/release'
     files = []
@@ -776,6 +793,8 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 'rights_policy': RIGHTS_POLICY, 'build_versions': versions,
                 'records_count': len(record_paths), 'counts': {f'{k[0]}.{k[1]}': v for k, v in sorted(counts.items())},
                 'files': files}
+    if withdrawal_reasons:
+        manifest['withdrawals'] = withdrawal_reasons
     if sum(f['bytes'] for f in files) > MAX_EXPANDED_BYTES:
         raise PackBuildError('pack exceeds expanded limit')
     archive_name = f'meal-concierge-recipes-{pack_version}.zip'
@@ -824,12 +843,13 @@ def main():
     parser.add_argument('--curation-sha256')
     parser.add_argument('--reviewed-amendments', type=Path)
     parser.add_argument('--reviewed-amendments-sha256')
+    parser.add_argument('--withdrawals', type=Path, help='cumulative reviewed stable IDs mapped to category/reason, excluding restored IDs')
     args = parser.parse_args()
     print(json.dumps(build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
                            covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256,
                            curation=args.curation, curation_sha256=args.curation_sha256,
                            reviewed_amendments=args.reviewed_amendments,
-                           reviewed_amendments_sha256=args.reviewed_amendments_sha256), indent=2))
+                           reviewed_amendments_sha256=args.reviewed_amendments_sha256, withdrawals=args.withdrawals), indent=2))
 
 
 if __name__ == '__main__':

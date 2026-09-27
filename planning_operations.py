@@ -162,6 +162,15 @@ class PlanningOperations:
             if "leftover_portions" in experience and (type(experience["leftover_portions"]) not in {int, float} or not math.isfinite(experience["leftover_portions"]) or not 0 <= experience["leftover_portions"] <= 100):
                 raise HouseholdError("leftover_portions must be a finite number from zero to 100")
             binding = {"target": deepcopy(target), "experience": deepcopy(experience)}
+            retained = next(menu for menu in menus if isinstance(menu, Mapping)
+                            and any(canonical(candidate) == canonical(target) for candidate in feedback_targets(menu)))
+            slot = next((slot for slot in retained.get("slots", []) if slot.get("slot_id") == target.get("slot_id")), None)
+            recipe = mp.recipe_for_slot(retained, slot) if slot else next(
+                (recipe for recipe in [*retained.get("dishes", []), *retained.get("salads", [])]
+                 if recipe.get("recipe_key") == target["recipe_key"]), {})
+            binding["portion_context"] = {"served_portions": slot.get("portions") if slot else recipe.get("portions"),
+                                          "recipe_portions": recipe.get("portions")}
+
             contributions = [{"recipe_key": target["recipe_key"], "direction": 0}]
         elif action == "swap":
             former = self._feedback_slot(snapshot, request.get("from_target"), allow_predecessor=True)
@@ -1568,6 +1577,10 @@ class PlanningOperations:
             for category in ("unknown", "rejected"):
                 result["discovery"][category] = [{**compact_candidate(item["recipe"], item["reference"]), "recipe_digest": item["content_digest"], "hard_constraints": item["hard_constraints"]}
                                                   for item in collection[category]]
+        result["household_experience"] = [
+            {"reference": deepcopy(candidate["reference"]), "summary": summary}
+            for candidate in resolved
+            if (summary := pf.household_experience(snapshot["planning_feedback"], candidate["reference"]))]
         result["cooking_experiences"] = pf.experiences(snapshot["planning_feedback"], {r["recipe_key"] for r in resolved})[-36:]
         if len(json.dumps({"ok": True, "result": {"plan": result}}, ensure_ascii=True).encode()) > MAX_REQUEST - 4_096:
             raise PlannerError("planner result cannot fit the response transport")
