@@ -187,18 +187,24 @@ If you have an older program version, update the program first. This also applie
 to installations that received the old `2026-09-06.5` collection automatically:
 a code update leaves that collection unchanged until you request an import.
 
-When no active work will be interrupted, stop the existing service, run from
-current source, and start it again:
+From current source, prepare first while the service stays running. Keep the
+`prepared` ID from the JSON output. Only after successful preparation, and when
+no active work will be interrupted, stop through the existing owner, import that
+exact ID and restart. Native-manager example:
 
 ```sh
+./install.sh prepare-recipes --home /absolute/data-home
+# Use the returned prepared ID below; do not stop if preparation failed.
 ./install.sh stop --home /absolute/data-home
-./install.sh import-recipes --home /absolute/data-home
+./install.sh import-recipes --home /absolute/data-home --prepared PREPARED_ID
 ./install.sh start --home /absolute/data-home
 ```
 
-`import-recipes` selects the newest published stable recipe release and verifies
-its checksum, size and format. You do not need to find a version number or edit
-a configuration file. It reports the import result; review any conflicts before
+Preparation reads the publisher-maintained collection descriptor, then verifies
+checksum, size, format and installed-runtime compatibility. Ordinary updates
+make no GitHub REST API request. Grok and other external hosts retain their
+existing execution owner for stop/start. You do not need to find a version number
+or edit a configuration file. Import reports its result; review any conflicts before
 retrying an incomplete import. Existing collection recipes can advance to the
 new publisher version while preserving local edits, favorites and archive state
 for records that remain in the collection. Once every incoming record has been
@@ -208,10 +214,18 @@ favorite belonging to the removed entry. Other local recipes, collections and
 favorites are outside the cleanup. An invalid pack or an interruption before the
 complete record pass does not perform absent-entry deletion.
 
-A local `--recipe-pack /absolute/pack.zip` must match that latest release and
-still requires internet access for verification. It is not an offline import
-mode or a selector for older packs. If the latest release is invalid or
-incompatible, the command reports the error instead of choosing an older one.
+Use `prepare-recipes --recipe-pack /absolute/pack.zip` to reuse a downloaded
+archive; it must match the current publisher descriptor. `import-recipes
+--prepared ID` is fully offline and rechecks the prepared bytes. It never
+silently switches to a newer release. Preparations survive failures for exact
+retry; a changed runtime or an intervening different collection update/removal
+requires fresh preparation. A network failure leaves the service running: report
+the error and any retry time promptly, without polling or silently waiting.
+Use the host execution handle and stderr phase/count progress to track a long
+operation; if detached, inspect that same execution before retrying. Once an
+import has exited (including an error), restore the service through its owner
+when no update/recovery marker prevents starting it. Do not claim a partial import
+completed. See [preparation and recovery details](runtime-reference.md#versioned-recipe-package-integration).
 
 ### Remove the recipe collection
 

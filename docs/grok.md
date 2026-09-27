@@ -132,6 +132,11 @@ Code updates preserve recipes, including collections imported by older
 versions. Update the
 code before separately requesting
 [the latest optional collection](runtime.md#versioned-recipe-package-integration).
+For a collection update, run `prepare-recipes` while the service is available,
+then stop only for `import-recipes --prepared ID`. Keep the execution handle,
+relay phase/progress or failure promptly, and restart after import exits. A
+network error during preparation is not an import still working; do not silently
+wait for GitHub or repeatedly rediscover a verified archive.
 An explicit request to remove the entire collection requires a current runtime:
 stop the exact cloud execution when idle, run
 `./install.sh remove-recipe-collection --home ABSOLUTE_DATA_HOME` through the

@@ -575,7 +575,7 @@ class InstallerTests(unittest.TestCase):
                    release('draft', '2026-09-16', draft=True),
                    {'tag_name': 'v99', 'published_at': '2026-09-17'}]
         with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(listing).encode())):
-            selected = install.latest_recipe_pack()
+            selected = install.published_recipe_pack("synthetic-token")
             self.assertEqual(selected['pack_version'], '2026-09-14-grocery-review-v3')
             self.assertEqual(selected['display_name'], 'Optional Recipe Collection')
         for field, value in [('digest', None), ('size', 0), ('browser_download_url', 'https://example.com/pack.zip')]:
@@ -583,7 +583,7 @@ class InstallerTests(unittest.TestCase):
             invalid['assets'][0][field] = value
             with patch.object(install.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps([listing[0], invalid]).encode())):
                 with self.assertRaises(RuntimeError):
-                    install.latest_recipe_pack()
+                    install.published_recipe_pack("synthetic-token")
 
     def test_install_and_update_publish_without_recipe_network_or_import(self):
         from contextlib import nullcontext

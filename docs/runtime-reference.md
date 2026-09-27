@@ -328,31 +328,66 @@ A fresh local bank can be empty; recipes from the selected, connected store
 remain available without the collection. Existing recipes are kept.
 
 To add or refresh the **Optional Recipe Collection**, use current repository code
-and update an older runtime first. Stop the existing service through its current
-owner, then run this command with the installation's actual home:
+and update an older runtime first. Preparation is read-only for household state
+and does not acquire service ownership:
 
 ```sh
-./install.sh import-recipes --home /absolute/data-home
+./install.sh prepare-recipes --home /absolute/data-home
 ```
 
-Start the service again through the same owner after import. For Grok/external
-installations use the established host executor; native installations use
-`./install.sh stop --home /absolute/data-home` and `start` respectively.
+Keep the returned `prepared` ID, version and timestamp. Preparation obtains a
+small publisher-controlled descriptor, downloads or reuses its exact archive,
+and verifies the full pack against the installed runtime. No GitHub account,
+REST quota or token is required. Download and phase progress goes to stderr;
+the result remains JSON. A failed preparation never requires service downtime.
+Report failures promptly and honor any HTTP retry/reset time without polling.
+
+When idle, stop through the current owner and apply the exact prepared archive:
+
+```sh
+./install.sh import-recipes --home /absolute/data-home --prepared PREPARED_ID
+```
+
+This command performs no network requests. It rechecks the archive's size, SHA,
+format and compatibility, retains the existing exclusive ownership locks and
+reports periodic processed/total counts on stderr. Start through the same owner
+after the command exits, including failed/partial imports when recovery permits.
+For Grok/external hosts retain the original execution ID and inspect it if the
+host disconnects; do not start a second import or leave an idle service stopped.
+Native installations use `./install.sh stop` and `start` with the same home.
 Never interrupt an active shopping, payment or delivery job to import recipes.
 
-`import-recipes` selects the most recently published stable `recipes-` release
-from the official GitHub repository, independently of the runtime code version.
-Drafts, prereleases and code releases are excluded. It verifies the archive
-against GitHub's SHA-256 and byte size, then checks the supported format before
-writing. A missing/invalid latest artifact or unsupported format is reported;
-there is no silent fallback to an older pack. No release lookup occurs during
-ordinary installation or update.
+Preparations are private installer files under `HOME/recipe-preparations/ID`;
+they are not arbitrary uploaded descriptors. They bind to the runtime and state
+path, and remain available for exact-artifact retries. A different intervening
+collection import or removal invalidates older preparations; same-artifact
+partial retries remain valid. The durable collection-attempt generation marker
+is written before official changes under offline ownership; it is not proof of
+successful completion. A runtime update requires new preparation. A newer
+published version alone does not change the already prepared update.
 
-`import-recipes --recipe-pack /absolute/pack.zip` uses a local copy but still
-looks up the latest release and verifies the same digest and size. It is not an
-offline mode or a way to select an older version. Archive data does not pass
-through RPC. Import requires the existing service to be stopped and retains the
-normal exclusive ownership locks.
+`prepare-recipes --recipe-pack /absolute/pack.zip` reuses a local ZIP after
+verifying it against the current publisher descriptor. Preparations reuse a
+cached matching archive, and can be removed when no import uses them. Invalid or
+incompatible current artifacts fail explicitly; no older-version fallback.
+The legacy `import-recipes` without `--prepared` remains supported, but requires
+a stopped service and resolves/downloads online. Agents should use preparation.
+No collection lookup occurs during ordinary program installation or update.
+
+#### Publisher channel
+
+The `Publish recipe channel` workflow responds to published/edited stable recipe
+releases and can be run manually. It uses reviewed `main`, authenticates release
+metadata discovery, downloads and preflights the actual archive, and only then
+updates `optional-recipes.json` on the dedicated `recipe-channel` branch. Clients
+read that small file from raw.githubusercontent.com. Code releases are excluded;
+GitHub's generic latest-release redirect is not a recipe channel. Complete all
+assets before publishing; if publication used automation that does not trigger
+another workflow, explicitly dispatch this workflow afterward. Verify its success
+and the public descriptor before announcing the collection update. Failures
+retain the previous published channel and must be resolved by the publisher.
+Do not replace an existing published archive with different bytes; publish a new
+recipe version. No token is distributed to installations.
 
 ### User-selected collection packs
 
