@@ -559,6 +559,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 "server": {"name": "MENY website"},
                 "tool_count": 11,
             }
+        if operation == "products" and action in {"prepare", "get"}:
+            state = self.store.read()
+            result["pantry_review"] = pantry_review(state["profile"], self._household_today(state))
         if response_view == "agent" and operation != "products":
             result = project_agent_result(
                 operation, action, result, offset=view_offset,

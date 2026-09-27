@@ -158,10 +158,17 @@ class AvailableIngredient(TypedDict):
     use_first: NotRequired[bool]
 
 
+class PlanningPeriod(TypedDict):
+    start_date: str
+    end_date: str
+
+
 class PlannerInput(TypedDict, total=False):
     """Bounded planner request; date and cooldown overrides live here."""
 
     week: str
+    planning_mode: Literal["ad_hoc", "weekly"]
+    period: PlanningPeriod
     dates: Annotated[list[str], Field(min_length=1, max_length=7)]
     portions: int
     candidates: Annotated[list[PlannerCandidate], Field(min_length=1, max_length=12)]
