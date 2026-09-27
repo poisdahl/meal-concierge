@@ -25,7 +25,7 @@ from service_common import (
     email_job_provider,
     expired_awaiting_confirmation,
     menu_email_html,
-    menu_email_period,
+    menu_delivery_title,
     require_provider_identity,
     safe_order_id
 )
@@ -79,7 +79,7 @@ class EmailOperations:
             handle.flush()
             os.fsync(handle.fileno())
         job["sender_part"] = {"file": filename, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-                              "filename": "ukesmeny.eml", "content_type": "message/rfc822"}
+                              "filename": "meny.eml", "content_type": "message/rfc822"}
         job["sender_warnings"] = warnings
 
     def _email_media_payload(self, menu: Mapping[str, Any], fallback_html: str,
@@ -127,6 +127,27 @@ class EmailOperations:
             raise HouseholdError("scheduler binding fields must be bounded nonempty text")
         return dict(value)
 
+    def _enqueue_purchase_email(self, state, snapshot, order_id):
+        """Queue only at the confirmed-order transition; never dispatch here."""
+        delivery = state["recipe_delivery"]
+        binding = delivery.get("sender_binding")
+        preferences = delivery["preferences"]["email"]
+        if (not preferences["enabled"] or not binding or binding.get("timing") != "after_purchase"
+                or not binding.get("unattended")):
+            return
+        # One original recipe email per provider/order, including legacy jobs.
+        if any(j.get("provider") == self.provider and j.get("order_id") == order_id for j in state["email_jobs"]):
+            return
+        state["email_jobs"].append({
+            "provider": self.provider, "order_id": order_id, "trigger": "after_purchase",
+            "delivery_date": snapshot.get("delivery_date"), "status": "pending", "sent_at": None,
+            "created_at": self._now().isoformat(), "recipient_snapshot": binding["recipient"],
+            "menu_snapshot": deepcopy(snapshot), "subject": menu_delivery_title(snapshot),
+            "show_estimate_labels": preferences.get("show_estimate_labels", True),
+            "sender_binding": deepcopy(binding), "sender_preferences": deepcopy(preferences),
+            **({"delivery_hold": True} if legacy_held(state) else {}),
+        })
+
     @staticmethod
     def _email_occurrence(job: Mapping[str, Any]) -> str:
         # One recipe email per provider order, even when delivery is rescheduled.
@@ -140,6 +161,10 @@ class EmailOperations:
     def _require_email_scheduler(self, job: Mapping[str, Any], request: Mapping[str, Any], state=None) -> None:
         # Presence, including an unfinished first adoption, permanently fences
         # this job from the unowned legacy invocation path.
+        if job.get("trigger") == "after_purchase":
+            if "scheduler" in job or request.get("scheduler") is not None:
+                raise HouseholdError("after-purchase delivery does not use a delivery-day scheduler")
+            return
         scheduler = self._native_scheduler_record(job)
         self._scheduler_dispatch_owner(state if state is not None else self.store.read(), scheduler)
         if scheduler is None:
@@ -183,6 +208,8 @@ class EmailOperations:
                     if job.get("order_id") == order_id and email_job_provider(job) == provider]
             if len(jobs) != 1:
                 raise HouseholdError("scheduler management requires one exact email job")
+            if jobs[0].get("trigger") == "after_purchase":
+                raise HouseholdError("after-purchase delivery has no native delivery-day schedule")
             if action == "ack_cleanup":
                 return self._ack_email_cleanup(state, jobs[0], supplied)
             if jobs[0].get("status") not in {"pending", "claimed", "sending"}:
@@ -357,7 +384,7 @@ class EmailOperations:
             provider = email_job_provider(job)
             order_id = safe_order_id(job.get("order_id"))
             scheduler = deepcopy(job.get("scheduler"))
-            if job.get("native_cleanup") or (scheduler and not self._native_bindings(job)):
+            if job.get("trigger") == "after_purchase" or job.get("native_cleanup") or (scheduler and not self._native_bindings(job)):
                 return {"provider": provider, "order_id": order_id,
                         "action": "none", "reason": "native cleanup already verified"}
             if scheduler and scheduler.get("job_removed") is True:
@@ -369,6 +396,35 @@ class EmailOperations:
                     "automation_key": job.get("automation_key") or email_automation_key(provider, order_id),
                     **({"scheduler": scheduler} if scheduler else {}),
                     "action": "remove", "reason": "order cancelled"}
+
+        if action == "migrate_after_purchase":
+            if request.get("delivery_requested") is not True or requested_provider is None:
+                raise HouseholdError("explicit delivery intent and exact provider/order are required to migrate an existing email")
+            order_id = safe_order_id(request.get("order_id"))
+            with self.store.locked() as state:
+                jobs = matching_jobs(state, order_id)
+                if len(jobs) != 1:
+                    raise HouseholdError("migration requires one original order email")
+                job = jobs[0]
+                if job.get("trigger") == "after_purchase":
+                    return {"migrated": True, "idempotent": True, "provider": requested_provider, "order_id": order_id}
+                if job.get("status") != "pending" or job.get("dispatch_started_at") or job.get("claim_token"):
+                    raise HouseholdError("only an undispatched pending email can migrate; reconcile original attempts first")
+                if not job.get("sender_binding"):
+                    raise HouseholdError("adopt the original email sender before changing delivery timing")
+                # Existing cleanup validation binds the exact original native job(s).
+                # Validate on a copy, then retain its receipt with the migrated job.
+                cleaned = deepcopy(job)
+                cleaned["status"] = "cancelled"
+                self._ack_email_cleanup(state, cleaned, request.get("scheduler") or {})
+                job["previous_delivery_schedule"] = {k: deepcopy(cleaned[k]) for k in
+                    ("scheduler", "native_cleanup", "automation_key", "automation_protocol") if k in cleaned}
+                for key in ("scheduler", "native_cleanup", "automation_key", "automation_protocol", "scheduler_adoption_scope"):
+                    job.pop(key, None)
+                job["trigger"] = "after_purchase"
+                job["timing_migrated_at"] = self._now().isoformat()
+                return {"migrated": True, "provider": requested_provider, "order_id": order_id,
+                        "next": "Use the original email_sender send_order occurrence; no new schedule or replacement message."}
 
         if action in {"cancel_followup", "reconcile"}:
             order_id = safe_order_id(request.get("order_id"))
@@ -404,19 +460,25 @@ class EmailOperations:
             jobs = [{
                 "order_id": job.get("order_id"), "delivery_date": job.get("delivery_date"),
                 "status": job.get("status"), "sent_at": job.get("sent_at"),
+                "trigger": job.get("trigger", "delivery_day"),
                 "provider": email_job_provider(job),
                 "recipient": mask_email(job.get("recipient_snapshot")),
                 "scheduler": deepcopy(job.get("scheduler")),
-                "scheduler_ownership": "managed" if "scheduler" in job else "unowned_legacy",
+                "scheduler_ownership": "not_required" if job.get("trigger") == "after_purchase" else "managed" if "scheduler" in job else "unowned_legacy",
                 "occurrence_id": self._email_occurrence(job) if email_job_provider(job) and job.get("status") != "invalid" else None,
-                "automation_update_required": job.get("status") == "pending" and job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL,
+                "automation_update_required": job.get("trigger") != "after_purchase" and job.get("status") == "pending" and job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL,
             } for job in state["email_jobs"]]
-            return {"jobs": jobs, "automation_updates_required": sum(bool(job["automation_update_required"]) for job in jobs)}
+            return {"jobs": jobs, "automation_updates_required": sum(bool(job["automation_update_required"]) for job in jobs),
+                    "pending_after_purchase": [{"provider": j["provider"], "order_id": j["order_id"],
+                        "action": "reconcile_order" if j["status"] == "sending" else "send_order"}
+                        for j in jobs if j["trigger"] == "after_purchase" and j["status"] in {"pending", "claimed", "sending"}]}
         if action == "automation_plan":
             state = self.store.read()
             updates = []
             scheduler_updates = []
             for job in state["email_jobs"]:
+                if job.get("trigger") == "after_purchase":
+                    continue
                 if job.get("status") != "pending":
                     continue
                 if self._scheduler_owner(state) and "scheduler" not in job:
@@ -444,7 +506,7 @@ class EmailOperations:
                 })
             return {"protocol": EMAIL_AUTOMATION_PROTOCOL, "updates": updates, "scheduler_updates": scheduler_updates,
                     "removals": [cleanup_action(job) for job in state["email_jobs"]
-                                 if job.get("status") in {"cancelled", "sent"}
+                                 if job.get("trigger") != "after_purchase" and job.get("status") in {"cancelled", "sent"}
                                  and not job.get("native_cleanup")
                                  and ("scheduler" not in job or self._native_bindings(job))]}
         if action == "ack_automation":
@@ -497,7 +559,6 @@ class EmailOperations:
                 recipient = locked.get("email_recipient")
                 if not isinstance(snapshot, Mapping) or not isinstance(recipient, str) or not recipient.strip():
                     raise HouseholdError("confirmed order, exact menu and email recipient are required")
-                period = menu_email_period(snapshot)
                 existing = [
                     job for job in locked["email_jobs"]
                     if job.get("order_id") == order_id and email_job_provider(job) == self.provider
@@ -509,13 +570,13 @@ class EmailOperations:
                     email_preferences = locked["recipe_delivery"]["preferences"]["email"]
                     show_estimate_labels = email_preferences.get("show_estimate_labels", True)
                     sender_binding = locked["recipe_delivery"].get("sender_binding")
-                    if sender_binding and sender_binding["timing"] == "on_request":
+                    if sender_binding and sender_binding["timing"] in {"on_request", "after_purchase"}:
                         raise HouseholdError("email is configured on request only; select delivery-day email explicitly first")
                     locked["email_jobs"].append({
                         "order_id": order_id, "delivery_date": delivery_date, "status": "pending", "sent_at": None,
                         "provider": self.provider,
                         "recipient_snapshot": recipient, "menu_snapshot": snapshot,
-                        "subject": f"Ukesmeny og oppskrifter – {period}",
+                        "subject": menu_delivery_title(snapshot),
                         "html": menu_email_html(snapshot, show_estimate_labels=show_estimate_labels),
                         "show_estimate_labels": show_estimate_labels,
                         "automation_key": automation_key, "automation_protocol": 0,
@@ -523,6 +584,8 @@ class EmailOperations:
                         **({"delivery_hold": True} if legacy_held(locked) else {}),
                     })
                 elif len(existing) == 1:
+                    if existing[0].get("trigger") == "after_purchase":
+                        raise HouseholdError("this order already has after-purchase recipe delivery; do not schedule a duplicate")
                     if existing[0].get("status") != "pending":
                         raise HouseholdError("the order email is already claimed, sent or cancelled")
                     if not valid_email_address(existing[0].get("recipient_snapshot")) or not isinstance(existing[0].get("menu_snapshot"), Mapping):
@@ -590,12 +653,11 @@ class EmailOperations:
             recipient = job.get("recipient_snapshot")
             if len(jobs) != 1 or not isinstance(menu, Mapping) or menu.get("order_id") != order_id or not isinstance(recipient, str) or not recipient.strip():
                 raise HouseholdError("pending email, exact menu and recipient are required for a test")
-            period = menu_email_period(menu)
             result = {
                 "send": True,
                 "test": True,
                 "recipient": recipient,
-                "subject": f"TEST – Ukesmeny og oppskrifter – {period}",
+                "subject": "TEST – " + menu_delivery_title(menu),
                 "html": menu_email_html(menu, test=True,
                                         show_estimate_labels=job.get("show_estimate_labels", True)),
                 "order_id": order_id,
@@ -622,7 +684,7 @@ class EmailOperations:
             job_provider = email_job_provider(initial_job)
             if job_provider is None:
                 raise HouseholdError("email job has no valid bound provider")
-            if initial_job.get("status") == "pending" and initial_job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL:
+            if initial_job.get("trigger") != "after_purchase" and initial_job.get("status") == "pending" and initial_job.get("automation_protocol") != EMAIL_AUTOMATION_PROTOCOL:
                 delivery_date = str(initial_job.get("delivery_date") or "")
                 automation_key = email_automation_key(job_provider, order_id)
                 return {
@@ -678,35 +740,35 @@ class EmailOperations:
                 }
                 if tracking not in fulfillable:
                     return {"send": False, "reason": "order status is not confirmed for recipe email"}
-                order = current.get("order") if isinstance(current.get("order"), Mapping) else {}
-                delivery_values = [order.get(key) for key in ("deliveryDate", "delivery_date") if key in order]
-                if not delivery_values or not all(isinstance(value, str) for value in delivery_values) or len(set(delivery_values)) != 1:
-                    raise HouseholdError("provider order does not establish one delivery date")
-                delivery = delivery_values[0]
-                try:
-                    canonical_delivery = date.fromisoformat(delivery).isoformat()
-                except ValueError as exc:
-                    raise HouseholdError("provider returned an invalid delivery date") from exc
-                if canonical_delivery != delivery:
-                    raise HouseholdError("provider returned an invalid delivery date")
-                automation_key = job.get("automation_key") or email_automation_key(job_provider, order_id)
-                job["automation_key"] = automation_key
-                local_today = self._household_today(state).isoformat()
-                if delivery != local_today or ("scheduler" in job and delivery != job["delivery_date"]):
-                    job["delivery_date"] = delivery
-                    job["automation_protocol"] = 0
-                    if "scheduler" in job:
-                        return {"send": False, "reason": "delivery moved", "delivery_date": delivery,
-                                "scheduler": self._scheduler_invocation(job), "scheduler_update_required": True,
-                                "next": "Call scheduler_plan, apply and verify its native update, then ack_scheduler."}
-                    return {
-                        "send": False, "reason": "delivery moved", "delivery_date": delivery,
-                        "automation_key": automation_key,
-                        "automation_update_required": True,
-                        "cron_prompt": email_automation_prompt(job_provider, order_id, delivery, automation_key),
-                        "automation_ack": email_automation_ack(job_provider, order_id, delivery, automation_key),
-                    }
-                period = menu_email_period(menu)
+                if job.get("trigger") != "after_purchase":
+                    order = current.get("order") if isinstance(current.get("order"), Mapping) else {}
+                    delivery_values = [order.get(key) for key in ("deliveryDate", "delivery_date") if key in order]
+                    if not delivery_values or not all(isinstance(value, str) for value in delivery_values) or len(set(delivery_values)) != 1:
+                        raise HouseholdError("provider order does not establish one delivery date")
+                    delivery = delivery_values[0]
+                    try:
+                        canonical_delivery = date.fromisoformat(delivery).isoformat()
+                    except ValueError as exc:
+                        raise HouseholdError("provider returned an invalid delivery date") from exc
+                    if canonical_delivery != delivery:
+                        raise HouseholdError("provider returned an invalid delivery date")
+                    automation_key = job.get("automation_key") or email_automation_key(job_provider, order_id)
+                    job["automation_key"] = automation_key
+                    local_today = self._household_today(state).isoformat()
+                    if delivery != local_today or ("scheduler" in job and delivery != job["delivery_date"]):
+                        job["delivery_date"] = delivery
+                        job["automation_protocol"] = 0
+                        if "scheduler" in job:
+                            return {"send": False, "reason": "delivery moved", "delivery_date": delivery,
+                                    "scheduler": self._scheduler_invocation(job), "scheduler_update_required": True,
+                                    "next": "Call scheduler_plan, apply and verify its native update, then ack_scheduler."}
+                        return {
+                            "send": False, "reason": "delivery moved", "delivery_date": delivery,
+                            "automation_key": automation_key,
+                            "automation_update_required": True,
+                            "cron_prompt": email_automation_prompt(job_provider, order_id, delivery, automation_key),
+                            "automation_ack": email_automation_ack(job_provider, order_id, delivery, automation_key),
+                        }
                 claim_token = secrets.token_urlsafe(18)
                 job["status"] = "claimed"
                 job["claim_token"] = claim_token
@@ -752,10 +814,9 @@ class EmailOperations:
                 recipient = jobs[0].get("recipient_snapshot")
                 if not isinstance(menu, Mapping) or menu.get("order_id") != order_id or not isinstance(recipient, str) or not recipient.strip():
                     raise HouseholdError("claimed email is not bound to one exact menu and recipient")
-                period = menu_email_period(menu)
                 payload = {
                     "dispatch": True, "send": True, "recipient": recipient,
-                    "subject": jobs[0].get("subject") or f"Ukesmeny og oppskrifter – {period}",
+                    "subject": jobs[0].get("subject") or menu_delivery_title(menu),
                     "html": jobs[0].get("html") or menu_email_html(
                         menu, show_estimate_labels=jobs[0].get("show_estimate_labels", True)),
                     "provider": email_job_provider(jobs[0]), "order_id": order_id, "claim_token": claim_token,
@@ -839,7 +900,7 @@ class EmailOperations:
                 jobs = matching_jobs(state, order_id, {"claimed", "sending"})
                 if len(jobs) != 1 or not secrets.compare_digest(str(jobs[0].get("claim_token") or ""), claim_token):
                     raise HouseholdError("email claim_token does not match a claimed or sending job")
-                if ("scheduler" in jobs[0] or self._scheduler_owner(state)) and jobs[0]["status"] == "sending":
+                if (jobs[0].get("trigger") == "after_purchase" or "scheduler" in jobs[0] or self._scheduler_owner(state)) and jobs[0]["status"] == "sending":
                     receipt = request.get("sender_receipt")
                     if request.get("send_outcome") != "not_sent" or not isinstance(receipt, str) or not receipt.strip() or len(receipt) > 1024 or any(ord(char) < 32 for char in receipt):
                         raise HouseholdError("dispatched email requires affirmative not_sent sender evidence; uncertainty stays locked")

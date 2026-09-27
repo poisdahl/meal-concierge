@@ -164,6 +164,7 @@ class WeeklyFlowTests(unittest.TestCase):
         findings = assess(profile, {'name': 'Hermetiske linser', 'dietary_evidence': {'ingredients': 'Linser, vann'}})
         self.assertFalse(any(f['blocked'] for f in findings))
 
+    @mock.patch.object(Application, '_household_today', lambda self, state=None: date(2026, 9, 7))
     def test_recurring_shared_sku_is_additive_idempotent_and_fulfilled(self):
         self.recurring()
         menu, products = self.shop(self.batch())
@@ -347,6 +348,7 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertEqual(carried['supplemental_quantities'], {'10': 1})
         self.assertEqual(carried['added_quantities'], {})
 
+    @mock.patch.object(Application, '_household_today', lambda self, state=None: date(2026, 9, 7))
     def test_recurring_substitution_replaces_one_occurrence_without_double_purchase(self):
         self.recurring('20')
         menu, _products = self.shop(self.batch())

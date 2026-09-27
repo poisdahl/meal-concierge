@@ -2,7 +2,7 @@
 
 A request to receive recipes authorizes only its requested destinations and
 formats. Reading/saving a menu, a saved recipient or purchasing groceries alone
-does not authorize sending. Use the exact saved `menu_ref` and current native
+does not authorize sending without a saved after-purchase delivery instruction. Use the exact saved `menu_ref` and current native
 capabilities. Optional sender failure does not block meal planning or permit
 rerouting content. Never send a probe to discover support.
 
@@ -10,7 +10,7 @@ rerouting content. Never send a probe to discover support.
 
 Start with `meal_concierge_email_sender status`. Reuse the host's existing
 connection. If setup is actually needed, `configure` records the selected
-connection, sender, recipient and timing (`on_request`, `delivery_day`, `both`)
+connection, sender, recipient and timing (`on_request`, `after_purchase`, `delivery_day`, `both`)
 once; it sends nothing and creates no timer. Do not change accounts merely to
 work around an unavailable connection. Follow the returned setup guidance if
 capability is missing; do not invent credentials or bypass a guarded sender.
@@ -58,6 +58,30 @@ with the actual destination and verified capability if it is not already enabled
 Use the host's supported formats. Grok group rooms support recipe text but not
 PDF/image attachments through that transport. Missing attachment support must
 be reported, not hidden as a successful delivery.
+
+## After a confirmed menu purchase
+
+When checkout returns `recipe_delivery.email`, immediately use the exact
+provider/order with `email_sender send_order`. Email status exposes unfinished
+`pending_after_purchase` occurrences after recovery. Reuse the original sender
+journal; an unknown send uses `reconcile_order`, never a new send occurrence.
+This is recipe delivery only: never call checkout again to recover an email.
+Grocery-only purchases and unconfirmed payments do not generate recipe delivery.
+
+Use complete email recipe text without a duplicate PDF by default. If email is
+definitively unavailable, use an authorized chat/file PDF fallback when supported;
+never infer email failure from an unknown send result or silently reroute.
+Explicit PDF requests remain supported. For native chat or PDF after purchase,
+use `recipe_delivery request` with the returned stable `request_id`, exact
+`provider` and `order_id`, `delivery_requested=true`, and actual authorized
+channel/destination/capabilities. This uses the purchased snapshot even after a
+new menu replaces the current one.
+
+Changing timing is for future purchases. To explicitly move a pending old
+email, remove and verify its exact native timer, then `email migrate_after_purchase`
+with provider/order, delivery_requested and the original scheduler removal proof.
+Adopt unowned legacy jobs first. Do not migrate claimed, uncertain or sent work.
+No delivery-day reminder is created automatically.
 
 ## Scheduled order email
 

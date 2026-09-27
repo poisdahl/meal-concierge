@@ -19,7 +19,7 @@
 
 **Plan meals, save recipes and shop for groceries through your AI agent.**
 
-Ask for a weekly menu, adjust portions and preferences, and turn ingredients
+Ask for a meal plan for the dates you need, adjust portions and preferences, and turn ingredients
 into a shopping cart. Meal Concierge can find and use online recipes from
 your selected, connected store: Oda, Mathem or MENY.
 You can also save your own recipes and add the **Optional Recipe Collection**.

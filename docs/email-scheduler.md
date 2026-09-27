@@ -1,6 +1,10 @@
 # Order recipe email scheduler contract
 
 The existing Application email operation owns the order-bound email journal.
+`after_purchase` jobs use the same send receipts but have no native timer: the
+host calls `email_sender send_order` after confirmed checkout or resumes the
+original pending occurrence from email status. This scheduler contract applies
+to delivery-day jobs only; scheduler operations reject after-purchase jobs.
 A native scheduler owns its timer and invokes the existing service; it does
 not start another household daemon. Every email remains bound to its original
 provider, order, recipient and menu snapshot after a provider or menu change.
@@ -199,3 +203,14 @@ not provide that access.
 
 For adapter changes, run `python tests/test_email_scheduler.py` from the product
 checkout using the pinned runtime dependencies.
+
+## Moving an existing pending delivery-day email
+
+A saved timing change affects future purchases only. For an explicit migration,
+inspect the exact pending job, remove and verify its original native timer(s),
+and call `email migrate_after_purchase` with the original provider/order,
+`delivery_requested=true`, and exact `ack_cleanup` removal evidence. Adopt
+unowned legacy jobs first so their original timer identity can be verified.
+This preserves the original message occurrence and cleanup evidence, rejects
+claimed/sending/sent jobs, and retains any delivery hold. Do not create a second
+email job or turn a timing change into a purchase retry.

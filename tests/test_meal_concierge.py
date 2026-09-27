@@ -10436,7 +10436,7 @@ class FlowTests(unittest.TestCase):
         duplicate_due = self.app.handle({"operation": "email", "action": "due", "order_id": "old"})
         self.assertEqual(duplicate_due, {"send": False, "reason": "email is already claimed before dispatch"})
         payload = self.app.handle({"operation": "email", "action": "begin_send", "order_id": "old", "claim_token": due["claim_token"]})
-        self.assertIn("Ukesmeny og oppskrifter", payload["subject"])
+        self.assertIn("Meny og oppskrifter", payload["subject"])
         self.assertIn("<h2>A</h2>", payload["html"])
         self.assertEqual(payload["automation_environment"], {"HERMES_WORKSPACE_AUTOMATION_PROFILE": "test-email"})
         self.app.handle({"operation": "email", "action": "release", "order_id": "old", "claim_token": due["claim_token"]})
@@ -10623,7 +10623,7 @@ class FlowTests(unittest.TestCase):
 
     def test_menu_email_html_omits_test_banner_for_due_mail(self):
         value = menu_email_html({"week": "2026-W36", "dishes": [], "salads": []})
-        self.assertIn("Ukesmeny og oppskrifter", value)
+        self.assertIn("Meny og oppskrifter", value)
         self.assertNotIn("Denne testmailen endrer ikke", value)
 
     def test_auto_checkout_defaults_off_and_only_completed_occurrence_is_single_use(self):

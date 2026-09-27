@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 from itertools import permutations
 import json
@@ -767,6 +767,9 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
     scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
     request = scope if isinstance(scope, Mapping) else planner_request
+    if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" and len(request.get("dates", [])) < 7:
+        explicit = set(request.get("strict_targets", []))
+        targets = [target for target in targets if target in explicit]
     agent_mode = isinstance(request, Mapping) and request.get("selection_mode") == "agent"
     enforced_targets = (
         set(request.get("strict_targets", [])) & set(targets)
@@ -804,7 +807,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                          else recipes.get(slot.get("recipe_key")) for slot in selected_slots]
                         if has_explicit_slots else list(recipes.values()))
     selected_slots = selected_slots if has_explicit_slots else [None] * len(selected_recipes)
-    expected = meals.get("dinner_days") if isinstance(meals, Mapping) else None
+    expected = len(request["dates"]) if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" else meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
             "target": target, "status": "unknown",
@@ -1118,9 +1121,61 @@ def _selection(
     return payload
 
 
+def planning_dates(value, today, default_count):
+    """Resolve explicit dates or a bounded period; week remains a legacy anchor."""
+    mode = value.get("planning_mode", "weekly" if value.get("week") else "ad_hoc")
+    if not isinstance(mode, str) or mode not in {"weekly", "ad_hoc"}:
+        raise PlannerError("planning_mode must be weekly or ad_hoc")
+    dates = deepcopy(value.get("dates"))
+    period = value.get("period")
+    if period is not None:
+        if mode != "ad_hoc" or dates is not None or not isinstance(period, Mapping) or set(period) != {"start_date", "end_date"}:
+            raise PlannerError("period requires ad_hoc mode, start_date/end_date and no dates")
+        try:
+            start, end = (date.fromisoformat(period[k]) for k in ("start_date", "end_date"))
+        except (TypeError, ValueError) as exc:
+            raise PlannerError("period dates must be ISO dates") from exc
+        if not 0 <= (end - start).days < MAX_DAYS:
+            raise PlannerError(f"period must contain one to {MAX_DAYS} days")
+        dates = [(start + timedelta(days=i)).isoformat() for i in range((end - start).days + 1)]
+    if mode == "ad_hoc" and dates is None:
+        try:
+            start = date.fromisoformat(today)
+        except (TypeError, ValueError) as exc:
+            raise PlannerError("planner as_of_date must be an ISO date") from exc
+        dates = [(start + timedelta(days=i)).isoformat() for i in range(default_count)]
+    if dates is not None:
+        if not isinstance(dates, list) or not 1 <= len(dates) <= MAX_DAYS:
+            raise PlannerError(f"planner dates must contain one to {MAX_DAYS} dates")
+        try:
+            if any(not isinstance(d, str) or date.fromisoformat(d).isoformat() != d for d in dates):
+                raise ValueError()
+        except (TypeError, ValueError) as exc:
+            raise PlannerError("planner dates must be canonical ISO dates") from exc
+    week = value.get("week")
+    if mode == "ad_hoc":
+        week = date.fromisoformat(min(dates)).strftime("%G-W%V")
+    return mode, week, dates
+
+
+def period_profile(profile, request):
+    """A short ad-hoc plan cannot certify a household's full-week quotas."""
+    if request.get("planning_mode") != "ad_hoc" or len(request["dates"]) >= 7:
+        return profile
+    result = deepcopy(profile)
+    explicit = set(request.get("strict_targets", []))
+    for key in SAVED_MINIMUM_TARGETS:
+        if key not in explicit:
+            result["diet"][key] = 0
+    if "leafy_green_days" not in explicit:
+        result["diet"]["leafy_green_days"] = []
+    result["diet"]["fish_grams_per_person"] = []
+    return result
+
+
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
-        "week", "dates", "portions", "candidates", "strict_targets",
+        "week", "dates", "planning_mode", "period", "portions", "candidates", "strict_targets",
         "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode", "selection_mode",
     }):
         raise PlannerError("planner input has unknown fields")
@@ -1128,7 +1183,8 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
     if not isinstance(selection_mode, str) or selection_mode not in {"agent", "ranked"}:
         raise PlannerError("selection_mode must be agent or ranked")
     available = normalize_available_ingredients(value.get("available_ingredients"))
-    week = str(value.get("week") or "")
+    mode, resolved_week, resolved_dates = planning_dates(value, value.get("as_of_date"), 7)
+    week = str(resolved_week or "")
     if re.fullmatch(r"\d{4}-W\d{2}", week) is None:
         raise PlannerError("planner week must use YYYY-Www")
     try:
@@ -1136,7 +1192,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         date.fromisocalendar(week_year, week_number, 1)
     except ValueError as exc:
         raise PlannerError("planner week is invalid") from exc
-    raw_dates = value.get("dates")
+    raw_dates = resolved_dates
     if not isinstance(raw_dates, list) or not 1 <= len(raw_dates) <= MAX_DAYS:
         raise PlannerError(f"planner dates must contain one to {MAX_DAYS} dates")
     dates = []
@@ -1148,7 +1204,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         except ValueError as exc:
             raise PlannerError("planner dates must be ISO dates") from exc
         iso = parsed.isocalendar()
-        if (iso.year, iso.week) != (week_year, week_number):
+        if mode == "weekly" and (iso.year, iso.week) != (week_year, week_number):
             raise PlannerError("every planner date must belong to planner week")
         dates.append(parsed.isoformat())
     if selection_mode == "agent" and dates != sorted(dates):
@@ -1194,6 +1250,7 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError("as_of_date must be an ISO date") from exc
     return {
         "planner_version": PLANNER_VERSION,
+        **({"planning_mode": "ad_hoc"} if mode == "ad_hoc" else {}),
         **({"selection_mode": selection_mode} if "selection_mode" in value else {}),
         **({"recurring_batch": deepcopy(value["recurring_batch"])} if value.get("recurring_batch") else {}),
         **({"prepared_portion_range": deepcopy(value["prepared_portion_range"])} if value.get("prepared_portion_range") is not None else {}),
@@ -1216,6 +1273,7 @@ def plan_week(
 ) -> dict[str, Any]:
     """Return a byte-stable ranking for already-resolved exact candidates."""
     checked = _validate_request(request)
+    profile = period_profile(profile, checked)
     meals = profile.get("meals") if isinstance(profile, Mapping) else None
     dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     diet = profile.get("diet") if isinstance(profile, Mapping) else None

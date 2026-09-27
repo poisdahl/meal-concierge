@@ -60,6 +60,8 @@ class SenderTests(unittest.TestCase):
                        "connections": [{"id": "gmail", "type": "command", "unattended": True}]}
         self.runner = self.new_runner()
         self.runner.execute({"action": "configure", "recipient": "recipient@example.test", "timing": "both"})
+        # Attachment-integrity cases exercise an explicitly requested email PDF.
+        self.rpc("recipe_delivery", action="configure", changes={"email": {"pdf": True}})
 
     def rpc(self, operation, **request):
         return self.app.handle({"operation": operation, **request})
@@ -316,7 +318,7 @@ class SenderTests(unittest.TestCase):
                         async with stdio_client(parameters, errlog=log) as (read, write):
                             async with ClientSession(read, write, read_timeout_seconds=30) as client:
                                 await client.initialize()
-                                configured = await client.call_tool("meal_concierge_email_sender", {"action": "configure", "recipient": "recipient@example.test"})
+                                configured = await client.call_tool("meal_concierge_email_sender", {"action": "configure", "recipient": "recipient@example.test", "timing": "on_request"})
                                 self.assertFalse(configured.is_error, configured.content)
                                 rejected = await client.call_tool("meal_concierge_email_sender", {
                                     "action": "send", "request_id": "missing-intent",
@@ -354,6 +356,7 @@ class OrderSenderTests(EmailSchedulerTests):
             return self.app.handle({"operation": operation, **request})
         runner = EmailSender(rpc, config, transport_factory=lambda c: self.mailbox)
         runner.execute({"action": "configure", "recipient": "synthetic@example.test", "timing": "delivery_day"})
+        rpc("recipe_delivery", action="configure", changes={"email": {"pdf": True}})
         runner.execute({"action": "adopt_order", "provider": "oda", "order_id": "test-order"})
         return runner
 

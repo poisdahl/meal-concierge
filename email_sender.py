@@ -108,9 +108,10 @@ class EmailSender:
         recipient = request.get("recipient")
         if not valid_email_address(recipient):
             raise ValueError("select the exact email recipient")
-        timing = request.get("timing", "on_request")
+        saved = self.rpc("recipe_delivery", action="sender")
+        timing = request.get("timing") or (saved.get("binding") or {}).get("timing") or "after_purchase"
         binding = {"connection_id": key, "runtime_id": self.config["runtime_id"], "account": actual["account"],
-                   "installation_id": self.rpc("recipe_delivery", action="sender")["installation_id"],
+                   "installation_id": saved["installation_id"],
                    "sender": actual["sender"], "recipient": recipient, "capabilities": actual,
                    "unattended": self.connections[key].get("unattended", False), "timing": timing}
         if request.get("sender") is not None and request["sender"] != actual["sender"]:
@@ -122,7 +123,7 @@ class EmailSender:
                  changes={"email": {"enabled": True}}, capabilities={"email": actual},
                  destinations={"email": {"sender": actual["sender"], "recipient": recipient}})
         return {"configured": True, "binding": binding, "sent": False,
-                "next": "Connection saved. Existing jobs and paused work are unchanged; delivery-day email still uses its verified native schedule."}
+                "next": "Connection saved for future deliveries. After-purchase email is queued only by confirmed menu purchases; delivery-day email still uses its verified native schedule. Existing jobs and paused work are unchanged."}
 
     def transport(self, binding, *, inspect=True):
         if not binding or binding.get("runtime_id") != self.config["runtime_id"]:

@@ -1,5 +1,13 @@
 # Bounded recipe selection
 
+Ordinary plans accept `planning_mode="ad_hoc"` and exact dates or
+`period={"start_date":"2026-10-04","end_date":"2026-10-06"}`. They may cross
+calendar weeks and include up to seven eating dates. Without an explicit week,
+ad-hoc is the default; explicit weekly requests preserve calendar behavior.
+The saved scope retains those dates and relative batch sessions. Short plans
+do not automatically inherit full-week numeric quotas; explicit strict targets
+remain enforced and saved dietary preferences still guide the agent.
+
 For ordinary use, the host model reads exact full recipes and chooses them.
 Send `selection_mode="agent"`, chronological dates and ordered exact references
 to menu `plan`; this retains the model's order through the existing save handoff.

@@ -153,6 +153,34 @@ def menu_email_period(menu: Mapping[str, Any]) -> str:
     except RecipeError as exc:
         raise HouseholdError("email menu needs a valid ISO week") from exc
 
+def menu_delivery_title(menu: Mapping[str, Any]) -> str:
+    """Presentation only: purchase identity remains the exact menu/order reference."""
+    english = str(menu.get("output_language") or "").split("-")[0] == "en"
+    title = "Menu and recipes" if english else "Meny og oppskrifter"
+    delivery = menu.get("delivery_date")
+    if isinstance(delivery, str):
+        try:
+            day = date.fromisoformat(delivery)
+            months = ("January February March April May June July August September October November December" if english else
+                      "januar februar mars april mai juni juli august september oktober november desember").split()
+            return f"{title} – {'delivery' if english else 'levering'} {day.day}. {months[day.month - 1]} {day.year}"
+        except ValueError:
+            pass
+    label = menu.get("title") or menu.get("name")
+    if isinstance(label, str) and label.strip():
+        return title + " – " + " ".join(label.split())[:200]
+    dates = []
+    for slot in menu.get("slots", []):
+        try:
+            dates.append(date.fromisoformat(slot["date"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if dates:
+        first, last = min(dates).isoformat(), max(dates).isoformat()
+        return title + " – " + (first if first == last else first + " – " + last)
+    return title
+
+
 def safe_order_id(value: Any) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None:
         raise HouseholdError("order_id must be a bounded safe provider identifier")
@@ -377,8 +405,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             rendered += tr('<p><strong>Bilde:</strong> ', '<p><strong>Image:</strong> ') + " · ".join(details) + "</p>"
         return rendered
 
-    week = menu_email_period(menu)
-    title = f"{tr('Ukesmeny og oppskrifter', 'Weekly menu and recipes')} – {week}"
+    title = menu_delivery_title(menu)
     parts = [
         tr('<!doctype html><html lang="no"><head><meta charset="utf-8">', '<!doctype html><html lang="en"><head><meta charset="utf-8">'),
         '<meta name="viewport" content="width=device-width,initial-scale=1">',

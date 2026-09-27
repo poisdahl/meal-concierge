@@ -7,11 +7,45 @@ It does not require a grocery purchase. Reads, saves, edits and state migration
 do not send anything. “Plan and give me next week's recipes” supplies delivery
 intent; an explicit resend is a new occurrence.
 
-New state defaults to chat enabled, email disabled, PDF and managed images
-enabled within both channels. Older state retains its existing email setting,
+New state defaults to chat enabled, email disabled, chat PDF and managed images enabled, and email PDF disabled. Older state retains its existing email setting,
 queued order emails and receipts; chat is not retroactively enabled. `status`,
 `configure` and `request` show the separate order-delivery-day email so an
 immediate delivery and the configured later occurrence remain intentional.
+
+## Confirmed-purchase delivery
+
+`after_purchase` is the default timing when explicitly configuring a new managed
+email connection and requires unattended sender support. Omitting timing when
+reconfiguring preserves the existing saved timing. The existing confirmed checkout transition freezes a menu-bound order
+and queues its email in the same state write. It never calls a sender. Cart-only
+orders, order edits and unconfirmed payments do not create new recipe emails.
+The original provider/order pair is the email occurrence; checkout reconciliation
+and repeated sender calls reuse it.
+
+A successful checkout returns `recipe_delivery` with provider/order, menu reference,
+a stable native-chat `request_id`, and the queued email action when configured.
+The host executes `email_sender send_order` immediately for that exact pair.
+`email status.pending_after_purchase` exposes unfinished occurrences after a host
+restart. The sender reuses due/begin/receipt acknowledgment; these jobs need no
+native timer or delivery-day gate. Pause and uncertain-send rules still apply.
+Use `reconcile_order` for uncertain dispatch, never a new request ID.
+
+For authorized native chat/PDF, `recipe_delivery request` accepts `provider` and
+`order_id` instead of `menu_ref`, plus the normal explicit delivery intent,
+destination and capabilities. It resolves the frozen purchased menu rather than
+the current editable menu. Email PDF remains an explicit format preference;
+default email contains complete recipe text without an attached duplicate.
+PDF fallback requires an authorized supported destination, and an unknown send
+outcome is not proof that email is unavailable.
+
+Configuring the timing does not send old orders or rewrite their journals. For
+an explicitly requested migration of an undispatched pending order email, remove
+and verify its original native timer, then call `email migrate_after_purchase`
+with exact provider/order, `delivery_requested=true`, and the same `scheduler`
+removal evidence accepted by `ack_cleanup`. Unowned legacy jobs need the existing
+scheduler-adoption workflow first. The original sender, snapshot, occurrence and
+cleanup receipt are retained; no duplicate job is created. Claimed, sending and
+sent jobs cannot migrate. Held jobs remain held until explicitly resumed.
 
 ## Email connection setup
 
@@ -21,7 +55,7 @@ the grocery service never receives credentials. CLI clients use the same runner
 with `operation=email_sender`. Agent brands do not select a transport.
 
 Start with status. If the connection exists, configure its selected sender,
-recipient and timing (`on_request`, `delivery_day`, `both`) once. This stores a
+recipient and timing (`on_request`, `after_purchase`, `delivery_day`, `both`) once. This stores a
 non-secret connection/account reference in this household. It sends nothing,
 creates no schedule and does not release held work or rewrite pending recipients.
 For multiple accounts, select connection_id explicitly. No default-account switch

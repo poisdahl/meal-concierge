@@ -1867,7 +1867,7 @@ class OrderOperations:
                 continue
             if job.get("status") in {"pending", "claimed", "sending"}:
                 keep.add(order_id)
-            elif job.get("status") in {"sent", "cancelled", "invalid"}:
+            elif job.get("status") in {"sent", "cancelled", "invalid"} and not (job.get("trigger") == "after_purchase" and job.get("status") == "sent"):
                 terminal.add(order_id)
         unscheduled = [
             (str(snapshot_times.get(order_id) or ""), order_id)
@@ -1896,8 +1896,23 @@ class OrderOperations:
                 job.pop("subject", None)
         if provider is not None and provider != active_provider:
             return
+        removed_fulfillments = [value for value in state.get('recurring_fulfilled', {}).values()
+            if value.get('order_id') == order_id and value.get('provider', active_provider) == active_provider]
         state['recurring_fulfilled'] = {key: value for key, value in state.get('recurring_fulfilled', {}).items()
             if not (value.get('order_id') == order_id and value.get('provider', active_provider) == active_provider)}
+        for recurring in state.get('recurring_items', []):
+            original_id = str(recurring.get('product_id'))
+            schedule = recurring.get('schedule') or {}
+            if schedule.get('unit') != 'days' or not any(
+                    r.get('original_product_id') == original_id and r.get('schedule') == schedule for r in removed_fulfillments):
+                continue
+            remaining = [r['fulfilled_on'] for r in state['recurring_fulfilled'].values()
+                if r.get('provider') == active_provider and r.get('original_product_id') == original_id
+                and r.get('schedule') == schedule and r.get('fulfilled_on')]
+            if remaining:
+                recurring['last_fulfilled_on'] = max(remaining)
+            else:
+                recurring.pop('last_fulfilled_on', None)
         snapshot = state.get("order_snapshots", {}).get(order_id)
         snapshot_menu_id = snapshot.get("menu_id") if isinstance(snapshot, Mapping) else None
         for menu_id, usage in state.get("recipe_usage", {}).items():
@@ -1916,6 +1931,7 @@ class OrderOperations:
             current.pop("order_id", None)
         if isinstance(snapshot, Mapping):
             self._release_detached_menu_usage(state, snapshot)
+            snapshot["phase"] = "cancelled"
         OrderOperations._prune_order_snapshots(state)
 
     def _cancel_reconcile(self, deadline: float | None = None, confirmation_id: str = "") -> dict[str, Any]:
@@ -2190,8 +2206,7 @@ class OrderOperations:
         equipment = [i for i in assess_menu(state).get('issues', []) if i.get('code') == 'equipment_unavailable']
         if equipment:
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': equipment}
-        year, week = map(int, menu['week'].split('-W'))
-        due = self._due_recurring(state, date.fromisocalendar(year, week, 1))
+        due = self._due_recurring(state, self._household_today(state))
         if canonical(due) != canonical(plan.get('recurring_items', [])):
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'weekly_goods_changed',
                     'next': 'Synchronize cart action=weekly for this menu before preparing checkout.'}
@@ -4535,6 +4550,21 @@ class OrderOperations:
                     state["pending_checkout"]["status"] = "uncertain"
             raise
 
+    def _purchase_delivery(self, state, order_id):
+        if state.get("order_snapshot_providers", {}).get(order_id) != self.provider:
+            return None
+        snapshot = state.get("order_snapshots", {}).get(order_id)
+        if not isinstance(snapshot, Mapping):
+            return None
+        job = next((j for j in state["email_jobs"] if j.get("provider") == self.provider
+                    and j.get("order_id") == order_id and j.get("trigger") == "after_purchase"), None)
+        return {"provider": self.provider, "order_id": order_id,
+                "menu_ref": self._cart_menu_ref(snapshot),
+                "email": ({"action": "send_order", "status": job["status"]} if job else None),
+                "chat_enabled": state["recipe_delivery"]["preferences"]["chat"]["enabled"],
+                "request_id": "purchase-" + hashlib.sha256(f"{self.provider}:{order_id}".encode()).hexdigest()[:24],
+                "next": "Deliver this purchased menu through its authorized channels. Use email_sender send_order for the queued email; preserve original receipts on recovery. For requested native chat or PDF fallback, request recipe_delivery with this provider/order and stable request_id, actual authorized destination and verified capabilities. No further checkout is needed."}
+
     def _record_order_snapshot(self, state: dict[str, Any], pending: Mapping[str, Any], order_id: str) -> None:
         order_id = safe_order_id(order_id)
         occurrence = pending.get("occurrence")
@@ -4553,8 +4583,16 @@ class OrderOperations:
         for item in plan.get('recurring_items', []):
             product_id = str(item['product_id'])
             required = plan.get('required_quantities', {}).get(product_id, item['quantity'])
-            if purchased.get(product_id, 0) >= required:
-                state.setdefault('recurring_fulfilled', {})[item['fulfillment_key']] = {'order_id': order_id, 'provider': self.provider, 'recorded_at': self._now().isoformat()}
+            if purchased.get(product_id, 0) >= required and item['fulfillment_key'] not in state.setdefault('recurring_fulfilled', {}):
+                state['recurring_fulfilled'][item['fulfillment_key']] = {'order_id': order_id, 'provider': self.provider, 'recorded_at': self._now().isoformat()}
+                original_id = str(item.get('original_product_id') or item['product_id'])
+                for recurring in state.get('recurring_items', []):
+                    if (str(recurring.get('product_id')) == original_id and recurring.get('schedule') == item.get('schedule')
+                            and (recurring.get('schedule') or {}).get('unit') == 'days'):
+                        fulfilled_on = self._household_today(state).isoformat()
+                        recurring['last_fulfilled_on'] = fulfilled_on
+                        state['recurring_fulfilled'][item['fulfillment_key']].update(
+                            original_product_id=original_id, schedule=deepcopy(item['schedule']), fulfilled_on=fulfilled_on)
         attribution = pending.get("summary", {}).get("menu_attribution") or self._checkout_menu_attribution(
             pending.get("menu"), pending.get("cart_plan"))
         if attribution != "menu_bound":
@@ -4570,7 +4608,14 @@ class OrderOperations:
         if previous_order_id and previous_order_id != order_id:
             return
         snapshot["phase"] = "ordered"
+        delivery = pending.get("summary", {}).get("delivery") or {}
+        delivery_date = delivery.get("date")
+        if isinstance(delivery.get("slot"), Mapping):
+            delivery_date = self._delivery_slot_date(delivery["slot"])
+        if isinstance(delivery_date, str):
+            snapshot["delivery_date"] = delivery_date
         snapshot["order_id"] = order_id
+        first_confirmation = order_id not in state.get("order_snapshots", {})
         state.setdefault("order_snapshots", {})[order_id] = snapshot
         state.setdefault("order_snapshot_times", {})[order_id] = self._now().isoformat()
         state.setdefault("order_snapshot_providers", {})[order_id] = self.provider
@@ -4584,6 +4629,8 @@ class OrderOperations:
         current = state.get("menu")
         if isinstance(current, Mapping) and current.get("menu_id") == snapshot.get("menu_id") and current.get("digest") == snapshot.get("digest"):
             state["menu"] = deepcopy(snapshot)
+        if first_confirmation:
+            self._enqueue_purchase_email(state, snapshot, order_id)
         OrderOperations._prune_order_snapshots(state, keep_order_id=order_id)
 
     def _checkout_authentication_wait(self, pending, deadline):
@@ -5307,6 +5354,7 @@ class OrderOperations:
                 self._record_order_snapshot(state, pending, order_id)
                 terminal = {
                     "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
+                    "recipe_delivery": self._purchase_delivery(state, order_id),
                     "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
                     **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
                     "payment": self._payment_evidence(tracking_status),
