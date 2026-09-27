@@ -3371,6 +3371,7 @@ class RecipeOperations:
                                 rows = self.recipes.search(
                                     query, limit=page_limit, offset=offset,
                                     include_archived=request.get("include_archived") is True,
+                                    status_filter=("active" if not include_ineligible and request.get("include_archived") is not True else None),
                                     favorites_only=favorites_only,
                                     entry_origin=entry_origin,
                                     category=category,
@@ -3536,6 +3537,7 @@ class RecipeOperations:
                 rows = self.recipes.search(
                     request.get("query", ""), limit=page_limit,
                     include_archived=request.get("include_archived") is True,
+                    status_filter=("active" if not include_ineligible and request.get("include_archived") is not True else None),
                     favorites_only=favorites_only, offset=offset,
                     entry_origin=entry_origin,
                     category=category,

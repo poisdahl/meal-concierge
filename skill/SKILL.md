@@ -83,8 +83,11 @@ stale data, or stock, price, payment or order facts may have changed.
    selecting. Reuse current search results; use source=internal with projection=summary
    for the bank and the actual selected provider for store discovery. Skip disabled,
    unavailable or user-excluded sources, and do not claim an unperformed search.
-   Exact user-selected recipes need no comparison search. Read full details only
-   for promising choices. Choose for dietary fit, practicality and variety, with
+   Exact user-selected recipes need no comparison search. Search summaries are
+   shortlists: read full exact details before recommending a recipe as cookable
+   or stating its quantities. For saved bank recipes, verify current status is
+   active; for discoveries, verify returned cooking readiness and provider fit.
+   Choose for dietary fit, practicality and variety, with
    source diversity as a tie-breaker, never a fixed quota. An all-external or
    all-store plan can be the best fit. Empty results for one narrow query do not mean the catalog
    is empty. Selected recipe websites are enabled by default: use a bounded
