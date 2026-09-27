@@ -17,7 +17,7 @@ import install
 from recipe_portable import canonical_bytes, write_archive
 from recipes import normalize_recipe, RecipeStore
 
-spec = importlib.util.spec_from_file_location('publish_recipe_channel', CORE / 'tools/publish_recipe_channel.py')
+spec = importlib.util.spec_from_file_location('publish_recipe_channel', CORE / 'recipe_channel_publish.py')
 publisher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publisher)
 

@@ -9,7 +9,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from install import published_recipe_pack, stage_recipe_pack
 from recipe_portable import preflight_archive
 

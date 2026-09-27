@@ -30,4 +30,4 @@ jobs:
       - name: Verify published archive, then update channel
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python tools/publish_recipe_channel.py
+        run: python recipe_channel_publish.py
