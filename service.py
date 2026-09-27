@@ -562,6 +562,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         if operation == "products" and action in {"prepare", "get"}:
             state = self.store.read()
             result["pantry_review"] = pantry_review(state["profile"], self._household_today(state))
+        if operation == "menu" and (isinstance(result.get("menu"), dict) or isinstance(result.get("plan"), dict)):
+            from agent_views import MENU_PRESENTATION_GUIDANCE
+            from dietary_guidance import dietary_guidance
+            result["dietary_guidance"] = dietary_guidance(self.store.read()["profile"])
+            result["presentation_guidance"] = deepcopy(MENU_PRESENTATION_GUIDANCE)
         if response_view == "agent" and operation != "products":
             result = project_agent_result(
                 operation, action, result, offset=view_offset,
@@ -684,14 +689,17 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         raise HouseholdError("unknown household operation")
 
     def _profile(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        from dietary_guidance import dietary_guidance
         action = request.get("action", "show")
         if action == "show":
             state = self.store.read()
             return {"profile": state["profile"], "email_recipient": mask_email(state.get("email_recipient")),
+                    "dietary_guidance": dietary_guidance(state["profile"]),
                     "pantry_review": pantry_review(state["profile"], self._household_today(state))}
         if action == "overview":
             state = self.store.read()
             return {"profile": deepcopy(state["profile"]), "schedule": deepcopy(state["schedule"]),
+                    "dietary_guidance": dietary_guidance(state["profile"]),
                     "recurring_items": deepcopy(state["recurring_items"]),
                     "due_recurring_items": self._due_recurring(state, self._household_today(state)),
                     "pantry_review": pantry_review(state["profile"], self._household_today(state)),
@@ -802,6 +810,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
 
     def _setup_summary(self, state: Mapping[str, Any]) -> dict[str, Any]:
         from recipe_search_setup import search_status
+        from dietary_guidance import dietary_guidance
         profile = state["profile"]
         meals = profile["meals"]
         return {
@@ -813,6 +822,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "purchasing": deepcopy(profile["products"]),
             "pantry_review": pantry_review(profile, self._household_today(state)),
             "diet": deepcopy(profile["diet"]),
+            "dietary_guidance": dietary_guidance(profile),
             "confirmation_policy": self.confirmation_policy,
             "checkout_payment": deepcopy(state["checkout_payment"]),
             "payment_choices": ["saved_card", "vipps"] if self.provider == "oda" else ["vipps" if self.provider == "meny" else "saved_card"],
@@ -851,6 +861,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def _user_guide() -> dict[str, Any]:
         return {
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
+            "during_diet": "Explain the actual saved dietary goal and its dietary_guidance. New/reset defaults use a concrete editable Norwegian starter preset with adult whole-diet reference amounts; offer keep/change/remove. Existing customized or cleared goals stay as saved. Another country or eating pattern is welcome; never infer it from the retailer or conversation language.",
             "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
             "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
             "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",

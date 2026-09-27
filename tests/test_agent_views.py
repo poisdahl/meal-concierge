@@ -6,10 +6,19 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_views import project_agent_result
+from agent_views import project_agent_result, _menu_recipe_presentation
 
 
 class AgentViewTests(unittest.TestCase):
+    def test_original_only_attribution_and_missing_times_are_honest(self):
+        view = _menu_recipe_presentation({'name': 'Canonical',
+            'presentation': {'name': 'Translated'},
+            'source': {'original': {'publisher': 'Original author', 'url': 'https://example.org/recipe'}}})
+        self.assertEqual(view['name'], 'Translated')
+        self.assertEqual(view['source_status'], 'available')
+        self.assertFalse(view['times'])
+        self.assertEqual(_menu_recipe_presentation({'name': 'No source'})['source_status'], 'unattributed')
+
     def test_status_keeps_next_action_and_incomplete_assessment(self):
         result = {"household": "Synthetic", "menu_phase": "draft", "pending_checkout_status": "uncertain",
                   "schedule": {"large_internal_state": "x" * 100_000},

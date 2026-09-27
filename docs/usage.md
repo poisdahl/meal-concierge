@@ -36,12 +36,21 @@ orders and shopping settings. Multiple trusted agents can share one installation
 
 ## Dietary goals and substitutions
 
-New installations start with an editable goal: follow national dietary guidelines
-for the household country. Confirm that country during setup, or change/remove
-the goal. The retailer does not determine which country's advice applies.
-You can instead specify other patterns, nutritional goals and food preferences.
-The agent interprets those saved goals when selecting recipes and products;
-there is no universal food-group bonus or preferred nutrient balance.
+New installations start with an explicit, editable Norwegian dietary-guideline
+preset, including adult daily and weekly reference quantities. Setup explains
+this starting choice and offers to keep, change or remove it; the retailer or
+conversation language does not determine the household's dietary goals. The
+preset favors plant-rich meals, fish and legumes and minimizes processed red
+and white meat. Its amounts describe the whole diet, not dinner-only quotas or
+raw shopping weights. The agent applies the actual saved goals to ingredients
+and methods; service readiness and ranking do not certify nutritional compliance.
+
+The maintained summary cites [Helsenorge](https://www.helsenorge.no/kosthold-og-ernaring/kostradene/)
+and [Helsedirektoratet](https://www.helsedirektoratet.no/faglige-rad/kostradene-og-naeringsstoffer/kostrad-for-befolkningen).
+It lives entirely in `diet.patterns`; replacing or clearing that list removes the
+preset. Existing profiles, including empty/custom goals, remain unchanged. For an
+older generic “national guidelines” goal, clarify the intended country once rather
+than silently replacing it. Separate saved nutritional targets still apply.
 
 Optional numeric targets start disabled: zero minima, an empty fish-gram range
 and all-zero plate fractions mean no additional target. They are not an
@@ -62,8 +71,8 @@ into allergies.
 
 Plan for dates, a period or a number of dinners, including across calendar weeks.
 Weekly planning and automation remain optional. The first saved-plan message
-offers full ingredients and steps, recipe swaps and using ingredients you already
-have. A short plan is assessed for the days it covers, not as a whole week's diet.
+names each recipe’s actual source with its link, marks adaptations, and offers
+full ingredients and steps, recipe swaps and using ingredients you already have. A short plan is assessed for the days it covers, not as a whole week's diet.
 
 Review the proposed dishes, dates, portions and any missing information, then
 ask to save the menu. Saved menus keep the recipes and amounts used for that

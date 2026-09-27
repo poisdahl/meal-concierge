@@ -16,6 +16,7 @@ import secrets
 from typing import Any, Callable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 from web_recipes import DEFAULT_WEB_SEARCH, validate_web_search
+from dietary_guidance import NORWEGIAN_PRESET
 
 
 class HouseholdError(RuntimeError):
@@ -82,7 +83,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "quality": "Complete, practical recipes with clear ingredients and steps.",
     },
     "diet": {
-        "patterns": ["National dietary guidelines for the household country"],
+        "patterns": deepcopy(NORWEGIAN_PRESET),
         "allergies_or_sensitivities": [],
         "rules": [],
         "uncertainty_permissions": [],
