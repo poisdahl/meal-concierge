@@ -8,7 +8,14 @@ The saved scope retains those dates and relative batch sessions. Short plans
 do not automatically inherit full-week numeric quotas; explicit strict targets
 remain enforced and saved dietary preferences still guide the agent.
 
-For ordinary use, the host model reads exact full recipes and chooses them.
+For ordinary open-ended planning, the host model compares a bounded candidate
+page from the enabled saved bank and selected store, reusing current search results.
+It reads exact full recipes before choosing. Disabled/unavailable sources and
+explicit user recipe choices do not require extra searches. Dietary fit, practical
+suitability and variety take priority; source diversity is a tie-breaker, not a
+quota. A suitable plan may therefore use recipes from a single source.
+The host applies the actual saved dietary text; free-text guidelines are not
+automatically enforced by the ranking score or recipe-readiness checks.
 Send `selection_mode="agent"`, chronological dates and ordered exact references
 to menu `plan`; this retains the model's order through the existing save handoff.
 Use one recipe per cooking date, with leftover dates supplied by accepted batch

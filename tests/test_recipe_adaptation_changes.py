@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import StateStore
-from recipes import RecipeError, normalize_recipe, recipe_digest
+from recipes import RecipeError, normalize_recipe, recipe_digest, scale_recipe
 from service import Application
 from test_meal_concierge_products import FakeProvider
 
@@ -111,6 +111,52 @@ class AdaptationChangesTests(unittest.TestCase):
         self.assertEqual(normalize_recipe(restarted.recipes.get(saved["id"], saved["revision"]),
                                           trusted_store_product_hints=True),
                          normalize_recipe(saved, trusted_store_product_hints=True))
+
+    def test_changed_ingredient_rescales_and_saves_with_current_serving_base(self):
+        app, store, client = self.application()
+        original = source_recipe()
+        original['portions'] = 2
+        original['portions_evidence']['input'] = 'Two portions'
+        frozen = app.recipes.persist_discovery(original, trusted_store_product_hints=True)
+        adapted = app.handle({'operation': 'recipes', 'action': 'adapt',
+            'discovery_ref': frozen['discovery_ref'], 'recipe_digest': recipe_digest(original),
+            'source_schema_version': 2, 'portions': 3,
+            'changes': {'ingredients': [{'index': 1, 'item': 'spinach', 'quantity': 180,
+                'unit': 'g', 'assumptions': 'Use 60 g spinach per serving.'}],
+                'steps': ['Simmer beans and fold in spinach until wilted.']}})
+        for target in (2, 6):
+            with self.subTest(target=target):
+                scaled = normalize_recipe(scale_recipe(adapted['recipe'], target),
+                                          trusted_store_product_hints=True)
+                changed = scaled['ingredients'][1]
+                self.assertEqual(changed['quantity'], {'numerator': 60 * target, 'denominator': 1})
+                calculation = changed['evidence']['quantity']['calculation']
+                self.assertEqual(calculation['input_portions'], {'numerator': 3, 'denominator': 1})
+                self.assertEqual(changed['evidence']['quantity']['basis'], 'estimate')
+                self.assertNotIn('acceptance', changed['evidence']['quantity'])
+                again = normalize_recipe(scale_recipe(scaled, 3), trusted_store_product_hints=True)
+                self.assertEqual(again['ingredients'][1]['quantity'], {'numerator': 180, 'denominator': 1})
+        plan = app.handle({'operation': 'menu', 'action': 'plan', 'planner_input': {
+            'selection_mode': 'agent', 'dates': ['2026-09-28'], 'portions': 6,
+            'candidates': [{'discovery_ref': adapted['discovery_ref']}]}})['plan']
+        self.assertEqual(plan['status'], 'planned')
+        saved = app.handle({'operation': 'menu', 'action': 'save', 'planner_ref': plan['save_ref']})
+        dish = saved['menu']['dishes'][0]
+        self.assertEqual(dish['ingredients'][1]['quantity'], {'numerator': 360, 'denominator': 1})
+        self.assertEqual(client.calls, [])
+
+    def test_older_quantity_calculation_without_serving_dependency_rescales(self):
+        original = normalize_recipe(source_recipe(), trusted_store_product_hints=True)
+        scaled = normalize_recipe(scale_recipe(original, 3), trusted_store_product_hints=True)
+        for ingredient in scaled['ingredients']:
+            calculation = ingredient['evidence']['quantity']['calculation']
+            del calculation['input_portions']
+            del calculation['portions_evidence']
+        compatible = normalize_recipe(scaled, trusted_store_product_hints=True)
+        rescaled = normalize_recipe(scale_recipe(compatible, 6), trusted_store_product_hints=True)
+        calculation = rescaled['ingredients'][0]['evidence']['quantity']['calculation']
+        self.assertEqual(calculation['input_portions'], {'numerator': 1, 'denominator': 1})
+        self.assertEqual(rescaled['ingredients'][0]['quantity'], {'numerator': 600, 'denominator': 1})
 
     def test_source_binding_survives_each_retailer(self):
         for provider in ("oda", "mathem", "meny"):

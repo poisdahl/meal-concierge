@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 from core import HouseholdError, StateStore
+from dietary_guidance import NORWEGIAN_PRESET, LEGACY_COUNTRY_PATTERN
 from service import Application
 from recipe_selection import context_queries
 from test_meal_concierge_planner import CONFIG, NoProviderCalls, recipe, explicit_facts
@@ -28,8 +29,11 @@ class ProfileNutritionTests(unittest.TestCase):
         for provider in ('oda', 'meny', 'mathem'):
             with self.subTest(provider=provider):
                 app = self.app({**CONFIG, 'provider': provider}, self.root / provider)
-                diet = app.handle({'operation': 'setup', 'action': 'show'})['current']['diet']
-                self.assertEqual(diet['patterns'], ['National dietary guidelines for the household country'])
+                current = app.handle({'operation': 'setup', 'action': 'show'})['current']
+                diet = current['diet']
+                self.assertEqual(diet['patterns'], NORWEGIAN_PRESET)
+                self.assertEqual(current['dietary_guidance']['status'], 'norwegian_starter_preset')
+                self.assertIn('remove', current['dietary_guidance']['setup_explanation'])
                 self.assertEqual(diet['fish_grams_per_person'], [])
                 self.assertEqual(diet['prioritise'], [])
                 self.assertTrue(all(value == 0 for key, value in diet.items() if key.startswith('minimum_')))
@@ -40,6 +44,42 @@ class ProfileNutritionTests(unittest.TestCase):
                 saved = app.store.read()['profile']['diet']
                 self.assertEqual(saved['patterns'], ['Swedish dietary guidelines'])
                 self.assertEqual(saved['fish_grams_per_person'], [150, 300])
+
+    def test_legacy_and_cleared_goals_are_not_silently_replaced(self):
+        app = self.app()
+        for patterns, status in (([LEGACY_COUNTRY_PATTERN], 'country_needs_clarification'),
+                                 ([], 'custom_or_no_pattern')):
+            app.store.update_profile({'diet': {'patterns': patterns}})
+            shown = self.app().handle({'operation': 'profile', 'action': 'show'})
+            self.assertEqual(shown['dietary_guidance']['status'], status)
+            self.assertEqual(self.app().store.read()['profile']['diet']['patterns'], patterns)
+            self.assertEqual(self.app().store.read()['profile']['diet']['nutrition'], '')
+            self.assertEqual(shown['dietary_guidance']['whole_diet_compliance'], 'not_established')
+
+    def test_saved_plan_agent_view_keeps_source_times_and_first_message_offer(self):
+        app = self.app()
+        dish = recipe('Bean dinner', 'presentation')
+        dish['source']['url'] = 'https://example.org/bean-dinner'
+        stored = app.handle({'operation': 'recipes', 'action': 'save', 'recipe': dish,
+                             'idempotency_key': 'presentation'})['recipe']
+        plan = app.handle({'operation': 'menu', 'action': 'plan', 'response_view': 'agent',
+            'planner_input': {'selection_mode': 'agent', 'dates': ['2026-09-28'],
+                'candidates': [{'recipe_ref': {'id': stored['id'], 'revision': stored['revision']}}]}})
+        self.assertEqual(plan['dietary_guidance']['whole_diet_compliance'], 'not_established')
+        save_request = {'operation': 'menu', 'action': 'save', 'response_view': 'agent',
+                        'planner_ref': plan['plan']['save_ref']}
+        saved = app.handle(save_request)
+        persisted = deepcopy(app.store.read()['menu'])
+        for view in (saved, app.handle(save_request), app.handle({
+                'operation': 'menu', 'action': 'get', 'response_view': 'agent'})):
+            slot = view['slots']['items'][0]
+            self.assertEqual(slot['source']['publisher'], 'Fixture')
+            self.assertEqual(slot['source']['url'], dish['source']['url'])
+            self.assertEqual(slot['times']['active_minutes'], 30)
+            self.assertIn('ingredients and cooking steps', view['presentation_guidance']['offer'])
+            self.assertEqual(view['dietary_guidance']['whole_diet_compliance'], 'not_established')
+        self.assertNotIn('presentation_guidance', persisted)
+        self.assertEqual(app.store.read()['menu'], persisted)
 
     def test_existing_goals_survive_reopen_setup_and_unrelated_update(self):
         app = self.app()

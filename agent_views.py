@@ -7,6 +7,34 @@ from typing import Any
 
 MCP_MENU_WIRE_BUDGET = 45_000
 
+MENU_PRESENTATION_GUIDANCE = {
+    "when": "In the first message presenting this saved or revised meal plan, not only after shopping.",
+    "include": "Give dish names, short descriptions, dates/portions and known active/total times. Credit each actual recipe publisher/author and available source link beside the dish; label adaptations. An internal collection is storage, not necessarily the author. If attribution is missing, say so; never invent it.",
+    "offer": "Would you like the full meal plan with all ingredients and cooking steps? You can swap any dish, ask for particular meals, or tell me what you already have and want to use up.",
+    "language": "Use the user's language. Say meal plan (måltidsplan in Norwegian); use ukemeny only for a genuinely weekly plan. Keep the offer short and do not repeat it on routine status reads.",
+}
+
+
+def _menu_recipe_presentation(recipe):
+    """Only frozen attribution and known timings; no new recipe fetch."""
+    if not isinstance(recipe, dict):
+        return {}
+    source = recipe.get('source') or {}
+    credit = (recipe.get('rights') or {}).get('credit')
+    shown = recipe.get('presentation') or {}
+    result = {'name': shown.get('name') or recipe.get('name'),
+              'times': _recipe_times(recipe.get('times')),
+              'source': _fields(source, ('kind', 'publisher', 'author', 'title', 'url', 'relationship'))}
+    if isinstance(source.get('original'), dict):
+        result['source']['original'] = _fields(source['original'], ('kind', 'publisher', 'author', 'title', 'url'))
+    if isinstance(credit, str) and credit:
+        result['source']['credit'] = _display_text(credit, 500)
+    attribution = (result['source'], result['source'].get('original') or {})
+    result['source_status'] = 'available' if any(
+        item.get(key) for item in attribution for key in ('publisher', 'author', 'url', 'credit')
+    ) else 'unattributed'
+    return result
+
 def _compact_plan_reason(reason: Any) -> dict[str, Any] | None:
     """Return the stable, concise part of a planner scoring reason."""
     if not isinstance(reason, dict) or not isinstance(reason.get("code"), str):
@@ -436,7 +464,7 @@ def _menu_successor_summary(successor: Any) -> dict[str, Any]:
         **{key: slot[key] for key in (
             "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
         ) if key in slot},
-        **({"name": mp.recipe_for_slot(successor, slot, allow_stale=True).get("name")}
+        **(_menu_recipe_presentation(mp.recipe_for_slot(successor, slot, allow_stale=True))
            if successor.get("dishes") else {}),
     } for slot in successor.get("slots", []) if isinstance(slot, dict)]
     return {"week": successor.get("week"), "slots": slots}
@@ -656,13 +684,13 @@ def _assessment_view(assessment: Any, offset: int, limit: int, section: str) -> 
 def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, section: str) -> dict[str, Any]:
     view = {"projection": "agent", "operation": "menu", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "idempotent", "locked", "slot_id",
-                                 "slot_replan_available", "menu_ref", "added_slot")))
+                                 "slot_replan_available", "menu_ref", "added_slot", "presentation_guidance", "dietary_guidance")))
     if isinstance(result.get("added_slots"), list):
         view["added_slots"] = _page(result["added_slots"], offset, limit, "items")
     menu = result.get("menu")
     if isinstance(menu, dict):
         view["menu_ref"] = _fields(menu, ("menu_id", "revision", "digest"))
-        view.update(_fields(menu, ("week", "phase", "weekly_plan_complete", "order_id", "supersedes")))
+        view.update(_fields(menu, ("week", "phase", "weekly_plan_complete", "order_id", "supersedes", "planning_scope")))
         view["menu"] = {**view["menu_ref"], **_fields(menu, ("week", "phase"))}
         if menu.get("output_language"):
             view["output_language"] = menu["output_language"]
@@ -676,7 +704,8 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
                  for slot, item in zip(raw_slots, summary["slots"])]
         if not slots:
             slots = [{"collection": collection, "index": index,
-                      **_fields(recipe, ("name", "portions", "recipe_key", "recipe_ref", "library_recipe_ref", "discovery_ref"))}
+                      **_fields(recipe, ("portions", "recipe_key", "recipe_ref", "library_recipe_ref", "discovery_ref")),
+                      **_menu_recipe_presentation(recipe)}
                      for collection in ("dishes", "salads")
                      for index, recipe in enumerate(menu.get(collection, [])) if isinstance(recipe, dict)]
         view["slots"] = _page(slots, offset, limit, "items")

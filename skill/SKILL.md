@@ -48,11 +48,13 @@ meal selection and product preparation need no additional reference loading.
 
 1. On first interactive use, present setup's single keep-all-or-change question,
    including its payment choices and editable dietary goals, then apply the answer once.
-   New households start with national dietary guidelines as a saved pattern.
-   Resolve the country from explicit household context or include it in that
-   setup question; do not infer it from the retailer. Record the chosen country
-   in `diet.patterns`. An unresolved country needs clarification before claiming
-   guideline alignment. Preserve existing or explicitly cleared goals. Reuse accepted
+   Explain the actual saved diet and returned `dietary_guidance`. New households
+   start with an explicit, editable Norwegian guideline preset and adult whole-diet
+   reference quantities; say it can be kept, changed to another country/pattern,
+   edited or removed. Use its maintained text without researching it on every setup.
+   Do not infer a country from retailer or conversation language. A legacy generic
+   national-guidelines goal needs its intended country clarified once, without silently
+   replacing the profile. Preserve existing/custom/explicitly cleared goals. Reuse accepted
    settings and standing authorization. Account connection is separate from
    preferences and optional email. Local recipes remain usable without a store
    account. Never create a purchase just to test setup.
@@ -66,8 +68,15 @@ meal selection and product preparation need no additional reference loading.
    installed library/collection list; show effective values and explain how to
    change them. Translate these short explanations to the user's language.
 2. Read the saved preferences, recent meals and suitable real recipes. Search
-   the bank and selected store with useful local food words; read full details
-   for your choices. Empty results for one narrow query do not mean the catalog
+   the enabled bank and selected enabled store with useful local food words; for an
+   ordinary open-ended plan, compare one bounded candidate page from each before
+   selecting. Reuse current search results; use source=internal with projection=summary
+   for the bank and the actual selected provider for store discovery. Skip disabled,
+   unavailable or user-excluded sources, and do not claim an unperformed search.
+   Exact user-selected recipes need no comparison search. Read full details only
+   for promising choices. Choose for dietary fit, practicality and variety, with
+   source diversity as a tie-breaker, never a fixed quota. An all-external or
+   all-store plan can be the best fit. Empty results for one narrow query do not mean the catalog
    is empty. Selected recipe websites are enabled by default: use a bounded
    search when better coverage or variety would help. For an unusual cuisine,
    specific dish or explicit website request, broader discovery may be more
@@ -106,8 +115,17 @@ meal selection and product preparation need no additional reference loading.
    Derive nutritional priorities for recipes and replacement products from the
    saved `diet.patterns`, `diet.nutrition`, explicit targets/preferences and
    `products` preferences. Interpret the named dietary patterns using relevant
-   authoritative guidance; verify current guidance when needed. Apply that
-   reasoning yourself, including to substitutions. Do not turn an ingredient
+   authoritative guidance; verify current guidance when needed. The concrete
+   Norwegian starter text already supplies the reference quantities: use it, not
+   invented numeric quotas or fresh web research each time. Its whole-diet adult
+   amounts are not dinner-only quotas, raw shopping weights or proof of compliance.
+   Minimize routine processed-meat suggestions, including chicken/turkey sausages
+   and nuggets, when that goal applies. Prefer fitting alternatives; an explicit
+   occasional request or use of reported stock can justify an explained exception
+   within all personal restrictions. A plant-based sausage is not processed meat,
+   though its actual composition still matters. Apply that reasoning yourself,
+   including to substitutions. Service readiness or ranked suggestions do not do
+   this dietary review for you. Do not turn an ingredient
    avoidance into an unstated nutrition goal, or apply a universal preferred
    nutrient balance, food group, processing level or plant-based replacement.
    A substitution must fit the dish's heat, acidity, texture and flavor and all
@@ -135,7 +153,10 @@ meal selection and product preparation need no additional reference loading.
    quantities remain unknown: do not invent gram conversions. This is an
    attributed model assessment, not independently verified nutrition. Reassess
    edited recipes. The legacy 25 g check is only a fallback heuristic.
-5. Save the exact returned handoff or save reference. Preserve its dates,
+5. Save the exact returned handoff or save reference. In your first saved-plan
+   message follow `presentation_guidance`: credit each recipe's actual source/link,
+   give dates/portions and known times, and offer the full ingredients and methods,
+   swaps and using food already at home. Do this before shopping. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
    To save a requested distinct whole new draft during a pending purchase,
    pass both the plan's `save_ref` as `planner_ref` and the
@@ -187,6 +208,10 @@ use recipe discovery `adapt` with its exact original `discovery_ref` or
 complete coherent `steps`. Optional `quantity` and `unit` change an amount;
 omitting them retains the amount. Optional top-level `portions` scales the
 source first, so quantities in your edits apply to that target serving count.
+A leafy vegetable replacing a herb garnish needs a deliberate vegetable amount
+and cooking step; it is not a like-for-like scaled garnish. Distinguish gross can
+weight from drained beans and dry rice from cooked rice, labeling estimates.
+Use the service's resulting calculation records unchanged.
 For a ready-made ingredient that is unavailable but simple to prepare, use
 `ingredients=[{index,replace_with:[{item,quantity,unit,assumptions},...]}]`
 to replace its single row with two to five separate measured ingredients.
@@ -385,7 +410,9 @@ Mathem amounts are SEK; Oda and MENY amounts are NOK.
 ## Recipes, delivery and ongoing use
 
 In the first message presenting a saved plan, give dish names, short descriptions,
-dates/portions and known cooking times. Distinguish active work from elapsed time
+dates/portions, each recipe's actual source and available link, and known cooking
+times. Label adaptations and distinguish a collection from the original author.
+Distinguish active work from elapsed time
 and per-dish time from a combined session; unknown times stay unknown. Offer:
 "Would you like the full ingredients and cooking steps? You can swap any dish,
 ask for particular meals, or tell me what you already have and want to use up."

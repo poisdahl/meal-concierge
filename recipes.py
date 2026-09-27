@@ -1338,12 +1338,14 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
                 evidence = item["evidence"]["quantity"]
                 previous = evidence.get("calculation", {})
                 serving_evidence = deepcopy(result["portions_evidence"])
-                serving_calculation = serving_evidence.pop("calculation", {})
+                serving_evidence.pop("calculation", None)
+                # A replacement starts at the current recipe servings; only this
+                # ingredient's own calculation can retain an earlier serving base.
                 evidence["calculation"] = {
                     "operation": "portion_scale",
                     "input_quantity": previous.get("input_quantity", quantity_json(source_quantity)),
                     "factor": quantity_json(read_quantity(previous.get("factor", 1)) * factor),
-                    "input_portions": previous.get("input_portions", serving_calculation.get("input_quantity", quantity_json(read_quantity(base)))),
+                    "input_portions": previous.get("input_portions", quantity_json(read_quantity(base) / read_quantity(previous.get("factor", 1)))),
                     "portions_evidence": previous.get("portions_evidence", serving_evidence),
                 }
         if item.get("scalable") is not True and not item.get("optional", False):
