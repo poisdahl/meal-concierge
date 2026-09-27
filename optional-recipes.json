@@ -1,0 +1,13 @@
+{
+  "bytes": 148393412,
+  "display_name": "Optional Recipe Collection",
+  "format": "meal-concierge-recipes",
+  "format_version": 1,
+  "kind": "bundled",
+  "normalizer_version": "3",
+  "pack_id": "wikibooks-themealdb-en",
+  "pack_version": "2026-09-26.19",
+  "recipe_schema_version": 2,
+  "sha256": "080b55d4529d8c3db1129c055f30934f7517925af5a60b17934bd910e1933856",
+  "url": "https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-26.19/meal-concierge-recipes-2026-09-26.19.zip"
+}
