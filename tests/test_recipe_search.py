@@ -260,7 +260,8 @@ class OptionalSearchTests(unittest.TestCase):
                             plan_result = json.loads(planned.content[0].text)
                             self.assertEqual(plan_result['plan']['status'], 'planned', plan_result)
                             self.assertIn('Synthetic carrot dinner', json.dumps(plan_result))
-                            return result.structured_content
+                            self.assertIsNone(result.structured_content)
+                            return json.loads(result.content[0].text)
                 self.assertEqual(asyncio.run(mcp())["backend"], "firecrawl")
             stopped.set()
             thread.join(timeout=5)
