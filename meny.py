@@ -359,25 +359,53 @@ def vipps_dispatch_acknowledged(value: Any) -> bool:
     return False
 
 
-def meny_order_search_completed(value: Any) -> bool:
+def _meny_order_search_requests(value: Any) -> list[Mapping[str, Any]]:
     if not isinstance(value, Mapping) or not isinstance(value.get("requests"), list):
         raise HouseholdError("MENY browser order request log changed")
+    searches = []
     for request in value["requests"]:
         if not isinstance(request, Mapping):
             raise HouseholdError("MENY browser order request log changed")
-        status = request.get("status")
         parsed = urlparse(str(request.get("url") or ""))
         if (
             str(request.get("method") or "").upper() == "GET"
-            and not isinstance(status, bool)
-            and isinstance(status, int)
-            and 200 <= status < 300
             and parsed.scheme == "https"
             and parsed.hostname == "platform-rest-prod.ngdata.no"
             and parsed.path.casefold().startswith("/api/order/search/")
         ):
-            return True
-    return False
+            searches.append(request)
+    return searches
+
+
+def meny_order_search_completed(value: Any) -> bool:
+    return any(
+        not isinstance(request.get("status"), bool)
+        and isinstance(request.get("status"), int)
+        and 200 <= request["status"] < 300
+        for request in _meny_order_search_requests(value)
+    )
+
+
+def meny_order_search_request_id(value: Any) -> str | None:
+    searches = _meny_order_search_requests(value)
+    if searches:
+        latest = searches[-1]
+        status, request_id = latest.get("status"), latest.get("requestId")
+        if not isinstance(status, bool) and isinstance(status, int) and 200 <= status < 300 and isinstance(request_id, str) and request_id:
+            return request_id
+    return None
+
+
+def meny_order_search_empty(value: Any) -> bool | None:
+    if not isinstance(value, Mapping) or not isinstance(value.get("responseBody"), str):
+        return None
+    try:
+        payload = json.loads(value["responseBody"])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, list):
+        return None
+    return len(payload) == 0
 
 
 def meny_order_card_status(value: Any) -> str:
@@ -2419,13 +2447,20 @@ __DELIVERY_BINDING__
         for phase in range(2):
             for attempt in range(40):
                 if not search_completed:
-                    search_completed = meny_order_search_completed(
-                        self._invoke("network", "requests", "--filter", "/api/order/search/")
-                    )
+                    requests = self._invoke("network", "requests", "--filter", "/api/order/search/")
+                    search_completed = meny_order_search_completed(requests)
                     if search_completed:
                         self._sleep(0.5)
                 result = self._eval(script)
                 if result.get("authenticated") is True and search_completed and result.get("ready") is True and isinstance(result.get("orders"), list):
+                    if not result["orders"]:
+                        requests = self._invoke("network", "requests", "--filter", "/api/order/search/")
+                        search_request_id = meny_order_search_request_id(requests)
+                        response = self._invoke("network", "request", search_request_id) if search_request_id else None
+                        if meny_order_search_empty(response) is not True:
+                            if attempt < 39:
+                                self._sleep(0.25)
+                            continue
                     orders = []
                     for value in result["orders"][:limit]:
                         order = dict(value)
