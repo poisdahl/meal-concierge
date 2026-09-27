@@ -566,8 +566,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             from agent_views import MENU_PRESENTATION_GUIDANCE
             from dietary_guidance import dietary_guidance
             result["dietary_guidance"] = dietary_guidance(self.store.read()["profile"])
-            if isinstance(result.get("menu"), dict):
-                result["presentation_guidance"] = deepcopy(MENU_PRESENTATION_GUIDANCE)
+            result["presentation_guidance"] = deepcopy(MENU_PRESENTATION_GUIDANCE)
         if response_view == "agent" and operation != "products":
             result = project_agent_result(
                 operation, action, result, offset=view_offset,

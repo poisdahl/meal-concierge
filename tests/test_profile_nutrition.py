@@ -66,6 +66,7 @@ class ProfileNutritionTests(unittest.TestCase):
             'planner_input': {'selection_mode': 'agent', 'dates': ['2026-09-28'],
                 'candidates': [{'recipe_ref': {'id': stored['id'], 'revision': stored['revision']}}]}})
         self.assertEqual(plan['dietary_guidance']['whole_diet_compliance'], 'not_established')
+        self.assertIn('whether it is saved', plan['presentation_guidance']['when'])
         save_request = {'operation': 'menu', 'action': 'save', 'response_view': 'agent',
                         'planner_ref': plan['plan']['save_ref']}
         saved = app.handle(save_request)
