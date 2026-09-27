@@ -65,7 +65,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "prepared_portion_range": [4, 8],
         "recurring_batch_accepted": False,
         "salads": 0,
-        "target_active_minutes": [15, 45],
+        "target_active_minutes": [0, 45],
         "maximum_active_minutes": 60,
         "dinner_time": "18:00",
         "cook_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -76,7 +76,7 @@ DEFAULT_PROFILE: dict[str, Any] = {
     },
     "cuisine": {
         "base_style": "Varied weekday cooking",
-        "variation": "Use different main ingredients, formats and cuisines across the seven dinners.",
+        "variation": "Use different main ingredients, formats and cuisines across the requested meals.",
         "wanted": [],
         "flavours": [],
         "quality": "Complete, practical recipes with clear ingredients and steps.",
@@ -101,10 +101,17 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "exceptions": [],
     },
     "products": {
-        "priority": ["diet fit", "practical need", "price per amount", "quality"],
+        "priority": [
+            "dietary restrictions and preferences",
+            "ingredient form, cooking suitability and meaningful meal quality",
+            "actual need after checking stock",
+            "lowest payable total among suitable choices, allowing for waste and shelf life",
+            "unit price when the extra quantity can realistically be used",
+            "pay more only for a meaningful benefit; explain material price differences",
+        ],
         "prefer_value_brands": [],
-        "organic": "when requested or equally suitable",
-        "local": "when requested or equally suitable",
+        "organic": "",
+        "local": "",
         "brands": [],
         "offers": "use when compatible with preferences, shelf life and real need",
         "shelf_life": "buy larger packs only when later use or freezing is realistic",
@@ -112,6 +119,9 @@ DEFAULT_PROFILE: dict[str, Any] = {
     },
     "pantry": {
         "assume": ["salt", "pepper", "cooking oil"],
+        "assumptions_accepted": False,
+        "review_interval_days": 56,
+        "last_reviewed_on": "",
         "confirm_if_stale": True,
         "breakfast_context": [],
         "notes": [],
@@ -214,7 +224,7 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
 def initial_recipe_delivery(*, legacy_email: bool = False, legacy: bool = False) -> dict[str, Any]:
     return {"preferences": {
         "chat": {"enabled": not legacy, "pdf": True, "images": True, "show_estimate_labels": True},
-        "email": {"enabled": legacy_email, "pdf": True, "images": True, "show_estimate_labels": True},
+        "email": {"enabled": legacy_email, "pdf": False, "images": True, "show_estimate_labels": True},
     }, "paused": False, "legacy_email_disabled": False, "jobs": {}}
 
 
@@ -278,6 +288,15 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
             elif any(not isinstance(x, str) or not x.strip() or len(x) > 500 for x in value):
                 raise HouseholdError(f"profile {path} must contain bounded non-empty text")
     check(profile, DEFAULT_PROFILE, "")
+    pantry = profile["pantry"]
+    if not 1 <= pantry["review_interval_days"] <= 366:
+        raise HouseholdError("pantry review_interval_days must be from 1 to 366")
+    if pantry["last_reviewed_on"]:
+        try:
+            if date.fromisoformat(pantry["last_reviewed_on"]).isoformat() != pantry["last_reviewed_on"]:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise HouseholdError("pantry last_reviewed_on must use YYYY-MM-DD") from exc
     meals = profile["meals"]
     if meals["meal_mode"] not in {"fresh", "batch", "mixed"}:
         raise HouseholdError("meal_mode must be fresh, batch or mixed")
@@ -379,7 +398,7 @@ def recurring_schedule(value: Any, today: date) -> dict[str, Any]:
     result = deepcopy(dict(value))
     unit = result.get("unit")
     if result.get("anchor") is None:
-        result["anchor"] = today.strftime("%G-W%V") if unit == "weeks" else today.strftime("%Y-%m")
+        result["anchor"] = today.isoformat() if unit == "days" else today.strftime("%G-W%V") if unit == "weeks" else today.strftime("%Y-%m")
     try:
         due_recurring({"schedule": result}, today)
     except (TypeError, ValueError) as exc:
@@ -918,7 +937,7 @@ def _migrate_state(
     profile = state.get("profile")
     if not isinstance(profile, dict):
         raise HouseholdError("household profile is invalid")
-    for section, fields in (("meals", ("meal_mode", "prepared_portion_range", "recurring_batch_accepted", "equipment")), ("diet", ("rules", "uncertainty_permissions"))):
+    for section, fields in (("meals", ("meal_mode", "prepared_portion_range", "recurring_batch_accepted", "equipment")), ("diet", ("rules", "uncertainty_permissions")), ("pantry", ("assumptions_accepted", "review_interval_days", "last_reviewed_on"))):
         for field in fields:
             profile[section].setdefault(field, deepcopy(DEFAULT_PROFILE[section][field]))
     profile.setdefault("recipes", deepcopy(DEFAULT_PROFILE["recipes"]))
@@ -1132,6 +1151,10 @@ class StateStore:
             previous = state["profile"]
             candidate = deepcopy(previous)
             _merge(candidate, changes)
+            pantry_changes = changes.get("pantry", {})
+            if "assume" in pantry_changes and candidate["pantry"]["assume"] != previous["pantry"]["assume"] and "assumptions_accepted" not in pantry_changes:
+                candidate["pantry"]["assumptions_accepted"] = False
+                candidate["pantry"]["last_reviewed_on"] = ""
             validate_profile(candidate)
             meal_changes = changes.get("meals") if isinstance(changes, Mapping) else None
             finalize_recurring_profile_write(
@@ -1161,6 +1184,9 @@ class StateStore:
                     if not isinstance(source, dict) or parts[-1] not in source or not isinstance(target, dict):
                         raise HouseholdError(f"unknown profile field: {path}")
                     target[parts[-1]] = deepcopy(source[parts[-1]])
+            if candidate["pantry"]["assume"] != previous["pantry"]["assume"]:
+                candidate["pantry"]["assumptions_accepted"] = False
+                candidate["pantry"]["last_reviewed_on"] = ""
             validate_profile(candidate)
             finalize_recurring_profile_write(
                 previous,
@@ -1203,7 +1229,7 @@ def put_item(items: list[dict[str, Any]], value: Mapping[str, Any]) -> list[dict
     normalized = {"product_id": product_id, "product_name": product_name, "quantity": quantity}
     if value.get("product_url"):
         normalized["product_url"] = str(value["product_url"])
-    for optional in ("label", "schedule"):
+    for optional in ("label", "schedule", "last_fulfilled_on"):
         if optional in value:
             normalized[optional] = deepcopy(value[optional])
     return sorted([entry for entry in items if item_key(entry) != product_id] + [normalized], key=item_key)
@@ -1220,8 +1246,10 @@ def due_recurring(item: Mapping[str, Any], when: date) -> bool:
         raise HouseholdError("recurring item schedule is missing")
     every = schedule.get("every", 1)
     unit = schedule.get("unit")
-    if isinstance(every, bool) or not isinstance(every, int) or every < 1 or unit not in {"weeks", "months"}:
+    if isinstance(every, bool) or not isinstance(every, int) or every < 1 or unit not in {"days", "weeks", "months"}:
         raise HouseholdError("recurring interval is invalid")
+    if unit == "days":
+        return when >= recurring_due_on(item)
     anchor = schedule.get("anchor")
     if unit == "weeks":
         if anchor is None:
@@ -1242,6 +1270,33 @@ def due_recurring(item: Mapping[str, Any], when: date) -> bool:
         anchor_year, anchor_month = int(match.group(1)), int(match.group(2))
     delta = (when.year - anchor_year) * 12 + when.month - anchor_month
     return delta >= 0 and delta % every == 0
+
+
+def recurring_due_on(item: Mapping[str, Any]) -> date:
+    """Elapsed schedules stay due until a confirmed purchase fulfills them."""
+    schedule = item["schedule"]
+    try:
+        anchor = date.fromisoformat(schedule["anchor"])
+        last = item.get("last_fulfilled_on")
+        return date.fromisoformat(last) + timedelta(days=schedule["every"]) if last else anchor
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise HouseholdError("elapsed recurring dates must use YYYY-MM-DD") from exc
+
+
+def pantry_review(profile: Mapping[str, Any], when: date) -> dict[str, Any]:
+    """A periodic conversation prompt, never an inferred shopping requirement."""
+    pantry = profile["pantry"]
+    accepted = pantry.get("assumptions_accepted") is True
+    reviewed = pantry.get("last_reviewed_on")
+    next_review = (date.fromisoformat(reviewed) + timedelta(days=pantry["review_interval_days"])) if reviewed else None
+    due = accepted and bool(pantry["assume"]) and pantry["confirm_if_stale"] and (next_review is None or when >= next_review)
+    return {
+        "assumptions_accepted": accepted, "assume": deepcopy(pantry["assume"]),
+        "review_due": bool(due), "next_review_on": next_review.isoformat() if next_review else None,
+        "guidance": "During normal shopping, ask once whether any accepted basics need restocking; due does not mean missing." if due else
+                    "Ordinary quantities of accepted basics need no repeated stock question; ask about unusually large needs, unsuitable types or reported low stock." if accepted else
+                    "The suggested basics are not confirmed stock. Offer the list once and record the user's choice before relying on it.",
+    }
 
 
 def masked_status(state: Mapping[str, Any], integration: Mapping[str, Any]) -> dict[str, Any]:

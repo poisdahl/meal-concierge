@@ -50,8 +50,10 @@ from core import (
     mask_email,
     masked_status,
     put_item,
+    pantry_review,
     remove_item,
     recurring_schedule,
+    recurring_due_on,
     validate_profile,
     validate_delivery_slot,
     valid_email_address,
@@ -507,7 +509,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 with self.product_plan_lock:
                     result = self._handle(request)
             elif (
-                operation == "profile" and action in {"update", "reset"}
+                operation == "profile" and action in {"update", "reset", "review_pantry"}
             ) or (
                 operation == "setup" and action == "apply"
             ) or (
@@ -682,7 +684,28 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         action = request.get("action", "show")
         if action == "show":
             state = self.store.read()
-            return {"profile": state["profile"], "email_recipient": mask_email(state.get("email_recipient"))}
+            return {"profile": state["profile"], "email_recipient": mask_email(state.get("email_recipient")),
+                    "pantry_review": pantry_review(state["profile"], self._household_today(state))}
+        if action == "overview":
+            state = self.store.read()
+            return {"profile": deepcopy(state["profile"]), "schedule": deepcopy(state["schedule"]),
+                    "recurring_items": deepcopy(state["recurring_items"]),
+                    "due_recurring_items": self._due_recurring(state, self._household_today(state)),
+                    "pantry_review": pantry_review(state["profile"], self._household_today(state)),
+                    "recipe_delivery": {key: deepcopy(state["recipe_delivery"][key]) for key in ("preferences", "paused")},
+                    "email_recipient": mask_email(state.get("email_recipient")),
+                    "checkout_payment": deepcopy(state["checkout_payment"]),
+                    "confirmation_policy": self.confirmation_policy,
+                    "guide": self._user_guide(),
+                    "details": "For configured email timing and pending sends, read email_sender status and recipe_delivery status; for installed collections, recipe_pack list and recipes libraries."}
+        if action == "review_pantry":
+            changes = request.get("changes") or {}
+            if not isinstance(changes, Mapping) or set(changes) - {"assume", "assumptions_accepted"}:
+                raise HouseholdError("review_pantry accepts assume and assumptions_accepted only")
+            accepted = changes.get("assumptions_accepted", True)
+            profile = self.store.update_profile({"pantry": {**dict(changes), "assumptions_accepted": accepted,
+                    "last_reviewed_on": self._household_today().isoformat() if accepted else ""}})
+            return {"profile": profile, "pantry_review": pantry_review(profile, self._household_today())}
         if action == "update":
             changes = request.get("changes", {})
             recipe_changes = changes.get("recipes") if isinstance(changes, Mapping) else None
@@ -783,6 +806,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "provider": self.provider,
             "people": meals["people"],
             "portions": meals["portions"],
+            "cooking_time": {key: deepcopy(meals[key]) for key in ("target_active_minutes", "maximum_active_minutes")},
+            "purchasing": deepcopy(profile["products"]),
+            "pantry_review": pantry_review(profile, self._household_today(state)),
             "diet": deepcopy(profile["diet"]),
             "confirmation_policy": self.confirmation_policy,
             "checkout_payment": deepcopy(state["checkout_payment"]),
@@ -813,8 +839,19 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "configuration_status": (state.get("setup") or {}).get("status"),
             "current": self._setup_summary(state),
             "store_readiness": self._store_readiness(state.get("checkout_payment")),
+            "guide": self._user_guide(),
             "question": "Keep all current/default Meal Concierge settings? Answer once, or provide only the values you want to change." if required else None,
             "next": "Call meal_concierge_setup action=apply with keep_current=true, or keep_current=false and only the requested changes." if required else "Use action=rerun to review this configuration again.",
+        }
+
+    @staticmethod
+    def _user_guide() -> dict[str, Any]:
+        return {
+            "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
+            "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
+            "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",
+            "overview_request": "Show me everything Meal Concierge can do and all my current settings, preferences, recurring items and delivery options.",
+            "presentation": "Give the relevant short guide at each setup step, then the overview phrase once at completion. Translate to the user's language; do not dump technical tool instructions.",
         }
 
     def _setup_gate(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -909,10 +946,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             setup = state["setup"]
             current = self._setup_summary(state)
             if setup["status"] == "complete" and canonical(current) == canonical(before):
-                return {"configured": True, "idempotent": True, "setup": deepcopy(setup), "current": current}
+                return {"configured": True, "idempotent": True, "setup": deepcopy(setup), "current": current, "guide": self._user_guide()}
             setup["status"] = "complete"
             setup["reviewed_at"] = now().isoformat()
-            return {"configured": True, "setup": deepcopy(setup), "current": current}
+            return {"configured": True, "setup": deepcopy(setup), "current": current, "guide": self._user_guide()}
 
     def _items(self, request: Mapping[str, Any], key: str) -> dict[str, Any]:
         action = request.get("action", "list")
@@ -935,6 +972,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     if isinstance(schedule, dict) and schedule.get("anchor") is None and all(schedule.get(k, 1 if k == "every" else None) == old_schedule.get(k, 1 if k == "every" else None) for k in ("unit", "every")) and old_schedule.get("anchor"):
                         schedule["anchor"] = old_schedule["anchor"]
                     item["schedule"] = recurring_schedule(schedule, self._household_today(state))
+                    # Fulfillment is written by confirmed checkout, not by a list edit.
+                    item.pop("last_fulfilled_on", None)
+                    if previous and previous.get("last_fulfilled_on"):
+                        item["last_fulfilled_on"] = previous["last_fulfilled_on"]
                 state[key] = put_item(state[key], item)
             elif action == "remove":
                 state[key] = remove_item(state[key], self._product_id(request.get("product_id")))
@@ -956,12 +997,13 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             self._product_id(item['product_id'])
             if not due_recurring(item, when):
                 continue
-            period = when.strftime('%G-W%V') if item['schedule']['unit'] == 'weeks' else when.strftime('%Y-%m')
+            period = recurring_due_on(item).isoformat() if item['schedule']['unit'] == 'days' else when.strftime('%G-W%V') if item['schedule']['unit'] == 'weeks' else when.strftime('%Y-%m')
             key = canonical({'provider': self.provider, 'product_id': item['product_id'],
                              'schedule': item['schedule'], 'period': period})
             if key not in state.get('recurring_fulfilled', {}):
                 substitute = state.get('recurring_substitutions', {}).get(key, {})
-                due.append({**deepcopy(item), **deepcopy(substitute), 'fulfillment_key': key})
+                due.append({**deepcopy(item), **deepcopy(substitute), 'fulfillment_key': key,
+                            **({'due_on': period} if item['schedule']['unit'] == 'days' else {})})
         return due
 
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -975,7 +1017,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             when = date.fromisoformat(str(request.get("date") or self._household_today().isoformat()))
             with self.store.locked() as state:
                 if state.get("pending_checkout") or state.get("order_change"):
-                    raise HouseholdError("finish the existing checkout before replacing weekly goods")
+                    raise HouseholdError("finish the existing checkout before replacing recurring goods")
                 # Keep the original recurrence and occurrence identity. Buying its
                 # substitute satisfies this occurrence, not a new recurring item.
                 candidates = [i for i in self._due_recurring(state, when)
@@ -987,7 +1029,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     **replacement, "original_product_id": original}
                 due = self._due_recurring(state, when)
             return {"substituted": True, "date": when.isoformat(), "due": due,
-                    "cart_changed": False, "next": "Synchronize the current weekly cart to replace the old item; do not add this substitute again as an extra."}
+                    "cart_changed": False, "next": "Synchronize the current meal-plan cart to replace the old item; do not add this substitute again as an extra."}
         if action == "due":
             try:
                 when = date.fromisoformat(str(request.get("date") or self._household_today().isoformat()))

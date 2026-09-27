@@ -2,7 +2,7 @@
 
 Talk to your agent in your preferred language. Start with a request such as:
 
-> Plan next week's seven dinners for two.
+> Plan four dinners from Thursday for two, using the carrots we already have.
 
 Meal Concierge can use recipes from your selected, connected store without
 an imported recipe collection. It can also use recipes you save in its local
@@ -11,9 +11,17 @@ optional offline collection.
 
 ## Set up your household
 
-On first use, review the household, portions, dietary preferences, weekly plan
+On first use, review the household, portions, dietary preferences, meal plan
 and recipe sources. Keep the suggested settings or describe what you want to
 change. Ask to review your setup again at any time.
+
+The agent gives a short guide as you make the relevant choices. Ask at any time:
+"Show everything Meal Concierge can do and all my settings and preferences."
+That overview includes meal and purchasing preferences, recurring groceries,
+pantry assumptions, recipe sources, delivery options and optional automation.
+The default cooking-time preference is 0–45 minutes of active work, with 60 as a
+soft upper limit. Elapsed oven or resting time is separate; missing times remain
+unknown. Organic and local labels carry no default price premium.
 
 Examples:
 
@@ -52,6 +60,11 @@ into allergies.
 
 ## Plan, save and adjust meals
 
+Plan for dates, a period or a number of dinners, including across calendar weeks.
+Weekly planning and automation remain optional. The first saved-plan message
+offers full ingredients and steps, recipe swaps and using ingredients you already
+have. A short plan is assessed for the days it covers, not as a whole week's diet.
+
 Review the proposed dishes, dates, portions and any missing information, then
 ask to save the menu. Saved menus keep the recipes and amounts used for that
 plan, even if the original recipes later change.
@@ -75,6 +88,13 @@ Meal Concierge can use that information when choosing recipes and calculating
 what to buy for the current plan. It does not maintain an automatic inventory
 of your kitchen. Specify quantities when you know them, and tell the agent
 which existing cart items are extra household shopping.
+
+During setup, choose whether salt, pepper and cooking oil can normally be assumed
+available. An accepted list avoids repeated questions for ordinary amounts. The
+agent still asks about unusual quantities or a different oil type, and checks
+roughly every eight weeks during your next normal shop whether anything needs
+restocking. It never buys merely because a check is due. Other recipe staples,
+such as butter, sugar and flour, get one combined stock question for the plan.
 
 ## Recipes and favorites
 
@@ -102,6 +122,22 @@ where a quantity, substitution or package size is unclear.
 - “Make sure we have two cartons of milk in the cart.”
 - “Add our usual household items as well.”
 - “Compare a cheaper version of this menu.”
+- “Find suitable offers on dinner ingredients, then suggest meals around them.”
+- “Just order these groceries; I don't need a meal plan.”
+
+Product selection considers dietary and cooking suitability, actual need and
+the lowest payable total for quantities you can use. The agent should explain
+a material premium for a meaningful benefit, and avoid excess packs bought only
+for a lower unit price. It can use observed offers when choosing recipes, checking
+membership and multibuy conditions. Search coverage differs by store; this is
+not a guarantee that every campaign or the globally cheapest basket was found.
+
+Recurring groceries can follow elapsed time, such as one pack every 21 days from
+the last confirmed purchase. An overdue item stays due for one normal quantity
+at the next regular shop, without catch-up packs. Existing calendar schedules
+remain available. Incidental top-up orders include only the requested goods
+unless you ask for recurring items too. Fruit quantities belong in these items,
+rather than duplicated in general meal preferences.
 
 A menu estimate is not the final order price. Delivery, discounts, deposits,
 other fees and changing product prices can affect checkout. Product selection
@@ -134,12 +170,16 @@ any price change. An accepted merchant change does not prove a bank refund has
 settled. If payment or an order change is uncertain, ask the agent to inspect
 the original attempt before making another one.
 
-## Receive recipes and automate a weekly plan
+## Receive recipes and optionally automate planning
 
 > Give me the recipes for the saved menu as a PDF.
 
 Chat text is the default for new installations; PDF and available images depend
-on your agent's actual attachment support. Email is optional. See
+on your agent's actual attachment support. Email is optional and contains the
+complete recipes without a duplicate PDF by default. Choose delivery after
+confirmed purchase to receive that order's saved recipes promptly. Grocery-only
+orders produce no recipe message. A PDF remains useful through a supported
+message destination when email is unavailable or when explicitly requested. See
 [recipe delivery](recipe-delivery.md) for setup, timing and limitations.
 
 For repetition, ask your agent to schedule the weekly plan or shopping preparation.

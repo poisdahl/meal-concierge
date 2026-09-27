@@ -143,6 +143,19 @@ No message promises universal removal, replacement or refund.
 
 ## Weekly shop continuity
 
+Ordinary ad-hoc plans may cross calendar weeks. Their requested dates and relative
+batch-serving positions are retained; the internal week identifier is not a
+requirement to order weekly. Explicit weekly requests keep calendar behavior.
+Saved nutrition targets remain visible, while a short ad-hoc plan does not
+automatically inherit full-week quotas. Explicit strict targets remain binding.
+
+Recurring products support `schedule={"unit":"days","every":21,"anchor":"2026-10-01"}`
+as well as the existing calendar weeks/months. Elapsed items first become due on
+the anchor, then after the interval from confirmed fulfillment. They remain due
+until bought once; retries and cart additions do not advance the interval. Normal
+meal shopping evaluates them on the actual household shopping date. Incidental
+grocery-only shopping does not silently add recurring goods.
+
 `products apply` includes due recurring goods once; a shared product adds the
 menu quantity and the recurring quantity. `cart weekly` refreshes that scope
 with the exact current menu reference. Checkout `weekly=true` requires applied
