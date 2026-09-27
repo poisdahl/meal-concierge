@@ -294,7 +294,7 @@ def read_one(raw=None):
 
 
 def page(raw):
-    return '<html><script type="application/ld+json">' + json.dumps(raw) + '</script></html>'
+    return '<html><script type="application/ld+json">' + json.dumps(raw).replace('</', '<\\/') + '</script></html>'
 
 
 class ReaderTests(unittest.TestCase):
@@ -392,11 +392,12 @@ class ReaderTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(RecipeImportReaderError):
                 read_webpage_jsonld(page(recipesage_fixture()), source_url=url)
 
-    def test_jsonld_is_not_entity_decoded_or_executed(self):
+    def test_jsonld_prose_is_decoded_with_original_retained(self):
         raw = recipesage_fixture()
         raw["recipeInstructions"] = ['Keep &quot;literal&quot; and <b>source text</b>.']
         record = read_webpage_jsonld(page(raw), source_url="https://example.test/page")[0]
-        self.assertEqual(record["extracted"]["steps"], raw["recipeInstructions"])
+        self.assertEqual(record["extracted"]["steps"], ['Keep "literal" and source text.'])
+        self.assertEqual(record["encoded_source_text"]["steps"], raw["recipeInstructions"])
 
     def test_unclosed_malformed_and_overdeep_jsonld_rejected(self):
         for html in ('<script type="application/ld+json">{}', '<script type="application/ld+json">{broken}</script>', '<script type="application/ld+json">' + '[' * 34 + '{}' + ']' * 34 + '</script>'):
@@ -3227,7 +3228,8 @@ Server(root/'service.sock',os.getgid(),os.getuid(),app).run()
                                 self.assertFalse(scopes_result.is_error)
                                 scopes = json.loads(scopes_result.content[0].text)
                                 self.assertFalse(scopes['searched'])
-                                self.assertEqual(len(scopes['scopes']), 7)
+                                self.assertEqual(len(scopes['scopes']), 1)
+                                self.assertEqual(len(scopes['scopes'][0]['domains']), 7)
                                 self.assertFalse(scopes['settings']['broad'])
                                 updated = await session.call_tool('meal_concierge_setup', {'action': 'apply', 'keep_current': False, 'changes': {'web_search': {'broad': True}}})
                                 self.assertFalse(updated.is_error)
