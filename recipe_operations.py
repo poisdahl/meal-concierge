@@ -586,7 +586,7 @@ class RecipeOperations:
                     effective_settings = effective_search_settings(web_settings, {k: v for k, v in web_result.items() if k != "status"})
                 except ValueError as exc:
                     raise RecipeError(str(exc)) from exc
-            if web_result["status"] == "disabled" and web_settings["enabled"] and (web_settings["broad"] or any(site["enabled"] for site in web_settings["sites"])):
+            if web_result["status"] == "disabled" and effective_settings["enabled"] and (effective_settings["broad"] or any(site["enabled"] for site in effective_settings["sites"])):
                 raise RecipeError("enabled web search cannot be reported disabled")
         if web_candidates and (not web_result or web_result["status"] != "completed"):
             raise RecipeError("web_candidates require a completed web_search_result")
@@ -615,7 +615,7 @@ class RecipeOperations:
                 if values is not None:
                     queries[source] = list(dict.fromkeys([names[0], values[0], *names[1:], *values[1:]]))[:6]
         history = self._planner_history_index(state)
-        web_active = web_settings["enabled"] and (web_settings["broad"] or any(site["enabled"] for site in web_settings["sites"]))
+        web_active = effective_settings["enabled"] and (effective_settings["broad"] or any(site["enabled"] for site in effective_settings["sites"]))
         queries["web"] = [""] if web_active else None
         def fetch_page(source, query, cursor, limit, deadline):
             if source != "web":

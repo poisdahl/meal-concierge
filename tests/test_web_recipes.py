@@ -228,6 +228,19 @@ class WebRecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, 'excluded'):
             self.imported(url='https://sub.recipes.example/soup', search_context=fresh)
 
+    def test_one_off_without_selected_sites_and_scoped_disabled_result(self):
+        self.settings(sites=[])
+        search = self.app.handle({'operation': 'recipes', 'action': 'web_search', 'query': 'soup', 'scope': 'broad', 'one_off': True, 'backend': 'host'})
+        context = search['search_context']
+        imported = self.imported(url='https://recipes.example/soup', search_context=context)
+        result, resolved, _ = self.plan([{'discovery_ref': imported['discovery_ref']}], {'status': 'completed', **context})
+        self.assertEqual(result['status'], 'planned')
+        self.assertEqual(len(resolved), 1)
+        self.settings(broad=True)
+        disabled = self.app.handle({'operation': 'recipes', 'action': 'web_search', 'query': 'soup', 'backend': 'host'})
+        self.assertEqual(disabled['status'], 'disabled')
+        self.plan([], {'status': 'disabled', **disabled['search_context']})
+
     def test_standing_broad_permission_does_not_broaden_ordinary_search(self):
         self.settings(broad=True)
         search = self.app.handle({'operation': 'recipes', 'action': 'web_search', 'query': 'soup', 'backend': 'host'})
