@@ -74,9 +74,10 @@ fetching their source pages. To **install it or update an existing copy**, send:
 > longer included. Preserve every other local recipe and favorite. Report the
 > imported version and any conflicts or incomplete results.
 
-The agent uses `import-recipes` to select the newest published stable collection
-and verify its checksum and size. It waits for active work to finish, stops the
-service for import, then starts it again. You do not have to find a release
+The agent uses `prepare-recipes` to download and validate the current published
+collection while the service remains available, without a GitHub API token.
+It waits for active work to finish, stops the service, imports the exact prepared
+archive offline, then starts the service again. You do not have to find a release
 number or download the file yourself.
 
 **Updating the program does not update the collection.** If you have an older

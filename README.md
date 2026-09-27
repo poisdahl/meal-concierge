@@ -153,9 +153,11 @@ updates do not download or import it. To add or refresh it, ask:
 > Concierge installation. Permanently remove collection recipes that are no
 > longer included. Preserve every other local recipe and favorite.
 
-The agent uses `import-recipes`, which selects the newest published stable
-recipe pack and verifies its checksum and size. It briefly stops the service
-when no active work will be interrupted, then starts it again.
+The agent uses `prepare-recipes` to download and validate the current published
+collection while the service keeps running. It then imports that exact prepared
+version offline with `import-recipes --prepared ID`, stopping only for import
+when no active work will be interrupted, and starts the service again.
+No GitHub account or API token is required.
 An authoritative collection update permanently deletes entries removed by the
 publisher, including the local revisions and favorite attached to that exact
 entry. Recipes and favorites outside this collection are never part of that

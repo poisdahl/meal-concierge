@@ -1386,6 +1386,7 @@ def apply_archive(
     expected_descriptor: Mapping,
     *,
     allow_removals: bool = False,
+    progress=None,
 ) -> dict:
     """Apply a verified pack under the caller's *in-process* offline ownership.
 
@@ -1442,6 +1443,8 @@ def apply_archive(
             _report_bytes(directory, "status.json", canonical_bytes(report))
             current = None
             present_recipe_ids = set()
+            if progress is not None:
+                progress(0, report['total'])
             try:
                 for record in archive.records():
                     current = record["recipe_id"]
@@ -1462,6 +1465,8 @@ def apply_archive(
                     results.append(result)
                     current = None
                     _report_bytes(directory, "status.json", canonical_bytes(report))
+                    if progress is not None:
+                        progress(report['processed'], report['total'])
                 if report["membership_mode"] == AUTHORITATIVE_MEMBERSHIP:
                     deleted = store.delete_absent_pack_records(
                         pack_id=archive.manifest["pack_id"],

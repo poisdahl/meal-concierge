@@ -3,6 +3,7 @@
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -16,7 +17,9 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -38,17 +41,65 @@ RECIPE_PACK = {
     'pack_id': PUBLISHER_RECIPE_PACK_IDS[0],
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
+RECIPE_PREPARATION_VERSION = 1
+RECIPE_CHANNEL_URL = 'https://raw.githubusercontent.com/poisdahl/meal-concierge/recipe-channel/optional-recipes.json'
+
+
+def progress(message):
+    print(message, file=sys.stderr, flush=True)
+
+
+def open_recipe_url(request):
+    try:
+        return urllib.request.urlopen(request, timeout=60)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (403, 429):
+            retry = exc.headers.get('Retry-After')
+            reset = exc.headers.get('X-RateLimit-Reset')
+            detail = f' Retry after {retry} (seconds or HTTP date).' if retry else ''
+            if reset and reset.isdigit():
+                detail += ' Rate limit resets at ' + datetime.fromtimestamp(int(reset), timezone.utc).isoformat() + '.'
+            raise RuntimeError(f'Recipe download/discovery refused (HTTP {exc.code}); possibly rate limited.{detail} '
+                               'No automatic retry or service stop. Keep the service running and retry preparation later.') from exc
+        raise RuntimeError(f'Recipe download/discovery unavailable (HTTP {exc.code}); keep the service running and retry preparation later.') from exc
+
+
+def validate_recipe_descriptor(value):
+    if not isinstance(value, dict) or any(type(value.get(k)) is not type(v) or value[k] != v for k, v in RECIPE_PACK.items()):
+        raise RuntimeError('recipe channel is invalid or requires a newer Meal Concierge runtime')
+    version = value.get('pack_version')
+    if not isinstance(version, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', version):
+        raise RuntimeError('invalid recipe release version')
+    url = f'https://github.com/poisdahl/meal-concierge/releases/download/recipes-{version}/meal-concierge-recipes-{version}.zip'
+    if (value.get('url') != url or type(value.get('bytes')) is not int
+            or not 0 < value['bytes'] <= MAX_PACK_BYTES
+            or not isinstance(value.get('sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', value['sha256'])):
+        raise RuntimeError('recipe channel has an invalid digest, size or official URL')
+    return {**RECIPE_PACK, 'display_name': RECIPE_COLLECTION_NAME,
+            **{k: value[k] for k in ('pack_version', 'url', 'bytes', 'sha256')}}
 
 
 def latest_recipe_pack():
-    """Resolve the newest stable recipe release, excluding ordinary code releases."""
+    """Read the publisher channel, without the end user's GitHub REST quota."""
+    request = urllib.request.Request(RECIPE_CHANNEL_URL, headers={'User-Agent': 'meal-concierge', 'Cache-Control': 'no-cache'})
+    with open_recipe_url(request) as response:
+        payload = response.read(16385)
+    if len(payload) > 16384:
+        raise RuntimeError('recipe channel descriptor is too large')
+    return validate_recipe_descriptor(json.loads(payload))
+
+
+def published_recipe_pack(token):
+    """Publisher-only release discovery; clients use the published channel."""
     releases = []
     page = 1
     while True:
         request = urllib.request.Request(
             f'https://api.github.com/repos/poisdahl/meal-concierge/releases?per_page=100&page={page}',
-            headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'meal-concierge'})
-        with urllib.request.urlopen(request, timeout=60) as response:
+            headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'meal-concierge',
+                     'Authorization': 'Bearer ' + token})
+        with open_recipe_url(request) as response:
             batch = json.load(response)
         if not isinstance(batch, list):
             raise RuntimeError('invalid GitHub release listing')
@@ -73,9 +124,9 @@ def latest_recipe_pack():
             or type(asset.get('size')) is not int or not 0 < asset['size'] <= MAX_PACK_BYTES
             or asset.get('browser_download_url') != url):
         raise RuntimeError('latest recipe release has an invalid digest, size or URL')
-    return {**RECIPE_PACK, 'display_name': RECIPE_COLLECTION_NAME,
+    return validate_recipe_descriptor({**RECIPE_PACK, 'display_name': RECIPE_COLLECTION_NAME,
             'pack_version': version, 'bytes': asset['size'],
-            'sha256': digest.removeprefix('sha256:'), 'url': url}
+            'sha256': digest.removeprefix('sha256:'), 'url': url})
 
 
 def stage_recipe_pack(release, source=None, expected=None):
@@ -86,9 +137,10 @@ def stage_recipe_pack(release, source=None, expected=None):
     destination = Path(release) / ('recipe-pack-' + uuid.uuid4().hex + '.zip')
     digest = hashlib.sha256()
     size = 0
+    last_progress = time.monotonic()
     try:
         if source is None:
-            handle = urllib.request.urlopen(expected['url'], timeout=60)
+            handle = open_recipe_url(expected['url'])
         else:
             descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             handle = os.fdopen(descriptor, 'rb')
@@ -102,6 +154,9 @@ def stage_recipe_pack(release, source=None, expected=None):
                         raise RuntimeError('recipe pack is larger than its release descriptor')
                     digest.update(chunk)
                     output.write(chunk)
+                    if time.monotonic() - last_progress >= 5:
+                        progress(f'Recipe archive: {size}/{expected["bytes"]} bytes received')
+                        last_progress = time.monotonic()
         if size != expected['bytes'] or digest.hexdigest() != expected['sha256']:
             raise RuntimeError('recipe pack differs from the selected published artifact')
         destination.chmod(0o400)
@@ -112,7 +167,7 @@ def stage_recipe_pack(release, source=None, expected=None):
 
 
 def recipe_pack_command(
-    release, action, archive, meta=None, expected=None, *, allow_removals=False,
+    release, action, archive, meta=None, expected=None, *, allow_removals=False, preparation=None,
 ):
     if action == 'inspect-local':
         code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import inspect_local_archive; print(json.dumps(inspect_local_archive(sys.argv[2],reserved_pack_ids=tuple(json.loads(sys.argv[3])))))"
@@ -128,14 +183,17 @@ def recipe_pack_command(
     expected = latest_recipe_pack() if expected is None else expected
     code = """import sys,json
 sys.path.insert(0,sys.argv[1])
+import install
 from install import RECIPE_PACK
 from recipe_portable import preflight_archive
 expected=json.loads(sys.argv[3])
+if json.loads(sys.argv[4]) and getattr(install, 'RECIPE_PREPARATION_VERSION', 0) != 1:
+    raise RuntimeError('update the installed Meal Concierge runtime before preparing recipes')
 if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
     raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
 print(json.dumps(preflight_archive(sys.argv[2],expected)))
 """
-    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected)]
+    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected), json.dumps(action == 'prepare')]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
@@ -146,13 +204,18 @@ from install import RECIPE_PACK,apply_recipe_pack
 expected=json.loads(sys.argv[4])
 if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
     raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
-apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),expected,allow_removals=json.loads(sys.argv[5]))
+extra = {'preparation': json.loads(sys.argv[6])} if len(sys.argv) > 6 else {}
+apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),expected,allow_removals=json.loads(sys.argv[5]),**extra)
 """
         args = [release / 'venv/bin/python', '-I', '-c', code, release, archive,
                 json.dumps(meta), json.dumps(expected), json.dumps(allow_removals)]
-    result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
+        if preparation is not None:
+            args.append(json.dumps(preparation))
+    # Keep phase/count progress visible while preserving the child's JSON stdout.
+    result = subprocess.run([str(x) for x in args], stdout=subprocess.PIPE,
+                            stderr=None if action == 'apply' else subprocess.PIPE, text=True)
     if result.returncode not in ({0, 2} if action == 'apply' else {0}):
-        detail = (result.stdout or result.stderr).strip()[:2000]
+        detail = (result.stdout or result.stderr or 'see error output above').strip()[:2000]
         raise RuntimeError(f'recipe pack {action} failed ({result.returncode}): {detail}')
     return json.loads(result.stdout)
 
@@ -190,14 +253,93 @@ def local_recipe_collection_remove_command(release, meta, expected):
     return json.loads(result.stdout)
 
 
-def apply_recipe_pack(archive, meta, expected, *, allow_removals=False):
+def collection_generation(meta):
+    path = Path(meta['paths']['state']) / 'recipe-collection-update.json'
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def advance_collection_generation(meta, digest=None):
+    path = Path(meta['paths']['state']) / 'recipe-collection-update.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, {'pack_id': RECIPE_PACK['pack_id'], 'sha256': digest,
+                      'action': 'apply' if digest else 'remove', 'generation': uuid.uuid4().hex})
+    # Persist the attempt marker before any SQLite changes can become durable.
+    with path.open('rb') as marker:
+        os.fsync(marker.fileno())
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def prepare_recipes(home, meta, source=None):
+    progress('Checking the published recipe collection; the service may stay running.')
+    expected = latest_recipe_pack()
+    release = Path(meta['release'])
+    root = home / 'recipe-preparations'
+    root.mkdir(mode=0o700, exist_ok=True)
+    destination = root / expected['sha256']
+    progress(f'Preparing collection {expected["pack_version"]} ({expected["bytes"]} bytes).')
+    with tempfile.TemporaryDirectory(prefix='.prepare-', dir=root) as temporary:
+        # A previous failed/finished preparation can reuse its exact verified ZIP.
+        cached = destination / 'archive.zip'
+        archive = stage_recipe_pack(temporary, source if source is not None else (cached if cached.exists() else None), expected)
+        progress('Verifying the complete archive and installed runtime compatibility.')
+        report = recipe_pack_command(release, 'prepare', archive, expected=expected)
+        receipt = {'format': RECIPE_PREPARATION_VERSION, 'expected': expected,
+                   'release': str(release), 'state': str(Path(meta['paths']['state']).resolve()),
+                   'baseline': collection_generation(meta), 'prepared_at': datetime.now(timezone.utc).isoformat()}
+        destination.mkdir(mode=0o700, exist_ok=True)
+        os.replace(archive, cached)
+        write_json(destination / 'receipt.json', receipt)
+    return {'status': 'prepared', 'prepared': expected['sha256'], 'pack_version': expected['pack_version'],
+            'sha256': expected['sha256'], 'records_count': report['records_count'],
+            'prepared_at': receipt['prepared_at'], 'service_stop_required': False,
+            'next': 'When idle, stop through the existing service owner, import-recipes --prepared this ID, then restart through the same owner.'}
+
+
+def read_preparation(home, meta, identifier):
+    if not re.fullmatch(r'[0-9a-f]{64}', identifier):
+        raise RuntimeError('--prepared must be the exact ID returned by prepare-recipes')
+    directory = home / 'recipe-preparations' / identifier
+    path = directory / 'receipt.json'
+    with path.open('rb') as source:
+        data = source.read(16385)
+    if len(data) > 16384:
+        raise RuntimeError('invalid recipe preparation receipt')
+    receipt = json.loads(data)
+    expected = validate_recipe_descriptor(receipt['expected'])
+    if (receipt.get('format') != RECIPE_PREPARATION_VERSION or expected['sha256'] != identifier
+            or receipt.get('release') != str(meta['release'])
+            or receipt.get('state') != str(Path(meta['paths']['state']).resolve())
+            or 'baseline' not in receipt):
+        raise RuntimeError('recipe preparation changed or belongs to a different runtime/installation; prepare again before stopping')
+    return directory / 'archive.zip', expected, receipt
+
+
+def apply_recipe_pack(archive, meta, expected, *, allow_removals=False, preparation=None):
     """Installed-runtime child entry point; no parent-owned lifetime locks."""
     from recipe_portable import apply_archive
     with offline(meta):
+        if expected.get('kind') == 'bundled':
+            current = collection_generation(meta)
+            if (preparation is not None and current != preparation['baseline']
+                    and not (current and current.get('action') == 'apply'
+                             and current.get('pack_id') == expected['pack_id']
+                             and current.get('sha256') == expected['sha256'])):
+                raise RuntimeError('collection changed after preparation; prepare again before stopping, or retry its exact current artifact')
+            advance_collection_generation(meta, expected['sha256'])
         settings = json.loads(Path(meta['paths']['config']).read_text())
+        last = [time.monotonic()]
+        def report_progress(done, total):
+            if done == 0 or done == total or time.monotonic() - last[0] >= 5:
+                progress(f'Importing recipes: {done}/{total}')
+                last[0] = time.monotonic()
         report = apply_archive(
             archive, Path(meta['paths']['state']), settings['household'], expected,
             allow_removals=allow_removals,
+            progress=report_progress,
         )
         print(json.dumps(report))
     if report['status'] != 'complete':
@@ -208,6 +350,7 @@ def remove_recipe_collection(meta):
     """Installed-runtime child entry point; no release lookup or download."""
     from recipe_portable import remove_collection
     with offline(meta):
+        advance_collection_generation(meta)
         settings = json.loads(Path(meta['paths']['config']).read_text())
         report = remove_collection(
             Path(meta['paths']['state']),
@@ -503,7 +646,7 @@ def discover(home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -516,13 +659,16 @@ def main():
     for field in ['config', 'state', 'socket', 'tokens', 'browser-profile', 'browser-home', 'browser-socket-directory', 'agent-browser', 'browser-executable']:
         parser.add_argument('--' + field)
     parser.add_argument('--recipe-pack', type=Path, help='recipe-pack ZIP selected for an inspect/import/removal action')
+    parser.add_argument('--prepared', help='exact preparation ID for an offline import-recipes')
     parser.add_argument('--expected-sha256', help='exact digest pin for a local collection import/removal')
     parser.add_argument('--allow-recipe-removals', action='store_true', help='allow an authoritative local pack to remove absent recipes from its own pack_id')
     parser.add_argument('--backup', type=Path)
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
-    pack_actions = {'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'}
+    pack_actions = {'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'}
+    if args.prepared is not None and (args.action != 'import-recipes' or args.recipe_pack is not None):
+        raise RuntimeError('--prepared applies only to import-recipes and cannot be combined with --recipe-pack')
     if args.recipe_pack is not None and args.action not in pack_actions:
         raise RuntimeError('--recipe-pack applies only to recipe-pack inspect/import/removal actions')
     if args.action in {'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'} and args.recipe_pack is None:
@@ -618,10 +764,13 @@ def main():
                 with offline(meta):
                     print(backup(meta, args.backup))
                 return
-            if args.action in {'import-recipes', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack'}:
-                assert_stopped(meta)
+            if args.action in {'prepare-recipes', 'import-recipes', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack'}:
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
                     raise RuntimeError('complete the stopped runtime update before changing the recipe collection')
+                if args.action == 'prepare-recipes':
+                    print(json.dumps(prepare_recipes(home, meta, args.recipe_pack)))
+                    return
+                assert_stopped(meta)
                 release = Path(meta['release'])
                 if args.action == 'remove-recipe-collection':
                     report = recipe_collection_remove_command(release, meta)
@@ -629,26 +778,34 @@ def main():
                     return
                 local_collection = args.action == 'import-recipe-pack'
                 local_removal = args.action == 'remove-recipe-pack'
-                expected = (
-                    recipe_pack_command(release, 'inspect-local', args.recipe_pack)
-                    if local_collection or local_removal else latest_recipe_pack()
-                )
+                preparation = None
+                source = args.recipe_pack
+                if args.prepared is not None:
+                    source, expected, preparation = read_preparation(home, meta, args.prepared)
+                else:
+                    expected = (
+                        recipe_pack_command(release, 'inspect-local', args.recipe_pack)
+                        if local_collection or local_removal else latest_recipe_pack()
+                    )
                 if (
                     args.expected_sha256 is not None
                     and expected['sha256'] != args.expected_sha256
                 ):
                     raise RuntimeError('local recipe pack differs from --expected-sha256')
-                archive = stage_recipe_pack(release, args.recipe_pack, expected)
+                archive = stage_recipe_pack(release, source, expected)
                 try:
                     if local_removal:
                         report = local_recipe_collection_remove_command(release, meta, expected)
                         label = expected.get('display_name', RECIPE_COLLECTION_NAME)
                         print(label + ':', json.dumps(report))
                         return
+                    progress(f'Validating collection {expected["pack_version"]} before import.')
                     recipe_pack_command(release, 'preflight', archive, expected=expected)
+                    progress('Importing the verified collection; keep the service stopped until the command exits.')
                     report = recipe_pack_command(
                         release, 'apply', archive, meta, expected,
                         allow_removals=args.allow_recipe_removals,
+                        **({'preparation': preparation} if preparation is not None else {}),
                     )
                     label = expected.get('display_name', RECIPE_COLLECTION_NAME)
                     print(label + ':', json.dumps({key: value for key, value in report.items() if key != 'results'}))
@@ -777,7 +934,7 @@ def publish(meta, path, home, settings, uv_binary=None):
         (home / 'maintenance.json').unlink()
         (home / 'pending-install.json').unlink()
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
-    print('Recipe collection is optional. Import later with import-recipes while the service is stopped.')
+    print('Recipe collection is optional. Use prepare-recipes while running, then import-recipes --prepared ID while stopped.')
 
 
 if __name__ == '__main__':
