@@ -758,7 +758,7 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
     view = {"projection": "agent", "operation": "status"}
     view.update(_fields(result, ("household", "configuration_status", "menu_phase", "menu_id",
                                  "cart_plan_status", "pending_checkout_status", "pending_cancellation_status",
-                                 "order_change_status", "confirmation_policy", "auto_checkout", "currency")))
+                                 "order_change_status", "confirmation_policy", "auto_checkout", "currency", "build", "capacity_warnings")))
     view["integration"] = _fields(result.get("integration"), ("status", "provider", "reason"))
     server = (result.get("integration") or {}).get("server")
     if isinstance(server, dict):
@@ -766,7 +766,7 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
     workflow = result.get("workflow")
     if isinstance(workflow, dict):
         view["workflow"] = _fields(workflow, ("cart_status", "delivery_status", "checkout_status",
-                                              "email_status", "next_action"))
+                                              "email_status", "next_action", "settled", "resume"))
         view["workflow"]["menu"] = _assessment_view(workflow.get("menu"), offset, limit, section)
     if isinstance(result.get("store_readiness"), dict):
         view["store_readiness"] = _fields(result["store_readiness"], ("status", "payment", "reason", "next"))
@@ -945,7 +945,7 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
         return view
     view.update(_fields(recipe, ("name", "schema_version", "portions", "scaled_from_portions",
                                  "recipe_ref", "library_recipe_ref", "recipe_digest", "recipe_key",
-                                 "status", "revision", "notes", "storage", "reheating", "language", "available_languages", "source_text_digest")))
+                                 "household_experience", "status", "revision", "notes", "storage", "reheating", "language", "available_languages", "source_text_digest")))
     view["times"] = _recipe_times(recipe.get("times"))
     if "recipe_ref" not in view and isinstance(recipe.get("id"), str) and type(recipe.get("revision")) is int:
         view["recipe_ref"] = {"id": recipe["id"], "revision": recipe["revision"]}

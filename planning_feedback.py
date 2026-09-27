@@ -34,7 +34,9 @@ def experiences(events, recipe_keys=None):
         if (event['event_id'], None) in suppressed or (event['event_id'], key) in suppressed or recipe_keys is not None and key not in recipe_keys:
             continue
         result.append({'event_id': event['event_id'], 'date': event['date'], 'recipe_key': key,
-                       'experience': deepcopy(event['binding']['experience']), 'reason': event.get('reason')})
+                       'experience': deepcopy(event['binding']['experience']), 'reason': event.get('reason'),
+                       'target': deepcopy(event['binding']['target']),
+                       'portion_context': deepcopy(event['binding'].get('portion_context'))})
     return result
 
 
@@ -103,3 +105,47 @@ def append(events, *, kind, binding, contributions, reason, key, signature, as_o
         raise HouseholdError('feedback event limit reached; retained correction groups cannot be discarded')
     events[:] = retained
     return deepcopy(event)
+
+
+def _version_identity(reference):
+    """Normalize only exact built-in reference aliases, never source/title matches."""
+    if not isinstance(reference, dict):
+        return None
+    bank = reference.get('recipe_ref')
+    library = reference.get('library_recipe_ref')
+    if bank:
+        return ('builtin', bank.get('id'), str(bank.get('revision')))
+    if library:
+        return (library.get('library_id'), library.get('recipe_id'), str(library.get('version')))
+    if reference.get('discovery_ref'):
+        return ('discovery', reference['discovery_ref'])
+    # Legacy feedback targets contain the inner reference.
+    if 'library_id' in reference:
+        return _version_identity({'library_recipe_ref': reference})
+    if 'id' in reference and 'revision' in reference:
+        return _version_identity({'recipe_ref': reference})
+    return None
+
+
+def household_experience(events, reference):
+    identity = _version_identity(reference)
+    if identity is None:
+        return None
+    reports = [event for event in experiences(events)
+               if _version_identity(event['target'].get('reference')) == identity]
+    if not reports:
+        return None
+    return {'basis': 'household_reports_for_exact_recipe_version', 'report_count': len(reports),
+            'recent_reports': [{key: event[key] for key in ('date', 'experience', 'portion_context')}
+                               for event in reports[-1:]]}
+
+
+def attach_experience(recipe, events, *, discovery_ref=None):
+    reference = {key: recipe[key] for key in ('recipe_ref', 'library_recipe_ref', 'discovery_ref') if key in recipe}
+    if not reference and discovery_ref:
+        reference = {'discovery_ref': discovery_ref}
+    if not reference and recipe.get('id') and recipe.get('revision'):
+        reference = {'recipe_ref': {'id': recipe['id'], 'revision': recipe['revision']}}
+    summary = household_experience(events, reference)
+    if summary:
+        recipe['household_experience'] = summary

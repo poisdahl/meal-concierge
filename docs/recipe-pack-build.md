@@ -169,3 +169,31 @@ source-payload hash and curated-recipe hash. Bind each variant's
 `source_text_digest` to the final normalized canonical recipe after other text
 edits. Portable pack import/export preserves these variants; it does not create
 translations or certify their culinary accuracy.
+
+## Intentional withdrawals
+
+Ordinary recipe repairs should update the existing stable identity. For rare
+intentional withdrawals, supply `--withdrawals /absolute/path/withdrawals.json`:
+
+```json
+{"stable-source-id": {"category": "quality", "reason": "The missing method could not be recovered."}}
+```
+
+Categories are `quality`, `rights`, `duplicate` or `other`; use a short factual
+reason. The ledger is cumulative: keep earlier reasons so installations skipping
+versions can explain their removals. Remove a declaration if that identity is
+intentionally restored. Never declare an identity still included in the pack.
+
+Channel publication compares membership against the actual previously published
+archive and rejects omissions without declarations, invented removals and dropped
+historical reasons. First publication with no channel baseline requires the
+publisher's explicit `--initial-publication` option. Identical republishing is
+idempotent. Normal publishing requires no new installation option.
+
+Synchronization still permanently removes withdrawn collection entries, including
+favorites and local revisions. It preserves unrelated recipes and frozen household
+menu/order history. Import results include bounded withdrawal explanations; full
+per-record details remain in the local report. Older packs without declarations
+remain readable and report that the publisher supplied no reason. A rights-related
+withdrawal describes the publisher's decision, not a legal determination about
+historical copies or hosting obligations.

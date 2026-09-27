@@ -178,10 +178,10 @@ class PreparationTests(unittest.TestCase):
         payload = (json.dumps(expected, indent=2, sort_keys=True) + '\n').encode()
         with patch.object(publisher, 'published_recipe_pack', return_value=expected), \
              patch.object(publisher, 'stage_recipe_pack', return_value=archive), \
-             patch.object(publisher, 'api', side_effect=[None, {'object': {'sha': 'reviewed-main'}}, {}, None, {},
+             patch.object(publisher, 'api', side_effect=[None, {'object': {'sha': 'reviewed-main'}}, {}, {},
                  {'content': base64.b64encode(payload).decode()}]) as api:
-            publisher.publish('synthetic-token')
+            publisher.publish('synthetic-token', initial_publication=True)
         self.assertEqual(api.call_args_list[2].kwargs['data'], {'ref': 'refs/heads/recipe-channel', 'sha': 'reviewed-main'})
-        put = api.call_args_list[4]
+        put = api.call_args_list[3]
         self.assertEqual(put.kwargs['method'], 'PUT')
         self.assertEqual(json.loads(base64.b64decode(put.kwargs['data']['content'])), expected)

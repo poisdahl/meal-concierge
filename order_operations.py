@@ -58,6 +58,8 @@ ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
 })
 
 
+from payment_attempts import current_review as checkout_review, review_method
+
 class OrderOperations:
     @staticmethod
     def _addition_payment_summary(pending, attempt):
@@ -147,7 +149,7 @@ class OrderOperations:
     @staticmethod
     def _checkout_attempt_for_abort(pending, confirmation_id):
         child = pending.get("recovery")
-        attempt = child if isinstance(child, Mapping) else pending
+        attempt = checkout_review(pending)
         if (attempt.get("confirmation_id") != confirmation_id
                 or attempt.get("status") not in {"clicking", "uncertain", "awaiting_user_payment"}):
             raise HouseholdError("Use the exact current dispatched checkout confirmation")
@@ -156,7 +158,7 @@ class OrderOperations:
     @staticmethod
     def _checkout_payment_closed(pending):
         child = pending.get("recovery")
-        attempt = child if isinstance(child, Mapping) else pending
+        attempt = checkout_review(pending)
         closure = (attempt.get("payment_abort") or {}).get("closure") or {}
         failure = attempt.get("payment_failure") or {}
         order_id = child.get("order_id") if isinstance(child, Mapping) else pending.get("unpaid_order_id")
@@ -195,7 +197,7 @@ class OrderOperations:
                 and untouched and source.get("status") == "closed"
                 and (card_source_closed or vipps_source_closed))
             return bool(source_closed)
-        method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if isinstance(child, Mapping) else (pending.get("checkout_payment") or {}).get("method")
+        method = review_method(pending, attempt)
         if method == "saved_card":
             context = attempt.get("authentication_context") or {}
             positively_closed = (closure.get("status") == "closed"
@@ -3311,7 +3313,7 @@ class OrderOperations:
     def _adopt_checkout_vipps_request(self, pending, order_id, deadline):
         """Retain a native gateway only after the caller binds its exact order."""
         child = pending.get("recovery")
-        attempt = child if isinstance(child, Mapping) else pending
+        attempt = checkout_review(pending)
         if not hasattr(self.browser, "adopt_vipps_request"):
             return pending, None
         change = pending.get("order_change") or {}
@@ -3367,7 +3369,7 @@ class OrderOperations:
                 return {"confirmed": False, "payment_abort_status": "closed", "order_id": order_id,
                         "confirmation_id": confirmation_id, "retry_allowed": False,
                         "next": "The merchant order is already cancelled. Reconcile that exact cancellation; do not repeat payment."}
-            method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is not pending else (pending.get("checkout_payment") or {}).get("method")
+            method = review_method(pending, attempt)
             if method not in {"saved_card", "vipps"}:
                 raise HouseholdError("The active Oda payment method is unavailable")
             context = attempt.get("authentication_context") if method == "saved_card" else attempt.get("vipps_request_context")
@@ -4823,7 +4825,7 @@ class OrderOperations:
                 pending = deepcopy(state["pending_checkout"])
         if vipps_request_not_received:
             child = pending.get("recovery")
-            reported_attempt = child if isinstance(child, Mapping) else pending
+            reported_attempt = checkout_review(pending)
             reported_order_id = child.get("order_id") if isinstance(child, Mapping) else pending.get("unpaid_order_id")
             reported_payment = ((child.get("browser_review") or {}).get("payment_choice", {})
                                 if isinstance(child, Mapping) else pending.get("checkout_payment", {}))

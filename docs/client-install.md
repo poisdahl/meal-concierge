@@ -178,3 +178,18 @@ the original operation before retrying. Reinstalling or restoring old data can
 lose the information needed to establish what happened. Report the source
 commit, client version, last confirmed step and exact error without sharing
 credentials.
+
+## Optional native conversation checks
+
+Maintainers with an authenticated Claude Code client can use the pinned test
+runtime to run `python -I -B tests/household_conversation_probe.py --root
+/absolute/fresh/scratch` (one command). This creates a synthetic household whose
+service rejects external networking. Ordinary user prompts exercise cooking
+feedback, recipe selection in a fresh conversation, plan-only portion changes,
+and recovery of an interrupted cart change while preserving unrelated goods.
+Assertions grade saved outcomes, not prescribed tool calls. The scratch directory
+retains conversation logs, call counts, errors and elapsed time. Authentication
+or client failures mean the journey was not successfully evaluated.
+
+This complements the deterministic product-preview, stale-reference and payment
+recovery tests. The native fixture does not simulate a retailer catalog or payment.

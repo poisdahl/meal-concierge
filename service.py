@@ -80,7 +80,7 @@ from product_planner import (
 from product_observations import MAX_PRODUCTS
 import menu_planning as mp
 import planning_feedback as pf
-from planning_assessment import assess_menu, workflow_status, feedback_targets
+from planning_assessment import capacity_warnings, assess_menu, workflow_status, feedback_targets
 import batch_planning as bp
 from recipe_libraries import (
     CAPABILITY_NAMES,
@@ -166,6 +166,9 @@ from delivery_operations import DeliveryOperations
 
 _RECIPE_PACK_ARCHIVE_ID = re.compile(r"[0-9a-f]{64}\.zip\Z")
 
+
+from build_identity import read as read_build_identity
+BUILD_IDENTITY = read_build_identity(Path(__file__).resolve().parent)
 
 class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations, DeliveryOperations):
     def _now(self) -> datetime:
@@ -567,6 +570,13 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             from dietary_guidance import dietary_guidance
             result["dietary_guidance"] = dietary_guidance(self.store.read()["profile"])
             result["presentation_guidance"] = deepcopy(MENU_PRESENTATION_GUIDANCE)
+        if operation == "recipes" and action in {None, "search", "discover", "get", "resolve", "detail"}:
+            from planning_feedback import attach_experience
+            events = self.store.read()["planning_feedback"]
+            for recipe in result.get("recipes", []):
+                attach_experience(recipe, events)
+            if isinstance(result.get("recipe"), dict):
+                attach_experience(result["recipe"], events, discovery_ref=result.get("discovery_ref"))
         if response_view == "agent" and operation != "products":
             result = project_agent_result(
                 operation, action, result, offset=view_offset,
@@ -584,7 +594,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         ):
             raise HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
         if operation == "health":
-            return {"ok": True, "integration": self.integration}
+            return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY)}
         if operation == "status":
             state = self.store.read()
             if self.provider in {"oda", "mathem"} and self.integration.get("status") != "ready":
@@ -598,10 +608,13 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     if pending_status not in UNRESOLVED_CHECKOUT_STATUSES:
                         safe = not state.get("pending_checkout") and not state.get("pending_cancellation") and not state.get("order_change") and not state.get("pending_cart_change")
                         self._refresh_integration(deadline, allow_recovery=safe)
+            state = self.store.read()
             return {
-                **masked_status(self.store.read(), self.integration),
+                **masked_status(state, self.integration),
+                "build": deepcopy(BUILD_IDENTITY),
+                "capacity_warnings": capacity_warnings(state),
                 "confirmation_policy": self.confirmation_policy,
-                "workflow": workflow_status(self.store.read()),
+                "workflow": workflow_status(state, now=self._now()),
                 "store_readiness": self._store_readiness(state.get("checkout_payment")),
                 **({"currency": "SEK", "checkout": "guarded_saved_card" if self.browser is not None else "manual", "store_url": "https://www.mathem.se/se/"} if self.provider == "mathem" else {}),
             }

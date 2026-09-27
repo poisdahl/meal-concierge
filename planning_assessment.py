@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from payment_attempts import current_review, review_method, review_expired
 
 
 def _text(value):
@@ -76,7 +77,7 @@ def assess_menu(state):
     return result
 
 
-def workflow_status(state):
+def workflow_status(state, *, now=None):
     assessment = assess_menu(state)
     menu = state.get("menu") or {}
     cart = state.get("cart_plan") or {}
@@ -93,18 +94,13 @@ def workflow_status(state):
         next_action = {"operation": "cart", "action": "reconcile_change", "reason": "Read back the pending grocery top-up before any further write; never repeat an uncertain delta."}
     elif pending:
         child = pending.get("recovery")
-        attempt = child if isinstance(child, Mapping) else pending
+        attempt = current_review(pending)
         status = attempt.get("status")
         active_checkout_status = status or active_checkout_status
-        method = ((attempt.get("browser_review") or {}).get("payment_choice") or {}).get("method") if attempt is child else (pending.get("checkout_payment") or {}).get("method")
-        expired_child = False
-        if attempt is child and status == "awaiting_confirmation" and isinstance(attempt.get("expires_at"), str):
-            try:
-                expiry = datetime.fromisoformat(attempt["expires_at"])
-                expired_child = expiry.tzinfo is not None and expiry <= datetime.now(timezone.utc)
-            except ValueError:
-                pass
-        action = "prepare" if expired_child else "confirm" if status == "awaiting_confirmation" else "reconcile"
+        method = review_method(pending, attempt)
+        expired = review_expired(attempt, now)
+        expired_child = expired and attempt is child
+        action = "prepare" if expired else "confirm" if status == "awaiting_confirmation" else "reconcile"
         if expired_child:
             legacy_child = (attempt.get("owner_reported_no_vipps_request") is True
                             and attempt.get("original_confirmation_id") == pending.get("confirmation_id")
@@ -114,6 +110,8 @@ def workflow_status(state):
                       "prepare a fresh review for the exact order with the original confirmation_id, vipps_request_not_received=true "
                       "and the same checkout_payment; the service must reverify the order. Preserve the original journal."
                       if legacy_child else "This same-order recovery review expired without payment. Prepare a fresh review with the same checkout_payment; preserve the original journal.")
+        elif expired:
+            reason = "This checkout review expired without dispatch. Prepare a fresh review; do not confirm the expired reference."
         elif action == "confirm":
             reason = "Review and confirm this exact prepared recovery under the existing confirmation policy." if attempt is child else "Continue the exact prepared checkout under the existing confirmation policy."
         elif (attempt.get("payment_abort") or {}).get("status") == "closed":
@@ -166,9 +164,12 @@ def workflow_status(state):
             if legacy_child:
                 next_action["order_id"] = attempt["order_id"]
                 next_action["confirmation_id"] = pending["confirmation_id"]
+        if (expired and attempt is pending and state.get("provider") == "oda"
+                and not pending.get("automatic_checkout") and "payment_preference" in pending):
+            next_action["checkout_payment"] = deepcopy(pending["checkout_payment"])
         if method in {"vipps", "saved_card"}:
             next_action["payment_method"] = method
-        if not expired_child and isinstance(attempt.get("confirmation_id"), str) and attempt["confirmation_id"]:
+        if not expired and isinstance(attempt.get("confirmation_id"), str) and attempt["confirmation_id"]:
             next_action["confirmation_id"] = attempt["confirmation_id"]
         if (state.get("provider") == "oda" and method == "saved_card"
                 and isinstance(attempt.get("authentication_context"), Mapping)
@@ -181,10 +182,11 @@ def workflow_status(state):
                            "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id"),
                            "reason": "Finish the exact prepared order cancellation; do not start another payment."}
     elif cancellation:
-        next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation."}
+        next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation.", "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id")}
     elif change:
-        next_action = {"operation": "orders", "action": "get", "reason": "Review the exact order being changed before continuing."}
-    elif menu.get("phase") == "ordered" and not jobs and state.get("email_recipient"):
+        next_action = {"operation": "orders", "action": "get", "reason": "Review the exact order being changed before continuing.", "order_id": change.get("order_id")}
+    elif (menu.get("phase") == "ordered" and not jobs and state.get("email_recipient")
+          and ((state.get("recipe_delivery") or {}).get("sender_binding") or {}).get("timing") not in {"on_request", "after_purchase"}):
         next_action = {"operation": "email", "action": "schedule", "reason": "Schedule recipes for the exact confirmed order and delivery date."}
     elif menu.get("phase") == "ordered" and any(j.get("status") in {"claimed", "sending", "uncertain"} for j in jobs):
         next_action = {"operation": "email", "action": "status", "reason": "Resolve the existing email dispatch before sending again."}
@@ -204,8 +206,74 @@ def workflow_status(state):
             next_action = {"operation": "delivery", "action": "list", "reason": "Choose a delivery window."}
         else:
             next_action = {"operation": "checkout", "action": "prepare", "reason": "Read the final provider total and prepare checkout."}
-    return {"menu": assessment, "cart_status": bound_cart.get("status", "not_prepared"),
+    if next_action["operation"] == "orders" and next_action["action"] == "cancel_confirm" and review_expired(cancellation, now):
+        next_action = {"operation": "orders", "action": "cancel_prepare", "order_id": cancellation.get("order_id"),
+                       "reason": "The cancellation review expired without dispatch; prepare a fresh review for the same order."}
+    continuation = _continuation(next_action, state, menu, bound_cart)
+    return {**continuation, "menu": assessment, "cart_status": bound_cart.get("status", "not_prepared"),
             "product_plan": deepcopy(bound_cart.get("product_plan_summary")),
             "delivery_status": "observed_requires_revalidation" if state.get("delivery_selection") else "not_observed",
             "checkout_status": active_checkout_status,
             "email_status": [j.get("status") for j in jobs], "next_action": next_action}
+
+
+def _continuation(action, state, menu, cart):
+    """Add executable argument shape without inventing input or authorization."""
+    operation, name = action['operation'], action['action']
+    arguments = {'action': name}
+    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment'):
+        if action.get(key) is not None:
+            arguments[key] = deepcopy(action[key])
+    needs = []
+    if operation == 'products' and name == 'prepare':
+        arguments['menu_ref'] = {key: menu[key] for key in ('menu_id', 'revision', 'digest')}
+    if operation == 'email' and name == 'schedule':
+        if menu.get('order_id'):
+            arguments['order_id'] = menu['order_id']
+        else:
+            needs.append('order_id')
+        needs.extend(['delivery_date', 'email_scheduling_authorized'])
+    if operation == 'menu' and name == 'plan':
+        needs.append('planning_request_and_recipe_selection')
+    if operation == 'feedback':
+        needs.extend(['reported_cooking_experience', 'exact_feedback_target', 'idempotency_key'])
+    if operation == 'products' or (operation == 'checkout' and name == 'prepare' and not state.get('pending_checkout')):
+        needs.append('shopping_requested')
+    if operation == 'checkout' and name in {'confirm', 'abort_payment'} or operation == 'orders' and name == 'cancel_confirm':
+        needs.append('authorization_under_existing_confirmation_policy')
+    if operation == 'checkout' and name == 'prepare' and action.get('recovery') and action.get('order_id'):
+        needs.append('vipps_request_not_received=true_only_after_current_owner_report')
+        # This boolean is user evidence, never inferred from missing local evidence.
+    if operation in {'checkout', 'orders'} and name in {'confirm', 'reconcile', 'abort_payment', 'cancel_confirm', 'cancel_reconcile'} and not arguments.get('confirmation_id'):
+        needs.append('exact_confirmation_id')
+    if operation == 'orders' and name in {'get', 'cancel_confirm'} and not arguments.get('order_id'):
+        needs.append('exact_order_id')
+    if operation == 'checkout' and name == 'confirm':
+        pending = state.get('pending_checkout') or {}
+        if ((pending.get('summary') or {}).get('delivery_change') or {}).get('confirmation_required'):
+            needs.append('delivery_price_approved=true_after_exact_total_approval')
+        needs.append('current_summary_dietary_review_if_required')
+    action['arguments'] = arguments
+    action['needs_input'] = needs
+    action['ready_to_call'] = not needs
+    resume = {}
+    if menu:
+        resume['menu_ref'] = {key: menu[key] for key in ('menu_id', 'revision', 'digest') if key in menu}
+    for key in ('confirmation_id', 'order_id'):
+        if action.get(key):
+            resume[key] = action[key]
+    return {'settled': {'menu_saved': bool(menu), 'order_confirmed': bool(menu.get('order_id'))},
+            'resume': resume}
+
+
+def capacity_warnings(state):
+    """Report approaching existing bounds without deleting operational evidence."""
+    from menu_planning import MAX_PLANNING_MENUS
+    from planner import MAX_HISTORY_RECORDS
+    collections = [(f'menu_planning.{name}', len(records), MAX_PLANNING_MENUS)
+                   for name, records in state.get('menu_planning', {}).items()]
+    collections.append(('recipe_usage', len(state.get('recipe_usage', {})), MAX_HISTORY_RECORDS))
+    return [{'collection': name, 'count': count, 'limit': limit,
+             'status': 'at_limit' if count >= limit else 'approaching_limit',
+             'next': 'Request maintenance before further planning edits; retain history and unresolved operations.'}
+            for name, count, limit in collections if count >= limit * .9]

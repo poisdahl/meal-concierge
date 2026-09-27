@@ -586,6 +586,8 @@ def stage_release(code_root, uv_binary=None):
     run(uv, '--no-config', 'pip', 'sync', '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
     # Check both versions AND the actual loaded modules inside this private venv.
     run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
+    from build_identity import create, MANIFEST
+    write_json(release / MANIFEST, create(SOURCE, release, PYTHON))
     return release
 
 
@@ -641,7 +643,18 @@ def write_unit(meta):
 
 def discover(home):
     candidates = {home, Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes'))) / 'meal-concierge'}
-    return [{'home': str(p), 'standalone': (p / 'runtime.json').exists(), 'config': (p / 'config.json').exists(), 'state': (p / 'state/state.json').exists()} for p in sorted(candidates) if p.exists()]
+    from build_identity import read as read_build_identity
+    result = []
+    for path in sorted(candidates):
+        if not path.exists():
+            continue
+        row = {'home': str(path), 'standalone': (path / 'runtime.json').exists(),
+               'config': (path / 'config.json').exists(), 'state': (path / 'state/state.json').exists()}
+        if row['standalone']:
+            meta = json.loads((path / 'runtime.json').read_text())
+            row['installed_build'] = read_build_identity(Path(meta['code_root']) / 'current') if meta.get('code_root') else {'identity_status': 'unavailable'}
+        result.append(row)
+    return result
 
 
 def main():

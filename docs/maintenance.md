@@ -77,3 +77,19 @@ other collections. Replacing the database or deleting/recreating the pack would
 lose or break that state. The existing authoritative sync preserves retained
 entries and removes withdrawn same-pack entries only after the complete record
 pass. That deterministic work is not an agent reading and rewriting each recipe.
+
+## Identifying the running build
+
+`install.py discover` reports installed build identity; `health` and `status`
+report a `build` object from the release actually running.
+It contains the packaged source/skill digest, dependency-file digest, pinned
+Python and interface version. A Git commit is included when staging from a Git
+checkout; `source_modified=true` means that commit alone does not identify the
+build. Archive installations may have an unknown commit. Older releases report
+`identity_status=unavailable`. These reads need no Git checkout or network lookup.
+
+Status also warns when planning history or recipe-usage history approaches its
+existing capacity. These are planning diagnostics, not a complete storage audit.
+Do not delete history to silence a warning: retained menus, feedback and uncertain
+external operations can depend on it. A future archival migration needs explicit
+reference and recovery semantics before changing those records.
