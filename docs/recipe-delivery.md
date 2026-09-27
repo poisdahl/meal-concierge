@@ -19,8 +19,11 @@ outbound jobs.
 ## After a purchase
 
 Choose after-purchase email to receive the purchased menu as soon as the grocery
-order is confirmed. It works for several purchases in one week and for scheduled
-orders. A grocery-only purchase does not send recipes. Pending payment is not a
+order is confirmed and your agent can use its email connection. Interactive-only
+connections default to on-request email; you can explicitly choose after-purchase
+email for use while that connection is available. If it needs your attention, the
+original delivery waits rather than switching sender. It works for several
+purchases in one week; scheduled delivery requires an unattended-capable sender. A grocery-only purchase does not send recipes. Pending payment is not a
 confirmed order, and a delayed email never causes another purchase.
 
 The title uses the delivery date when known. Each message contains the recipes
@@ -45,7 +48,8 @@ For long menus, text or attachments may be split into several parts.
 | Codex or Claude Code in a terminal | Can create local files; the terminal itself does not show a PDF/image preview. |
 | Codex or Claude Code in a desktop app | Use the client's file viewer for PDF and images; file access and attachment support are required. |
 | Grok Bot group rooms | Recipe text is supported; PDF and image attachments are not delivered through that room transport. |
-| Hermes, OpenClaw, NanoClaw and other destinations | File delivery depends on the configured chat/sender. Have the agent check support rather than promise attachments. |
+| NanoClaw | The generated attachment exports recipe PDFs for supported native delivery. Managed email is unavailable in that attachment; use a verified native email/chat connection or another configured client. |
+| Hermes, OpenClaw and other destinations | File delivery depends on the configured chat/sender. Have the agent check support rather than promise attachments. |
 
 If a PDF or image cannot be delivered, the agent should identify the omission
 and offer the supported format. It must not report a local file path as a

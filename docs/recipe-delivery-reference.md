@@ -14,9 +14,15 @@ immediate delivery and the configured later occurrence remain intentional.
 
 ## Confirmed-purchase delivery
 
-`after_purchase` is the default timing when explicitly configuring a new managed
-email connection and requires unattended sender support. Omitting timing when
-reconfiguring preserves the existing saved timing. The existing confirmed checkout transition freezes a menu-bound order
+`after_purchase` is the default timing for a new managed connection with unattended
+support; interactive-only connections default to `on_request`. An explicit
+`after_purchase` choice is also supported for interactive connections. The agent
+sends when the original transport is available; normal inspection/preflight and
+host approvals still apply. If unavailable before dispatch, the original job
+stays pending for that connection to become available. This does not create a
+background sender or imply the host can run unattended. Delivery-day schedules
+still require unattended support. Omitting timing when reconfiguring preserves
+the existing saved timing. The existing confirmed checkout transition freezes a menu-bound order
 and queues its email in the same state write. It never calls a sender. Cart-only
 orders, order edits and unconfirmed payments do not create new recipe emails.
 The original provider/order pair is the email occurrence; checkout reconciliation

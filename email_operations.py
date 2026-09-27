@@ -132,8 +132,7 @@ class EmailOperations:
         delivery = state["recipe_delivery"]
         binding = delivery.get("sender_binding")
         preferences = delivery["preferences"]["email"]
-        if (not preferences["enabled"] or not binding or binding.get("timing") != "after_purchase"
-                or not binding.get("unattended")):
+        if not preferences["enabled"] or not binding or binding.get("timing") != "after_purchase":
             return
         # One original recipe email per provider/order, including legacy jobs.
         if any(j.get("provider") == self.provider and j.get("order_id") == order_id for j in state["email_jobs"]):
@@ -643,7 +642,8 @@ class EmailOperations:
                     job["sender_binding"] = deepcopy(binding)
                     job["sender_preferences"] = deepcopy(state["recipe_delivery"]["preferences"]["email"])
                     job["automation_protocol"] = 0
-                return {"binding": deepcopy(job.get("sender_binding")), "status": job["status"]}
+                return {"binding": deepcopy(job.get("sender_binding")), "status": job["status"],
+                        "trigger": job.get("trigger", "order_delivery_day")}
         if action == "test":
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()

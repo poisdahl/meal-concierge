@@ -48,3 +48,21 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     if response.get("contract") != 1:
         raise ServiceError("incompatible bridge/core contract; upgrade the stopped service before attaching this client")
     return response["result"]
+
+
+def host_email_sender(service_rpc, **request):
+    """Thin clients may lack the optional managed sender; native delivery stays usable."""
+    try:
+        from email_sender import email_sender
+    except ModuleNotFoundError as exc:
+        if exc.name != "email_sender":
+            raise
+        return {
+            "status": "unavailable", "available": False, "dispatched": False,
+            "next": "This client package has no managed email sender. Use an explicitly authorized "
+                    "supported native email or chat destination through recipe_delivery, or a "
+                    "client with the original managed sender. This capability result does not "
+                    "establish the outcome of an earlier send; reconcile that original attempt "
+                    "before retrying or changing delivery routes.",
+        }
+    return email_sender(service_rpc, **request)

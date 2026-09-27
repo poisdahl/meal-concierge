@@ -152,7 +152,7 @@ class DeliveryOperations:
                     capabilities(binding["capabilities"], "email", destination)
                     if type(binding["unattended"]) is not bool or binding["timing"] not in {"on_request", "delivery_day", "both", "after_purchase"}:
                         raise HouseholdError("invalid email timing or unattended support")
-                    if binding["timing"] != "on_request" and not binding["unattended"]:
+                    if binding["timing"] in {"delivery_day", "both"} and not binding["unattended"]:
                         raise HouseholdError("this connection is not configured for unattended execution")
                     if destination != request.get("destinations", {}).get("email"):
                         raise HouseholdError("sender binding must match the selected email destination")

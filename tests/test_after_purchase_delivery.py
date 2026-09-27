@@ -5,6 +5,7 @@ from email.parser import BytesParser
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -68,6 +69,47 @@ class AfterPurchaseTests(unittest.TestCase):
         self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'on_request'})
         self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test'})
         self.assertEqual('on_request', self.rpc('recipe_delivery', action='sender')['binding']['timing'])
+
+    def test_interactive_setup_defaults_to_request_and_accepts_explicit_purchase_timing(self):
+        self.config['connections'][0]['unattended'] = False
+        with self.app.store.locked() as state:
+            state['recipe_delivery'].pop('sender_binding', None)
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test'})
+        self.assertEqual('on_request', self.rpc('recipe_delivery', action='sender')['binding']['timing'])
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'after_purchase'})
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test'})
+        self.assertEqual('after_purchase', self.rpc('recipe_delivery', action='sender')['binding']['timing'])
+        for timing in ('delivery_day', 'both'):
+            with self.assertRaisesRegex(HouseholdError, 'unattended'):
+                self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': timing})
+        self.assertEqual([], self.mailbox.messages)
+
+    def test_interactive_purchase_waits_for_transport_then_sends_original_once(self):
+        self.config['connections'][0]['unattended'] = False
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'after_purchase'})
+        offered = self.purchase()
+        self.assertEqual('send_order', offered['email']['action'])
+        original = deepcopy(self.app.store.read()['email_jobs'])
+        with mock.patch.object(self.mailbox, 'inspect', side_effect=ValueError('existing connection needs user action')):
+            with self.assertRaisesRegex(ValueError, 'needs user action'):
+                self.send()
+        self.assertEqual(original, self.app.store.read()['email_jobs'])
+        self.assertEqual([], self.mailbox.messages)
+        self.mailbox.failure = 'after'
+        self.assertEqual('unknown', self.send()['outcome'])
+        self.assertTrue(self.send(action='reconcile_order')['sent'])
+        self.assertTrue(self.send()['sent'])
+        self.assertEqual(1, len(self.mailbox.messages))
+        self.assertEqual(1, len(self.app.store.read()['email_jobs']))
+
+    def test_delivery_day_still_requires_original_and_current_unattended_support(self):
+        self.runner.execute({'action': 'configure', 'recipient': 'recipient@example.test', 'timing': 'both'})
+        self.purchase()
+        self.rpc('email', action='schedule', provider='oda', order_id='order-1', delivery_date='2099-10-02')
+        self.config['connections'][0]['unattended'] = False
+        with self.assertRaisesRegex(ValueError, 'unattended'):
+            self.send()
+        self.assertEqual([], self.mailbox.messages)
 
     def test_future_delivery_sends_now_once_without_scheduler_or_duplicate_pdf(self):
         offered = self.purchase()
