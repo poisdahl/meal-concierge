@@ -218,6 +218,8 @@ async def sdk_checks(root, process):
         assert schemas["meal_concierge_checkout"]["properties"]["recovery"]["type"] == "boolean"
         assert "checkout_payment" in schemas["meal_concierge_checkout"]["properties"]
         assert "switch_payment" in schemas["meal_concierge_checkout"]["properties"]["action"]["enum"]
+        assert "retire_attempt" in schemas["meal_concierge_checkout"]["properties"]["action"]["enum"]
+        assert {"expected_checkout_digest", "owner_authorization"} <= schemas["meal_concierge_checkout"]["properties"].keys()
         order_properties = schemas["meal_concierge_orders"]["properties"]
         assert {"remove_prepare", "remove_confirm", "remove_reconcile"} <= set(order_properties["action"]["enum"])
         assert "items" in order_properties
