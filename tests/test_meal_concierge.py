@@ -5345,6 +5345,85 @@ class MenyClientTests(unittest.TestCase):
         self.assertEqual(client._sleep.call_args_list, [mock.call(0.25), mock.call(0.5)])
         self.assertIn("closest('tr,li,article,section')", client._eval.call_args_list[-1].args[0])
 
+    def test_order_list_waits_for_cards_after_nonempty_search_response(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        completed = {"requests": [{
+            "method": "GET", "status": 200, "requestId": "search-1",
+            "url": "https://platform-rest-prod.ngdata.no/api/order/search/store/user",
+        }]}
+        client._invoke = mock.Mock(side_effect=[
+            {}, completed, completed, {"responseBody": '[{"ngOrderId":"99990001"}]'},
+        ])
+        client._eval = mock.Mock(side_effect=[
+            {"ready": True, "authenticated": True, "orders": []},
+            {"ready": True, "authenticated": True, "orders": [{"order_number": "99990001"}]},
+        ])
+
+        self.assertEqual(client._get_orders(10)["orders"], [{"order_number": "99990001"}])
+        self.assertIn(mock.call("network", "request", "search-1"), client._invoke.call_args_list)
+        self.assertEqual(client._sleep.call_args_list, [mock.call(0.5), mock.call(0.25)])
+
+    def test_order_list_accepts_empty_only_from_exact_empty_search_response(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        completed = {"requests": [{
+            "method": "GET", "status": 200, "requestId": "search-1",
+            "url": "https://platform-rest-prod.ngdata.no/api/order/search/store/user",
+        }]}
+        client._invoke = mock.Mock(side_effect=[{}, completed, completed, {"responseBody": "[]"}])
+        client._eval = mock.Mock(return_value={"ready": True, "authenticated": True, "orders": []})
+
+        self.assertEqual(client._get_orders(10)["orders"], [])
+        client._invoke.assert_any_call("network", "request", "search-1")
+
+    def test_order_list_rejects_empty_dom_when_search_has_orders(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        completed = {"requests": [{
+            "method": "GET", "status": 200, "requestId": "search-1",
+            "url": "https://platform-rest-prod.ngdata.no/api/order/search/store/user",
+        }]}
+        def invoke(*args):
+            if args[:2] == ("network", "requests"):
+                return completed
+            if args[:2] == ("network", "request"):
+                return {"responseBody": '[{"ngOrderId":"99990001"}]'}
+            return {}
+        client._invoke = mock.Mock(side_effect=invoke)
+        client._eval = mock.Mock(return_value={"ready": True, "authenticated": True, "orders": []})
+
+        with self.assertRaisesRegex(HouseholdError, "MENY orders did not finish rendering"):
+            client._get_orders(10)
+        self.assertEqual(client._eval.call_count, 40)
+
+    def test_order_list_does_not_accept_older_empty_search_when_newer_search_is_pending(self):
+        client = self.client()
+        client._open = mock.Mock()
+        client._sleep = mock.Mock()
+        older = {"method": "GET", "status": 200, "requestId": "search-1",
+                 "url": "https://platform-rest-prod.ngdata.no/api/order/search/store/user"}
+        newer = {"method": "GET", "requestId": "search-2",
+                 "url": "https://platform-rest-prod.ngdata.no/api/order/search/store/user"}
+        reads = 0
+        def invoke(*args):
+            nonlocal reads
+            if args[:2] == ("network", "requests"):
+                reads += 1
+                return {"requests": [older] if reads == 1 else [older, newer]}
+            if args[:2] == ("network", "request"):
+                self.fail("an older empty response must not be read")
+            return {}
+        client._invoke = mock.Mock(side_effect=invoke)
+        client._eval = mock.Mock(return_value={"ready": True, "authenticated": True, "orders": []})
+
+        with self.assertRaisesRegex(HouseholdError, "MENY orders did not finish rendering"):
+            client._get_orders(10)
+        self.assertEqual(client._eval.call_count, 40)
+
     def test_order_card_status_uses_the_explicit_marker_not_delivery_wording(self):
         self.assertEqual(meny_order_card_status("KAN ENDRES"), "confirmed")
         self.assertEqual(meny_order_card_status("LEVERT"), "delivered")
