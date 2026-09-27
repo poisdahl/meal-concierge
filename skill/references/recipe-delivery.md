@@ -14,6 +14,16 @@ connection, sender, recipient and timing (`on_request`, `after_purchase`, `deliv
 once; it sends nothing and creates no timer. Do not change accounts merely to
 work around an unavailable connection. Follow the returned setup guidance if
 capability is missing; do not invent credentials or bypass a guarded sender.
+New interactive-only connections default to `on_request`; unattended connections
+default to `after_purchase`. Honor an explicit after-purchase choice even for an
+interactive connection, but explain it requires that original transport to be
+available. A preflight failure leaves its original job pending; recover when the
+connection is available, without changing recipients or creating another job.
+Delivery-day schedules still require unattended support.
+
+Thin packages such as NanoClaw may report managed email `unavailable`. Use the
+verified native delivery path below only for an authorized destination; a missing
+managed executor says nothing about the outcome of an earlier email attempt.
 
 Call email_sender `send` with the exact `menu_ref`, `delivery_requested=true`
 for the actual request, and one stable `request_id`. The executor freezes and

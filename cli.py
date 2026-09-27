@@ -15,7 +15,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rpc_client import ServiceError, rpc
+from rpc_client import ServiceError, rpc, host_email_sender
 
 
 def main() -> int:
@@ -49,8 +49,7 @@ def main() -> int:
         return 2
     try:
         if operation == "email_sender":
-            from email_sender import email_sender
-            result = email_sender(rpc, **request)
+            result = host_email_sender(rpc, **request)
         else:
             result = rpc(operation, **request)
     except ServiceError as exc:

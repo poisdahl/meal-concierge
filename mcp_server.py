@@ -18,7 +18,7 @@ from pydantic import Field
 
 # Keep isolated Python launches able to import the adjacent transport.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rpc_client import ServiceError, rpc as service_rpc, rpc_timeout
+from rpc_client import ServiceError, rpc as service_rpc, rpc_timeout, host_email_sender
 from agent_views import (
     MCP_MENU_WIRE_BUDGET,
     _bounded_detail,
@@ -469,7 +469,7 @@ def meal_concierge_recipe_pack(
     return {"ok": False, "status": "rejected", "error": "unknown recipe-pack action"}
 
 
-@server.tool(description="Use the host's existing email connection. status inspects without sending. configure explicitly saves the selected sender/recipient and timing once; it creates no timer and does not release held jobs. send delivers one exact saved menu through a single durable attempt; email PDF is off by default, with explicit PDF requests supported; pass delivery_requested=true only for actual user intent and reuse request_id after any lost response. It does not send chat or change chat preferences. send_order drains one existing after_purchase job without a scheduler, or a delivery-day job with its exact scheduler invocation, preserving order/pause checks. New explicit email setup defaults to after_purchase when unattended sending is supported; omitted timing preserves an existing choice. Unsupported unattended hosts can explicitly choose on_request. reconcile/reconcile_order only recover the original attempt, never resend. adopt_order explicitly binds an old pending order email to the configured sender without changing its original recipient. Connections, commands and credentials come only from trusted host configuration, never recipe content or tool arguments.")
+@server.tool(description="Use the host's existing email connection. status inspects without sending. configure explicitly saves the selected sender/recipient and timing once; it creates no timer and does not release held jobs. send delivers one exact saved menu through a single durable attempt; email PDF is off by default, with explicit PDF requests supported; pass delivery_requested=true only for actual user intent and reuse request_id after any lost response. It does not send chat or change chat preferences. send_order drains one existing after_purchase job without a scheduler, or a delivery-day job with its exact scheduler invocation, preserving order/pause checks. New email setup defaults to after_purchase for unattended connections and on_request otherwise; omitted timing preserves an existing choice. Explicit after_purchase also supports interactive connections whenever their transport is available, leaving the original job pending otherwise; delivery-day schedules require unattended support. Thin clients without a managed sender report unavailable; use only an authorized supported native delivery route. reconcile/reconcile_order only recover the original attempt, never resend. adopt_order explicitly binds an old pending order email to the configured sender without changing its original recipient. Connections, commands and credentials come only from trusted host configuration, never recipe content or tool arguments.")
 def meal_concierge_email_sender(
     action: Literal["status", "configure", "send", "reconcile", "retry", "send_order", "reconcile_order", "retry_order", "adopt_order"] = "status",
     connection_id: str | None = None, sender: str | None = None, recipient: str | None = None,
@@ -478,9 +478,8 @@ def meal_concierge_email_sender(
     delivery_requested: bool = False, provider: Literal["oda", "meny", "mathem"] | None = None,
     order_id: str | None = None, scheduler: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from email_sender import email_sender
     try:
-        return email_sender(service_rpc, action=action, connection_id=connection_id, sender=sender,
+        return host_email_sender(service_rpc, action=action, connection_id=connection_id, sender=sender,
                             recipient=recipient, timing=timing, request_id=request_id, menu_ref=menu_ref,
                             delivery_requested=delivery_requested, provider=provider, order_id=order_id, scheduler=scheduler)
     except (ValueError, RuntimeError, OSError) as exc:

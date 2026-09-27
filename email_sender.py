@@ -109,7 +109,8 @@ class EmailSender:
         if not valid_email_address(recipient):
             raise ValueError("select the exact email recipient")
         saved = self.rpc("recipe_delivery", action="sender")
-        timing = request.get("timing") or (saved.get("binding") or {}).get("timing") or "after_purchase"
+        default_timing = "after_purchase" if self.connections[key].get("unattended", False) else "on_request"
+        timing = request.get("timing") or (saved.get("binding") or {}).get("timing") or default_timing
         binding = {"connection_id": key, "runtime_id": self.config["runtime_id"], "account": actual["account"],
                    "installation_id": saved["installation_id"],
                    "sender": actual["sender"], "recipient": recipient, "capabilities": actual,
@@ -257,7 +258,8 @@ class EmailSender:
                 bound = self.rpc("email", action="sender_binding", provider=target["provider"], order_id=target["order_id"])
                 binding = bound["binding"]
                 transport = self.transport(binding)
-                if not binding["unattended"] or not self.connections[binding["connection_id"]].get("unattended"):
+                if bound.get("trigger") != "after_purchase" and (
+                        not binding["unattended"] or not self.connections[binding["connection_id"]].get("unattended")):
                     raise ValueError("original sender is not available for unattended execution")
                 claimed = self.rpc("email", action="due", provider=target["provider"], order_id=target["order_id"], scheduler=request.get("scheduler"))
                 if claimed.get("claim") is not True:

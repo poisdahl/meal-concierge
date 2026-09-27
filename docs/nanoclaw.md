@@ -109,6 +109,18 @@ accepts prepared image bytes through stdin; `recipes/cover_get` requires
 model text. Attachment display and delivery depend on the group's native chat
 adapter; a filename in chat is not a delivered image.
 
+For output PDFs, `bridge/cli.py --delivery-output /new/private/recipes.pdf`
+accepts an exact `recipe_delivery` read request on stdin and verifies the exported
+attachment. Transfer it through the supported native destination; export alone
+is not delivery. This output helper is separate from the PDF input reader above.
+
+The generated attachment does not include a managed email executor or mount host
+email credentials. Its email tool explicitly reports `unavailable`. A verified
+native email integration can use the shared skill's unmanaged delivery path;
+otherwise use an authorized supported chat destination or a client with the
+original managed sender. Missing client capability does not resolve a previous
+uncertain send and never authorizes sending a duplicate through another route.
+
 ## Updates and help
 
 Update the host service through the [runtime procedure](runtime.md#updates-failures-and-recovery).
