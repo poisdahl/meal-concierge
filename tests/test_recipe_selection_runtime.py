@@ -1,6 +1,6 @@
 """MC41 real MCP/CLI -> Unix Server/Application with synthetic local recipes.
 
-Run with the pinned MCP 2.1.1 Python using -I -B. This verifies local-bank
+Run with the pinned MCP 2.2.0 Python using -I -B. This verifies local-bank
 selection during a source outage, not an Oda/Mathem recipe API contract.
 """
 from __future__ import annotations
@@ -162,7 +162,7 @@ def relay_mcp(root):
                 process.wait(timeout=5)
 
 
-@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
+@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.2.0 runtime")
 class MenuProjectionTests(unittest.TestCase):
     def test_oversized_nonprepared_replan_keeps_real_status_codes_and_counts(self):
         spec = importlib.util.spec_from_file_location("menu_replan_projection_test", SOURCE / "mcp_server.py")
@@ -376,7 +376,7 @@ class MenuProjectionTests(unittest.TestCase):
         self.assertLess(len(wire), 40000)
 
 
-@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
+@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.2.0 runtime")
 class ProductProjectionTests(unittest.TestCase):
     @staticmethod
     def module():
@@ -1775,10 +1775,10 @@ class ProductContinuationContractTests(unittest.TestCase):
         self.assertEqual(projected["cart"]["parity"], "unknown")
 
 
-@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.1.1 runtime")
+@unittest.skipUnless(MCP_AVAILABLE, "requires the pinned MCP 2.2.0 runtime")
 class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.assertEqual(importlib.metadata.version("mcp"), "2.1.1")
+        self.assertEqual(importlib.metadata.version("mcp"), "2.2.0")
         SCRATCH.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(prefix="rt-", dir=SCRATCH)
         self.addCleanup(self.temp.cleanup)
