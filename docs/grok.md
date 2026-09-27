@@ -115,6 +115,13 @@ status and authenticated cart access before calling setup complete.
 
 ## Updates and help
 
+Start with [bounded maintenance](maintenance.md). Run the installer commands in
+native shell executions and keep their handles; do not turn recipe records,
+full logs or each unchanged progress check into separate model work. Read only
+the applicable update sections. The existing installer performs the pack sync,
+including withdrawn-entry cleanup; never replace the whole bank or recreate it
+through thousands of recipe tool calls.
+
 Use the [runtime update procedure](runtime.md#updates-failures-and-recovery) and
 [external service ownership instructions](runtime-reference.md#externally-managed-hosts).
 From the new source, run `check-browser` against the existing home before stopping
@@ -129,9 +136,9 @@ identity, report any duplicates for separate owner-directed cleanup, then reload
 the pointer skill.
 
 Code updates preserve recipes, including collections imported by older
-versions. Update the
-code before separately requesting
-[the latest optional collection](runtime.md#versioned-recipe-package-integration).
+versions. If both are requested, update the code first, then
+[the optional collection](runtime.md#versioned-recipe-package-integration), reusing
+the installation paths and matching registration.
 For a collection update, run `prepare-recipes` while the service is available,
 then stop only for `import-recipes --prepared ID`. Keep the execution handle,
 relay phase/progress or failure promptly, and restart after import exits. A

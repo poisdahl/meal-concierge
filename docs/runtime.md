@@ -122,9 +122,14 @@ browser paths. Log in only after the program update. See
 
 ### Update the program
 
+Start with [bounded maintenance](maintenance.md): read only the relevant update
+sections, reuse installation details and verify the defined checks rather than
+running a full product audit.
+
 > Update my existing Meal Concierge installation to the latest main, pinned to
-> a specific commit. Preserve my data, login and recipes. Follow docs/runtime.md
-> and my agent's guide, refresh the agent connection if needed, and verify it.
+> a specific commit. Preserve my data, login and recipes. Follow docs/maintenance.md
+> and my agent’s update steps, refresh the connection if needed, and perform the
+> bounded verification. Leave the collection unchanged unless I request its update.
 
 Obtain the chosen new source commit first. While the existing service is still
 running, validate the dependencies from that checkout:
@@ -180,7 +185,8 @@ reconcile the original operation first.
 > Synchronize the latest Optional Recipe Collection into my existing Meal
 > Concierge installation. Permanently remove collection recipes that are no
 > longer included. Preserve every other local recipe and favorite. Tell me which
-> version was imported and whether any conflicts need my attention.
+> version was imported and whether any conflicts need my attention. Follow
+> docs/maintenance.md and use the installer’s pack operation, not individual recipe tools.
 
 The same request **adds the collection for the first time or updates it later**.
 If you have an older program version, update the program first. This also applies

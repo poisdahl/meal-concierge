@@ -77,16 +77,21 @@ Send this to an installation-capable agent with access to your existing
 installation (or to Grok for its cloud installation):
 
 > Update my existing Meal Concierge installation from
-> https://github.com/poisdahl/meal-concierge to the latest version on main.
-> Follow docs/runtime.md and my agent's installation guide. Preserve my recipes,
-> settings, login, browser profile and saved data. Check the new version's
-> prerequisites before stopping the working service. Refresh the connected
-> agent's tools and skill as needed, verify that everything works, and report
-> the installed version.
+> https://github.com/poisdahl/meal-concierge to the latest main, pinned to a full
+> commit. Follow docs/maintenance.md and the applicable host update steps.
+> Preserve my recipes, settings, login, browser profile and saved data. Check
+> prerequisites before stopping; use the bounded verification in that guide.
+> Report the installed commit and health. Do not update the recipe collection.
 
-A program update keeps your existing recipe collection. To refresh the
-collection too, request [the latest recipe collection](#add-or-update-the-recipe-collection)
-separately after updating the program. You keep the same household and saved data.
+To update both in one request, replace the last sentence with:
+
+> Then synchronize the latest Optional Recipe Collection, permanently removing
+> withdrawn collection entries while preserving every other recipe and favorite.
+> Report its version, result counts and any conflicts or incomplete results.
+
+Program and collection updates remain separate choices. A combined request
+updates the program first and reuses installation details, reducing repeated
+agent work. See [bounded maintenance](docs/maintenance.md).
 
 ## Requirements
 
@@ -151,7 +156,9 @@ updates do not download or import it. To add or refresh it, ask:
 
 > Synchronize the latest Optional Recipe Collection into my existing Meal
 > Concierge installation. Permanently remove collection recipes that are no
-> longer included. Preserve every other local recipe and favorite.
+> longer included. Preserve every other local recipe and favorite. Follow
+> docs/maintenance.md; use the installer’s pack operation, not individual recipe
+> tools. Report the version, result counts and any conflicts or incomplete results.
 
 The agent uses `prepare-recipes` to download and validate the current published
 collection while the service keeps running. It then imports that exact prepared
