@@ -143,6 +143,18 @@ preserve or update its body binding to the actual MCP and household/store
 identity, report any duplicates for separate owner-directed cleanup, then reload
 the pointer skill.
 
+If that targeted reconnect still leaves native host calls failing, distinguish
+service health from host registration state. Verify the exact service through a
+direct MCP SDK call and a fresh inert control registration through the host. Only
+when both work while the old product registration fails, create a fresh registration
+with the same verified command, arguments and environment. Cut over only the matching
+skill pointer to the new exact MCP identity and household/store, reload it, then
+verify native status and a read-only recipe or cart call. Remove the stale
+registration and temporary control only after that native verification succeeds.
+Keep the original registration available until cutover is proven; do not reset all
+MCP servers or recreate household state. Reconcile any uncertain original operation
+before retrying it through the new identity.
+
 Code updates preserve recipes, including collections imported by older
 versions. If both are requested, update the code first, then
 [the optional collection](runtime.md#versioned-recipe-package-integration), reusing

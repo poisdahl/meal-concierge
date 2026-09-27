@@ -1065,6 +1065,155 @@ class InstallerTests(unittest.TestCase):
             install.migrate(release, meta)
 
 
+class HistoryMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        from test_history_retention import populated
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.home = self.root / 'home'
+        self.home.mkdir()
+        release = self.root / 'release'
+        (release / 'venv/bin').mkdir(parents=True)
+        (release / 'venv/bin/python').symlink_to(sys.executable)
+        for source in CORE.glob('*.py'):
+            shutil.copyfile(source, release / source.name)
+        self.paths = {key: str(self.home / value) for key, value in {
+            'state': 'state', 'config': 'config.json', 'socket': 'run/service.sock',
+            'browser_profile': 'browser/profile', 'browser_home': 'browser',
+            'browser_socket_directory': 'browser/run',
+        }.items()}
+        self.meta = {'manager': 'external', 'home': str(self.home), 'release': str(release),
+                     'code_root': str(self.root / 'program'), 'paths': self.paths}
+        self.state_path = Path(self.paths['state']) / 'state.json'
+        self.state_path.parent.mkdir()
+        self.state_path.write_text(json.dumps(populated()))
+        Path(self.paths['config']).write_text(json.dumps({'household': 'synthetic', 'provider': 'oda'}))
+        (self.home / 'runtime.json').write_text(json.dumps(self.meta))
+        with sqlite3.connect(self.state_path.parent / 'recipes.sqlite3') as connection:
+            connection.execute('create table untouched(value text)')
+            connection.execute('insert into untouched values (?)', ('recipe bank',))
+        self.destination = self.root / 'backup'
+
+    def preview(self):
+        return json.loads(installer('history-preview', '--home', self.home).stdout)['preview']
+
+    def test_installed_cli_preview_archive_and_merge_recovery_preserve_current_journals(self):
+        before = self.state_path.read_bytes()
+        bank = (self.state_path.parent / 'recipes.sqlite3').read_bytes()
+        preview = self.preview()
+        self.assertEqual(self.state_path.read_bytes(), before)
+        result = installer('history-archive', '--home', self.home, '--history-preview', preview,
+                           '--backup', self.destination)
+        self.assertTrue(json.loads(result.stdout)['archived'])
+        self.assertEqual((self.destination / 'state/state.json').read_bytes(), before)
+        self.assertEqual((self.state_path.parent / 'recipes.sqlite3').read_bytes(), bank)
+        state = json.loads(self.state_path.read_text())
+        self.assertEqual(state['recipe_usage'], {})
+        state['pending_checkout'] = {'status': 'uncertain', 'confirmation_id': 'later-payment'}
+        self.state_path.write_text(json.dumps(state))
+        result = installer('history-restore', '--home', self.home, '--backup', self.destination)
+        self.assertTrue(json.loads(result.stdout)['restored'])
+        restored = json.loads(self.state_path.read_text())
+        self.assertEqual(restored['pending_checkout'], state['pending_checkout'])
+        self.assertEqual(restored['recipe_usage'], json.loads(before)['recipe_usage'])
+
+    def test_stale_preview_and_live_owner_refuse_before_backup(self):
+        preview = self.preview()
+        before = self.state_path.read_bytes()
+        with ownership(self.paths['state'], self.paths['browser_profile'],
+                       self.paths['browser_home'], self.paths['browser_socket_directory']):
+            result = installer('history-archive', '--home', self.home, '--history-preview', preview,
+                               '--backup', self.destination, success=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('already owned', result.stderr)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.state_path.read_bytes(), before)
+        state = json.loads(before)
+        state['pending_checkout'] = {'status': 'uncertain'}
+        self.state_path.write_text(json.dumps(state))
+        result = installer('history-archive', '--home', self.home, '--history-preview', preview,
+                           '--backup', self.destination, success=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('preview is stale', result.stderr)
+        self.assertFalse(self.destination.exists())
+
+    def test_rebaseline_after_older_writer_preserves_history_and_uncertain_journals(self):
+        state = json.loads(self.state_path.read_text())
+        state['pending_checkout'] = {'status': 'uncertain', 'confirmation_id': 'keep-exact'}
+        self.state_path.write_text(json.dumps(state))
+        result = installer('history-rebaseline', '--home', self.home)
+        self.assertTrue(json.loads(result.stdout)['rebaselined'])
+        after = json.loads(self.state_path.read_text())
+        old_clocks = state.pop('history_retention')
+        new_clocks = after.pop('history_retention')
+        self.assertEqual(state, after)
+        self.assertNotEqual(old_clocks, new_clocks)
+        self.assertEqual(json.loads(installer('history-preview', '--home', self.home).stdout)['eligible_records'], 0)
+
+    def test_interruption_after_verified_archive_leaves_original_state_recoverable(self):
+        import core
+        preview = self.preview()
+        before = self.state_path.read_bytes()
+        original_write = core._atomic_json
+
+        def fail_state_write(path, value):
+            if path == self.state_path:
+                raise OSError('synthetic interrupted state replacement')
+            original_write(path, value)
+
+        with patch.object(core, '_atomic_json', side_effect=fail_state_write):
+            with self.assertRaisesRegex(OSError, 'interrupted'):
+                install.history_maintenance(self.meta, 'history-archive', preview, self.destination)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertTrue((self.destination / 'history-archive.json').exists())
+        result = installer('history-restore', '--home', self.home, '--backup', self.destination)
+        self.assertTrue(json.loads(result.stdout)['restored'])
+
+    def test_backup_file_sync_failure_prevents_live_compaction(self):
+        preview = self.preview()
+        before = self.state_path.read_bytes()
+        original_sync = os.fsync
+        target = self.destination / 'state/state.json'
+
+        def fail_backup_sync(descriptor):
+            if target.exists():
+                expected, actual = target.stat(), os.fstat(descriptor)
+                if (expected.st_dev, expected.st_ino) == (actual.st_dev, actual.st_ino):
+                    raise OSError('synthetic backup durability failure')
+            original_sync(descriptor)
+
+        with patch.object(os, 'fsync', side_effect=fail_backup_sync):
+            with self.assertRaisesRegex(OSError, 'backup durability'):
+                install.history_maintenance(self.meta, 'history-archive', preview, self.destination)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_all_backup_files_are_synced_before_live_replacement(self):
+        import core
+        preview = self.preview()
+        original_sync, original_write = os.fsync, core._atomic_json
+        synced = set()
+
+        def record_sync(descriptor):
+            value = os.fstat(descriptor)
+            original_sync(descriptor)
+            synced.add((value.st_dev, value.st_ino))
+
+        def check_before_replace(path, value):
+            if path == self.state_path:
+                required = list(self.destination.rglob('*')) + [self.destination, *self.destination.parents]
+                self.assertTrue(any(p.name == 'state.json' for p in required))
+                for item in required:
+                    info = item.stat()
+                    self.assertIn((info.st_dev, info.st_ino), synced, str(item))
+            original_write(path, value)
+
+        with patch.object(os, 'fsync', side_effect=record_sync), patch.object(core, '_atomic_json', side_effect=check_before_replace):
+            result = install.history_maintenance(self.meta, 'history-archive', preview, self.destination)
+        self.assertTrue(result['archived'])
+
+
 async def native_bridge(meta, restart=False):
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client

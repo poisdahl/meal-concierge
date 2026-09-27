@@ -1118,16 +1118,30 @@ class StateStore:
                 raise HouseholdError(
                     f"household state belongs to provider {state_provider}; use a separate state directory for {configured_provider}"
                 )
+            from history_retention import track_changes
+            track_changes(state)
 
     @contextmanager
-    def locked(self) -> Iterator[dict[str, Any]]:
+    def locked(self, *, readonly: bool = False) -> Iterator[dict[str, Any]]:
         descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            fcntl.flock(descriptor, fcntl.LOCK_SH if readonly else fcntl.LOCK_EX)
+            def number(value):
+                parsed = float(value)
+                if not math.isfinite(parsed):
+                    raise HouseholdError("household state contains an invalid JSON value")
+                return parsed
             try:
-                state = json.loads(self.path.read_text(encoding="utf-8"))
+                state = json.loads(self.path.read_text(encoding="utf-8"), parse_float=number, parse_constant=number)
             except (OSError, json.JSONDecodeError) as exc:
                 raise HouseholdError("household state is unreadable") from exc
+            if readonly:
+                # Each read already owns a freshly decoded object. It cannot
+                # alias persisted state, and no mutation comparison is needed.
+                yield state
+                return
+            from history_retention import snapshot_activity, track_changes
+            activity = snapshot_activity(state)
             try:
                 before = json.dumps(state, ensure_ascii=False, sort_keys=True, allow_nan=False)
             except (TypeError, ValueError, UnicodeError) as exc:
@@ -1138,14 +1152,18 @@ class StateStore:
             except (TypeError, ValueError, UnicodeError) as exc:
                 raise HouseholdError("household state contains an invalid JSON value") from exc
             if before != after:
+                try:
+                    track_changes(state, before=activity)
+                except (TypeError, ValueError, UnicodeError) as exc:
+                    raise HouseholdError("household state contains an invalid JSON value") from exc
                 _atomic_json(self.path, state)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
     def read(self) -> dict[str, Any]:
-        with self.locked() as state:
-            return deepcopy(state)
+        with self.locked(readonly=True) as state:
+            return state
 
     def update_profile(self, changes: Mapping[str, Any]) -> dict[str, Any]:
         with self.locked() as state:

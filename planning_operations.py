@@ -765,7 +765,10 @@ class PlanningOperations:
         successor.update({"menu_id": "menu_" + secrets.token_hex(12), "revision": 1, "phase": "draft"})
         successor["digest"] = menu_digest(successor)
         if current is not None:
-            planning["history"][mp.lock_key(current)] = deepcopy(current)
+            key = mp.lock_key(current)
+            if key in planning["history"] and canonical(planning["history"][key]) != canonical(current):
+                raise HouseholdError("retained menu snapshot already exists with different content")
+            planning["history"][key] = deepcopy(current)
         for slot in current["slots"] if current else []:
             if slot["slot_id"] in supplied["replaced_slot_ids"] and slot.get("kind") != "leftover":
                 owner = current.get("slot_owners", {}).get(slot["slot_id"], current["menu_id"])
