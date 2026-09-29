@@ -13,12 +13,17 @@ Paste this into your agent:
 > for my existing [Codex / ChatGPT Work Local / Claude Code] environment.
 > Follow docs/client-install.md.
 > Connect to my existing household if present; otherwise install the latest
-> version. Ask which host, store and household to use as needed.
-> Preserve my data and settings. Verify the service, tools, skill and store
-> connection, and help me complete login and activation.
+> published stable program release using docs/runtime.md#choose-a-program-release.
+> Pin its tag to a full commit; do not install main. Ask which host, store and
+> household to use as needed.
+> Preserve my data and settings. Verify the running build, tools, skill and store
+> connection, report the release tag and running commit, and help me complete
+> login and activation.
 
 This connects to the existing household when one is already installed.
 For a program update, use the [update prompt](../README.md#update-meal-concierge).
+To choose a specific release, use the
+[exact-version instructions](../README.md#program-releases-and-exact-versions).
 
 ## Choose your client
 
@@ -54,8 +59,9 @@ and [Claude Code shared configuration](https://code.claude.com/docs/en/desktop#s
 ### 1. Install or reuse the household service
 
 Follow [Install and attach](runtime.md#install-and-attach), using a retained
-checkout of the latest `main` resolved to a full commit for a new installation.
-Keep source and household data in separate directories. Record the source commit.
+checkout of the [selected program release](runtime.md#choose-a-program-release)
+for a new installation. Keep source and household data in separate directories.
+Record the release tag and full source commit.
 
 Before creating anything, inspect the chosen home, `MEAL_CONCIERGE_HOME`,
 `~/.local/share/meal-concierge`, `~/.hermes/meal-concierge` and known existing

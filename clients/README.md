@@ -28,6 +28,13 @@ client package; see [client modes](../docs/client-install.md#choose-your-client)
 Use the [program update prompt](../README.md#update-meal-concierge) to update an
 existing installation. Repeating setup connects to it; it does not update it.
 
+New installations and program updates select a published stable **program**
+release, such as `v0.1.1`, and retain its exact commit. To request an explicit
+version, use the [version instructions](../README.md#program-releases-and-exact-versions).
+The `recipes-*` releases are a separate collection. Build or regenerate client
+packages from the checkout matching the installed runtime, then verify the
+running build and loaded skill in each client you use.
+
 ## Import a recipe from a PDF
 
 Attach the PDF through your client's native attachment workflow and ask the

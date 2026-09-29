@@ -10,12 +10,17 @@ Send this to Codex, Claude Code or another agent with access to your OpenClaw ho
 > Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
 > for my existing OpenClaw installation. Follow docs/openclaw.md.
 > Connect to my existing household if present; otherwise install the latest
-> version. Ask which host, store and household to use as needed.
-> Preserve my data and settings. Verify the service, tools, skill and store
-> connection, and help me complete login and activation.
+> published stable program release using docs/runtime.md#choose-a-program-release.
+> Pin its tag to a full commit; do not install main. Ask which host, store and
+> household to use as needed.
+> Preserve my data and settings. Verify the running build, tools, skill and store
+> connection, report the release tag and running commit, and help me complete
+> login and activation.
 
 This connects to the existing household when one is already installed.
 For a program update, use the [update prompt](../README.md#update-meal-concierge).
+To choose a specific release, use the
+[exact-version instructions](../README.md#program-releases-and-exact-versions).
 
 ## Requirements
 

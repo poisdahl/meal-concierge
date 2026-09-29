@@ -11,12 +11,17 @@ Paste this into the Grok Bot that will use Meal Concierge:
 > Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
 > on this Grok cloud computer. Follow docs/grok.md.
 > Connect to my existing household if present; otherwise install the latest
-> version. Ask which store and household to use as needed.
-> Preserve my data and settings. Verify the service, tools, skill and store
-> connection, and help me complete login and activation.
+> published stable program release using docs/runtime.md#choose-a-program-release.
+> Pin its tag to a full commit; do not install main. Ask which store and household
+> to use as needed.
+> Preserve my data and settings. Verify the running build, tools, skill and store
+> connection, report the release tag and running commit, and help me complete
+> login and activation.
 
 This connects to the existing household when one is already installed.
 For a program update, use the [update prompt](../README.md#update-meal-concierge).
+To choose a specific release, use the
+[exact-version instructions](../README.md#program-releases-and-exact-versions).
 
 ## Requirements
 
@@ -36,10 +41,11 @@ Inspect shared files, active services, registrations and skills before creating
 anything. Reuse the intended healthy household, not another household or a test
 installation. Repeating setup does not authorize an update or reset.
 
-For a new installation, obtain the latest `main` as a full commit SHA and retain
-that exact checkout and its instructions. Git checkout or a commit-specific
-GitHub ZIP is suitable; inspect archive paths before extracting into a new
-directory. Keep source separate from household data.
+For a new installation, [choose a stable program release](runtime.md#choose-a-program-release)
+and retain its exact commit and checkout. A commit-specific GitHub ZIP is also
+suitable; inspect archive paths before extracting into a new directory. Retain
+the release tag and archive provenance separately, since an archive installation
+cannot report its Git commit. Keep source separate from household data.
 
 Follow [external service setup](runtime-reference.md#externally-managed-hosts). Use
 `./install.sh install --manager external` with the chosen store, household and
