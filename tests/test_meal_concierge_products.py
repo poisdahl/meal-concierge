@@ -1128,6 +1128,20 @@ class ProductPlannerTests(unittest.TestCase):
             "candidate_refs": ["28866"],
             "shared_package": authority,
         } for requirement in requirements]
+        for outer_fields in (
+            {"package_count": 1, "quantity_basis": authority["quantity_basis"]},
+            {"package_count": 1}, {"quantity_basis": authority["quantity_basis"]},
+            {"max_excess": 0}, {"max_excess": None},
+        ):
+            mixed = deepcopy(approvals)
+            mixed[0].update(outer_fields)
+            with self.subTest(outer_fields=outer_fields), self.assertRaisesRegex(
+                HouseholdError, "only inside shared_package; remove top-level"
+            ):
+                build_product_plan(
+                    provider="oda", binding={}, menu=value, observations=observations,
+                    candidate_approvals=mixed,
+                )
         plan = build_product_plan(
             provider="oda", binding={}, menu=value, observations=observations,
             candidate_approvals=approvals,
