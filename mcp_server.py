@@ -73,7 +73,11 @@ class CandidateApproval(RequiredCandidateApproval, total=False):
     quantity_basis: str
     selection_reason: Annotated[str, Field(min_length=1, max_length=600)]
     semantic_authorization: SemanticAuthorization
-    shared_package: SharedPackageAuthorization
+    shared_package: Annotated[SharedPackageAuthorization, Field(description=(
+        "Repeat the same group and same single candidate in candidate_refs on every member approval. "
+        "Put package_count and quantity_basis only inside shared_package; omit "
+        "top-level package_count, quantity_basis and max_excess."
+    ))]
 
 
 class IngredientSource(TypedDict):

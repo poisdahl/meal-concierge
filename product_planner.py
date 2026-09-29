@@ -447,6 +447,13 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 600:
                 raise HouseholdError("selection_reason must be a bounded explanation")
             approval["selection_reason"] = reason.strip()
+        if raw.get("shared_package") is not None and any(
+            field in raw for field in ("package_count", "quantity_basis", "max_excess")
+        ):
+            raise HouseholdError(
+                "With shared_package, put package_count and quantity_basis only inside shared_package; "
+                "remove top-level package_count, quantity_basis and max_excess from every member approval"
+            )
         if "package_count" in raw or "quantity_basis" in raw:
             count, basis = raw.get("package_count"), raw.get("quantity_basis")
             if len(refs) != 1 or type(count) is not int or not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT or not isinstance(basis, str) or not 1 <= len(basis.strip()) <= 600:
@@ -494,7 +501,6 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
                 or not 1 <= shared["package_count"] <= MAX_PACKAGES_PER_REQUIREMENT
                 or not isinstance(shared.get("quantity_basis"), str)
                 or not 1 <= len(shared["quantity_basis"].strip()) <= 600
-                or "package_count" in raw or "quantity_basis" in raw or "max_excess" in raw
             ):
                 raise HouseholdError(
                     "shared_package needs every exact requirement_id, one candidate, package_count and quantity_basis"

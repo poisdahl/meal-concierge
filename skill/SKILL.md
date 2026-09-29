@@ -312,7 +312,10 @@ This remains a practical estimate, not an exact conversion. Check the observed
 pack size, availability and package limit; report unresolved uncertainty.
 For one package serving several requirements, each member carries the same exact
 `shared_package` group and sole candidate ref; `authorized_by` can be omitted or
-`agent`. Keep distinct foods distinct. If the product changes how the dish must
+`agent`. Put the combined `package_count` and `quantity_basis` only inside
+`shared_package`, alongside all member `requirement_ids`. Omit top-level
+`package_count`, `quantity_basis` and `max_excess` from every member approval.
+Keep distinct foods distinct. If the product changes how the dish must
 be cooked, adapt the recipe first. Known allergy/never-buy conflicts need another
 product, not a claim of culinary equivalence.
 
