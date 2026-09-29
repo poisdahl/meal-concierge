@@ -37,9 +37,9 @@ Choose the guide for the environment where you will use Meal Concierge.
 
 | Your agent and installation guide | Where it connects |
 |---|---|
-| [Hermes Agent](docs/hermes.md) | Alongside your Hermes installation. |
+| [Hermes Agent](docs/hermes.md) | Service on the same host. |
 | [OpenClaw](docs/openclaw.md) | Service on the same host. |
-| [NanoClaw](docs/nanoclaw.md) | Host service; trusted agent groups connect from containers. |
+| [NanoClaw](docs/nanoclaw.md) | Service on the same host; trusted agent groups connect from containers. |
 | [Codex](docs/client-install.md) | Desktop app or CLI; local session on the service host. |
 | [ChatGPT Work Local](docs/client-install.md#choose-your-client) | Codex package; verify tools and skill in the Work conversation. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
