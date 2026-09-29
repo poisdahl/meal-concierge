@@ -187,9 +187,12 @@ stale data, or stock, price, payment or order facts may have changed.
    exact current `menu_ref` returned by `get`. This leaves the pending purchase frozen; do
    not prepare or apply new cart goods until it resolves. For exact same-week
    changes to an existing independent menu, use `edit_slots` with its current
-   `menu_ref`, a stable idempotency key and an ordered `edits` list. `add`
-   supplies date, meal_type, portions and exact reference; optional `leafy_green`
-   carries the structured assessment above. Fresh add/replace can also carry
+   `menu_ref`, a stable idempotency key and an ordered `edits` list. Each edit
+   uses `action` (`add`, `replace`, `remove` or `move`), not `op`. Fresh `add`
+   and `replace` put the exact `recipe_ref` or `discovery_ref` inside `reference`,
+   not at the edit top level. `add` supplies date, meal_type and portions;
+   optional `leafy_green` carries the structured assessment above.
+   Fresh add/replace can also carry
    `dietary_facets` with `source:"explicit"` when needed for strict targets;
    base it on the exact recipe snapshot. Set `served_with:"dinner"` for a
    side served with that date's dinner (or `"lunch"`/`"other"` otherwise),
