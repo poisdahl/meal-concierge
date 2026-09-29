@@ -1995,7 +1995,7 @@ class PlanningOperations:
                         revision = 1
                     else:
                         if current.get("supersedes"):
-                            raise HouseholdError("a successor preserves immutable lineage; use replan instead of revision edits")
+                            raise HouseholdError("a successor preserves immutable lineage; use menu replan_prepare then replan_apply to replace future meals while retaining past meals")
                         current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
                         if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
                             raise HouseholdError("an ordered menu is immutable; save a new menu instead")
@@ -2911,7 +2911,7 @@ class PlanningOperations:
             "budget_ore", "price_mode", "selection_digest", "product_plan_digest",
             "requirement_scope_digest", "dependent_groups",
         }
-        additions = {"binding_arguments", "snapshot", "apply_arguments", "partial_apply_arguments"}
+        additions = {"binding_arguments", "snapshot", "apply_arguments", "partial_apply_arguments", "include_recurring"}
         if (not isinstance(record, Mapping) or not required.issubset(record)
                 or set(record).difference(required | additions | {"observation_work", "validation_work"})
                 or record.get("kind") != "product_plan"):
@@ -2944,6 +2944,7 @@ class PlanningOperations:
     ) -> tuple[str, str]:
         record = {
             "kind": "product_plan",
+            "include_recurring": plan.get("binding", {}).get("include_recurring", True),
             "menu_ref": deepcopy(dict(menu_ref)) if menu_ref is not None else None,
             "candidate_approvals": deepcopy(approvals),
             "dependent_groups": self._continuation_dependent_groups(plan),
@@ -2992,6 +2993,7 @@ class PlanningOperations:
             "coverage_status", "cost_status", "budget_status", "budget_ore", "price_mode",
             "totals", "excluded_costs",
         ) if key in plan}
+        snapshot["include_recurring"] = plan.get("binding", {}).get("include_recurring", True)
         rules = []
 
         def findings(values):
@@ -3381,7 +3383,10 @@ class PlanningOperations:
         ingredient_decisions: Any = None, budget_ore: int | None = None, price_mode: str = "exact",
         observe_selected_only: bool = False, work: dict[str, Any] | None = None,
         selected_refs: Mapping[str, list[Any]] | None = None,
+        include_recurring: bool = True,
     ) -> dict[str, Any]:
+        if not include_recurring:
+            binding = {**binding, "include_recurring": False}
         snapshot = self.store.read()
         if snapshot.get("product_selection_generation"):
             binding = {**binding, "selection_generation": snapshot["product_selection_generation"]}
@@ -3647,6 +3652,9 @@ class PlanningOperations:
 
     def _products_operation(self, request: Mapping[str, Any], *, validation_record=None, validation_ref=None) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        include_recurring = request.get("include_recurring", True)
+        if type(include_recurring) is not bool:
+            raise HouseholdError("include_recurring must be a boolean")
         if action == "get":
             return self._get_product_plan(request)
         if request.get("planner_ref") is not None and action != "prepare":
@@ -3683,7 +3691,7 @@ class PlanningOperations:
         if action == "apply" and request.get("product_plan_ref") is not None:
             if any(request.get(key) is not None for key in (
                 "menu_ref", "planner_ref", "planner_handoff", "planner_selection_ref", "product_plan",
-                "candidate_approvals", "ingredient_decisions", "budget_ore", "price_mode",
+                "candidate_approvals", "ingredient_decisions", "budget_ore", "price_mode", "include_recurring",
             )):
                 raise HouseholdError("product_plan_ref apply replaces binding, candidate and product-plan arguments")
             record = self._product_plan_record(self.store.read(), request["product_plan_ref"])
@@ -3723,6 +3731,9 @@ class PlanningOperations:
                     request.get("candidate_approvals") or [], mode,
                     dependent_groups=continuation_record["dependent_groups"],
                 )
+                include_recurring = continuation_record.get("include_recurring", True)
+                if "include_recurring" in request and request["include_recurring"] != include_recurring:
+                    raise HouseholdError("product_plan_ref preserves recurring scope; prepare the menu again to change it")
                 ingredient_decisions = continuation_record["ingredient_decisions"]
                 budget_ore = continuation_record["budget_ore"]
                 price_mode = continuation_record["price_mode"]
@@ -3754,6 +3765,10 @@ class PlanningOperations:
                             "persisted partial product selections belong to a different menu"
                         )
                     persisted_seed = self._partial_seed_approvals(cart_plan)
+                    prior_scope = cart_plan["partial_product_plan_authority"]["context"]["binding"].get("include_recurring", True)
+                    if "include_recurring" in request and include_recurring != prior_scope:
+                        raise HouseholdError("partial product selections preserve recurring scope; finish or reset the plan before changing it")
+                    include_recurring = prior_scope
                 elif saved_ref is not None and full_state:
                     stored_authority = cart_plan.get("product_plan_authority")
                     stored_context = (
@@ -3765,6 +3780,10 @@ class PlanningOperations:
                         and (key != "ingredient_decisions" or bool(request.get(key)))
                         and canonical(request.get(key)) != canonical(stored_context.get(key))
                         for key in ("ingredient_decisions", "budget_ore", "price_mode")
+                    )
+                    stored_recurring = (stored_context.get("binding") or {}).get("include_recurring", True) if isinstance(stored_context, Mapping) else True
+                    explicit_context_change = explicit_context_change or (
+                        "include_recurring" in request and include_recurring != stored_recurring
                     )
                     if not explicit_context_change:
                         persisted_authority = self._full_seed_authority(cart_plan, saved_ref)
@@ -3780,6 +3799,7 @@ class PlanningOperations:
                 )
                 if persisted_authority is not None:
                     context = persisted_authority["context"]
+                    include_recurring = context.get("binding", {}).get("include_recurring", True)
                     ingredient_decisions = deepcopy(context.get("ingredient_decisions"))
                     budget_ore = context.get("budget_ore")
                     price_mode = context.get("price_mode") or "exact"
@@ -3790,6 +3810,7 @@ class PlanningOperations:
             observation_work = (deepcopy(continuation_record.get("observation_work") or {})
                                 if continuation_record is not None and mode != "reset" else {})
             plan = self._prepare_products(
+                include_recurring=include_recurring,
                 work=observation_work,
                 binding=binding,
                 menu=menu,
@@ -3834,6 +3855,7 @@ class PlanningOperations:
             )
             common_arguments = {
                 **binding_arguments,
+                "include_recurring": include_recurring,
                 "candidate_approvals": self._plan_approvals(plan),
                 "ingredient_decisions": deepcopy(plan.get("ingredient_decisions")),
                 "budget_ore": plan.get("budget_ore"), "price_mode": plan.get("price_mode") or "exact",
@@ -3874,7 +3896,7 @@ class PlanningOperations:
                     old_binding.get("kind") == "planner_selection"
                     and canonical(old_binding.get("planner_handoff")) == canonical(menu.get("planner_selection"))
                 )
-                identity_binding = {k: v for k, v in old_binding.items() if k != "ingredient_decisions_digest"}
+                identity_binding = {k: v for k, v in old_binding.items() if k not in {"ingredient_decisions_digest", "include_recurring"}}
                 if not same_selection and canonical(identity_binding) != canonical(binding):
                     raise HouseholdError("previous product plan does not bind this exact menu selection")
                 old_facts = {k: v for k, v in previous.items() if k != "binding"}
@@ -3949,6 +3971,7 @@ class PlanningOperations:
                     and isinstance(approval.get("requirement_id"), str)
                 })
                 fresh = self._prepare_products(
+                    include_recurring=include_recurring,
                     binding=fresh_binding,
                     menu=menu,
                     candidate_approvals=list(combined_approvals.values()),
@@ -3976,6 +3999,7 @@ class PlanningOperations:
                     for approval in current_approvals
                 })
                 revalidated = self._prepare_products(
+                    include_recurring=include_recurring,
                     binding=fresh_binding,
                     menu=menu,
                     candidate_approvals=list(combined_approvals.values()),
@@ -4072,6 +4096,7 @@ class PlanningOperations:
                 def final_partial_prewrite_check() -> dict[str, Any]:
                     try:
                         final = self._prepare_products(
+                            include_recurring=include_recurring,
                             binding=fresh_binding,
                             menu=menu,
                             candidate_approvals=list(combined_approvals.values()),
@@ -4158,6 +4183,7 @@ class PlanningOperations:
             else:
                 supplied = validate_product_plan(supplied, request.get("product_plan_digest"))
                 approvals = self._plan_approvals(supplied)
+                include_recurring = supplied.get("binding", {}).get("include_recurring", True)
                 binding = supplied.get("binding")
                 if not isinstance(binding, Mapping):
                     raise HouseholdError("prepared product plan binding is invalid")
@@ -4192,6 +4218,7 @@ class PlanningOperations:
                              if reviewed.get("status") == "prepared" else None)
             context = self._product_current_context(self.store.read())
             fresh = self._prepare_products(
+                include_recurring=include_recurring,
                 binding=fresh_binding, menu=menu, candidate_approvals=approvals,
                 ingredient_decisions=supplied.get("ingredient_decisions"),
                 budget_ore=supplied.get("budget_ore"), price_mode=supplied.get("price_mode") or "exact",
@@ -4209,7 +4236,7 @@ class PlanningOperations:
                         "candidate_approvals": deepcopy(approvals),
                         "ingredient_decisions": supplied.get("ingredient_decisions"),
                         "budget_ore": supplied.get("budget_ore"), "price_mode": supplied.get("price_mode") or "exact",
-                        "product_plan_digest": supplied["product_plan_digest"]}
+                        "product_plan_digest": supplied["product_plan_digest"], "include_recurring": include_recurring}
                     validation_ref, _ = self._store_product_plan_record(
                         menu_ref=expected_menu_ref, plan=supplied if supplied.get("requirements") is not None else fresh,
                         approvals=deepcopy(approvals), ingredient_decisions=supplied.get("ingredient_decisions"),
@@ -4257,9 +4284,10 @@ class PlanningOperations:
                         and self._product_current_context(current) == context,
                         "reason": "menu or dietary context changed before cart sync"}
 
-            if (not prepared_cart_requirements(supplied) and not self.store.read()["recurring_items"]
+            if (not prepared_cart_requirements(supplied) and (not include_recurring or not self.store.read()["recurring_items"])
                     and not (self.store.read().get("cart_plan") or {}).get("supplemental_quantities")):
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref,
+                    "_include_recurring": include_recurring,
                     "_allow_empty_requirements": True, "_before_cart_write": final_product_prewrite_check,
                     "_expected_product_context": context}, deadline)
                 if not cart_result.get("synced"):
@@ -4316,6 +4344,7 @@ class PlanningOperations:
                 }
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
+                "_include_recurring": include_recurring,
                 "_allow_empty_requirements": True,
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
@@ -4740,6 +4769,7 @@ class PlanningOperations:
                 state["cart_plan"] = deepcopy(current)
             current['menu_required_quantities'] = menu_requirements
             current['recurring_items'] = recurring
+            current['include_recurring'] = request.get('_include_recurring', True)
             state['cart_plan'] = deepcopy(current)
         if current["status"] == "needs_input":
             return {"synced": False, **self._cart_question(current, first_summary, reason="cart_or_menu_changed_before_sync")}

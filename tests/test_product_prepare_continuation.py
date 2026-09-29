@@ -46,6 +46,71 @@ class ProductContinuationTests(unittest.TestCase):
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {
             "week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
 
+    def test_recipe_only_scope_survives_continuation_apply_and_restart(self):
+        self.save_week()
+        recurring = self.provider.entry("recurring fixture")["products"][0]["product_ref"]
+        self.app.handle({"operation": "recurring", "action": "add", "item": {
+            "product_id": recurring, "product_name": "Recurring fixture", "quantity": 1,
+            "schedule": {"every": 1, "unit": "weeks", "anchor": "2026-W37"}}})
+        before = deepcopy(self.store.read()["recurring_items"])
+        first = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu), include_recurring=False)
+        ref = first["product_plan_ref"]
+        with self.assertRaisesRegex(Exception, "preserves recurring scope"):
+            self.request(action="prepare", product_plan_ref=ref, include_recurring=True)
+        ready = self.request(action="prepare", product_plan_ref=ref,
+                             candidate_approvals=self.approvals(first["product_plan"]))
+        page = self.request(action="get", product_plan_ref=ready["product_plan_ref"], response_view="agent")
+        self.assertFalse(page["include_recurring"])
+        with self.assertRaisesRegex(Exception, "replaces binding"):
+            self.request(action="apply", product_plan_ref=ready["product_plan_ref"],
+                         product_plan_digest=ready["product_plan"]["product_plan_digest"],
+                         cart_change_requested=True, include_recurring=True)
+        self.assertTrue(self.request(**ready["apply_arguments"], cart_change_requested=True)["applied"])
+        self.assertEqual(self.provider.quantities.get(recurring, 0), 0)
+        self.assertEqual(self.store.read()["recurring_items"], before)
+        self.assertNotIn(str(recurring), self.store.read()["cart_plan"]["menu_required_quantities"])
+        self.app = Application(self.store, self.provider, object())
+        continued = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu))
+        self.assertFalse(continued["product_plan"]["binding"]["include_recurring"])
+        self.assertTrue(self.request(**continued["apply_arguments"], cart_change_requested=True)["applied"])
+        self.assertEqual(self.provider.quantities.get(recurring, 0), 0)
+        stock = {"source": deepcopy(first["product_plan"]["requirements"][0]["sources"][0]), "action": "have_all"}
+        self.request(action="record_ingredients", menu_ref=self.app._cart_menu_ref(self.menu), ingredient_decisions=[stock])
+        reset = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
+                             continuation_mode="reset", include_recurring=False)
+        ready = self.request(action="prepare", product_plan_ref=reset["product_plan_ref"],
+                             candidate_approvals=self.approvals(reset["product_plan"]))
+        applied = self.request(**ready["apply_arguments"], cart_change_requested=True)
+        self.assertTrue(applied["applied"])
+        self.assertEqual(self.provider.quantities.get(recurring, 0), 0)
+
+    def test_partial_recipe_only_scope_survives_restart_and_weekly_checkout_gate(self):
+        self.save_week()
+        recurring = self.provider.entry("recurring fixture")["products"][0]["product_ref"]
+        self.app.handle({"operation": "recurring", "action": "add", "item": {
+            "product_id": recurring, "product_name": "Recurring fixture", "quantity": 1,
+            "schedule": {"every": 1, "unit": "weeks", "anchor": "2026-W37"}}})
+        initial = self.prepare(include_recurring=False)
+        partial = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
+                               include_recurring=False, candidate_approvals=self.approvals(initial)[:1])
+        self.assertTrue(self.request(**partial["partial_apply_arguments"], cart_change_requested=True)["partial_applied"])
+        self.app = Application(self.store, self.provider, object())
+        with self.assertRaisesRegex(HouseholdError, "preserve recurring scope"):
+            self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu), include_recurring=True)
+        resumed = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu))
+        self.assertFalse(resumed["product_plan"]["binding"]["include_recurring"])
+        ready = self.request(action="prepare", product_plan_ref=resumed["product_plan_ref"],
+                             candidate_approvals=self.approvals(resumed["product_plan"]))
+        self.assertTrue(self.request(**ready["apply_arguments"], cart_change_requested=True)["applied"])
+        self.assertIsNone(self.app._weekly_checkout_problem())
+        self.assertEqual(self.provider.quantities.get(recurring, 0), 0)
+        # A fresh default shop explicitly reset from the menu still includes due items.
+        ordinary = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
+                                continuation_mode="reset", candidate_approvals=self.approvals(initial))
+        self.assertTrue(self.request(**ordinary["apply_arguments"], cart_change_requested=True)["applied"])
+        self.assertEqual(self.provider.quantities[recurring], 1)
+        self.assertIsNone(self.app._weekly_checkout_problem())
+
     def test_67_requirements_prepare_restart_delta_and_one_complete_apply(self):
         self.provider = BatchedRetailer()
         self.app = Application(self.store, self.provider, object())

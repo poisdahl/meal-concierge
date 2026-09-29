@@ -668,7 +668,17 @@ as `--agent-browser` and the existing non-snap Chrome path as
 executable before the empty-PATH launcher test below; a wrapper may require
 commands that will no longer be on PATH. Use one dedicated session/profile and
 the cloud display the user can actually open; another Bot may have a different
-display. Start the dedicated login browser headed (`--headed`) from the outset.
+display. Persist visible-browser launches with installer options
+`--browser-mode headed --browser-display DISPLAY_VALUE` (use the host's actual
+Linux display; omit the display option on macOS). If needed, supply
+`--browser-xauthority ABSOLUTE_AUTHORITY_FILE`, readable by the browser user.
+Install/update stores these choices for future cold launches; omitted options
+retain existing settings and existing installations default to headless.
+Use `--browser-mode headless` to explicitly return to headless operation.
+Direct service deployments use the same flags. A missing Linux display for
+headed mode fails clearly; there is no silent fallback to headless. Verify the
+browser user's display access during login. Start the dedicated login browser
+headed (`--headed`) from the outset.
 Setting DISPLAY alone does not make a headless session visible, and flags on a
 later command may not change an already running session.
 

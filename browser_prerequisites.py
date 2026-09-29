@@ -113,6 +113,57 @@ def discover_browser_paths(
     return validate_browser_paths(adapter, chrome, runtime_path=runtime_path)
 
 
+def browser_launch_settings(mode="headless", display=None, xauthority=None) -> dict[str, str]:
+    """Validate durable launch choices, independently of an existing browser daemon."""
+    if mode not in {"headless", "headed"}:
+        raise RuntimeError("browser mode must be headless or headed")
+    if mode == "headless":
+        if display is not None or xauthority is not None:
+            raise RuntimeError("browser display and Xauthority require headed mode")
+        return {"mode": mode}
+    if sys.platform.startswith("linux") and not display:
+        raise RuntimeError("headed browser requires --browser-display for the visible host desktop")
+    result = {"mode": mode}
+    if display is not None:
+        if not isinstance(display, str) or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,200}", display):
+            raise RuntimeError("browser display is invalid")
+        result["display"] = display
+    if xauthority is not None:
+        path = Path(xauthority)
+        if not path.is_absolute() or not path.is_file() or not os.access(path, os.R_OK):
+            raise RuntimeError("browser Xauthority must be a readable absolute file path")
+        result["xauthority"] = str(path)
+    return result
+
+
+def validate_browser_authority_access(settings: Mapping[str, str], uid: int, gid: int) -> None:
+    path = settings.get("xauthority")
+    if path is None or os.geteuid() != 0 or uid == 0:
+        return
+
+    def drop_privileges():
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", "import os,sys; sys.exit(0 if os.access(sys.argv[1], os.R_OK) else 1)", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=drop_privileges, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot verify display authorization access for the browser user") from exc
+    if result.returncode:
+        raise RuntimeError("configured browser Xauthority is not readable by the browser user")
+
+
+def browser_launch_environment(settings: Mapping[str, str]) -> dict[str, str]:
+    return {variable: settings[key] for key, variable in (
+        ("display", "DISPLAY"), ("xauthority", "XAUTHORITY")
+    ) if key in settings}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent-browser", default=os.environ.get("MEAL_CONCIERGE_AGENT_BROWSER") or None)

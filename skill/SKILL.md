@@ -325,7 +325,12 @@ alone must not advance the date. Other staples use the combined check above.
 
 Record enough-for-this-menu answers with `have_all`, partial stock with
 `have_quantity`, and needs-buying answers with `include`, using the exact source
-positions and `record_ingredients`. Allocate a reported total once across the
+positions and `record_ingredients`. Example:
+`{"source":{"collection":"dishes","recipe_index":0,"ingredient_index":0},"action":"have_all"}`.
+Only `have_quantity` takes `quantity` and `unit`. For an explicitly recipe-only
+shop, set `include_recurring=false` on every fresh/reset product prepare,
+including after recording pantry answers; returned references retain this scope. This skips recurring groceries for that shop
+without editing their saved schedules. Allocate a reported total once across the
 menu, not once per recipe. After recording stock, prepare the saved `menu_ref`
 with `continuation_mode="reset"`; do not reuse earlier apply arguments. For an
 unsaved preview, fresh prepare with its original `planner_ref` and decisions,

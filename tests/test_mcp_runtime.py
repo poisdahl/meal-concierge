@@ -273,6 +273,12 @@ async def sdk_checks(root, process):
         assert product_schema["properties"]["continuation_mode"]["enum"] == ["extend", "replace", "reset"]
         assert product_schema["properties"]["product_plan_ref"]["anyOf"][0]["type"] == "string"
         assert product_schema["properties"]["candidate_approvals"]["anyOf"][0]["maxItems"] == 64
+        stock_schema = product_schema["$defs"]["IngredientDecision"]
+        assert stock_schema["required"] == ["source", "action"]
+        assert stock_schema["properties"]["source"]["$ref"].endswith("/IngredientSource")
+        assert stock_schema["properties"]["action"]["enum"] == ["have_all", "have_quantity", "include", "omit"]
+        assert product_schema["$defs"]["IngredientSource"]["required"] == ["collection", "recipe_index", "ingredient_index"]
+        assert product_schema["properties"]["include_recurring"]["anyOf"][0]["type"] == "boolean"
         approval_schema = product_schema["$defs"]["CandidateApproval"]
         assert approval_schema["required"] == ["requirement_id", "candidate_refs"]
         assert approval_schema["properties"]["semantic_authorization"]["$ref"].endswith("SemanticAuthorization")

@@ -380,7 +380,7 @@ class InstallerTests(unittest.TestCase):
              patch.object(install, 'assert_stopped', side_effect=lambda value: stopped_meta.append(json.loads(json.dumps(value)))), \
              patch.object(install, 'publish') as publish:
             install.main()
-        self.assertEqual(stopped_meta, [meta])
+        self.assertEqual(stopped_meta, [{**meta, "browser_launch": {"mode": "headless"}}])
         updated = publish.call_args.args[0]['paths']
         self.assertEqual(updated, {**paths, 'browser_binary': str(adapter), 'browser_executable': str(chrome)})
         assert_preserved()  # Publication owns actual replacement.
