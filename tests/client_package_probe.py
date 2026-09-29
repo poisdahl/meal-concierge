@@ -333,6 +333,24 @@ def completed_calls(events):
             and x.get("item", {}).get("type") == "mcp_tool_call"]
 
 
+def call_payload(call):
+    """Read a successful native MCP result without assuming structured output."""
+    assert call["status"] == "completed" and call.get("error") is None, call
+    result = call["result"]
+    assert not result.get("is_error"), result
+    structured = result.get("structured_content")
+    assert structured is None or isinstance(structured, dict), result
+    content = result.get("content", [])
+    if content:
+        assert len(content) == 1 and content[0]["type"] == "text", result
+        payload = json.loads(content[0]["text"])
+        assert isinstance(payload, dict), result
+        assert structured is None or payload == structured, result
+        return payload
+    assert isinstance(structured, dict), result
+    return structured
+
+
 def lost_response(root, marketplace):
     class ExpectedDisconnect(Exception):
         pass
@@ -363,9 +381,10 @@ def lost_response(root, marketplace):
         assert [x["arguments"].get("action") for x in calls] == ["reconcile_change", "get"], calls
         assert all(x["status"] == "completed" for x in calls)
         assert all(x.get("error") is None and not x["result"].get("is_error") for x in calls)
-        reconciled, observed = [x["result"]["structured_content"] for x in calls]
+        reconciled, observed = [call_payload(x) for x in calls]
         assert reconciled["reconciled"] is True and reconciled["cart_write_pending"] is False
-        assert [(x["product_id"], x["quantity"]) for x in observed["items"]] == [(10, 1)]
+        assert observed["lines"]["total"] == 1 and observed["lines"]["offset"] == 0
+        assert [(x["product_id"], x["quantity"]) for x in observed["lines"]["items"]] == [("10", 1)]
         assert not json.loads((root / "state/state.json").read_text()).get("pending_cart_change")
         app_read = [x for x in records(root) if x["request"]["operation"] == "cart"
                     and x["request"].get("action") == "get"][-1]
@@ -384,7 +403,7 @@ def codex_probe(root, marketplace, *, long_seconds=0):
             events = native(root, "codex", marketplace, "long", "Call meal_concierge_checkout action=prepare exactly once. This is a synthetic Mathem cart with a deliberately slow read. Wait for its result and report whether it confirmed an order. Never submit or retry.", timeout=long_seconds + 240)
             calls = completed_calls(events)
             assert len(calls) == 1 and calls[0]["tool"] == "meal_concierge_checkout", calls
-            assert calls[0]["result"]["structured_content"]["confirmed"] is False
+            assert call_payload(calls[0])["confirmed"] is False
             measured = [x for x in records(root) if x["request"]["operation"] == "checkout"][-1]["elapsed"]
             assert measured >= long_seconds
             print(json.dumps({"delayed_provider_read_seconds": measured, "live": False}), flush=True)
@@ -415,7 +434,7 @@ def codex_probe(root, marketplace, *, long_seconds=0):
         events = native(root, "codex", marketplace, "reconnect", "Call meal_concierge_status first. After receiving it, call meal_concierge_profile action=show. Make these two tool calls sequentially, not in parallel. Report the household and portions; do not change anything.", on_events=reconnect)
         assert restarted and restarted[0]["old"] != restarted[0]["new"], "no service restart happened between tool calls"
         profile = next(x for x in completed_calls(events) if x["tool"] == "meal_concierge_profile")
-        assert profile["result"]["structured_content"]["profile"]["meals"]["portions"] == 3
+        assert call_payload(profile)["profile"]["meals"]["portions"] == 3
         observed = [x for x in records(root) if x["request"]["operation"] == "profile" and x["request"].get("action") == "show"][-1]
         assert observed["pid"] == restarted[0]["new"], "profile was handled before the service restart"
         assert process[0].poll() is None
