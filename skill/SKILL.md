@@ -289,6 +289,10 @@ alone is not a reason to pay more. Explain a material premium only when it gives
 a meaningful benefit to the dish or saved preferences; otherwise choose the
 cheaper fitting option. A modest culinary difference alone need not justify a
 premium. Preserve specific ingredient forms and adapt the recipe if needed.
+Do not count a mixed product's full pack weight toward a single ingredient.
+Use observed composition to establish its usable amount; if unknown, choose an
+observed single-ingredient match or leave the requirement unresolved. A product
+name alone is not composition evidence.
 
 Prepare products for the exact saved `menu_ref`. To preview an unsaved menu,
 pass its unchanged `save_ref` as products `planner_ref`; saving or resolving a
