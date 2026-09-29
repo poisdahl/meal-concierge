@@ -839,9 +839,12 @@ def _order_row(order: Any, *, exact: bool, tracking: Any = None) -> dict[str, An
     if isinstance(tracking, dict):
         row["tracking"] = _fields(tracking, ("order_id", "orderNumber", "status", "delivery_date",
                                               "deliveryDate", "delivery_window"))
-    row["cancelled"] = any(str(value).casefold().strip() in {
-        "cancelled", "canceled", "kansellert", "cancelled_by_customer", "canceled_by_customer"}
-                           for value in (observed, row["tracking_status"]))
+    statuses = {str(value).casefold().strip() for value in (observed, row["tracking_status"])}
+    row["cancelled"] = None
+    if statuses.intersection({"cancelled", "canceled", "kansellert", "cancelled_by_customer", "canceled_by_customer"}):
+        row["cancelled"] = True
+    elif "not_cancelled" in statuses:
+        row["cancelled"] = False
     if not exact:
         row["exact_read_required"] = True
     return row
@@ -879,7 +882,7 @@ def _orders_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     orders = result.get("orders")
     rows = [_order_row(item, exact=False) for item in orders] if isinstance(orders, list) else []
     view["orders"] = _page(rows, offset, limit, "items") if section in {"summary", "items"} else {"total": len(rows)}
-    view["next"] = "Use orders get with the exact order ID before treating delivery or payment as current."
+    view["next"] = "Use orders get with the exact order ID before treating cancellation, delivery or payment as current."
     return view
 
 
