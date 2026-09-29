@@ -25,7 +25,9 @@ does not fulfill a request to create one.
 
 You are responsible for choosing useful meals, coherent adaptations and suitable
 observed store products. Use culinary judgment instead of asking the user to
-approve ordinary ingredient matches, brands or shared packages. The service
+approve ordinary ingredient matches, brands or shared packages. Product
+`candidate_approvals` record your selection, not a separate user-approval step;
+cart changes and payment still require their own applicable authority. The service
 handles exact amounts, persistence, cart ownership and external effects. Explain
 material substitutions, uncertain estimates and missing information. Ask only
 when a real preference, restriction or authorization is missing.
@@ -45,8 +47,10 @@ are relative to this installed skill directory; use the host's skill/file reader
 meal selection and product preparation need no additional reference loading.
 
 Reuse already-read results and exact references while their scope/version remains
-current. Fetch only missing pages: candidate summaries are not ingredient/method
-evidence, but complete details already read need no duplicate get. Review the
+current. `recipes get` defaults to `view_section="summary"`, which pages both
+ingredients and steps; `view_limit=20` may cover an ordinary recipe in one read.
+Follow each returned page pointer and fetch only missing ingredient or step pages.
+Candidate search summaries are not ingredient/method evidence. Review the
 selected recipes' ingredient, method and dietary fit; reassess affected parts
 after adaptation, scaling or changed preferences. Batch independent ingredient
 decisions up to the tool's limit and follow returned continuation/page arguments.
@@ -175,9 +179,8 @@ stale data, or stock, price, payment or order facts may have changed.
    evidence means unverified feasibility, not an impossible recipe. Pure meal
    planning needs no product search. Preview never authorizes cart writes.
    Save the exact returned handoff or save reference. In your first saved-plan
-   message follow `presentation_guidance`: credit each recipe's actual source/link,
-   give dates/portions and known times, and offer the full ingredients and methods,
-   swaps and using food already at home. Do this before cart changes. Preserve its dates,
+   message follow `presentation_guidance` and the presentation rule below before
+   cart changes. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
    To save a requested distinct whole new draft during a pending purchase,
    pass both the plan's `save_ref` as `planner_ref` and the
@@ -226,7 +229,9 @@ For an adaptation, read the selected recipe's ingredient and step pages, then
 use recipe discovery `adapt` with its exact original `discovery_ref` or
 `recipe_ref`, `recipe_digest`, `source_schema_version`, and `changes`. Supply
 `ingredients=[{index,item,assumptions}]` using zero-based indices plus the
-complete coherent `steps`. Optional `quantity` and `unit` change an amount;
+complete coherent `steps`. Use this edit for a single replacement, such as dry
+chickpeas to canned cooked chickpeas; `replace_with` is only for splitting one
+row into two to five ingredients. Optional `quantity` and `unit` change an amount;
 omitting them retains the amount. Optional top-level `portions` scales the
 source first, so quantities in your edits apply to that target serving count.
 A leafy vegetable replacing a herb garnish needs a deliberate vegetable amount
@@ -330,8 +335,9 @@ positions and `record_ingredients`. Example:
 Only `have_quantity` takes `quantity` and `unit`. For an explicitly recipe-only
 shop, set `include_recurring=false` on every fresh/reset product prepare,
 including after recording pantry answers; returned references retain this scope. This skips recurring groceries for that shop
-without editing their saved schedules. Allocate a reported total once across the
-menu, not once per recipe. After recording stock, prepare the saved `menu_ref`
+without editing their saved schedules. Allocate a reported total yourself once
+across the exact menu sources, never once per recipe. Do not ask the user to
+split known stock between dishes unless their intended use is ambiguous. After recording stock, prepare the saved `menu_ref`
 with `continuation_mode="reset"`; do not reuse earlier apply arguments. For an
 unsaved preview, fresh prepare with its original `planner_ref` and decisions,
 without `product_plan_ref`. If the user only says "some", ask whether it covers
@@ -345,9 +351,11 @@ units and package choices.
 Every prepare returns a `product_plan_ref`, including unsaved previews. The whole
 menu is retained while provider reads run in bounded slices. Follow returned
 `continue_arguments` to finish pending reads, and send at most 64 changed choices
-per prepare with the latest ref. Do not omit dinners to fit a call. Read `products get` pages with
-`offset`, `limit`, and `section="requirements"` or `"issues"`; use `requirement_id`
-for one exact need. Follow `next_offset` until all relevant requirements and
+per prepare with the latest ref. Do not omit dinners to fit a call. For a whole
+menu review, use `limit=20` on `products prepare/get` and read pages with
+`offset` and `section="requirements"` or `"issues"`; use `requirement_id`
+for one exact need. Follow each returned `next_offset`, even when a response
+contains fewer than 20 rows, until all relevant requirements and
 issues are reviewed. After a lost reply or context compaction, get with the exact
 `menu_ref` or unsaved `planner_ref` to recover its latest prepared plan without
 repeating provider searches. A snapshot is a review, not a fresh availability
@@ -436,14 +444,22 @@ Mathem amounts are SEK; Oda and MENY amounts are NOK.
 ## Recipes, delivery and ongoing use
 
 In the first message presenting a saved plan, give dish names, short descriptions,
-dates/portions, each recipe's actual source and available link, and known cooking
-times. Label adaptations and distinguish a collection from the original author.
+exact dates and portions (weekday only when verified), each recipe's actual source
+and URL when available, and its known active and total cooking times. Say when a
+time is unknown. Label adaptations and distinguish a collection from the original
+author.
 Distinguish active work from elapsed time
 and per-dish time from a combined session; unknown times stay unknown. Offer:
 "Would you like the full ingredients and cooking steps? You can swap any dish,
 ask for particular meals, or tell me what you already have and want to use up."
 Use the household's actual stock to reduce purchases or adapt/swap recipes when
 that better uses the ingredients. Allocate a shared quantity only once.
+When asked for full recipes, give every measured ingredient and the complete
+cooking steps in the requested reviewed language variant when available. If that
+variant is unavailable, say so and present the returned canonical recipe in its
+returned language; do not silently translate it. An explicit request for a new
+translation can use the supported reviewed-variant workflow. Keep uncertain
+amounts labeled as estimates.
 
 Elapsed recurring items use `schedule={unit:"days",every:N,anchor:"YYYY-MM-DD"}`.
 After purchase, the interval runs from confirmed fulfillment; overdue means one

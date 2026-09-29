@@ -20,7 +20,8 @@ const call = async (name: string, args = {}) => {
   const result = await client.callTool({ name: `meal_concierge_${name}`, arguments: args });
   assert(!result.isError, JSON.stringify(result));
   const parsed = JSON.parse((result.content as any)[0].text);
-  assert.deepEqual(result.structuredContent, parsed);
+  // Agent views use one JSON text block; other tools may also return structured content.
+  if (result.structuredContent != null) assert.deepEqual(result.structuredContent, parsed);
   return parsed;
 };
 try {
