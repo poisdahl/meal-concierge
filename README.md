@@ -41,12 +41,33 @@ agent's host. For **Grok Bot**, send it to Grok itself. Replace the bracketed na
 > Set up Meal Concierge from https://github.com/poisdahl/meal-concierge
 > for my existing [Hermes / OpenClaw / NanoClaw / Codex / ChatGPT Work Local / Claude Code / Grok Bot].
 > Follow the matching installation guide. Connect to my existing household if
-> present; otherwise install the latest version. Ask which host, store and
-> household to use as needed. Preserve my data and settings. Verify the service,
-> tools, skill and store connection, and help me complete login and activation.
+> present; otherwise install the latest published stable program release using
+> docs/runtime.md#choose-a-program-release. Pin its tag to a full commit; do not
+> install main. Ask which host, store and household to use as needed. Preserve my
+> data and settings. Verify the running build, tools, skill and store connection,
+> report the release tag and running commit, and help me complete login and activation.
 
 Already installed? This connects to the same household. Use the
 [update prompt](#update-meal-concierge) to update the program instead.
+
+### Program releases and exact versions
+
+[Program releases](https://github.com/poisdahl/meal-concierge/releases) use tags
+such as **v0.1.1**. New installations and program updates use the latest published
+stable program release by default. The `recipes-*` releases on the same page are
+the separate Optional Recipe Collection.
+
+To choose an exact version, replace “the latest published stable program release”
+in the setup or update prompt with “program release v0.1.1” (or your chosen
+published version). The installing agent retains that release's exact checkout;
+the installer does not select or download a program version itself. See
+[release selection and checkout](docs/runtime.md#choose-a-program-release).
+
+To check an existing installation, ask:
+
+> Show the running Meal Concierge build and full source commit from service
+> status. Compare it with my selected release tag and report any mismatch or
+> unavailable identity. Do not update anything.
 
 ### Agent support
 
@@ -149,11 +170,14 @@ Send this to an installation-capable agent with access to the existing
 installation, or to Grok for its cloud installation:
 
 > Update my existing Meal Concierge installation from
-> https://github.com/poisdahl/meal-concierge to the latest main, pinned to a full
-> commit. Follow docs/maintenance.md and the applicable host update steps.
+> https://github.com/poisdahl/meal-concierge to the latest published stable program
+> release using docs/runtime.md#choose-a-program-release. Pin its tag to a full
+> commit; do not install main. Follow docs/maintenance.md and the applicable host
+> update steps.
 > Preserve my recipes, settings, login, browser profile and saved data. Check
 > prerequisites before stopping; use the bounded verification in that guide.
-> Report the installed commit and health. Do not update the recipe collection.
+> Report the release tag, running commit and health. Do not update the recipe
+> collection.
 
 To update **both the program and collection**, replace the last sentence with:
 

@@ -7,6 +7,49 @@ manual steps and the information an installing agent needs.
 Meal Concierge runs as a separate service. Your agent connects to it; recipes,
 settings and store login belong to the service installation.
 
+## Choose a program release
+
+For a new installation or a requested program update, use the
+[official releases](https://github.com/poisdahl/meal-concierge/releases):
+
+1. Choose the highest published stable program version with a tag of the form
+   `vMAJOR.MINOR.PATCH`, comparing the three numbers numerically. Exclude drafts,
+   prereleases and `recipes-*` collection releases. Read the selected release's
+   notes; the repository's generic “Latest” release may refer to a recipe pack.
+2. If the user names a version, select that exact published program release
+   instead. If it cannot be found or fetched, report the problem without
+   substituting another version or `main`.
+3. Resolve its tag to a full commit and retain a clean checkout at that commit,
+   outside the household data directory. Record both the tag and commit. Use
+   that checkout's installer and matching client builders; consult its host
+   guide for version-specific requirements. Keep the selected commit even if
+   an older tagged guide still says to obtain “latest main”.
+
+For example, this checks out **v0.1.1**, not a moving “latest” version. With Git
+installed, replace the tag and the new, unused source path for your selection:
+
+```sh
+git clone --branch v0.1.1 --depth 1 \
+  https://github.com/poisdahl/meal-concierge.git /absolute/meal-concierge-v0.1.1
+cd /absolute/meal-concierge-v0.1.1
+git checkout --detach
+git rev-parse HEAD
+git status --short
+```
+
+Compare the full commit with the selected release's tag/recorded commit; the
+status output should be empty. Retain this source directory for client packaging
+and maintenance. A commit-specific GitHub source archive is also usable, but
+does not carry Git metadata: retain its provenance separately and expect the
+[running build](maintenance.md#identifying-the-running-build) to lack a Git commit.
+
+`install.sh install` and `install.sh update` stage the source they run from.
+They do not fetch the latest program or accept a program `--version` flag.
+Do not use a plain clone of `main`, `git pull`, or a recipe release as a substitute
+for selecting a program release. A development build requires an explicit request
+and its own pinned commit. Repeating setup for an existing household retains its
+installed version and attaches to it; it does not select a newer release.
+
 ## Install and attach
 
 ### What you need
@@ -40,11 +83,9 @@ This checks selected and conventional locations only. For an existing healthy
 household, retain its version and use `attach`; a repeated setup request is not
 an update request. Do not replace another household or an existing service.
 
-For a **new** installation, obtain the latest `main` from the
-[official repository](https://github.com/poisdahl/meal-concierge) and retain a
-checkout at its exact commit. Keep source outside the data directory. Run from
-that checkout, replacing the example household and provider (`oda`, `mathem`
-or `meny`):
+For a **new** installation, [choose a program release](#choose-a-program-release)
+and run from its retained checkout, replacing the example household and provider
+(`oda`, `mathem` or `meny`):
 
 ```sh
 ./install.sh install --provider oda --household "My household" \
@@ -82,6 +123,8 @@ recipe bank can be empty; this does not mean the installation failed.
 
 In the actual agent conversation, ask to show Meal Concierge setup, the selected
 household and store, and available recipes. Confirm the skill and tools load.
+Compare the service's running build with the selected release commit using
+[build verification](maintenance.md#identifying-the-running-build).
 After login, check a recipe/product search and cart read. Report core setup,
 store connection and checkout readiness separately. These checks do not place
 an order or send email.
@@ -126,13 +169,18 @@ Start with [bounded maintenance](maintenance.md): read only the relevant update
 sections, reuse installation details and verify the defined checks rather than
 running a full product audit.
 
-> Update my existing Meal Concierge installation to the latest main, pinned to
-> a specific commit. Preserve my data, login and recipes. Follow docs/maintenance.md
-> and my agent’s update steps, refresh the connection if needed, and perform the
-> bounded verification. Leave the collection unchanged unless I request its update.
+> Update my existing Meal Concierge installation to the latest published stable
+> program release using docs/runtime.md#choose-a-program-release. Pin its tag to
+> a full commit; do not install main. Preserve my data, login and recipes. Follow
+> docs/maintenance.md and my agent’s update steps, refresh the connection if needed, and perform the
+> bounded verification. Report the release tag and running commit. Leave the
+> collection unchanged unless I request its update.
 
-Obtain the chosen new source commit first. While the existing service is still
-running, validate the dependencies from that checkout:
+[Choose the target program release](#choose-a-program-release) first; use an exact
+published version when requested. If the same unmodified build is already running,
+verify it and report that no program update is needed. Otherwise retain the target checkout
+before stopping anything. While the existing service is still running, validate
+the dependencies from that checkout:
 
 ```sh
 ./install.sh check-browser --home /absolute/data-home
@@ -162,7 +210,10 @@ The update makes an offline backup of state and configuration before migration.
 It preserves recipes, local edits, favorites, saved menus, settings and existing
 login paths. It does not import or refresh the optional collection. Refresh the
 client package or skill using your agent's guide and start a new conversation.
-Verify the same household and saved data.
+Verify the same household and saved data, and compare the
+[running build](maintenance.md#identifying-the-running-build) with the target commit.
+Selecting an older tag is not a supported shortcut for undoing state migrations;
+use the recovery guidance below for an interrupted update.
 
 ### Recover an interrupted attempt
 

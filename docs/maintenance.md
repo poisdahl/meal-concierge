@@ -19,8 +19,12 @@ into the conversation.
    MCP registration and skill pointer. If unknown, discover once. Read the current
    identity and active shopping/payment/delivery state; do not interrupt work or
    retry an uncertain operation. Reuse these observations only while still valid.
-2. **Program requested:** resolve `main` once to a full commit, retain that exact
-   checkout and run its `check-browser` against the existing home before stopping.
+2. **Program requested:** [select the latest stable program release](runtime.md#choose-a-program-release),
+   or the exact published version requested. Record its tag and full commit once
+   and retain that clean checkout. Do not select `main` or a `recipes-*` release.
+   If the same unmodified build is already running, verify it and report that no
+   program update is needed. Otherwise run the target checkout's `check-browser`
+   against the existing home before stopping.
    Follow the runtime update sequence and the host's existing stop/start owner.
    Refresh only the matching client connection/skill as required by its guide;
    preserve unrelated registrations. A routine update does not authorize setup,
@@ -64,8 +68,8 @@ Use the installer's successful result and these bounded checks:
   report is the check; no recipe-by-recipe recount or quality review is needed.
   If incomplete, report that and inspect only the relevant conflict/error report.
 
-Return the installed commit, collection version if requested, concise result
-counts, service/connection health and any unresolved issue. Never describe a
+Return the selected program tag and running commit, collection version if
+requested, concise result counts, service/connection health and any unresolved issue. Never describe a
 partial import as complete. Refresh the maintained skill for subsequent meal work;
 there is no need to demonstrate meal planning during maintenance.
 
@@ -80,8 +84,24 @@ pass. That deterministic work is not an agent reading and rewriting each recipe.
 
 ## Identifying the running build
 
-`install.py discover` reports installed build identity; `health` and `status`
-report a `build` object from the release actually running.
+From the retained checkout, inspect the selected home:
+
+```sh
+./install.sh discover --home /absolute/data-home
+```
+
+Its `installed_build` describes the staged installation. In the actual connected
+agent, call `meal_concierge_status` to read the running service's `build` object;
+direct service `health` and `status` reads expose the same identity. Compare
+`build.source_commit` with the full commit recorded for your selected program
+tag, and require `build.source_modified=false` for an unmodified release. Checking
+only `git rev-parse HEAD` in a source directory does not verify the running service.
+
+The build does not contain a release tag or a separate program version string.
+Keep the tag-to-commit mapping from release selection and report that alongside
+the service result. A matching runtime identity also does not prove that the
+client reloaded its skill; verify the connection through the host guide.
+
 It contains the packaged source/skill digest, dependency-file digest, pinned
 Python and interface version. A Git commit is included when staging from a Git
 checkout; `source_modified=true` means that commit alone does not identify the
