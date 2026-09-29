@@ -2209,7 +2209,7 @@ class OrderOperations:
         equipment = [i for i in assess_menu(state).get('issues', []) if i.get('code') == 'equipment_unavailable']
         if equipment:
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'equipment_unavailable', 'issues': equipment}
-        due = self._due_recurring(state, self._household_today(state))
+        due = self._due_recurring(state, self._household_today(state)) if plan.get('include_recurring', True) else []
         if canonical(due) != canonical(plan.get('recurring_items', [])):
             return {'confirmed': False, 'status': 'needs_input', 'reason': 'weekly_goods_changed',
                     'next': 'Synchronize cart action=weekly for this menu before preparing checkout.'}

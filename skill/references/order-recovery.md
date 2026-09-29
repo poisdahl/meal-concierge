@@ -69,6 +69,14 @@ not prevent a read-only merchant review for the same identified unpaid order.
 Confirm only the fresh review after exact order, account, goods, delivery,
 amount and method checks. Do not submit another order to solve a missing notification.
 
+For an ordinary recorded Oda request the user missed, reconcile the active
+confirmation first. When that attempt retains the exact order binding, inspect a fresh review with
+`checkout prepare` with `recovery=true` and its `confirmation_id`; omit `order_id`
+and the special recovery evidence flags. After the user approves the new request, normally
+reconcile its fresh confirmation without extra flags. `vipps_request_not_received`
+and `vipps_approval_completed` are for the narrowly described recovery evidence
+cases in the tool and exact returned status, not generic reports of a missed or approved notification.
+
 Read `workflow.next_action` against the active payment attempt. A prepared
 recovery child uses its fresh `confirmation_id` and the existing confirmation
 policy; a dispatched or uncertain child must be reconciled under that same ID.

@@ -1622,6 +1622,7 @@ process.stdout.write(eval(script));
 
     def test_cancellation_relaunch_honors_an_expired_deadline(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser.browser_launch = {"mode": "headless"}
         browser.binary = Path("/shared/agent-browser-native")
         browser.executable = Path("/usr/bin/chromium")
         browser.profile = Path("/profile")
@@ -1656,6 +1657,7 @@ process.stdout.write(eval(script));
 
     def test_checkout_relaunch_honors_an_expired_deadline(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser.browser_launch = {"mode": "headless"}
         browser.binary = Path("/shared/agent-browser-native")
         browser.executable = Path("/usr/bin/chromium")
         browser.profile = Path("/profile")
@@ -3102,6 +3104,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
 
     def test_checkout_deadline_caps_each_browser_command(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser.browser_launch = {"mode": "headless"}
         browser.binary = Path("/shared/agent-browser-native")
         browser.executable = Path("/usr/bin/chromium")
         browser.profile = Path("/profile")
@@ -4071,6 +4074,7 @@ process.stdout.write(eval(script));
 
     def test_oda_vipps_phone_is_sent_to_browser_over_stdin_not_process_argv(self):
         browser = OdaBrowser.__new__(OdaBrowser)
+        browser.browser_launch = {"mode": "headless"}
         browser.binary = Path("/shared/agent-browser-native")
         browser.executable = Path("/usr/bin/chromium")
         browser.profile = Path("/profile")

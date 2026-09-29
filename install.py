@@ -24,7 +24,7 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime_ownership import file_lock, ownership, listener_ownership
-from browser_prerequisites import discover_browser_paths, executable
+from browser_prerequisites import discover_browser_paths, executable, browser_launch_settings
 from recipe_portable import PUBLISHER_RECIPE_PACK_IDS
 
 SOURCE = Path(__file__).resolve().parent
@@ -460,6 +460,8 @@ def service_args(meta, release=None):
     result = [str(root / 'venv/bin/python'), '-I', str(root / 'service.py')]
     for key, value in meta['paths'].items():
         result += ['--' + key.replace('_', '-'), value]
+    for key, value in meta.get("browser_launch", {}).items():
+        result += ["--browser-" + key, value]
     return result
 
 
@@ -748,6 +750,19 @@ def discover(home):
     return result
 
 
+def configured_browser_launch(args, meta):
+    settings = dict(meta.get("browser_launch", {"mode": "headless"}))
+    if args.browser_mode is not None:
+        settings["mode"] = args.browser_mode
+        if args.browser_mode == "headless":
+            settings = {"mode": "headless"}
+    for key in ("display", "xauthority"):
+        value = getattr(args, "browser_" + key)
+        if value is not None:
+            settings[key] = value
+    return browser_launch_settings(**settings)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
@@ -762,6 +777,9 @@ def main():
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
     for field in ['config', 'state', 'socket', 'tokens', 'browser-profile', 'browser-home', 'browser-socket-directory', 'agent-browser', 'browser-executable']:
         parser.add_argument('--' + field)
+    parser.add_argument('--browser-mode', choices=['headless', 'headed'], help='persist launch mode; existing installations retain their current mode')
+    parser.add_argument('--browser-display', help='visible Linux desktop DISPLAY for headed browser launches')
+    parser.add_argument('--browser-xauthority', help='absolute display authorization file, if required by the host')
     parser.add_argument('--recipe-pack', type=Path, help='recipe-pack ZIP selected for an inspect/import/removal action')
     parser.add_argument('--prepared', help='exact preparation ID for an offline import-recipes')
     parser.add_argument('--expected-sha256', help='exact digest pin for a local collection import/removal')
@@ -791,6 +809,8 @@ def main():
         raise RuntimeError('--allow-recipe-removals applies only to import-recipe-pack')
     if args.allow_recipe_removals and args.expected_sha256 is None:
         raise RuntimeError('--allow-recipe-removals requires --expected-sha256 for the exact pack')
+    if any(getattr(args, 'browser_' + key) is not None for key in ('mode', 'display', 'xauthority')) and args.action not in {'install', 'update', 'check-browser'}:
+        raise RuntimeError('browser launch settings apply only to install, update or check-browser')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
     if args.action == 'check-browser':
@@ -810,7 +830,7 @@ def main():
             if changing_browser else stored_runtime_path
         )
         checked = browser_paths(args, provider, meta['paths'], runtime_path=runtime_path)
-        print(json.dumps({'provider': provider, **checked}, indent=2))
+        print(json.dumps({'provider': provider, **checked, 'browser_launch': configured_browser_launch(args, meta)}, indent=2))
         print('Browser prerequisites ready; no store login was performed.')
         return
     if args.action == 'inspect-recipe-pack':
@@ -975,6 +995,7 @@ def main():
             meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
+        meta['browser_launch'] = configured_browser_launch(args, meta)
         actual_settings = dict(settings or json.loads(Path(meta['paths']['config']).read_text()))
         actual_settings['provider'] = configured_provider(actual_settings)
         if manifest.exists():

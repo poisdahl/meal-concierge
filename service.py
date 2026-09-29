@@ -1170,6 +1170,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--browser-home", type=Path, default=Path.home() / ".meal-concierge-browser")
     result.add_argument("--browser-socket-directory", type=Path, default=Path("/tmp/meal-concierge-browser"))
     result.add_argument("--browser-cdp")
+    result.add_argument("--browser-mode", choices=["headless", "headed"], default="headless")
+    result.add_argument("--browser-display")
+    result.add_argument("--browser-xauthority")
     result.add_argument("--browser-uid", type=int, default=os.getuid())
     result.add_argument("--browser-gid", type=int, default=os.getgid())
     return result
@@ -1225,6 +1228,9 @@ def run(args, settings=None) -> None:
         "socket_directory": args.browser_socket_directory,
         "uid": args.browser_uid,
         "gid": args.browser_gid,
+        "browser_mode": getattr(args, "browser_mode", "headless"),
+        "browser_display": getattr(args, "browser_display", None),
+        "browser_xauthority": getattr(args, "browser_xauthority", None),
     }
     if settings["provider"] in {"oda", "mathem"}:
         if args.tokens is None:

@@ -6,6 +6,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
+from browser_prerequisites import browser_launch_settings, browser_launch_environment, validate_browser_authority_access
+
 import calendar
 import hashlib
 import ipaddress
@@ -1092,6 +1094,9 @@ class OdaBrowser:
         socket_directory: Path | str,
         uid: int,
         gid: int,
+        browser_mode: str = "headless",
+        browser_display: str | None = None,
+        browser_xauthority: str | None = None,
         provider_client: Any = None,
         vipps_phone_number: str | None = None,
     ):
@@ -1104,6 +1109,8 @@ class OdaBrowser:
         self.socket_directory = Path(socket_directory)
         self.uid = uid
         self.gid = gid
+        self.browser_launch = browser_launch_settings(browser_mode, browser_display, browser_xauthority)
+        validate_browser_authority_access(self.browser_launch, uid, gid)
         self.vipps_phone_number = vipps_phone_number
         self.session = f"oda-household-{instance}"
         self._checkout_deadline: float | None = None
@@ -3541,7 +3548,8 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
         # Chromium's launch flags must match that operation from its first read.
         if getattr(self, "_cancellation_deadline", None) is not None and browser_args == DEFAULT_BROWSER_ARGS:
             browser_args = CANCELLATION_BROWSER_ARGS
-        command = [str(self.binary), "--json", "--session", self.session, "--profile", str(self.profile), "--executable-path", str(self.executable), *arguments]
+        command = [str(self.binary), "--json", "--session", self.session, "--profile", str(self.profile), "--executable-path", str(self.executable),
+                   *(["--headed"] if self.browser_launch.get("mode") == "headed" else []), *arguments]
         environment = {
             "AGENT_BROWSER_ARGS": browser_args,
             "AGENT_BROWSER_DEFAULT_TIMEOUT": "60000",
@@ -3550,6 +3558,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             "LANG": "C.UTF-8",
             "PATH": os.environ.get("PATH", os.defpath),
         }
+        environment.update(browser_launch_environment(self.browser_launch))
         for name in ("AGENT_BROWSER_PROXY", "AGENT_BROWSER_PROXY_BYPASS"):
             if value := os.environ.get(name):
                 environment[name] = value

@@ -47,6 +47,16 @@ explicit paths, including the validated browser adapter and Chrome/Chromium.
 Keep data, OAuth tokens and browser profiles in a dedicated
 `/workspace` directory; separate replaceable code and short sockets can use
 `/tmp`. Installation leaves the service stopped and imports no collection.
+For Grok's visible cloud desktop, discover its actual display and install with
+`--browser-mode headed --browser-display DISPLAY_VALUE`. If that desktop uses
+Xauthority, also pass `--browser-xauthority ABSOLUTE_AUTHORITY_FILE`; the browser
+user must have access to that file and display. These launch choices are saved
+and reused after service/browser restarts. Do not rely on manually opening a
+headed browser once: a later cold launch must use the same settings. Keep the
+installation's dedicated profile; do not attach a general desktop Chrome profile
+through CDP as a login workaround. Login in a different profile does not transfer
+the household's store session.
+
 
 ### 2. Start and connect
 
@@ -174,7 +184,14 @@ durable data, credentials and operation records.
 
 A Grok timeout can occur while Meal Concierge continues working. Reconnect and
 check the original cart change, checkout or send before retrying; increasing the
-bridge timeout alone cannot make Grok wait longer.
+bridge timeout alone cannot make Grok wait longer. For browser trouble, inspect
+the exact managed session, launch mode, display and service error first. A failed
+page read is not proof that login expired. Do not repeatedly restart Chrome,
+clear its locks/profile, or ask for login to resolve an undiagnosed timeout.
+Change durable launch settings through a reviewed update with the same browser
+options, retain the profile, and reconcile the original operation before retrying.
+After the exact session is confirmed idle, close only that browser session once
+to apply changed launch options; flags cannot change an already-running daemon.
 
 ### Attachments and scheduled delivery
 
