@@ -58,7 +58,7 @@ an address in its delivery area. Complete login in the installation's dedicated 
 |---|---|---|
 | Oda | Norway / NOK | Saved card or Vipps. |
 | Mathem | Sweden / SEK | Saved card. |
-| MENY | Norway / NOK | Vipps; configure home delivery and your Vipps phone number. |
+| MENY | Norway / NOK | Vipps. |
 
 Installation does not create accounts or add payment cards. Enter passwords,
 payment details and required approvals in the trusted store or payment interface,
