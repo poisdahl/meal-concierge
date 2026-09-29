@@ -122,12 +122,40 @@ class AgentViewTests(unittest.TestCase):
         not_cancelled = project_agent_result("orders", "get", {
             "order": {"id": "still-open", "status": "not_cancelled"},
             "tracking": {"status": "not_cancelled"}})["order"]
-        self.assertFalse(not_cancelled["cancelled"])
+        self.assertIs(not_cancelled["cancelled"], False)
         self.assertEqual(not_cancelled["normalized_order_id"], "still-open")
         exact = project_agent_result("orders", "get", {
             "order": rows[0], "tracking": {"order_id": "cancelled-1", "status": "cancelled"}})
         self.assertTrue(exact["order"]["cancelled"])
         self.assertEqual(exact["order"]["tracking_status"], "cancelled")
+
+    def test_order_cancellation_stays_unknown_without_explicit_evidence(self):
+        for fields in ({}, {"status": None}, {"status": "unknown"},
+                       {"status": "confirmed"}, {"status": "unrecognized-provider-status"}):
+            order = {"orderNumber": "synthetic-order", **fields}
+            with self.subTest(fields=fields):
+                listed = project_agent_result("orders", "list", {"orders": [order]})["orders"]["items"][0]
+                self.assertIsNone(listed["cancelled"])
+                self.assertEqual(json.dumps(listed["cancelled"]), "null")
+                self.assertEqual(listed["tracking_status"], "not_read")
+                self.assertEqual(listed["payment_status"], "unknown")
+                self.assertTrue(listed["exact_read_required"])
+                exact = project_agent_result("orders", "get", {
+                    "order": order, "tracking": {"status": "unknown"}})["order"]
+                self.assertIsNone(exact["cancelled"])
+                self.assertEqual(exact["tracking_status"], "unknown")
+
+    def test_order_cancellation_preserves_explicit_statuses_and_positive_precedence(self):
+        for status in ("cancelled", "canceled", "kansellert", "cancelled_by_customer", "canceled_by_customer"):
+            with self.subTest(status=status):
+                exact = project_agent_result("orders", "get", {
+                    "order": {"id": "synthetic-order", "status": "not_cancelled"},
+                    "tracking": {"status": " " + status.upper() + " "}})["order"]
+                self.assertIs(exact["cancelled"], True)
+        exact = project_agent_result("orders", "get", {
+            "order": {"id": "synthetic-order"},
+            "tracking": {"status": " NOT_CANCELLED "}})["order"]
+        self.assertIs(exact["cancelled"], False)
 
     def test_exact_order_goods_are_reviewable_in_pages(self):
         order = {"orderNumber": "synthetic-123", "status": "confirmed", "currency": "NOK",
