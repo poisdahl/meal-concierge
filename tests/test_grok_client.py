@@ -68,7 +68,7 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool('meal_concierge_' + name, arguments)
         self.assertFalse(result.is_error, result)
         text = json.loads(result.content[0].text)
-        if name in {"status", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
+        if name in {"setup", "catalog", "status", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
             self.assertIsNone(result.structured_content)
             self.assertEqual(len(result.content), 1)
             self.assertLess(len(result.model_dump_json(by_alias=True)), 45_000)

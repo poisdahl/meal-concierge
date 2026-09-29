@@ -1842,7 +1842,7 @@ class RecipeSelectionRuntimeTests(unittest.IsolatedAsyncioTestCase):
         result = await client.call_tool("meal_concierge_" + tool, arguments)
         self.assertFalse(result.is_error, result)
         text = json.loads(result.content[0].text)
-        if tool in {"menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
+        if tool in {"setup", "catalog", "menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
             self.assertEqual(len(result.content), 1)
             self.assertEqual(result.content[0].type, "text")
             self.assertIsNone(result.structured_content)
