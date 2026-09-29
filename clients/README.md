@@ -5,9 +5,8 @@ with the [setup prompt](../README.md#installation) or choose your guide:
 
 | Your agent | Installation guide |
 |---|---|
-| Codex — desktop app or CLI | [Local client setup](../docs/client-install.md) |
+| Codex (desktop or CLI) and ChatGPT Work Local | [Local client setup](../docs/client-install.md) |
 | Claude Code — CLI or Claude Desktop **Code → Local** | [Local client setup](../docs/client-install.md) |
-| ChatGPT Work Local | [Client modes and checks](../docs/client-install.md#choose-your-client) |
 | Hermes | [Hermes](../docs/hermes.md) |
 | OpenClaw | [OpenClaw](../docs/openclaw.md) |
 | NanoClaw | [NanoClaw](../docs/nanoclaw.md) |

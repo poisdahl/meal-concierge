@@ -40,14 +40,13 @@ Choose the guide for the environment where you will use Meal Concierge.
 | [Hermes Agent](docs/hermes.md) | Service on the same host. |
 | [OpenClaw](docs/openclaw.md) | Service on the same host. |
 | [NanoClaw](docs/nanoclaw.md) | Service on the same host; trusted agent groups connect from containers. |
-| [Codex](docs/client-install.md) | Desktop app or CLI; local session on the service host. |
-| [ChatGPT Work Local](docs/client-install.md#choose-your-client) | Codex package; verify tools and skill in the Work conversation. |
+| [Codex and ChatGPT Work Local](docs/client-install.md) | Same local package; Codex desktop/CLI or Work Local on the service host. |
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer; group-room recipe delivery is text only. |
 
-Regular ChatGPT Chat, Work Cloud and Claude Desktop Chat are not covered by
-this local setup. See [shared setup](docs/runtime.md#install-and-attach) for exact
-host and browser prerequisites.
+For Codex and Work Local, [verify tools, skill and file access](docs/client-install.md#choose-your-client)
+in the mode you use. See [shared setup](docs/runtime.md#install-and-attach)
+for exact host and browser prerequisites.
 
 ### Requirements
 
