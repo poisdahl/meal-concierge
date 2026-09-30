@@ -1,13 +1,11 @@
 # Connect your agent to Meal Concierge
 
-Install once, then connect your existing agents to the same household. Start
-with the [setup prompt](../README.md#installation) or choose your guide:
+Start with the [setup prompt](../README.md#installation) or choose your guide:
 
 | Your agent | Installation guide |
 |---|---|
-| Codex — desktop app or CLI | [Local client setup](../docs/client-install.md) |
+| Codex (desktop or CLI) and ChatGPT Work Local | [Local client setup](../docs/client-install.md) |
 | Claude Code — CLI or Claude Desktop **Code → Local** | [Local client setup](../docs/client-install.md) |
-| ChatGPT Work Local | [Client modes and checks](../docs/client-install.md#choose-your-client) |
 | Hermes | [Hermes](../docs/hermes.md) |
 | OpenClaw | [OpenClaw](../docs/openclaw.md) |
 | NanoClaw | [NanoClaw](../docs/nanoclaw.md) |
@@ -15,30 +13,22 @@ with the [setup prompt](../README.md#installation) or choose your guide:
 
 ## Reuse your household
 
-Multiple trusted agents with access to the service host can share its recipes,
-settings, store connection and skill. Adding an agent does not require copying
-recipes or credentials; household data persists between conversations.
+Trusted agents can share the household's recipes, settings, store connection and skill.
 
 Codex, ChatGPT Work Local and Claude Code connect on the **same computer and as
-the same user** as the service. Their generated packages contain local paths and
-stay there. Grok uses its separate cloud computer. Regular ChatGPT Chat,
-Work Cloud and Claude Desktop Chat are not covered by this local package.
+the same user** as the service. Generated packages use local paths and stay on
+that computer. Grok uses its own cloud computer.
 
-Repeating setup attaches to the existing household. Use the
-[update prompt](../README.md#update-meal-concierge) to upgrade it, and
-[version instructions](../README.md#program-releases-and-exact-versions) to choose
-an exact stable program release. Build packages from the checkout matching the
-installed runtime, then verify the running build, native tools and loaded skill
-in each client you use.
+Setup reuses the existing household. Use the [update prompt](../README.md#update-meal-concierge)
+for upgrades or [version instructions](../README.md#program-releases-and-exact-versions)
+for an exact release. Build packages from the checkout matching the installed
+runtime, then verify the running build, tools, skill and file access in each mode you use.
 
 ## Import a recipe from a PDF
 
-Attach the PDF and ask the agent to use the installed Meal Concierge skill.
-The Codex and Claude Code packages include a launcher for the runtime's PDF
-renderer; the agent needs image-reading capability and permission to run it.
-NanoClaw needs its native container reader.
-See [PDF input](../docs/recipe-import.md#pdf-attachments-without-system-packages).
+Attach a PDF and ask your agent to import the recipe with Meal Concierge.
+See [PDF input](../docs/recipe-import.md#pdf-attachments-without-system-packages)
+for client requirements.
 
-To receive recipes, use chat, optional email or supported PDF delivery. Attachment
-support varies; Grok Bot group rooms support text only. See
-[recipe delivery](../docs/recipe-delivery.md).
+For output formats, see [recipe delivery](../docs/recipe-delivery.md).
+Grok Bot group rooms support text only.
