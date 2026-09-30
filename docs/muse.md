@@ -132,7 +132,7 @@ provider, with no credentials, unexpected port or fragment. Identity, query,
 page and size must match the pending request. The observation time must be
 timezone-aware, after emission, before validation and before expiry. Responses
 are limited to 65,536 bytes and bounded product text. Invalid JSON, UTF-8,
-duplicate keys, extra fields, nonregular files and symlinks fail clearly.
+extra fields, nonregular files and symlinks fail clearly.
 
 The wait is capped at 90 seconds and any shorter product-planning deadline,
 including request publication, file read and validation. It is not reset by new
