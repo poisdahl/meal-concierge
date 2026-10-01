@@ -12,6 +12,12 @@ from pathlib import Path
 
 
 def export_part(rpc, job_id, part_id, output):
+    return export_chunks(lambda offset: rpc("recipe_delivery", action="read", job_id=job_id,
+                                           part_id=part_id, offset=offset), output)
+
+
+def export_chunks(read_chunk, output):
+    """Export one frozen file; the reader uses the delivery chunk metadata contract."""
     output = Path(output)
     descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
     try:
@@ -22,7 +28,7 @@ def export_part(rpc, job_id, part_id, output):
         with os.fdopen(descriptor, "wb") as stream:
             offset, expected, checksum = 0, None, hashlib.sha256()
             while True:
-                result = rpc("recipe_delivery", action="read", job_id=job_id, part_id=part_id, offset=offset)
+                result = read_chunk(offset)
                 metadata = (result.get("bytes"), result.get("sha256"), result.get("content_type"), result.get("filename"))
                 if expected is None:
                     expected = metadata

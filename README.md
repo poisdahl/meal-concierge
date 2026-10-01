@@ -24,7 +24,7 @@ Meal Concierge keeps your recipes and household preferences between conversation
 
 [Install](#installation) · [First use](#first-use) ·
 [Update](#update-meal-concierge) · [Recipe collection](#add-or-update-the-recipe-collection) ·
-[User guide](docs/usage.md)
+[User guide](docs/usage.md) · [On-demand recipe PDF](docs/on-demand.md)
 
 ## Installation
 

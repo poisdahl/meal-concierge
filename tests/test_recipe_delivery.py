@@ -105,6 +105,22 @@ class SMTPHandler(socketserver.StreamRequestHandler):
 
 
 class DeliveryTransportTests(unittest.TestCase):
+    def test_export_checksum_failure_removes_only_new_output(self):
+        def rpc(operation, **request):
+            return {"bytes": 3, "sha256": "0" * 64, "content_type": "application/pdf",
+                    "filename": "menu.pdf", "offset": 0,
+                    "data_base64": base64.b64encode(b"pdf").decode(), "next_offset": None}
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "menu.pdf"
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                export_part(rpc, "job", "part", target)
+            self.assertFalse(target.exists())
+            target.write_bytes(b"existing")
+            with self.assertRaises(FileExistsError):
+                export_part(rpc, "job", "part", target)
+            self.assertEqual(target.read_bytes(), b"existing")
+
     def test_exported_pdf_is_shared_group_readable_without_false_delivery_success(self):
         data = b"%PDF-synthetic-frozen-delivery"
         checksum = hashlib.sha256(data).hexdigest()
