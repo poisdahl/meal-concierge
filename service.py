@@ -209,10 +209,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.browser = provider_client if self.provider == "meny" else browser
         self.browser_lock = threading.Lock()
         self.email_automation_profile = str(store.config.get("email_automation_profile") or "").strip()
-        self.external_recipe_sources = dict(external_recipe_sources or {
+        self.external_recipe_sources = dict({
             "themealdb": TheMealDBSource(api_key=os.environ.get("THEMEALDB_API_KEY", "1")),
             "wikibooks": WikibooksSource(),
-        })
+        } if external_recipe_sources is None else external_recipe_sources)
         self.integration: dict[str, Any]
         if self.provider == "meny":
             # MENY readiness can require a full browser navigation. Keep the
