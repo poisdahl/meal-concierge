@@ -25,13 +25,13 @@ For a new installation or a requested program update, use the
    guide for version-specific requirements. Keep the selected commit even if
    an older tagged guide still says to obtain “latest main”.
 
-For example, this checks out **v0.1.1**, not a moving “latest” version. With Git
+For example, this checks out **v0.1.2**, not a moving “latest” version. With Git
 installed, replace the tag and the new, unused source path for your selection:
 
 ```sh
-git clone --branch v0.1.1 --depth 1 \
-  https://github.com/poisdahl/meal-concierge.git /absolute/meal-concierge-v0.1.1
-cd /absolute/meal-concierge-v0.1.1
+git clone --branch v0.1.2 --depth 1 \
+  https://github.com/poisdahl/meal-concierge.git /absolute/meal-concierge-v0.1.2
+cd /absolute/meal-concierge-v0.1.2
 git checkout --detach
 git rev-parse HEAD
 git status --short
