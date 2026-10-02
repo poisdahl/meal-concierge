@@ -133,10 +133,10 @@ To update **both program and collection**, replace the last sentence with:
 ### Program releases and exact versions
 
 [Program releases](https://github.com/poisdahl/meal-concierge/releases) use tags
-such as **v0.1.1**; `recipes-*` tags belong to the separate collection.
+such as **v0.1.2**; `recipes-*` tags belong to the separate collection.
 
 For a specific version, replace “the latest published stable program release”
-with “program release v0.1.1” (or your chosen published version).
+with “program release v0.1.2” (or your chosen published version).
 See [release selection](docs/runtime.md#choose-a-program-release).
 
 To verify an existing installation without updating it, ask:
