@@ -388,9 +388,9 @@ apply leaves checkout incomplete; finish the same menu. If apply reports drift,
 read/reconcile it and prepare again. Never bypass an incomplete menu apply with
 raw additions or by dropping menu requirements.
 
-An already-authorized menu/cart update or extras request includes the internal
-product-plan recovery needed to carry it out. If prepare or completion is
-required, recover the latest plan for the exact saved menu, finish its returned
+Within the current authorized saved-menu/cart flow, an extras request includes
+the internal product-plan recovery needed to continue that flow. If prepare or
+completion is required, recover the latest plan for the exact saved menu, finish its returned
 continuations, or freshly prepare that menu and match retained choices to newly
 observed candidate refs. Preserve explicit pantry/stock decisions, recurring
 scope, saved preferences, resolved cart choices and manual extras. Complete the
