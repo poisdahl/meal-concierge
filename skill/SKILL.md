@@ -388,6 +388,20 @@ apply leaves checkout incomplete; finish the same menu. If apply reports drift,
 read/reconcile it and prepare again. Never bypass an incomplete menu apply with
 raw additions or by dropping menu requirements.
 
+An already-authorized menu/cart update or extras request includes the internal
+product-plan recovery needed to carry it out. If prepare or completion is
+required, recover the latest plan for the exact saved menu, finish its returned
+continuations, or freshly prepare that menu and match retained choices to newly
+observed candidate refs. Preserve explicit pantry/stock decisions, recurring
+scope, saved preferences, resolved cart choices and manual extras. Complete the
+full apply with its returned arguments before continuing the original extras;
+do not ask the owner to request this internal repair. After cart reconciliation,
+resume the product apply even when all goods are visible: reconciliation alone
+does not clear its fence. Ask when a new material choice or service-required
+cart-drift decision remains unresolved. Reconcile an uncertain write by its
+original identity before any further write; never replay an uncertain delta or
+overwrite extras to make recovery pass.
+
 For ordinary extras, `ensure` adds only the deficit to a requested minimum.
 `change` takes `operations=[{product_id,quantity}]`, with a positive package delta
 to add and a negative delta to remove. Do not send `{op:"clear"}`. For an explicit
@@ -402,6 +416,15 @@ stay unknown; do not claim a globally cheapest basket. The live checkout summary
 is the final price authority. Honor a configured budget without inventing one.
 
 ## Delivery and orders
+
+Delivery `list` queries each supplied ISO date separately, at most seven per
+call. For Oda/Mathem, an undated call observes one provider-selected date; it is
+not a search of the whole week. Report an empty result only for the bounds checked,
+without inferring that the retailer is fully booked. When the user's request
+allows later dates, continue with an explicit bounded date range and offer the
+first suitable observed window. Keep a stated deadline or ask before widening
+it; explain any conflict with the menu start. Finding a later window does not
+authorize selecting it or submitting an order outside the user's request.
 
 A cart update is not a purchase. Use the service's selected delivery window,
 account/address, payment choice and current confirmation policy. A clear purchase
