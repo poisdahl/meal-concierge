@@ -262,6 +262,10 @@ class DotsSessionTests(unittest.TestCase):
                 if not exact:
                     state["pending_cart_change"]["native_managed"]["product_plan_digest"] = "c" * 64
                 (self.root / "state/state.json").write_text(json.dumps(state))
+                code, read = self.call({"operation": "cart", "action": "get"})
+                self.assertEqual(code, 0, read)
+                self.assertTrue(read["result"]["cart_write_pending"])
+                self.assertEqual(self.state()["pending_cart_change"], state["pending_cart_change"])
                 code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
                 self.assertEqual(code, 0, recovered)
                 recovered_state = self.state()

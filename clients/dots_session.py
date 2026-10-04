@@ -462,7 +462,10 @@ def command(root, value, reader):
                           else app.handle(request))
                 with app.store.locked() as current:
                     pending = current.get("pending_cart_change")
-                    if pending and pending.get("native_managed") and app._native_managed_finalized(current, pending):
+                    if (pending and pending.get("native_managed")
+                            and pending["native_managed"]["command_id"] == command_id
+                            and request.get("operation") == "products" and request.get("action") == "apply"
+                            and app._native_managed_finalized(current, pending)):
                         current.pop("pending_cart_change")
                 output = {"ok": True, "result": result}
         except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
