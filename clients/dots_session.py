@@ -78,7 +78,7 @@ def emit(value):
 
 
 def configuration(value):
-    dots.object_fields(value, {"household", "browser_binding", "allow_cart_writes"}, {"household"})
+    dots.object_fields(value, {"household", "browser_binding", "allow_cart_writes", "target_registry"}, {"household"})
     if not isinstance(value["household"], str) or not 1 <= len(value["household"].strip()) <= 150:
         raise ValueError("household must be bounded text")
     if type(value.get("allow_cart_writes", False)) is not bool:
@@ -97,6 +97,16 @@ def configuration(value):
                 raise ValueError("approved account/cart context must have an exact SHA256 identity")
     if value.get("allow_cart_writes") and binding is None:
         raise ValueError("cart writes require an approved native cloud browser/account/cart binding")
+    if "target_registry" in value:
+        registry = value["target_registry"]
+        if (binding is None or not isinstance(registry, str) or not registry
+                or not Path(registry).is_absolute()
+                or Path(registry).name != ".meal-concierge-dots-targets"):
+            raise ValueError("target_registry requires a browser binding and an absolute shared registry path")
+        path = Path(registry)
+        dots.existing_root(path.parent)
+        if str(path) != registry or path.resolve(strict=False) != path:
+            raise ValueError("target_registry must have a canonical path")
     return value
 
 
@@ -245,7 +255,10 @@ def native_ownership(stack, root, config, *, new):
     if binding is None:
         return
     # One persistent journal owner per native target, shared across core roots.
-    registry = Path.home() / ".meal-concierge-dots-targets"
+    legacy = Path.home() / ".meal-concierge-dots-targets"
+    registry = Path(config.get("target_registry", legacy))
+    if new and registry != legacy and os.path.lexists(legacy):
+        raise HouseholdError("original HOME target registry exists; do not select another ownership namespace")
     if new and not os.path.lexists(registry):
         registry.mkdir(mode=0o700)
         on_demand._sync_directory(registry.parent)
@@ -302,6 +315,13 @@ def init(root, value, reader):
     root = Path(root).absolute()
     if root.parent.resolve(strict=True) != root.parent:
         raise ValueError("core root parent must be canonical")
+    if config.get("target_registry"):
+        registry = Path(config["target_registry"])
+        if registry == root or root in registry.parents:
+            raise ValueError("target_registry must be shared outside the core root")
+        legacy = Path.home() / ".meal-concierge-dots-targets"
+        if registry != legacy and os.path.lexists(legacy):
+            raise HouseholdError("original HOME target registry exists; do not select another ownership namespace")
     root.mkdir(mode=0o700)
     on_demand._sync_directory(root.parent)
     with file_lock(root / "command.lock"):

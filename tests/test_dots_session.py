@@ -76,11 +76,11 @@ class DotsSessionTests(unittest.TestCase):
         return {"reply_to": frame["call_id"], "browser_binding": self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
 
-    def run_session(self, action, value, host=None):
+    def run_session(self, action, value, host=None, environment=None):
         child = subprocess.Popen([sys.executable, "-I", "-B", str(SOURCE / "clients/dots_session.py"),
                                  action, "--root", str(self.root)], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                 env={**os.environ, "HOME": str(self.home)})
+                                 env={**os.environ, "HOME": str(self.home), **(environment or {})})
         try:
             self.assertTrue(select.select([child.stdout], [], [], 45)[0], "core readiness timeout")
             self.assertEqual(json.loads(child.stdout.readline()), {"kind": "core_ready", "input_max_bytes": 65536})
@@ -262,6 +262,77 @@ class DotsSessionTests(unittest.TestCase):
         code, result = self.call(self.ensure())
         self.assertEqual(code, 0, result)
         self.assertEqual(self.writes, 1)
+
+    def test_explicit_shared_registry_survives_calls_and_refuses_adoption_or_replacement(self):
+        # A separate synthetic host has no legacy registry; its HOME is unchanged
+        # across every call, while the shared state scope is outside both cores.
+        self.home = self.root.parent / "shared-host-home"
+        self.home.mkdir(mode=0o700)
+        self.root = self.root.parent / "shared-core"
+        shared = self.root.parent / "shared-state"
+        shared.mkdir(mode=0o700)
+        registry = shared / ".meal-concierge-dots-targets"
+        config = {**self.config, "allow_cart_writes": False, "target_registry": str(registry)}
+        code, result = self.run_session("init", config)
+        self.assertEqual(code, 0, result)
+        owner_files = {p.name: p.read_bytes() for p in registry.glob("*.json")}
+        self.assertEqual(len(owner_files), 2)
+        original_config = (self.root / "config.json").read_bytes()
+        code, result = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"]["items"], [])
+        self.assertEqual(self.writes, 0)
+        self.assertFalse((self.home / ".meal-concierge-dots-targets").exists())
+        self.assertEqual((self.root / "config.json").read_bytes(), original_config)
+        self.assertEqual(owner_files, {p.name: p.read_bytes() for p in registry.glob("*.json")})
+        code, result = self.run_session("call", {
+            "request_id": str(uuid.uuid4()), "request": {"operation": "cart", "action": "get"}},
+            environment={"XDG_STATE_HOME": str(shared / "unrelated-state-scope")})
+        self.assertEqual(code, 0, result)
+        self.assertFalse((shared / "unrelated-state-scope").exists())
+        self.assertEqual(owner_files, {p.name: p.read_bytes() for p in registry.glob("*.json")})
+        original_root = self.root
+        self.root = original_root.parent / "second-shared-core"
+        code, result = self.run_session("init", config)
+        self.assertEqual(code, 1, result)
+        self.assertIn("another original core household", result["error"])
+        self.assertFalse((self.root / "state").exists())
+        self.root = original_root
+        frame_count = len(self.frames)
+        lock = sorted(registry.glob("*.lock"))[0]
+        with lock.open("r+b") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, result = self.call({"operation": "cart", "action": "get"})
+            self.assertEqual(code, 1, result)
+        self.assertEqual(len(self.frames), frame_count)
+        retained = shared / "retained-original-registry"
+        registry.rename(retained)
+        code, result = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 1, result)
+        self.assertFalse(registry.exists())
+        self.assertEqual(len(self.frames), frame_count)
+        self.assertEqual(owner_files, {p.name: p.read_bytes() for p in retained.glob("*.json")})
+
+    def test_registry_selection_rejects_legacy_bypass_and_invalid_scopes_before_init(self):
+        original_root = self.root
+        original_files = self.files()
+        shared = original_root.parent / "registry-validation"
+        shared.mkdir(mode=0o700)
+        invalid = ["relative/.meal-concierge-dots-targets", str(shared / "different-name"),
+                   str(shared / ".meal-concierge-dots-targets")]
+        for index, path in enumerate(invalid):
+            self.root = original_root.parent / ("invalid-core-" + str(index))
+            code, result = self.run_session("init", {**self.config, "target_registry": path})
+            self.assertEqual(code, 1, result)
+            self.assertFalse(self.root.exists())
+        # An existing private core directory cannot serve as its own registry scope.
+        self.root = original_root
+        code, result = self.run_session("init", {
+            **self.config, "target_registry": str(self.root / ".meal-concierge-dots-targets")})
+        self.assertEqual(code, 1, result)
+        self.assertIn("outside the core root", result["error"])
+        self.assertEqual(self.files(), original_files)
+        self.assertFalse((shared / ".meal-concierge-dots-targets").exists())
 
     def test_disabled_writes_do_not_create_an_uncertain_journal(self):
         self.root = self.root.parent / "read-only-core"
