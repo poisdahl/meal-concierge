@@ -122,6 +122,56 @@ def prepared(menu_value: dict, candidates: list[dict], *, max_excess: dict | Non
 
 
 class ProductObservationTests(unittest.TestCase):
+    def test_meny_display_sizes_survive_brand_text_and_cover_recipe_quantities(self):
+        for label, amount, unit in (
+            ("40g pakke", 40, "g"),
+            ("Jalapeno 60ml Mc Ilhenny", 60, "ml"),
+            ("Original 150ml Cholula", 150, "ml"),
+            ("Harissa 130g Al Amier", 130, "g"),
+            ("178ml Trappeys", 178, "ml"),
+            ("200g St.maria", 200, "g"),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(parse_package(label, provider="meny"), {
+                    "quantity": {"numerator": amount, "denominator": 1},
+                    "unit": unit, "item_count": 1,
+                })
+        for label in (
+            "6,5cm Potte Gartner", "Potte Stor Bama", "Stor Potte Bama",
+            "ca. 40g pakke", "minst 40g pakke", "40g eller stor pakke",
+            "40g per pose", "40g / 60ml", "40g 20 kr", "2 poser 40g",
+            "Ca. størrelse 40g", "om lag 40g", "under 40g", "40g+",
+            "400 til 500g", "40g avrent", "40g pr. kg",
+        ):
+            with self.subTest(label=label):
+                self.assertIsNone(parse_package(label, provider="meny"))
+
+        for item, quantity, unit, label, count in (
+            ("bladpersille", 50, "g", "40g pakke", 2),
+            ("chilisaus", "2.5", "ml", "Original 150ml Cholula", 1),
+        ):
+            with self.subTest(item=item):
+                observed = normalize_meny_product_search({
+                    "provider": "meny", "query": item, "products": [{
+                        "product_id": "/varer/fixture/product-700000000011",
+                        "name": item, "package": label, "price": "34,90 kr",
+                        "detail_price": "34,90 kroner.", "deposit_status": "none",
+                        "available": True,
+                    }],
+                }, observed_at=OBSERVED_AT)
+                shopping = menu({"item": item, "quantity": quantity, "unit": unit})
+                requirement = menu_requirements(shopping)[0][0]
+                plan = build_product_plan(
+                    provider="meny", binding={"kind": "saved_menu"}, menu=shopping,
+                    observations={requirement["requirement_id"]: observed},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [observed["products"][0]["product_ref"]],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared")
+                self.assertEqual(plan["requirements"][0]["selection"]["package_count"], count)
+
     def test_fixture_backed_meny_forms_keep_money_and_offer_boundaries(self):
         fixture = json.loads((FIXTURES / "meny_product_observations.json").read_text(encoding="utf-8"))
         result = normalize_meny_product_search(fixture["response"], observed_at=OBSERVED_AT)
