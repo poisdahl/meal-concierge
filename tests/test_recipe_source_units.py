@@ -106,8 +106,13 @@ class SourceUnitTests(unittest.TestCase):
         self.assertEqual(batch_mass({'item': 'bread', 'quantity': 100, 'unit': 'g'}), 100)
 
     def test_english_display_keeps_canonical_source_units_and_quantities(self):
-        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots')
-        rows = [source_ingredient(f'2 {aliases[2]} salt', language='nb') for aliases in ALIASES.values()]
+        units = [aliases[2] for aliases in ALIASES.values()] + [
+            'fedd', 'clove', 'cloves', 'stilk', 'stilker', 'stalk', 'stalks',
+            'pk', 'pakke', 'pakker', 'package', 'packages',
+        ]
+        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots',
+                   *(['cloves'] * 3), *(['stalks'] * 4), *(['packages'] * 5))
+        rows = [source_ingredient(f'2 {unit} salt', language='nb') for unit in units]
         recipe = fixture(*rows)
         recipe['translations'] = {'en': {
             'name': 'Synthetic culinary measures', 'steps': ['Use the listed cooking measures.'],
@@ -118,7 +123,7 @@ class SourceUnitTests(unittest.TestCase):
         before = deepcopy(recipe)
         displayed = display_recipe(scale_recipe(recipe, 6), 'en')
         self.assertEqual([row['amount'] for row in displayed['ingredients']], [f'6 {unit}' for unit in english])
-        self.assertEqual([row['unit'] for row in displayed['ingredients']], [aliases[2] for aliases in ALIASES.values()])
+        self.assertEqual([row['unit'] for row in displayed['ingredients']], units)
         self.assertEqual(recipe, before)
 
     def test_retail_mass_volume_and_piece_counts_need_explicit_practical_packages(self):

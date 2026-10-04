@@ -122,7 +122,8 @@ def display_recipe(recipe, language=None):
             if presentation['resolved_language'].split('-')[0] == 'en':
                 dimension = UNITS.get(unit, (None, None))[0]
                 unit = {'ts': 'tsp', 'ss': 'tbsp', 'stk': 'pieces', 'fedd': 'cloves'}.get(unit, unit)
-                unit = {'drop': 'drops', 'pinch': 'pinches', 'handful': 'handfuls',
+                unit = {'clove': 'cloves', 'stalk': 'stalks', 'package': 'packages',
+                        'drop': 'drops', 'pinch': 'pinches', 'handful': 'handfuls',
                         'slice': 'slices', 'bunch': 'bunches', 'pot': 'pots'}.get(dimension, unit)
             row['amount'] = (quantity_text(row['quantity']) + ' ' + unit).strip()
     return result
