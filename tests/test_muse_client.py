@@ -332,7 +332,7 @@ class MuseCliTests(unittest.TestCase):
                 menu = saved["result"]["menu"]
                 reference = {key: menu[key] for key in ("menu_id", "revision", "digest")}
                 prepared = self.cli(home, {"operation": "products", "action": "prepare", "menu_ref": reference,
-                    "include_recurring": False}, producer=True)
+                    "include_recurring": False, "price_mode": "estimate"}, producer=True)
                 self.assertTrue(prepared["ok"], prepared)
                 self.assertNotIn("apply_arguments", prepared["result"])
                 self.assertNotIn("partial_apply_arguments", prepared["result"])
@@ -340,6 +340,26 @@ class MuseCliTests(unittest.TestCase):
                 self.assertEqual(len(plan["requirements"]), 1)
                 self.assertIn("9212", json.dumps(plan))
                 self.assertIn("Cart apply is unavailable", prepared["result"]["next"])
+                approval = plan["requirements"][0]["observation"]["products"][0]["candidate_approval"]
+                selected = self.cli(home, {"operation": "products", "action": "prepare",
+                    "product_plan_ref": prepared["result"]["product_plan_ref"],
+                    "include_recurring": False, "candidate_approvals": [approval]}, producer=True)
+                self.assertTrue(selected["ok"], selected)
+                readback = self.cli(home, {"operation": "products", "action": "get",
+                    "product_plan_ref": selected["result"]["product_plan_ref"]})
+                self.assertTrue(readback["ok"], readback)
+                estimate = readback["result"]
+                self.assertEqual(estimate["status"], "prepared")
+                self.assertEqual(estimate["price_mode"], "estimate")
+                selection = estimate["requirements"][0]["selection"]
+                self.assertEqual(selection["package_count"], 1)
+                self.assertEqual(selection["surplus_quantity"], {"numerator": 300, "denominator": 1})
+                self.assertEqual(estimate["totals"]["merchandise_ore"], 1000)
+                self.assertIsNone(estimate["totals"]["mandatory_deposit_ore"])
+                self.assertIsNone(estimate["totals"]["total_payable_ore"])
+                for result in (selected["result"], estimate):
+                    self.assertNotIn("apply_arguments", result)
+                    self.assertNotIn("partial_apply_arguments", result)
                 rejected = self.cli(home, {"operation": "products", "action": "apply"})
                 self.assertFalse(rejected["ok"])
                 status = self.cli(home, {"operation": "status"})["result"]
