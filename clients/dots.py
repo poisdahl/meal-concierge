@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -119,6 +119,16 @@ def timestamp(value):
     return parsed
 
 
+def public_path(path):
+    # Bind the supplied URL/path as written; do not normalize traversal into a
+    # different merchant page or decode ambiguous nested escapes.
+    if ("\\" in path or "//" in path or any(p in {".", ".."} for p in path.split("/"))
+            or re.search(r"%(?:2e|2f|5c|25)", path, re.I)
+            or re.search(r"%(?![0-9a-fA-F]{2})", path)
+            or any(ord(c) <= 32 for c in unquote(path, errors="strict"))):
+        raise ValueError("observation paths must be canonical public merchant paths")
+
+
 def load_request(root):
     request = on_demand._json(on_demand._read_file(root / "request.json", MAX_RESPONSE))
     object_fields(request, {"format", "request_id", "provider", "batch", "menu_ref", "menu_sha256",
@@ -139,6 +149,7 @@ def validate_observation(request, value):
     if not isinstance(url, str) or len(url) > 2000 or any(ord(c) <= 32 for c in url):
         raise ValueError("observation source URL is invalid")
     parsed = urlsplit(url)
+    public_path(parsed.path)
     if (parsed.scheme != "https" or parsed.hostname != "meny.no" or parsed.port not in (None, 443)
             or parsed.username is not None or parsed.password is not None or parsed.fragment
             or not (parsed.path == "/varer" or parsed.path.startswith("/varer/"))):
@@ -153,8 +164,9 @@ def validate_observation(request, value):
     for product in products:
         object_fields(product, PRODUCT_FIELDS, {"product_id", "name"})
         if not isinstance(product["product_id"], str) or re.fullmatch(
-                r"/varer/[A-Za-z0-9._~%/-]+-\d{4,14}", product["product_id"]) is None:
+                r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}", product["product_id"]) is None:
             raise ValueError("product_id must be the actually observed MENY product path")
+        public_path(product["product_id"])
         for key, field in product.items():
             if key == "available":
                 if field is not None and type(field) is not bool:
@@ -163,6 +175,9 @@ def validate_observation(request, value):
                 raise ValueError("product display fields must be bounded text or null")
     normalized = normalize_meny_product_search({"query": request["query"], "products": products},
                                                observed_at=value["observed_at"])
+    normalized["scope"] = {"kind": "host_observation", "requested_size": request["limit"],
+                           "returned": len(normalized["products"]),
+                           "semantics": "bounded_supplied_candidates"}
     refs = value["candidate_refs"]
     actual = {p["product_ref"] for p in normalized["products"]}
     if (not isinstance(refs, list) or len(refs) > len(actual)
@@ -255,7 +270,7 @@ def main():
                   else plan(args.root, value) if args.action == "plan" else inspect(args.root))
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, allow_nan=False))
         return 0
-    except (HouseholdError, OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+    except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
         print(json.dumps({"ok": False, "error": str(exc), "dispatchable": False}))
         return 1
 

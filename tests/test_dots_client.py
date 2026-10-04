@@ -70,7 +70,7 @@ class DotsClientTests(unittest.TestCase):
                 "source_url": "https://meny.no/varer/middag/havregryn-1234567890123",
                 "observed_at": datetime.now(timezone.utc).isoformat(),
                 "products": [{"product_id": "/varer/middag/havregryn-1234567890123",
-                              "name": "Synthetic oats", "package": "500 g", "price": "20,00",
+                              "name": "Synthetic oats", "package": "500 g", "price": "20,00 kr",
                               "detail_price": "20,00 kroner.", "deposit_status": "none", "available": True}],
                 "candidate_refs": ["/varer/middag/havregryn-1234567890123"]}
 
@@ -89,6 +89,7 @@ class DotsClientTests(unittest.TestCase):
         self.assertEqual(result["candidate_totals"]["package_count"], 1)
         self.assertEqual(result["candidate_totals"]["total_payable_ore"], 2000)
         self.assertEqual(result["provenance"]["kind"], "host_attested")
+        self.assertEqual(result["requirements"][0]["observation"]["scope"]["kind"], "host_observation")
         self.assertNotIn("product_plan_digest", result)
         self.assertEqual(before, {str(p.relative_to(self.batch)): p.read_bytes() for p in self.batch.rglob("*") if p.is_file()})
         self.assertEqual(hashlib.sha256((self.batch / "export.pdf").read_bytes()).hexdigest(),
@@ -123,10 +124,16 @@ class DotsClientTests(unittest.TestCase):
         value = self.issue()
         variants = [{**value, "query": "different"}, {**value, "request_id": "different"},
                     {**value, "source_url": "https://example.com/varer"},
+                    {**value, "source_url": "https://meny.no/varer/../konto"},
+                    {**value, "source_url": "https://meny.no/varer/%252e%252e/konto"},
+                    {**value, "source_url": "https://meny.no/varer/foo%2fbar"},
                     {**value, "observed_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()},
                     {**value, "observed_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
                     {**value, "checkout": True},
                     {**value, "products": [{"product_id": "/varer/not-a-product", "name": "Bad path"}]},
+                    {**value, "products": [{"product_id": "/varer/../konto/x-1234", "name": "Bad path"}]},
+                    {**value, "products": [{"product_id": "/varer/%2e%2e/konto/x-1234", "name": "Bad path"}]},
+                    {**value, "products": [{"product_id": value["candidate_refs"][0], "name": "\ud800"}]},
                     {**value, "candidate_refs": ["/varer/middag/unobserved-1234567890123"]},
                     {**value, "products": [{"product_id": value["candidate_refs"][0], "name": "x" * 66000}]}]
         before = self.files()
