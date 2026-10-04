@@ -67,7 +67,7 @@ legacy recovery boundary accepts a rational with denominator at most 10^9 only
 when its absolute difference is at most 10^-12. It does not rewrite the stored
 document or historical digest. Schema-2 calculations never take this fallback.
 
-Supported canonical dimensions are grams, millilitres and count. Shared aliases
+Supported canonical dimensions include grams, millilitres and count. Shared aliases
 include g/gram(s), kg/kilogram(s), ml/cl/dl/l and common litre spellings,
 stk/stykk/count/piece(s), Norwegian ts/teskje(er) = 5 ml and ss/spiseskje(er) =
 15 ml. The internal metric culinary aliases tsp/teaspoon(s) and
@@ -78,13 +78,24 @@ differ, as shown by [NIST's conversion table](https://www.nist.gov/pml/owm/metri
 
 Explicit `metric cup`/`metrisk kopp` = 250 ml and `us cup`/`amerikansk kopp`
 = 236.5882365 ml are distinct. Explicit `us liquid quart`/`amerikansk
-væskekvart` = 946.352946 ml. Unqualified cup, quart, fluid-ounce, pinch and
+væskekvart` = 946.352946 ml. Unqualified cup, quart, fluid-ounce and
 free-text quantities stay unresolved; source approximation remains explicit in
 quantity evidence even when its selected unit has an exact conversion factor.
 Mass oz = 28.349523125 g and lb = 453.59237 g use the international avoirdupois
 definition ([NIST weight conversion factors](https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=200329)).
 There is no automatic volume-to-mass conversion. A reader may convert only when
 it has ingredient-specific evidence and retains that input/conversion basis.
+
+Numeric drop(s)/dråpe(r), pinch(es)/klype(r), handful(s)/håndfull(er),
+slice(s)/skive(r), bunch(es)/bunt(er)/knippe(r) and pot(s)/potte(r) each retain a
+separate canonical dimension. Their source counts scale by the exact serving
+ratio; this preserves the source measure without claiming a physical size or
+greater measurement precision. None is equivalent to grams, millilitres,
+ordinary piece counts or packages. A retailer package in an incompatible
+dimension requires an explicit practical `package_count` and `quantity_basis`;
+the resulting package choice remains an estimate with unknown physical coverage
+and surplus. These units do not supply a weight for serving inference. Missing
+quantities and explicit `scalable: false` remain unresolved.
 
 `item` is the supplied consistent ingredient matching name. Preserve its input
 in `original_text`; `raw`/`amount` are normalized display text in schema 2.

@@ -2569,7 +2569,7 @@ class MenuCostComparisonTests(unittest.TestCase):
 
     def test_per_menu_budget_and_nonconvertible_requirements(self):
         from test_meal_concierge_planner import recipe
-        for count, unit in ((65, "g"), (1, "pinch")):
+        for count, unit in ((65, "g"), (1, "dash")):
             raw = recipe("many", f"many-{count}", unit=unit)
             raw["ingredients"] = [{"raw": f"1 {unit} item{i}", "item": f"item{i}", "quantity": 1, "unit": unit, "scalable": True} for i in range(count)]
             saved = self.app.handle({"operation": "recipes", "action": "save", "recipe": raw, "idempotency_key": f"many-{count}"})["recipe"]

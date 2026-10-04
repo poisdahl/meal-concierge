@@ -311,6 +311,8 @@ def batch_mass(ingredient):
     if not ingredient.get('quantity') or ingredient.get('unit') not in UNITS:return 0
     n= float(read_quantity(ingredient['quantity'])); unit,factor=UNITS[ingredient['unit']];n*=float(factor)
     if unit in {'g','ml'}:return n
+    # Source culinary measures do not establish a weight for serving inference.
+    if unit not in {'count','clove','stalk','package'}:return 0
     item=re.split(r'\s+or\s+',ingredient['item'].casefold())[0].split(',')[0]
     size=re.search(r'(\d+(?:\.\d+)?)\s*(kg|g|lb|pound|oz)\b', item)
     if size:
