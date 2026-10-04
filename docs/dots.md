@@ -153,11 +153,17 @@ They do not initialize replacements when anything is missing.
 
 ### Native browser requests over stdin/stdout
 
-An optional host adapter supports only MENY cart `get`, `ensure` for a reported
-shortage, and read-only `reconcile_change`. It does **not** apply a full managed
-menu product plan; `ensure` is never a fallback for unfinished menu shopping.
-Managed product apply/sync, existing-order edits, checkout, delivery and
-sending are not exposed. Browser support is host-attested and requires a
+An optional host adapter supports MENY cart `get`, `ensure` for a reported
+shortage, read-only `reconcile_change`, and complete managed menu shopping
+through core `products` `prepare`, `get` and `apply`. Save the recipes and
+menu in this original household, prepare against its current `menu_ref`, then
+use the returned product-plan reference and exact complete digest with
+`cart_change_requested:true`. Candidate selection and continuation use the
+existing core contracts. Partial apply is not exposed. `ensure` is never a
+fallback for unfinished menu shopping. Cart `reconcile` supports the exact
+digest-bound `keep_current` decision without exclusions or quantity changes;
+use fresh prepare/apply for subsequent shopping. Existing-order edits,
+checkout, delivery and sending are not exposed. Browser support is host-attested and requires a
 reviewed native operator; this CLI does not independently inspect the browser.
 
 At initialization, a browser-enabled household must supply `browser_binding`
@@ -254,6 +260,30 @@ complete current DOM snapshot validated by `normalize_cart_snapshot` in
 cannot be inferred. `manipulate_cart` requires `{"dispatched":true}` only
 after the exact bounded batch was dispatched. That reply is not completion:
 the core performs a fresh readback before clearing its pending journal.
+
+`product_search` requires one first-page query and size 5. Its result must
+include the exact `query`, `page:1`, `requested_size:5`,
+`semantics:"bounded_relevance_ranked"`, `authenticated:true`, `ready:true`,
+`heading_count:1`, and the first at most five relevance-ranked `products`.
+Observe the actual rendered search results; selected cards are not a search
+scope. Product fields use the existing MENY DOM normalization, including
+actual package, availability, displayed price and linked detail/deposit
+evidence. Missing facts remain unknown and cannot become payable cost.
+
+Each managed batch persists its original menu/product identity, initial cart
+allocations and verified batch prefix before a write frame. The adapter
+returns a fresh complete cart snapshot to the core after dispatch, rather
+than treating a dispatch acknowledgement as completion. The journal survives
+until the core commits the exact complete plan and its allocations. After
+process loss, `reconcile_change` reads without dispatch. A complete matching
+batch read extends the verified prefix; partial observed units are protected
+as existing stock, never invented as managed additions. Recovery preserves
+verified allocations once, requires a decision for the fresh cart digest,
+and clears stale product authority before fresh prepare/apply. If the exact
+complete plan was already committed before journal cleanup, reconciliation
+preserves it without allocating the same units twice. Expired native requests
+must never execute later: establish that no old action remains outstanding
+and retain exclusive cart custody before reconciliation.
 
 Before **each** unit click, the native operator must recheck the approved
 cloud account/cart/tab, no order edit, complete live quantities equal to the
