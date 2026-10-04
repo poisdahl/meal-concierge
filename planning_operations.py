@@ -2482,7 +2482,10 @@ class PlanningOperations:
         normalized["query"] = query
         scope = normalized.get("scope")
         products = normalized.get("products")
-        if (not isinstance(scope, Mapping) or scope.get("semantics") != "bounded_relevance_ranked"
+        if (not isinstance(scope, Mapping)
+                or not (scope.get("semantics") == "bounded_relevance_ranked"
+                        or (provider == "meny" and scope.get("semantics") == "bounded_personalized"
+                            and scope.get("sort_label") == "Anbefalt for deg"))
                 or scope.get("kind") != "provider_search" or type(scope.get("page")) is not int
                 or scope["page"] != 1 or type(scope.get("requested_size")) is not int
                 or scope["requested_size"] != MAX_CANDIDATES_PER_REQUIREMENT
