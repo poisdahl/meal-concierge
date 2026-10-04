@@ -2482,7 +2482,10 @@ class PlanningOperations:
         normalized["query"] = query
         scope = normalized.get("scope")
         products = normalized.get("products")
-        if (not isinstance(scope, Mapping) or scope.get("semantics") != "bounded_relevance_ranked"
+        if (not isinstance(scope, Mapping)
+                or not (scope.get("semantics") == "bounded_relevance_ranked"
+                        or (provider == "meny" and scope.get("semantics") == "bounded_personalized"
+                            and scope.get("sort_label") == "Anbefalt for deg"))
                 or scope.get("kind") != "provider_search" or type(scope.get("page")) is not int
                 or scope["page"] != 1 or type(scope.get("requested_size")) is not int
                 or scope["requested_size"] != MAX_CANDIDATES_PER_REQUIREMENT
@@ -2997,7 +3000,7 @@ class PlanningOperations:
         snapshot = {key: deepcopy(plan[key]) for key in (
             "provider", "status", "product_plan_digest", "partial_product_plan_digest",
             "coverage_status", "cost_status", "budget_status", "budget_ore", "price_mode",
-            "totals", "excluded_costs",
+            "totals", "excluded_costs", "scope", "comparison_claim",
         ) if key in plan}
         snapshot["include_recurring"] = plan.get("binding", {}).get("include_recurring", True)
         rules = []
@@ -3046,6 +3049,8 @@ class PlanningOperations:
             observation = requirement.get("observation") or {}
             row["search_query"] = observation.get("query", requirement.get("search", requirement["item"]))
             row["observed_at"] = observation.get("observed_at")
+            if isinstance(observation.get("scope"), Mapping):
+                row["search_scope"] = deepcopy(observation["scope"])
             if observation.get("unavailable_reason"):
                 row["unavailable_reason"] = observation["unavailable_reason"]
             by_product = {}

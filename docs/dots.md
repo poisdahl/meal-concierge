@@ -153,7 +153,7 @@ They do not initialize replacements when anything is missing.
 
 ### Native browser requests over stdin/stdout
 
-An optional host adapter supports MENY cart `get`, `ensure` for a reported
+An optional host adapter supports MENY cart `get`, `clear`, `ensure` for a reported
 shortage, read-only `reconcile_change`, and complete managed menu shopping
 through core `products` `prepare`, `get` and `apply`. Save the recipes and
 menu in this original household, prepare against its current `menu_ref`, then
@@ -165,6 +165,15 @@ digest-bound `keep_current` decision without exclusions or quantity changes;
 use fresh prepare/apply for subsequent shopping. Existing-order edits,
 checkout, delivery and sending are not exposed. Browser support is host-attested and requires a
 reviewed native operator; this CLI does not independently inspect the browser.
+
+`cart.clear` removes the whole observed cart. Use it only for an explicit
+whole-cart clearing request with the exact current `cart_digest`, after
+reconciling any pending change and checking that no other shopper's goods
+would be removed. Writes must be enabled. Removal uses the existing two-click
+batches and complete fresh readback. A lost reply after a complete batch can
+be reconciled without dispatch; a partially dispatched batch with an unknown
+ending remains pending and must never be retried. Cleanup is not guaranteed
+when dispatch is uncertain.
 
 At initialization, a browser-enabled household must supply `browser_binding`
 with `origin:"https://meny.no"`, the actual cloud `browser_id` and `tab_id`,
@@ -263,8 +272,16 @@ the core performs a fresh readback before clearing its pending journal.
 
 `product_search` requires one first-page query and size 5. Its result must
 include the exact `query`, `page:1`, `requested_size:5`,
-`semantics:"bounded_relevance_ranked"`, `authenticated:true`, `ready:true`,
-`heading_count:1`, and the first at most five relevance-ranked `products`.
+`authenticated:true`, `ready:true`, `heading_count:1`, and the first at most
+five `products` in the actual displayed order. Use
+`semantics:"bounded_relevance_ranked"` only when that ordering is observed.
+For MENY's personalized “For deg” results, use
+`semantics:"bounded_personalized"` with the actually selected
+`sort_label:"Anbefalt for deg"`. Missing or different sort labels stop the
+personalized path. Normalized observations and the product plan retain this
+search mode; changing it requires a new review before applying. Any price
+comparison covers only the approved candidates in that observed bounded
+scope, without a claim about all products or other accounts' results.
 Observe the actual rendered search results; selected cards are not a search
 scope. Product fields use the existing MENY DOM normalization, including
 actual package, availability, displayed price and linked detail/deposit
