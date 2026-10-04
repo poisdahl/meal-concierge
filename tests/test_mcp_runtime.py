@@ -560,7 +560,7 @@ async def provider_diagnostic_checks(root):
             assert row['candidates'] == [], row
         recovered_ref = plan['product_plan_ref']
         reads = (root / 'diagnostic-invocations').read_text().splitlines()
-        assert len(reads) == 14, reads  # Two catalog failures and twelve ingredient reads.
+        assert len(reads) == 16, reads  # Two MCP + two CLI failures and twelve ingredient reads.
         before = len((root / 'application.jsonl').read_text().splitlines())
         page = await call(client, 'products', action='get', product_plan_ref=recovered_ref,
                           section='issues', limit=5)
