@@ -11,6 +11,36 @@ from typing import Any
 class ServiceError(RuntimeError):
     """An explicit service rejection, distinct from an uncertain transport loss."""
 
+    def __init__(self, message: str, *, provider_failure: Any = None):
+        super().__init__(message)
+        self.provider_failure = normalize_provider_failure(provider_failure)
+
+
+def normalize_provider_failure(value: Any) -> dict[str, str] | None:
+    """Optional wire diagnostics contain closed facts, never provider text or authority."""
+    if not isinstance(value, dict):
+        return None
+    classes = {
+        "client_connect_failed", "client_send_failed", "client_read_failed",
+        "client_invalid_response", "cdp_timeout_reported", "cdp_channel_closed_reported",
+        "browser_unavailable_reported", "operation_timeout_reported", "adapter_exit_failed",
+        "adapter_response_invalid", "adapter_rejected", "local_timeout", "local_spawn_failed",
+    }
+    phases = {
+        "adapter_json_error": "adapter_invocation", "adapter_stderr": "adapter_invocation",
+        "adapter_exit": "adapter_invocation", "invalid_stdout": "adapter_invocation",
+        "local_timeout": "local_wait", "local_spawn": "local_spawn",
+    }
+    if (value.get("provider") != "meny"
+            or not isinstance(value.get("class"), str) or value["class"] not in classes
+            or not isinstance(value.get("source"), str) or value["source"] not in phases
+            or value.get("phase") != phases[value["source"]]
+            or value.get("daemon_request_ending") != "unknown"):
+        return None
+    return {key: value[key] for key in (
+        "provider", "class", "source", "phase", "daemon_request_ending",
+    )}
+
 
 SOCKET = Path(os.environ.get("MEAL_CONCIERGE_SOCKET", "/run/meal-concierge/service.sock"))
 
@@ -44,7 +74,8 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     except (json.JSONDecodeError, IndexError) as exc:
         raise RuntimeError("meal concierge service returned no valid response") from exc
     if response.get("ok") is not True:
-        raise ServiceError(str(response.get("error") or "meal concierge operation failed"))
+        raise ServiceError(str(response.get("error") or "meal concierge operation failed"),
+                           provider_failure=response.get("provider_failure"))
     if response.get("contract") != 1:
         raise ServiceError("incompatible bridge/core contract; upgrade the stopped service before attaching this client")
     return response["result"]

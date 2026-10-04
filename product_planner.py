@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import unicodedata
 
 from core import HouseholdError
+from rpc_client import normalize_provider_failure
 
 
 PRODUCT_PLAN_VERSION = "product-plan-v4"
@@ -781,7 +782,7 @@ def _without_presentation(value: Any) -> Any:
         return {
             key: _without_presentation(child)
             for key, child in value.items()
-            if key not in {"product_plan_digest", "observed_at", "display", "display_ore_per_unit"}
+            if key not in {"product_plan_digest", "observed_at", "display", "display_ore_per_unit", "provider_failure"}
         }
     if isinstance(value, list):
         return [_without_presentation(child) for child in value]
@@ -1016,6 +1017,9 @@ def build_product_plan(
         if not isinstance(observation, Mapping) or observation.get("unavailable_reason"):
             reason = observation["unavailable_reason"] if isinstance(observation, Mapping) else "provider_search_unavailable"
             unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": reason})
+            diagnostic = normalize_provider_failure(observation.get("provider_failure")) if isinstance(observation, Mapping) else None
+            if diagnostic:
+                unresolved[-1]["provider_failure"] = diagnostic
             item["status"] = "needs_input"
             planned.append(item)
             continue

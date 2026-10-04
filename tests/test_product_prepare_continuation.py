@@ -46,6 +46,52 @@ class ProductContinuationTests(unittest.TestCase):
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {
             "week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
 
+    def test_failed_search_diagnostics_survive_saved_plan_and_agent_pages(self):
+        from meny import MenyBrowserError
+
+        class FailedRetailer(Retailer):
+            def call(self, tool, arguments, **kwargs):
+                if tool == 'product_search':
+                    self.calls.append((tool, deepcopy(arguments), kwargs))
+                    raise MenyBrowserError('MENY browser operation failed',
+                                           failure_class='client_read_failed', source='adapter_json_error')
+                return super().call(tool, arguments, **kwargs)
+
+        self.save_week()
+        self.provider = FailedRetailer()
+        self.app = Application(self.store, self.provider, object())
+        menu_before = deepcopy(self.store.read()['menu'])
+        result = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu), include_recurring=False)
+        plan = result['product_plan']
+        self.assertTrue(plan['unresolved_requirements'])
+        for issue in plan['unresolved_requirements']:
+            self.assertEqual(issue['reason'], 'provider_search_unavailable_or_scope_changed')
+            self.assertEqual(issue['provider_failure']['class'], 'client_read_failed')
+        self.assertTrue(all('observation' not in row for row in plan['requirements']))
+        self.assertFalse(self.provider.quantities)
+        reads = len(self.provider.calls)
+        self.assertEqual(reads, len(plan['requirements']))
+        self.app = Application(self.store, self.provider, object())
+        recovered = self.request(action='get', product_plan_ref=result['product_plan_ref'],
+                                 response_view='agent', section='issues', limit=20)
+        self.assertEqual(recovered['issues'][0]['provider_failure']['class'], 'client_read_failed')
+        self.assertEqual(len(self.provider.calls), reads)
+        self.assertEqual(self.store.read()['menu'], menu_before)
+
+    def test_successful_empty_search_remains_a_valid_observation(self):
+        class EmptyRetailer(Retailer):
+            def entry(self, query):
+                return observation(query, [])
+
+        self.save_week()
+        self.provider = EmptyRetailer()
+        self.app = Application(self.store, self.provider, object())
+        plan = self.prepare(include_recurring=False)
+        self.assertTrue(all(row['observation']['products'] == [] for row in plan['requirements']))
+        self.assertTrue(all(issue['reason'] == 'exact_candidate_scope_needs_selection'
+                            and 'provider_failure' not in issue for issue in plan['unresolved_requirements']))
+        self.assertFalse(self.provider.quantities)
+
     def test_recipe_only_scope_survives_continuation_apply_and_restart(self):
         self.save_week()
         recurring = self.provider.entry("recurring fixture")["products"][0]["product_ref"]
