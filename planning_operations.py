@@ -2517,7 +2517,9 @@ class PlanningOperations:
             rows.append((requirement, hints, key))
         # A failing query cannot starve the still-unseen tail on later calls.
         missing = sorted((key for key in requested if key not in cache), key=lambda key: attempted.index(key) if key in attempted else -1)
-        failed = {}
+        # A continuation may spend its whole budget on previously unseen queries.
+        # Keep the last failed observation until that same search succeeds/retries.
+        failed = work.setdefault("search_failures", {}) if work is not None else {}
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
         while missing:
@@ -2547,6 +2549,8 @@ class PlanningOperations:
                 checked = {key: self._checked_product_observation(result[requested[key]], self.provider, requested[key])
                            for key in keys}
                 cache.update(checked)
+                for key in keys:
+                    failed.pop(key, None)
             except HouseholdError as exc:
                 for key in keys:
                     failed[key] = {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"}

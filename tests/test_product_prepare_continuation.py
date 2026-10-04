@@ -78,6 +78,42 @@ class ProductContinuationTests(unittest.TestCase):
         self.assertEqual(len(self.provider.calls), reads)
         self.assertEqual(self.store.read()['menu'], menu_before)
 
+    def test_failure_survives_unattempted_continuation_then_clears_on_success(self):
+        from meny import MenyBrowserError
+
+        self.save_week()
+        original_call = self.provider.call
+
+        def fail_search(tool, arguments, **kwargs):
+            if tool == 'product_search':
+                self.provider.calls.append((tool, deepcopy(arguments), kwargs))
+                raise MenyBrowserError('MENY browser operation failed',
+                                       failure_class='client_read_failed', source='adapter_json_error')
+            return original_call(tool, arguments, **kwargs)
+
+        self.provider.call = fail_search
+        with mock.patch('planning_operations.MAX_REQUIREMENTS', 1):
+            first = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu))
+            failed = next(issue for issue in first['product_plan']['unresolved_requirements']
+                          if 'provider_failure' in issue)
+            first_query = self.provider.calls[-1][1]['queries']
+            self.app = Application(self.store, self.provider, object())
+            second = self.request(**first['continue_arguments'])
+        self.assertNotEqual(self.provider.calls[-1][1]['queries'], first_query)
+        retained = next(issue for issue in second['product_plan']['unresolved_requirements']
+                        if issue['requirement_id'] == failed['requirement_id'])
+        self.assertEqual(retained, failed)
+        self.app = Application(self.store, self.provider, object())
+        page = self.request(action='get', product_plan_ref=second['product_plan_ref'],
+                            response_view='agent', section='issues', requirement_id=failed['requirement_id'])
+        self.assertEqual(page['issues'][0]['provider_failure'], failed['provider_failure'])
+        self.provider.call = original_call
+        recovered = self.request(**second['continue_arguments'])
+        self.assertTrue(all('provider_failure' not in issue
+                            for issue in recovered['product_plan']['unresolved_requirements']))
+        self.assertTrue(all('observation' in row for row in recovered['product_plan']['requirements']))
+        self.assertFalse(self.provider.quantities)
+
     def test_successful_empty_search_remains_a_valid_observation(self):
         class EmptyRetailer(Retailer):
             def entry(self, query):
