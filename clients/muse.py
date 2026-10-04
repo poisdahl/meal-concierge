@@ -40,6 +40,33 @@ ALLOWED = {
     "menu": {"get", "assess", "resolve_handoff", "plan", "save", "add_slot", "edit_slots"},
     "catalog": {"products"}, "products": {"get", "prepare", "record_ingredients"},
 }
+PROTECTED_GUIDANCE = ("Muse's protected Oda connection supports catalog, cart, delivery and order reads, "
+                      "guarded cart changes and delivery selection. Browser checkout, order edits, "
+                      "email and scheduling are unavailable. Recipes use the builtin bank and supplied text.")
+PROTECTED_ALLOWED = {**ALLOWED,
+    "catalog": {"products", "recipes", "usuals"},
+    "products": {"get", "prepare", "record_ingredients", "apply", "lowest_cost"},
+    "cart": {None, "get", "change", "apply", "set", "update", "ensure", "clear", "reconcile_change", "sync", "reconcile", "weekly"},
+    "delivery": {None, "list", "select"}, "orders": {None, "list", "get"},
+    "product_favorites": {"list", "add", "remove"}, "recurring": {"list", "add", "remove", "substitute"},
+    "menu": ALLOWED["menu"] | {"lock", "clear", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"},
+}
+
+
+def guard_local_recipes(request):
+    if request.get("operation") != "recipes":
+        return
+    library, libraries, reference = (request.get("library_id"), request.get("library_ids"),
+                                     request.get("library_recipe_ref"))
+    if (library not in (None, "builtin") or libraries is not None and libraries != ["builtin"]
+            or reference is not None and (not isinstance(reference, Mapping)
+                or reference.get("library_id") != "builtin")):
+        raise HouseholdError("Muse recipes use the builtin bank only")
+    if request.get("action") == "import":
+        kind, decision = request.get("source_kind"), request.get("storage_decision")
+        if kind != "transcript" and not (kind == "url" and isinstance(decision, Mapping)
+                                          and decision.get("storage") == "link_only"):
+            raise HouseholdError("Muse imports accept transcripts or nonfetching link-only URLs")
 
 
 def private_directory(path: Path) -> None:
@@ -221,19 +248,7 @@ class MuseApplication(Application):
             raise HouseholdError("Unsupported Muse operation/action. " + GUIDANCE)
         if operation == "products" and action == "prepare" and request.get("include_recurring") is not False:
             raise HouseholdError("Muse product preparation requires include_recurring=false")
-        if operation == "recipes":
-            library = request.get("library_id")
-            libraries = request.get("library_ids")
-            reference = request.get("library_recipe_ref")
-            if (library not in (None, "builtin") or libraries is not None and libraries != ["builtin"]
-                    or reference is not None and (not isinstance(reference, Mapping)
-                        or reference.get("library_id") != "builtin")):
-                raise HouseholdError("Muse recipes use the builtin bank only")
-            if action == "import":
-                kind, decision = request.get("source_kind"), request.get("storage_decision")
-                if kind != "transcript" and not (kind == "url" and isinstance(decision, Mapping)
-                                                  and decision.get("storage") == "link_only"):
-                    raise HouseholdError("Muse imports accept transcripts or nonfetching link-only URLs")
+        guard_local_recipes(request)
         result = super().handle(request)
         result["client_guidance"] = GUIDANCE
         if operation == "profile" and action == "overview":
@@ -273,25 +288,86 @@ class MuseApplication(Application):
                 "presentation": "Explain the relevant local capabilities and current limits in the user's language."}
 
 
-def initialize(home: Path, provider: str, household: str) -> None:
+class ProtectedMuseApplication(MuseApplication):
+    def _observe_terminal_failure(self):
+        failure = self.provider_client.terminal_failure
+        if failure:
+            self.integration = {"status": "unavailable", "provider": "oda", "message": failure}
+
+    def handle(self, request):
+        if not isinstance(request, Mapping):
+            raise HouseholdError("request must be an object")
+        operation, action = request.get("operation"), request.get("action")
+        if (not isinstance(operation, str) or action is not None and not isinstance(action, str)
+                or operation not in PROTECTED_ALLOWED or action not in PROTECTED_ALLOWED[operation]):
+            raise HouseholdError("Unsupported Muse operation/action. " + PROTECTED_GUIDANCE)
+        guard_local_recipes(request)
+        self._observe_terminal_failure()
+        try:
+            result = Application.handle(self, request)
+        finally:
+            self._observe_terminal_failure()
+        result["client_guidance"] = PROTECTED_GUIDANCE
+        if operation == "profile" and action == "overview":
+            result["details"] = PROTECTED_GUIDANCE
+        return result
+
+    def _refresh_integration(self, *args, **kwargs):
+        # A terminal startup failure stays terminal for this service. Restart
+        # after supported human recovery; status must not replay rejected auth.
+        if not getattr(self, "_muse_probe_attempted", False):
+            self._muse_probe_attempted = True
+            return super()._refresh_integration(*args, **kwargs)
+
+    def _store_readiness(self, checkout_payment=None):
+        ready = self.integration.get("status") == "ready"
+        return {"provider": self.provider,
+                "connection_check": {"status": "verified" if ready else "unknown",
+                    "scope": "Last protected MCP initialize/tools-list only; account, address and payment readiness remain unverified.",
+                    "next_action": None if ready else "Inspect the original error and use Muse's provider recovery guidance before restarting."},
+                "browser_check": {"status": "not_configured", "next_action": None},
+                "delivery_check": {"status": "unknown"}, "payment_check": {"status": "unknown"},
+                "local_recipes_available": True, "note": PROTECTED_GUIDANCE}
+
+    @staticmethod
+    def _user_guide():
+        return {**MuseApplication._user_guide(),
+                "after_setup": "Plan from exact local recipe candidates, prepare products, review and apply guarded cart changes, and select delivery. Browser checkout is unavailable.",
+                "presentation": "Explain demonstrated Muse capabilities and unverified checkout readiness in the user's language."}
+
+
+def initialize(home: Path, provider: str, household: str, *, credential_name=None, operation_directory=None) -> None:
     if provider not in ORIGINS or not household.strip() or len(household) > 100:
         raise HouseholdError("Muse initialization requires a provider and bounded household name")
     if len(str(home / "service.sock").encode()) > 100:
         raise HouseholdError("Choose a shorter Muse home; its Unix socket path must fit within 100 bytes")
+    marker = {"format": 1, "kind": "catalog_local_planning", "household": household, "provider": provider}
+    if credential_name is not None or operation_directory is not None:
+        from muse_mcp import MuseProtectedMcpClient
+        if provider != "oda" or credential_name is None or operation_directory is None:
+            raise HouseholdError("Protected Muse mode requires Oda, a credential name and shared operation directory")
+        shop = MuseProtectedMcpClient(operation_directory, credential_name)
+        marker.update(kind="protected_oda_mcp", credential_name=shop.credential_name,
+                      operation_directory=str(shop.operation_directory))
     home.mkdir(mode=0o700, parents=True, exist_ok=False)
     for name in ("state", "profile-lock", "observations", "observations/requests", "observations/responses"):
         (home / name).mkdir(mode=0o700)
     publish_json(home / "config.json", {"household": household, "instance": "muse", "provider": provider,
         "confirmation_policy": "fresh", "recipe_libraries": [], "primary_recipe_library_id": "builtin"})
-    publish_json(home / "muse-client.json", {"format": 1, "kind": "catalog_local_planning",
-                                             "household": household, "provider": provider})
+    publish_json(home / "muse-client.json", marker)
 
 
 def load_home(home: Path):
     private_directory(home)
     marker = read_json(home / "muse-client.json")
-    if not isinstance(marker, dict) or marker.get("format") != 1 or marker.get("kind") != "catalog_local_planning":
+    if (not isinstance(marker, dict) or marker.get("format") != 1
+            or marker.get("kind") not in {"catalog_local_planning", "protected_oda_mcp"}):
         raise HouseholdError("Use a fresh household initialized by the Muse client")
+    if marker["kind"] == "protected_oda_mcp":
+        from muse_mcp import MuseProtectedMcpClient
+        if marker.get("provider") != "oda":
+            raise HouseholdError("Protected Muse mode requires Oda")
+        MuseProtectedMcpClient(marker.get("operation_directory"), marker.get("credential_name"))
     # Read with no-follow before the established core config normalizer.
     raw = read_json(home / "config.json")
     if not isinstance(raw, dict) or set(raw) - {"household", "instance", "provider", "confirmation_policy",
@@ -310,14 +386,23 @@ def load_home(home: Path):
 
 def serve(home: Path) -> None:
     settings = load_home(home)
-    shop = HostObservationShop(home / "observations", settings["provider"])
+    marker = read_json(home / "muse-client.json")
+    protected = marker["kind"] == "protected_oda_mcp"
+    if protected:
+        from muse_mcp import MuseProtectedMcpClient
+        shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
+    else:
+        shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
-        app = MuseApplication(StateStore(home / "state", settings), shop, None)
+        cls = ProtectedMuseApplication if protected else MuseApplication
+        app = cls(StateStore(home / "state", settings), shop, None, external_recipe_sources={})
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 
 def respond(home: Path, request_id: str, response) -> None:
     settings = load_home(home)
+    if read_json(home / "muse-client.json")["kind"] != "catalog_local_planning":
+        raise HouseholdError("Protected Muse mode does not accept catalog observation files")
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
         raise HouseholdError("Muse request_id must be one emitted UUID")
     path = home / "observations/requests" / (request_id + ".json")
@@ -340,6 +425,8 @@ def main() -> int:
     parser.add_argument("--provider", choices=tuple(ORIGINS))
     parser.add_argument("--household")
     parser.add_argument("--request-id")
+    parser.add_argument("--credential-name", help="Muse connected custom Oda credential reference, never a token")
+    parser.add_argument("--operation-directory", type=Path, help="existing private shared directory for every native Oda client")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
@@ -347,7 +434,8 @@ def main() -> int:
         if args.action == "init":
             if not args.provider or not args.household:
                 raise HouseholdError("init requires --provider and --household")
-            initialize(args.home, args.provider, args.household)
+            initialize(args.home, args.provider, args.household, credential_name=args.credential_name,
+                       operation_directory=args.operation_directory)
         elif args.action == "run":
             serve(args.home)
         else:

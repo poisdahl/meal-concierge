@@ -374,6 +374,9 @@ class RetailMcpClient:
             raise HouseholdError(f"{self.label} rejected the operation")
         structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
         value = _json_value(structured)
+        return self._normalize_result(tool, arguments, value)
+
+    def _normalize_result(self, tool, arguments, value):
         if not isinstance(value, dict):
             raise HouseholdError(f"{self.label} returned no structured result")
         if tool == "get_delivery_slots":
