@@ -950,6 +950,8 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
                                  "recipe_ref", "library_recipe_ref", "recipe_digest", "recipe_key",
                                  "household_experience", "status", "revision", "notes", "storage", "reheating", "language", "available_languages", "source_text_digest")))
     view["times"] = _recipe_times(recipe.get("times"))
+    if (recipe.get("yield") or {}).get("scalable") is True:
+        view["yield"] = _fields(recipe["yield"], ("quantity", "unit", "scalable", "evidence"))
     if "recipe_ref" not in view and isinstance(recipe.get("id"), str) and type(recipe.get("revision")) is int:
         view["recipe_ref"] = {"id": recipe["id"], "revision": recipe["revision"]}
     view["source_schema_version"] = recipe.get("schema_version")
@@ -986,7 +988,7 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     if section == "provenance":
         view["portions_evidence"] = _fields(recipe.get("portions_evidence"),
                                             ("basis", "input", "assumptions", "calculation"))
-        view["yield"] = _fields(recipe.get("yield"), ("original_text", "quantity", "unit", "evidence"))
+        view["yield"] = _fields(recipe.get("yield"), ("original_text", "quantity", "unit", "evidence", "scalable"))
         view["ingredient_provenance"] = _page(ingredients, offset, limit, "items")
     if section == "issues":
         issues = [item for item in ingredients if item.get("estimate_or_unknown")]

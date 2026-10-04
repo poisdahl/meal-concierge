@@ -508,6 +508,18 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 if portion_evidence.get("assumptions"):
                     portions_text += tr(": ", " (evidence, original language): ") + portion_evidence["assumptions"]
             source_yield = recipe.get("yield") or {}
+            current_yield = ""
+            if source_yield.get("scalable") is True:
+                current_yield = quantity_text(source_yield["quantity"]) + " " + source_yield["unit"]
+                estimates = [e for evidence in source_yield.get("evidence", {}).values()
+                             for e in evidence_inputs(evidence) if e.get("basis") == "estimate"]
+                if estimates and show_estimate_labels:
+                    if all(e.get("acceptance") for e in estimates):
+                        current_yield += tr(' (godkjent anslag)', ' (accepted estimate)')
+                    elif all(e.get("acceptance") or e.get("project_review") for e in estimates):
+                        current_yield += tr(' (anslag fra Meal Concierge)', ' (Meal Concierge estimate)')
+                    else:
+                        current_yield += tr(' (anslag)', ' (estimate)')
             parts.extend([
                 '<section class="recipe">',
                 f"<h2>{escape(recipe.get('name'))}</h2>",
@@ -515,6 +527,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 cover(recipe),
                 f"<p><strong>{escape(cooking_label)}</strong></p>" if cooking_label else "",
                 f"<p>{escape(portions_text)}</p>",
+                f"<p>{tr('Utbytte for disse porsjonene:', 'Yield for these servings:')} {escape(current_yield)}</p>" if current_yield else "",
                 f"<p>{tr('Kildens utbytte:', 'Source yield:')} {escape(source_yield['original_text'])}</p>" if source_yield.get("original_text") else "",
                 tr('<h3>Ingredienser</h3><ul>', '<h3>Ingredients</h3><ul>') if (recipe.get("rights") or {}).get("storage") != "link_only" else "",
                 ingredients(recipe.get("ingredients")) if (recipe.get("rights") or {}).get("storage") != "link_only" else "",

@@ -119,11 +119,23 @@ describe each calculation field. Evidence is:
 {"basis":"estimate","input":"2 loaves","assumptions":"Six slices per loaf; one slice per person.","conversion":null}
 ```
 
+Yield may additionally contain `"scalable": true` when reviewed source facts
+support proportionally changing the number of comparable-sized output units.
+This requires a numeric yield, its unit, known person servings and usable
+quantity/unit/serving evidence. Omitted or false leaves the source yield fixed,
+preserving existing recipes and menus. Enable it on the source-serving recipe,
+then materialize a new menu from that revision; never enable it on an old scaled
+menu whose yield still describes the original batch. It does not establish a
+minimum batch, vessel size or cooking time. Fractional yields remain exact and
+do not imply a practical cooking method. Delivery shows opted-in current yield
+separately from the unchanged source wording. Disabling calculated yield scaling
+requires replacing its quantity and evidence, rather than erasing provenance.
+
 `basis` is `source`, `user`, `estimate` or `unknown`. Input, assumptions and
 conversion are nullable strings of at most 1000 characters. Deterministic
 scaling adds an optional `calculation` record containing
 `operation: "portion_scale"`, exact `input_quantity` and exact `factor`, retaining
-the original basis/input/conversion. Ingredient calculations additionally carry
+the original basis/input/conversion. Ingredient and opted-in yield calculations carry
 exact `input_portions` and the original `portions_evidence`, with no nested
 calculation. Scaled person servings retain their original numeric input in their
 own calculation. Repeated scaling keeps the original inputs and combines exact
