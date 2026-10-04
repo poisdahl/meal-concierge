@@ -719,15 +719,22 @@ def _yield(value: Any, *, basis: str) -> dict[str, Any] | None:
         return None
     if isinstance(value, str):
         value = {"original_text": value}
-    if not isinstance(value, Mapping) or set(value) - {"original_text", "quantity", "unit", "evidence"}:
+    if not isinstance(value, Mapping) or set(value) - {"original_text", "quantity", "unit", "evidence", "scalable"}:
         raise RecipeError("yield contains unsupported fields")
     original = _bounded_text(value.get("original_text"), "yield.original_text", maximum=500)
-    return {
+    result = {
         "original_text": original,
         "quantity": _quantity(value.get("quantity"), "yield.quantity"),
         "unit": _bounded_text(value.get("unit"), "yield.unit", maximum=80),
         "evidence": _amount_evidence(value.get("evidence"), "yield.evidence", original=original, basis=basis),
     }
+    if "scalable" in value:
+        if type(value["scalable"]) is not bool:
+            raise RecipeError("yield.scalable must be a boolean")
+        if value["scalable"] and (result["quantity"] is None or not result["unit"]):
+            raise RecipeError("scalable yield requires a quantity and unit")
+        result["scalable"] = value["scalable"]
+    return result
 
 
 def _image(value: Any) -> dict[str, Any] | None:
@@ -929,6 +936,13 @@ def normalize_recipe(
             "source_provider": provider,
             "image": _image(cleaned.get("image")),
         })
+        if (result.get("yield") or {}).get("scalable") is True:
+            if result.get("portions") is None or _unresolved_evidence(result["portions_evidence"]):
+                raise RecipeError("scalable yield requires known person servings and usable serving evidence")
+            if any(_unresolved_evidence(evidence) for evidence in result["yield"]["evidence"].values()):
+                raise RecipeError("scalable yield requires usable quantity and unit evidence")
+        elif (result.get("yield") or {}).get("scalable") is False and (result.get("yield") or {}).get("evidence", {}).get("quantity", {}).get("calculation", {}).get("input_portions"):
+            raise RecipeError("serving-dependent yield requires yield.scalable; reset quantity and evidence before disabling it")
         for path, evidence in recipe_evidence_fields(result).items():
             calculation = evidence.get("calculation")
             if calculation is None:
@@ -1110,6 +1124,10 @@ def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) 
             and (prior is None or prior["source"] != value["source"])):
         raise RecipeError("external adaptations without a source snapshot require an exact prior recipe")
     recipe = normalize_recipe(value)
+    if prior is not None and (prior.get("yield") or {}).get("scalable") is True:
+        physical_yield = recipe.get("yield") or {}
+        if physical_yield.get("scalable") is not True and physical_yield.get("evidence", {}).get("quantity", {}).get("calculation", {}).get("input_portions"):
+            raise RecipeError("reset yield quantity and evidence before removing yield.scalable")
     if prior is not None:
         prior_by_item: dict[str, list[Mapping[str, Any]]] = {}
         for prior_ingredient in prior.get("ingredients", []):
@@ -1369,6 +1387,27 @@ def scale_recipe(recipe: Mapping[str, Any], portions: Any | None = None) -> dict
         if reason:
             requirement["unresolved_reason"] = reason
         requirements.append(requirement)
+    physical_yield = result.get("yield") or {}
+    if physical_yield.get("scalable") is True and base is not None and factor != 1:
+        evidence = physical_yield["evidence"]["quantity"]
+        if not any(path.startswith("yield.") for path in missing):
+            try:
+                source_quantity = read_quantity(physical_yield["quantity"])
+                physical_yield["quantity"] = quantity_json(source_quantity * factor)
+                previous = evidence.get("calculation", {})
+                serving_evidence = deepcopy(result["portions_evidence"])
+                serving_evidence.pop("calculation", None)
+                evidence["calculation"] = {
+                    "operation": "portion_scale",
+                    "input_quantity": previous.get("input_quantity", quantity_json(source_quantity)),
+                    "factor": quantity_json(read_quantity(previous.get("factor", 1)) * factor),
+                    "input_portions": previous.get("input_portions", quantity_json(read_quantity(base) / read_quantity(previous.get("factor", 1)))),
+                    "portions_evidence": previous.get("portions_evidence", serving_evidence),
+                }
+            except ValueError as exc:
+                raise RecipeError(f"scaled yield quantity: {exc}") from exc
+    elif factor != 1 and physical_yield.get("evidence", {}).get("quantity", {}).get("calculation", {}).get("input_portions"):
+        raise RecipeError("yield scaling was disabled: reset its quantity and evidence or restore yield.scalable")
     result["ingredients"] = scaled
     result["portions"] = target
     if version == 2 and factor != 1:
