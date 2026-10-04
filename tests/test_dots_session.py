@@ -541,6 +541,105 @@ class DotsSessionTests(unittest.TestCase):
         self.assertFalse(state.exists())
         self.assertEqual(before, self.files())
 
+    def delivery_host(self, frame):
+        if frame["operation"] != "get_delivery_slots":
+            return self.host(frame)
+        label = "fra 49 kr fra 49 kroner, 6. oktober klokka 09:00 til 12:00"
+        return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "result": {"authenticated": True, "ready": True,
+                           "source_url": "https://meny.no/varer", "dialog_count": 1,
+                           "slots": [{"slot_id": label, "display": label, "date": "2026-10-06",
+                                      "start": "09:00", "end": "12:00", "selected": False}]}}
+
+    def test_delivery_read_normalizes_labels_dates_and_from_price_without_writes(self):
+        code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False})
+        self.assertEqual(code, 0, policy)
+        before = self.state()
+        code, result = self.call({"operation": "delivery", "action": "list",
+                                 "dates": ["2026-10-06", "2026-10-07"]}, host=self.delivery_host)
+        self.assertEqual(code, 0, result)
+        slots = result["result"]["slots"]
+        self.assertEqual(len(slots), 1)
+        slot = slots[0]
+        self.assertEqual(slot["slot_ref"], "meny:2026-10-06T09:00/12:00")
+        self.assertEqual(slot["start_at"], "2026-10-06T09:00:00+02:00")
+        self.assertEqual(slot["price_ore"], 4900)
+        self.assertEqual(slot["price_kind"], "from")
+        self.assertFalse(slot["selected"])
+        self.assertEqual(result["result"]["price_display"][slot["slot_ref"]], "fra 49 kr")
+        self.assertIn("6. oktober", result["result"]["display"][slot["slot_ref"]])
+        for key in ("profile", "menu", "pending_cart_change", "cart_plan", "native_cart_writes_enabled"):
+            self.assertEqual(before.get(key), self.state().get(key))
+        self.assertEqual(self.writes, 0)
+        self.assertTrue(all(f["effect"] == "read" for f in self.frames))
+
+    def test_delivery_empty_requested_date_requires_a_complete_nonempty_picker(self):
+        code, result = self.call({"operation": "delivery", "dates": ["2026-10-07"]}, host=self.delivery_host)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"]["slots"], [])
+        self.assertEqual(result["result"]["display"], {})
+        def empty(frame):
+            reply = self.delivery_host(frame)
+            if frame["operation"] == "get_delivery_slots":
+                reply["result"]["slots"] = []
+            return reply
+        code, result = self.call({"operation": "delivery"}, host=empty)
+        self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+
+    def test_delivery_rejects_changed_route_auth_picker_or_binding(self):
+        for field, value in (("source_url", "https://meny.no/trumf-profil"),
+                             ("authenticated", False), ("ready", False),
+                             ("dialog_count", True), ("dialog_count", 2)):
+            with self.subTest(field=field, value=value):
+                def changed(frame):
+                    reply = self.delivery_host(frame)
+                    if frame["operation"] == "get_delivery_slots":
+                        reply["result"][field] = value
+                    return reply
+                code, result = self.call({"operation": "delivery"}, host=changed)
+                self.assertEqual(code, 1, result)
+        def wrong_binding(frame):
+            reply = self.delivery_host(frame)
+            if frame["operation"] == "get_delivery_slots":
+                reply["browser_binding"] = {**self.binding, "account_sha256": "c" * 64}
+            return reply
+        code, result = self.call({"operation": "delivery"}, host=wrong_binding)
+        self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+
+    def test_delivery_rejects_conflicting_slot_facts_or_duplicate_refs(self):
+        for change in ("date", "label", "duplicate", "selected"):
+            with self.subTest(change=change):
+                def changed(frame):
+                    reply = self.delivery_host(frame)
+                    if frame["operation"] == "get_delivery_slots":
+                        slots = reply["result"]["slots"]
+                        if change == "date":
+                            slots[0]["date"] = "2026-10-07"
+                        elif change == "label":
+                            slots[0]["display"] = slots[0]["display"].replace("09:00", "10:00")
+                        elif change == "selected":
+                            slots[0]["selected"] = 1
+                        else:
+                            slots.append(dict(slots[0]))
+                    return reply
+                code, result = self.call({"operation": "delivery"}, host=changed)
+                self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+
+    def test_delivery_selection_and_address_override_stop_before_intent(self):
+        for request in ({"operation": "delivery", "action": "select", "slot_ref": "anything"},
+                        {"operation": "delivery", "action": "list", "address_id": "another"},
+                        {"operation": "orders", "action": "list"}):
+            before = self.files()
+            frame_count = len(self.frames)
+            code, result = self.call(request)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(self.files(), before)
+            self.assertEqual(len(self.frames), frame_count)
+
     def test_native_target_cannot_be_adopted_by_a_second_household(self):
         def lose_write(frame):
             reply = self.host(frame)
