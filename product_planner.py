@@ -808,9 +808,15 @@ def product_plan_digest(value: Mapping[str, Any]) -> str:
                         product for product in observation.get("products", [])
                         if isinstance(product, Mapping) and product.get("product_ref") in selected_refs
                     ]
+                    scope = observation.get("scope") or {}
                     requirement["observation"] = {"products": sorted(
                         selected, key=lambda product: _ref_sort_key(product["product_ref"])
                     )}
+                    # Personalized order is part of the reviewed search mode;
+                    # changing unrelated result membership still need not block.
+                    if scope.get("semantics") == "bounded_personalized":
+                        requirement["observation"]["scope"] = {
+                            key: deepcopy(scope[key]) for key in ("semantics", "sort_label") if key in scope}
                 requirement.pop("eligible_candidate_count", None)
                 requirement.pop("dietary_assessments", None)
     return hashlib.sha256(canonical(_without_presentation(authoritative)).encode()).hexdigest()
@@ -1299,6 +1305,11 @@ def build_product_plan(
         for r in planned if r.get("selection", {}).get("coverage_status") not in {None, "exact"}
     }
     estimated_coverage = bool(coverage_kinds)
+    search_semantics = sorted({
+        row["observation"]["scope"]["semantics"] for row in planned
+        if isinstance(row.get("observation", {}).get("scope"), Mapping)
+        and isinstance(row["observation"]["scope"].get("semantics"), str)
+    })
     plan: dict[str, Any] = {
         "product_plan_version": PRODUCT_PLAN_VERSION,
         "provider": provider,
@@ -1317,7 +1328,7 @@ def build_product_plan(
         "cost_status": "exact_product_payable" if payable_known and status == "prepared" else "merchandise_estimate_only" if status == "prepared" else "unresolved",
         "status": status,
         "scope": {
-            "search_semantics": "bounded_relevance_ranked",
+            "search_semantics": search_semantics[0] if len(search_semantics) == 1 else "mixed_bounded" if search_semantics else "not_observed",
             "candidate_semantics": "exact_selected_refs_per_requirement",
             "maximum_requirements_per_read_slice": MAX_REQUIREMENTS,
             "maximum_candidates_per_requirement": MAX_CANDIDATES_PER_REQUIREMENT,

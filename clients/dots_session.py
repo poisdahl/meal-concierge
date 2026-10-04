@@ -249,7 +249,7 @@ class NativeHost:
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
         return {"status": "ready", "provider": "meny", "protocol_version": "native-host-stdio-v1",
-                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 3}
+                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 4}
 
     def verify_order_change(self, order_id, code, *, deadline=None):
         if order_id is not None or code is not None:
@@ -271,7 +271,9 @@ class NativeHost:
             if (result.get("query") != queries[0] or type(result.get("page")) is not int
                     or result["page"] != 1 or type(result.get("requested_size")) is not int
                     or result["requested_size"] != size
-                    or result.get("semantics") != "bounded_relevance_ranked"
+                    or result.get("semantics") not in {"bounded_relevance_ranked", "bounded_personalized"}
+                    or (result.get("semantics") == "bounded_personalized"
+                        and result.get("sort_label") != "Anbefalt for deg")
                     or result.get("authenticated") is not True or result.get("ready") is not True
                     or type(result.get("heading_count")) is not int or result["heading_count"] != 1
                     or not isinstance(result.get("products"), list) or len(result["products"]) > size):
@@ -287,6 +289,9 @@ class NativeHost:
                     raise HouseholdError(str(exc)) from exc
             normalized = normalize_meny_product_search(result)
             normalized["scope"]["requested_size"] = size
+            normalized["scope"]["semantics"] = result["semantics"]
+            if result["semantics"] == "bounded_personalized":
+                normalized["scope"]["sort_label"] = result["sort_label"]
             return normalized
         if tool == "get_cart":
             self.last_cart = normalize_cart_snapshot(self.exchange("get_cart", {}, deadline=deadline))
@@ -426,7 +431,7 @@ def command(root, value, reader):
     request = value["request"]
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
-            and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "reconcile_change", "reconcile"})):
+            and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "clear", "reconcile_change", "reconcile"})):
         raise ValueError("unsupported foreground core operation; no checkout, delivery or order edits")
     if request.get("operation") == "products" and request.get("action") == "apply" and (
             request.get("partial_product_plan_digest") or request.get("partial_apply") or request.get("product_plan")):
@@ -458,7 +463,7 @@ def command(root, value, reader):
         saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
         if saved.get("native_config_sha256") != dots.digest(config_data):
             raise ValueError("original native configuration binding changed; no replacement account/context")
-        write = ((request.get("operation") == "cart" and request.get("action") == "ensure")
+        write = ((request.get("operation") == "cart" and request.get("action") in {"ensure", "clear"})
                  or (request.get("operation") == "products" and request.get("action") == "apply"))
         if write and not cart_writes_enabled(config, saved):
             raise ValueError("native cart writes are disabled; no intent or browser operation started")

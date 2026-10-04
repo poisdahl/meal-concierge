@@ -129,7 +129,7 @@ class DotsSessionTests(unittest.TestCase):
         return {"operation": "cart", "action": "ensure",
                 "requirements": [{"product_id": PRODUCT, "product_name": "Synthetic oats", "quantity": quantity}]}
 
-    def managed_request(self):
+    def managed_request(self, host=None):
         recipe = {"name": "Synthetic oats", "portions": 2,
                   "ingredients": [{"raw": "100 g havregryn", "item": "havregryn", "quantity": 100,
                                    "unit": "g", "scalable": True}], "steps": ["Cook the oats."],
@@ -147,18 +147,144 @@ class DotsSessionTests(unittest.TestCase):
         menu = self.state()["menu"]
         menu_ref = {key: menu[key] for key in ("menu_id", "revision", "digest")}
         request = {"operation": "products", "action": "prepare", "menu_ref": menu_ref}
-        code, first = self.call(request)
+        code, first = self.call(request, host=host)
         self.assertEqual(code, 0, first)
         requirement = first["result"]["product_plan"]["requirements"][0]["requirement_id"]
         request["candidate_approvals"] = [{"requirement_id": requirement, "candidate_refs": [PRODUCT]}]
-        code, prepared = self.call(request)
+        code, prepared = self.call(request, host=host)
         self.assertEqual(code, 0, prepared)
         self.assertEqual(prepared["result"]["product_plan"]["status"], "prepared", prepared)
         self.assertEqual(self.writes, 0)
         code, saved_plan = self.call({"operation": "products", "action": "get",
                                      "product_plan_ref": prepared["result"]["product_plan_ref"]})
         self.assertEqual(code, 0, saved_plan)
+        self.prepared_ref = prepared["result"]["product_plan_ref"]
         return {"operation": "products", **prepared["result"]["apply_arguments"], "cart_change_requested": True}
+
+    def personalized_host(self, frame):
+        reply = self.host(frame)
+        if frame["operation"] == "product_search":
+            reply["result"].update(semantics="bounded_personalized", sort_label="Anbefalt for deg")
+        return reply
+
+    def test_personalized_search_preserves_scope_through_saved_plan_and_apply(self):
+        request = self.managed_request(host=self.personalized_host)
+        code, saved = self.call({"operation": "products", "action": "get",
+                                 "product_plan_ref": self.prepared_ref})
+        self.assertEqual(code, 0, saved)
+        plan = saved["result"]
+        self.assertEqual(plan["scope"]["search_semantics"], "bounded_personalized")
+        scope = plan["requirements"][0]["search_scope"]
+        self.assertEqual((scope["semantics"], scope["sort_label"], scope["requested_size"]),
+                         ("bounded_personalized", "Anbefalt for deg", 5))
+        code, applied = self.call(request, host=self.personalized_host)
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"], applied)
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+
+    def test_personalized_search_mode_drift_requires_review_without_writes(self):
+        request = self.managed_request(host=self.personalized_host)
+        code, result = self.call(request)  # Same product, now relevance-ranked.
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
+
+    def test_mixed_search_modes_are_reported_from_actual_observations(self):
+        recipe = {"name": "Synthetic oats with milk", "portions": 2,
+                  "ingredients": [{"raw": "100 g havregryn", "item": "havregryn", "quantity": 100,
+                                   "unit": "g", "scalable": True},
+                                  {"raw": "200 ml melk", "item": "melk", "quantity": 200,
+                                   "unit": "ml", "scalable": True}], "steps": ["Cook the oats."],
+                  "source": {"kind": "user", "publisher": "Synthetic kitchen", "relationship": "user_supplied"},
+                  "rights": {"storage": "full", "credit": "Synthetic test"}}
+        code, saved = self.call({"operation": "recipes", "action": "save", "recipe": recipe,
+                                 "idempotency_key": "synthetic-mixed-search"})
+        self.assertEqual(code, 0, saved)
+        ref = saved["result"]["recipe"]
+        code, saved = self.call({"operation": "menu", "action": "save", "menu": {
+            "week": "2026-W41", "dishes": [{"recipe_ref": {"id": ref["id"], "revision": ref["revision"]},
+                                             "portions": 6}],
+            "schedule": [{"day": "2026-10-06", "meal": recipe["name"], "portions": 6}]}})
+        self.assertEqual(code, 0, saved)
+        menu = self.state()["menu"]
+        reads = []
+        def mixed(frame):
+            if frame["operation"] == "product_search":
+                reads.append(frame)
+                if len(reads) == 1:
+                    return self.personalized_host(frame)
+            return self.host(frame)
+        code, result = self.call({"operation": "products", "action": "prepare",
+                                  "menu_ref": {key: menu[key] for key in ("menu_id", "revision", "digest")}}, host=mixed)
+        self.assertEqual(code, 0, result)
+        plan = result["result"]["product_plan"]
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(plan["scope"]["search_semantics"], "mixed_bounded")
+        self.assertEqual({row["observation"]["scope"]["semantics"] for row in plan["requirements"]},
+                         {"bounded_personalized", "bounded_relevance_ranked"})
+        self.assertEqual(self.writes, 0)
+
+    def clear_request(self):
+        code, cart = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, cart)
+        return {"operation": "cart", "action": "clear", "cart_digest": cart["result"]["cart_digest"]}
+
+    def test_clear_managed_cart_uses_batches_digest_and_cached_receipt_after_disable(self):
+        self.assertEqual(self.call(self.managed_request())[0], 0)
+        code, stale = self.call({"operation": "cart", "action": "clear", "cart_digest": "0" * 64})
+        self.assertEqual(code, 1, stale)
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+        request, command_id = self.clear_request(), str(uuid.uuid4())
+        code, cleared = self.call(request, command_id)
+        self.assertEqual(code, 0, cleared)
+        self.assertTrue(cleared["result"]["cleared"])
+        self.assertEqual((self.quantity, self.writes), (0, 4))
+        self.assertNotIn("cart_plan", self.state())
+        self.assertNotIn("pending_cart_change", self.state())
+        self.assertEqual(self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                    "browser_binding": self.binding})[0], 0)
+        before, frames = self.files(), list(self.frames)
+        self.assertEqual(self.call(request, command_id), (0, cleared))
+        self.assertEqual((self.files(), self.frames), (before, frames))
+        code, blocked = self.call(request)
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual((self.files(), self.frames), (before, frames))
+
+    def test_clear_lost_complete_final_batch_reply_recovers_without_dispatch(self):
+        self.assertEqual(self.call(self.managed_request())[0], 0)
+        request = self.clear_request()
+        def lose_final(frame):
+            reply = self.host(frame)
+            return None if frame["operation"] == "manipulate_cart" and self.quantity == 0 else reply
+        self.call(request, host=lose_final)
+        self.assertIn("pending_cart_change", self.state())
+        self.assertEqual((self.quantity, self.writes), (0, 4))
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 0, recovered)
+        self.assertEqual((self.quantity, self.writes), (0, 4))
+        self.assertNotIn("pending_cart_change", self.state())
+        self.assertNotIn("cart_plan", self.state())
+
+    def test_clear_partial_batch_loss_preserves_pending_and_never_resends(self):
+        self.assertEqual(self.call(self.managed_request())[0], 0)
+        request = self.clear_request()
+        def partial(frame):
+            if frame["operation"] == "manipulate_cart":
+                self.quantity -= 1
+                self.writes += 1
+                return None
+            return self.host(frame)
+        self.call(request, host=partial)
+        pending = self.state()["pending_cart_change"]
+        self.assertEqual((self.quantity, self.writes), (2, 3))
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 1, recovered)
+        self.assertEqual(self.state()["pending_cart_change"], pending)
+        code, blocked = self.call(request)
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual((self.quantity, self.writes), (2, 3))
+        self.assertEqual(self.state()["pending_cart_change"], pending)
 
     def test_managed_menu_uses_complete_search_and_verified_batches(self):
         request = self.managed_request()
@@ -283,13 +409,17 @@ class DotsSessionTests(unittest.TestCase):
 
     def test_native_search_rejects_selected_card_as_ranked_scope(self):
         request = self.managed_request()
-        for invalid in ("selected_card", PRODUCT + "?other=1", "/varer/../havregryn-1234567890123",
+        for invalid in ("selected_card", "personalized_missing_sort", "personalized_wrong_sort", PRODUCT + "?other=1", "/varer/../havregryn-1234567890123",
                         "/varer/%2e%2e/havregryn-1234567890123", "/varer/%bad%/havregryn-1234567890123"):
             with self.subTest(invalid_search_scope_or_path=invalid):
                 def selected_card(frame):
                     reply = self.host(frame)
                     if frame["operation"] == "product_search":
-                        if invalid == "selected_card":
+                        if invalid.startswith("personalized_"):
+                            reply["result"]["semantics"] = "bounded_personalized"
+                            if invalid == "personalized_wrong_sort":
+                                reply["result"]["sort_label"] = "Varegruppe"
+                        elif invalid == "selected_card":
                             reply["result"]["semantics"] = invalid
                         else:
                             reply["result"]["products"][0]["product_id"] = invalid
