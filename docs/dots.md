@@ -79,9 +79,8 @@ observed detail-price evidence, not merely absence of a deposit label.
 
 The result returns normalized candidates, scaled requirements and unresolved
 reasons. A complete exact candidate selection may return candidate totals;
-each request covers one ingredient against the whole menu. Results from
-separate requests are not combined into a complete multi-ingredient plan.
-Other ingredients still require evidence. Unknown availability, package,
+each request covers one ingredient against the whole menu. Other ingredients
+still require evidence. Unknown availability, package,
 pricing or eligibility remains unresolved. Totals exclude delivery, bags,
 cart fees and later price changes. This is a proposal among the explicitly
 selected observed products, not a store-wide cheapest-product claim or an
@@ -91,6 +90,35 @@ The first accepted observation and its result are retained. An identical
 `plan` input returns that result, even later; different input conflicts. A
 partially published result stays incomplete and is never automatically
 recomputed. Command ownership uses the existing nonblocking file lock.
+
+## Combine observations for the whole menu
+
+Issue and accept a separate request for each ingredient, then combine those
+existing observation folders into a **new** private combined-plan folder:
+
+```sh
+"$CLOUD_PYTHON" -I -B "$SOURCE/clients/dots.py" combine --batch "$BATCH" --root "$COMBINED" \
+  < observation-roots.json
+"$CLOUD_PYTHON" -I -B "$SOURCE/clients/dots.py" inspect --root "$COMBINED"
+```
+
+Input is `{"observation_roots":["/absolute/observation-a","/absolute/observation-b"]}`,
+with one to 64 existing folders and at most one accepted observation per
+ingredient. All must belong to this exact batch and frozen menu. The command
+reuses the real whole-menu planner: scaled quantities, package choices,
+totals and unresolved requirements cover the full menu together. Omitted
+ingredients remain explicitly unresolved; partial evidence cannot produce
+complete candidate totals. Duplicate ingredient observations, another batch,
+changed or incomplete original records fail before creating the output.
+
+The combined snapshot retains each observation's identity, timestamp,
+source URL and hashes. Combining historical evidence does not refresh prices,
+stock or eligibility and never authorizes shopping. `dispatchable` stays
+false. Obtain fresh observations in new folders when fresh evidence is needed.
+Existing combined folders cannot be overwritten. Later inspection verifies
+the original batch and observation bindings and returns the saved result;
+missing or changed originals fail without reconstruction. An interrupted
+result publication stays incomplete and is not replayed.
 
 ## Capability limits
 
