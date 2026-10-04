@@ -100,7 +100,7 @@ def menu_language(menu, language):
 
 
 def display_recipe(recipe, language=None):
-    from recipe_quantities import quantity_text
+    from recipe_quantities import UNITS, quantity_text
     result = deepcopy(recipe)
     presentation = recipe_presentation(recipe, language)
     result['presentation'] = presentation
@@ -120,6 +120,9 @@ def display_recipe(recipe, language=None):
         if row.get('quantity') is not None:
             unit = row.get('unit') or ''
             if presentation['resolved_language'].split('-')[0] == 'en':
+                dimension = UNITS.get(unit, (None, None))[0]
                 unit = {'ts': 'tsp', 'ss': 'tbsp', 'stk': 'pieces', 'fedd': 'cloves'}.get(unit, unit)
+                unit = {'drop': 'drops', 'pinch': 'pinches', 'handful': 'handfuls',
+                        'slice': 'slices', 'bunch': 'bunches', 'pot': 'pots'}.get(dimension, unit)
             row['amount'] = (quantity_text(row['quantity']) + ' ' + unit).strip()
     return result

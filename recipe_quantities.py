@@ -11,8 +11,9 @@ import unicodedata
 MAX_NUMERATOR = 10**15
 MAX_DENOMINATOR = 10**12
 
-# A bare cup, fluid ounce, pinch or volume-to-mass conversion is deliberately
-# absent: the source must supply its measurement convention or density.
+# A bare cup, fluid ounce or volume-to-mass conversion is deliberately absent:
+# the source must supply its measurement convention or density. Culinary counts
+# such as pinches retain their own dimensions, never a physical conversion.
 UNITS = {
     "mg": ("g", Fraction(1, 1000)),
     **{unit: ("g", Fraction(1)) for unit in ("g", "gram", "grams", "gramme", "grammes")},
@@ -27,6 +28,12 @@ UNITS = {
     **{unit: ("clove", Fraction(1)) for unit in ("fedd", "clove", "cloves")},
     **{unit: ("stalk", Fraction(1)) for unit in ("stilk", "stilker", "stalk", "stalks")},
     **{unit: ("package", Fraction(1)) for unit in ("pk", "pakke", "pakker", "package", "packages")},
+    **{unit: ("drop", Fraction(1)) for unit in ("drop", "drops", "dråpe", "dråper")},
+    **{unit: ("pinch", Fraction(1)) for unit in ("pinch", "pinches", "klype", "klyper")},
+    **{unit: ("handful", Fraction(1)) for unit in ("handful", "handfuls", "håndfull", "håndfuller")},
+    **{unit: ("slice", Fraction(1)) for unit in ("slice", "slices", "skive", "skiver")},
+    **{unit: ("bunch", Fraction(1)) for unit in ("bunch", "bunches", "bunt", "bunter", "knippe", "knipper")},
+    **{unit: ("pot", Fraction(1)) for unit in ("pot", "pots", "potte", "potter")},
     "oz": ("g", Fraction(45359237, 1600000)),
     "lb": ("g", Fraction(45359237, 100000)),
     **{unit: ("ml", Fraction(250)) for unit in ("metric cup", "metrisk kopp")},
