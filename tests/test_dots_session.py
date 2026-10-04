@@ -171,9 +171,9 @@ class DotsSessionTests(unittest.TestCase):
         code, saved = self.call({"operation": "products", "action": "get",
                                  "product_plan_ref": request["product_plan_ref"]})
         self.assertEqual(code, 0, saved)
-        plan = saved["result"]["product_plan"]
+        plan = saved["result"]
         self.assertEqual(plan["scope"]["search_semantics"], "bounded_personalized")
-        scope = plan["requirements"][0]["observation"]["scope"]
+        scope = plan["requirements"][0]["search_scope"]
         self.assertEqual((scope["semantics"], scope["sort_label"], scope["requested_size"]),
                          ("bounded_personalized", "Anbefalt for deg", 5))
         code, applied = self.call(request, host=self.personalized_host)

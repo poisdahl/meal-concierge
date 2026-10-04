@@ -3000,7 +3000,7 @@ class PlanningOperations:
         snapshot = {key: deepcopy(plan[key]) for key in (
             "provider", "status", "product_plan_digest", "partial_product_plan_digest",
             "coverage_status", "cost_status", "budget_status", "budget_ore", "price_mode",
-            "totals", "excluded_costs",
+            "totals", "excluded_costs", "scope", "comparison_claim",
         ) if key in plan}
         snapshot["include_recurring"] = plan.get("binding", {}).get("include_recurring", True)
         rules = []
@@ -3049,6 +3049,8 @@ class PlanningOperations:
             observation = requirement.get("observation") or {}
             row["search_query"] = observation.get("query", requirement.get("search", requirement["item"]))
             row["observed_at"] = observation.get("observed_at")
+            if isinstance(observation.get("scope"), Mapping):
+                row["search_scope"] = deepcopy(observation["scope"])
             if observation.get("unavailable_reason"):
                 row["unavailable_reason"] = observation["unavailable_reason"]
             by_product = {}
