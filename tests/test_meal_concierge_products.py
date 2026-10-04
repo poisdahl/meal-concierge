@@ -142,6 +142,8 @@ class ProductObservationTests(unittest.TestCase):
             "40g per pose", "40g / 60ml", "40g 20 kr", "2 poser 40g",
             "Ca. størrelse 40g", "om lag 40g", "under 40g", "40g+",
             "400 til 500g", "40g avrent", "40g pr. kg",
+            "rundt 40g pakke", "anslagsvis 40g pakke", "40g variabel vekt",
+            "to poser 40g", "Original 150ml Unknown Brand",
         ):
             with self.subTest(label=label):
                 self.assertIsNone(parse_package(label, provider="meny"))
@@ -171,6 +173,30 @@ class ProductObservationTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared")
                 self.assertEqual(plan["requirements"][0]["selection"]["package_count"], count)
+
+        for label in ("rundt 40g pakke", "anslagsvis 40g pakke", "40g variabel vekt", "to poser 40g"):
+            with self.subTest(uncertain_label=label):
+                observed = normalize_meny_product_search({
+                    "provider": "meny", "query": "bladpersille", "products": [{
+                        "product_id": "/varer/fixture/product-700000000011",
+                        "name": "bladpersille", "package": label, "price": "34,90 kr",
+                        "detail_price": "34,90 kroner.", "deposit_status": "none",
+                        "available": True,
+                    }],
+                }, observed_at=OBSERVED_AT)
+                shopping = menu({"item": "bladpersille", "quantity": 40, "unit": "g"})
+                requirement = menu_requirements(shopping)[0][0]
+                plan = build_product_plan(
+                    provider="meny", binding={"kind": "saved_menu"}, menu=shopping,
+                    observations={requirement["requirement_id"]: observed},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [observed["products"][0]["product_ref"]],
+                    }],
+                )
+                self.assertNotIn("package", observed["products"][0])
+                self.assertEqual(plan["status"], "needs_input")
+                self.assertEqual(plan["unresolved_requirements"][0]["reason"], "candidate_package_incompatible")
 
     def test_fixture_backed_meny_forms_keep_money_and_offer_boundaries(self):
         fixture = json.loads((FIXTURES / "meny_product_observations.json").read_text(encoding="utf-8"))

@@ -240,24 +240,17 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
         candidate = text
         if candidate.startswith("Økologisk "):
             candidate = candidate[len("Økologisk "):]
-        for suffix in (" Q", " Vilje", " Ode", " flaske", " boks"):
+        # Only observed descriptors may surround MENY's fixed size.
+        for prefix in ("Jalapeno ", "Original ", "Harissa "):
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix):]
+                break
+        for suffix in (" Q", " Vilje", " Ode", " flaske", " boks", " pakke",
+                       " Mc Ilhenny", " Cholula", " Al Amier", " Trappeys", " St.maria"):
             if candidate.endswith(suffix):
                 candidate = candidate[:-len(suffix)]
                 break
         parsed = _strict_package(candidate)
-        if parsed is None:
-            sizes = list(_PACKAGE_SINGLE.finditer(text))
-            if len(sizes) == 1:
-                size = sizes[0]
-                descriptions = [text[:size.start()].strip(), text[size.end():].strip()]
-                # MENY surrounds a fixed size with variety and brand text.
-                # Other numbers, units, alternatives and weight qualifiers
-                # cannot establish a single exact package capacity.
-                words = r"[^\W\d_]+(?:[ .'-][^\W\d_]+)*\.?"
-                uncertain = r"\b(?:ca|cirka|omtrent|minst|minimum|maks|opptil|inntil|fra|til|eller|per|pr|under|over|om|lag|avrent|drained|kg|g|l|ml|stk)\b"
-                if (all(not part or re.fullmatch(words, part) for part in descriptions)
-                        and not re.search(uncertain, " ".join(descriptions), re.IGNORECASE)):
-                    parsed = _strict_package(size[0])
     elif provider in {"oda", "mathem"} and parsed is None:
         segments = [segment.strip() for segment in text.split(", ")]
         if len(segments) == 2 and _ODA_PERCENT_PREFIX.fullmatch(segments[0]):
