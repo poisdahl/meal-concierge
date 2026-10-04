@@ -23,7 +23,7 @@ CANARY = "FAKE_SECRET_HEADER_AND_ERROR_CANARY"
 
 # Test-only bootstrap; production accepts no endpoint/helper override argument.
 BOOTSTRAP = '''
-import json, os, pathlib, sys, types
+import json, os, pathlib, sys, time, types
 sys.path.insert(0, ROOT)
 import muse_mcp
 muse_mcp.ODA_ENDPOINT = ENDPOINT
@@ -33,6 +33,8 @@ def attach(request, **kwargs):
         log.write(str(os.getpid())+'\\n')
     if HELPER_MODE == 'fail':
         raise RuntimeError('FAKE_SECRET_HEADER_AND_ERROR_CANARY')
+    if HELPER_MODE == 'slow':
+        time.sleep(2)
     if HELPER_MODE != 'missing':
         request.add_header('Authorization', 'Bearer hsurr:FAKE_SECRET_HEADER_AND_ERROR_CANARY')
 sys.modules['dynamic_credentials'] = types.SimpleNamespace(add_surrogate_to_request=attach)
@@ -298,6 +300,21 @@ client._run(None,{{}},1.6)
             self.client()._run(None,{},0.15)
         self.assertFalse(self.requests)
         self.assertFalse(self.helper_calls())
+
+    def test_worker_deadline_during_helper_is_not_an_auth_failure(self):
+        self.helper_mode = 'slow'
+        self.write_bootstrap()
+        client = self.client()
+        with client._operation_lock() as descriptor:
+            process = subprocess.Popen(client._worker_command(descriptor),stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=(descriptor,))
+            output,error = process.communicate(json.dumps({'tool':None,'arguments':{},
+                'cutoff':time.monotonic()+0.7,'credential_name':'custom.synthetic-oda',
+                'parent_pid':os.getpid()}).encode(),timeout=3)
+            self.assertEqual(json.loads(output),{'ok':False,'error':'deadline_reached'})
+            self.assertFalse(error)
+        self.assertFalse(self.requests)
+        self.assertIsNone(client.terminal_failure)
 
 
 class CoreTests(Fixture):

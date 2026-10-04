@@ -224,6 +224,8 @@ def exchange(request, *, parent_pid):
     sys.path.insert(0, "/opt/hatch/skills/skill-creator/bin")
     try:
         from dynamic_credentials import add_surrogate_to_request
+    except Stopped:
+        raise
     except Exception:
         raise Stopped("helper_unavailable") from None
     opener = build_opener(NoRedirect())  # Default ProxyHandler, TLS and environment.
@@ -254,6 +256,8 @@ def exchange(request, *, parent_pid):
         try:
             add_surrogate_to_request(outgoing, credential_name=request["credential_name"],
                                      entry_name="access_token", allowed_hosts=["oda.com"])
+        except Stopped:
+            raise
         except Exception:
             raise Stopped("helper_unavailable") from None
         header = outgoing.get_header("Authorization")
