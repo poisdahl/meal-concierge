@@ -79,7 +79,9 @@ observed detail-price evidence, not merely absence of a deposit label.
 
 The result returns normalized candidates, scaled requirements and unresolved
 reasons. A complete exact candidate selection may return candidate totals;
-other ingredients still require evidence. Unknown availability, package,
+each request covers one ingredient against the whole menu. Results from
+separate requests are not combined into a complete multi-ingredient plan.
+Other ingredients still require evidence. Unknown availability, package,
 pricing or eligibility remains unresolved. Totals exclude delivery, bags,
 cart fees and later price changes. This is a proposal among the explicitly
 selected observed products, not a store-wide cheapest-product claim or an
