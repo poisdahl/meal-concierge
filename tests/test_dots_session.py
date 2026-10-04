@@ -106,8 +106,9 @@ class DotsSessionTests(unittest.TestCase):
                 self.frames.append(frame)
                 reply = (host or self.host)(frame)
                 if reply is None:
-                    child.stdin.close()  # Lost host reply, not a definite pre-click stop.
-                else:
+                    if not child.stdin.closed:
+                        child.stdin.close()  # Lost host reply, not a definite pre-click stop.
+                elif not child.stdin.closed:
                     child.stdin.write(json.dumps(reply).encode() + b"\n")
                     child.stdin.flush()
             child.wait(timeout=10)
