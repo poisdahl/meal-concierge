@@ -60,6 +60,14 @@ class DotsSessionTests(unittest.TestCase):
             result = {"authenticated": True, "new_cart": True}
         elif operation == "get_cart":
             result = self.snapshot()
+        elif operation == "product_search":
+            result = {"query": frame["arguments"]["queries"][0], "page": 1,
+                      "requested_size": 5, "semantics": "bounded_relevance_ranked",
+                      "authenticated": True, "ready": True, "heading_count": 1,
+                      "products": [{"product_id": PRODUCT, "name": "Havregryn",
+                                    "package": "100g", "price": "20,00 kr",
+                                    "detail_price": "20,00 kroner.", "deposit_status": "none",
+                                    "available": True}]}
         elif operation == "manipulate_cart":
             pending = self.state()["pending_cart_change"]  # Must precede stdout issuance.
             self.assertEqual(pending["before"], frame["before_quantities"])
@@ -119,6 +127,167 @@ class DotsSessionTests(unittest.TestCase):
     def ensure(self, quantity=1):
         return {"operation": "cart", "action": "ensure",
                 "requirements": [{"product_id": PRODUCT, "product_name": "Synthetic oats", "quantity": quantity}]}
+
+    def managed_request(self):
+        recipe = {"name": "Synthetic oats", "portions": 2,
+                  "ingredients": [{"raw": "100 g havregryn", "item": "havregryn", "quantity": 100,
+                                   "unit": "g", "scalable": True}], "steps": ["Cook the oats."],
+                  "source": {"kind": "user", "publisher": "Synthetic kitchen", "relationship": "user_supplied"},
+                  "rights": {"storage": "full", "credit": "Synthetic test"}}
+        code, saved = self.call({"operation": "recipes", "action": "save", "recipe": recipe,
+                                 "idempotency_key": "synthetic-managed-oats"})
+        self.assertEqual(code, 0, saved)
+        ref = saved["result"]["recipe"]
+        code, saved = self.call({"operation": "menu", "action": "save", "menu": {
+            "week": "2026-W41", "dishes": [{"recipe_ref": {"id": ref["id"], "revision": ref["revision"]},
+                                             "portions": 6}],
+            "schedule": [{"day": "2026-10-06", "meal": recipe["name"], "portions": 6}]}})
+        self.assertEqual(code, 0, saved)
+        menu = self.state()["menu"]
+        menu_ref = {key: menu[key] for key in ("menu_id", "revision", "digest")}
+        request = {"operation": "products", "action": "prepare", "menu_ref": menu_ref}
+        code, first = self.call(request)
+        self.assertEqual(code, 0, first)
+        requirement = first["result"]["product_plan"]["requirements"][0]["requirement_id"]
+        request["candidate_approvals"] = [{"requirement_id": requirement, "candidate_refs": [PRODUCT]}]
+        code, prepared = self.call(request)
+        self.assertEqual(code, 0, prepared)
+        self.assertEqual(prepared["result"]["product_plan"]["status"], "prepared", prepared)
+        self.assertEqual(self.writes, 0)
+        code, saved_plan = self.call({"operation": "products", "action": "get",
+                                     "product_plan_ref": prepared["result"]["product_plan_ref"]})
+        self.assertEqual(code, 0, saved_plan)
+        return {"operation": "products", **prepared["result"]["apply_arguments"], "cart_change_requested": True}
+
+    def test_managed_menu_uses_complete_search_and_verified_batches(self):
+        request = self.managed_request()
+        command_id = str(uuid.uuid4())
+        code, applied = self.call(request, command_id)
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"], applied)
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+        state = self.state()
+        self.assertNotIn("pending_cart_change", state)
+        self.assertNotIn("managed_product_apply_fence", state)
+        self.assertEqual(state["cart_plan"]["added_quantities"], {PRODUCT: 3})
+        self.assertEqual(state["cart_plan"]["product_plan_digest"], request["product_plan_digest"])
+        self.assertIn("product_plan_authority", state["cart_plan"])
+        before, frames = self.files(), list(self.frames)
+        code, cached = self.call(request, command_id)
+        self.assertEqual((code, cached), (0, applied))
+        self.assertEqual((self.files(), self.frames), (before, frames))
+
+    def test_managed_lost_second_batch_reply_reconciles_without_double_allocation(self):
+        request = self.managed_request()
+        def lose_second(frame):
+            reply = self.host(frame)
+            return None if frame["operation"] == "manipulate_cart" and self.writes == 2 else reply
+        code, result = self.call(request, host=lose_second)
+        self.assertIn("pending_cart_change", self.state())
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+        self.assertEqual(self.state()["pending_cart_change"]["native_managed"]["verified"], {PRODUCT: 2})
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 0, recovered)
+        self.assertEqual(self.writes, 2)
+        state = self.state()
+        self.assertNotIn("pending_cart_change", state)
+        self.assertEqual(state["cart_plan"]["added_quantities"], {PRODUCT: 3})
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {})
+        self.assertEqual(state["cart_plan"]["status"], "needs_input")
+        self.assertNotIn("product_plan_authority", state["cart_plan"])
+        self.assertIn("managed_product_apply_fence", state)
+        code, blocked = self.call(self.ensure(4))
+        self.assertEqual(code, 1, blocked)
+        self.assertEqual(self.writes, 2)
+
+    def test_partial_managed_dispatch_protects_unconfirmed_units_as_baseline(self):
+        request = self.managed_request()
+        def partial(frame):
+            if frame["operation"] == "manipulate_cart":
+                self.assertEqual(self.state()["pending_cart_change"]["before"], {})
+                self.quantity, self.writes = 1, self.writes + 1
+                return None
+            return self.host(frame)
+        self.call(request, host=partial)
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 0, recovered)
+        state = self.state()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {})
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {PRODUCT: 1})
+        self.assertEqual(self.writes, 1)
+        code, decision = self.call({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                                    "menu_ref": state["cart_plan"]["menu_ref"],
+                                    "cart_digest": state["cart_plan"]["pending_cart_digest"],
+                                    "accept_missing_product_ids": [PRODUCT]})
+        self.assertEqual(code, 0, decision)
+        self.assertTrue(decision["result"]["reconciled"])
+        self.assertEqual(self.writes, 1)
+
+    def test_managed_boundaries_block_before_intent_or_dispatch(self):
+        before = self.files()
+        for request in ({"operation": "products", "action": "apply", "partial_apply": True},
+                        {"operation": "cart", "action": "reconcile", "decision": "restore_missing"},
+                        {"operation": "cart", "action": "reconcile", "decision": "keep_current", "exclude_product_ids": [PRODUCT]}):
+            code, result = self.call(request)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(self.files(), before)
+        policy = {"operation": "native_cart_policy", "action": "set", "enabled": False,
+                  "browser_binding": self.binding}
+        self.assertEqual(self.call(policy)[0], 0)
+        before, frames = self.files(), list(self.frames)
+        code, result = self.call({"operation": "products", "action": "apply"})
+        self.assertEqual(code, 1, result)
+        self.assertEqual((self.files(), self.frames), (before, frames))
+
+    def test_finalization_crash_preserves_only_exact_committed_plan(self):
+        request = self.managed_request()
+        journals = []
+        def retain_journal(frame):
+            reply = self.host(frame)
+            if frame["operation"] == "manipulate_cart":
+                journals.append(self.state()["pending_cart_change"])
+            return reply
+        code, applied = self.call(request, host=retain_journal)
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"])
+        completed = self.state()
+        # Persisted final batch + committed core plan models process loss at
+        # the narrow boundary before the adapter removes its journal.
+        journal = journals[-1]
+        journal["native_managed"]["verified"] = journal["expected"]
+        for exact in (True, False):
+            with self.subTest(exact_product_identity=exact):
+                state = json.loads(json.dumps(completed))
+                state["pending_cart_change"] = json.loads(json.dumps(journal))
+                if not exact:
+                    state["pending_cart_change"]["native_managed"]["product_plan_digest"] = "c" * 64
+                (self.root / "state/state.json").write_text(json.dumps(state))
+                code, recovered = self.call({"operation": "cart", "action": "reconcile_change"})
+                self.assertEqual(code, 0, recovered)
+                recovered_state = self.state()
+                self.assertNotIn("pending_cart_change", recovered_state)
+                self.assertEqual(recovered_state["cart_plan"]["added_quantities"], {PRODUCT: 3})
+                self.assertEqual(self.writes, 2)
+                if exact:
+                    self.assertEqual(recovered_state["cart_plan"], completed["cart_plan"])
+                    self.assertNotIn("managed_product_apply_fence", recovered_state)
+                else:
+                    self.assertEqual(recovered_state["cart_plan"]["status"], "needs_input")
+                    self.assertNotIn("product_plan_authority", recovered_state["cart_plan"])
+                    self.assertIn("managed_product_apply_fence", recovered_state)
+
+    def test_native_search_rejects_selected_card_as_ranked_scope(self):
+        request = self.managed_request()
+        def selected_card(frame):
+            reply = self.host(frame)
+            if frame["operation"] == "product_search":
+                reply["result"]["semantics"] = "selected_card"
+            return reply
+        code, result = self.call({"operation": "products", "action": "prepare",
+                                  "menu_ref": request["menu_ref"]}, host=selected_card)
+        self.assertEqual(code, 0, result)
+        self.assertNotEqual(result["result"]["product_plan"]["status"], "prepared")
+        self.assertEqual(self.writes, 0)
 
     def test_core_recipe_menu_and_command_recovery_without_provider(self):
         recipe = {"name": "Synthetic oats", "portions": 2,

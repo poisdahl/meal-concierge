@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -18,8 +19,9 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clients import dots
-from core import HouseholdError, StateStore
+from core import HouseholdError, StateStore, cart_summary
 from meny import normalize_cart_snapshot
+from product_observations import normalize_meny_product_search
 import on_demand
 from runtime_ownership import file_lock
 from service import Application
@@ -143,10 +145,51 @@ def cart_policy(store, config, request):
 
 
 class NativeHost:
-    def __init__(self, store, config, reader, command_id, deadline):
+    def __init__(self, store, config, reader, command_id, deadline, request=None):
         self.store, self.config, self.reader = store, config, reader
         self.command_id, self.deadline = command_id, deadline
         self.calls = 0
+        self.request = request or {}
+        self.last_cart = None
+
+    def managed_intent(self, operations):
+        if self.request.get("operation") != "products" or self.request.get("action") != "apply":
+            return False
+        if self.last_cart is None:
+            raise HouseholdError("managed native batch requires a complete pre-write cart")
+        before = self.app._cart_lines(cart_summary(self.last_cart))[0]
+        expected = dict(before)
+        for item in operations:
+            product = item["productId"]
+            quantity = expected.get(product, 0) + item["quantity"]
+            if quantity < 0:
+                raise HouseholdError("managed batch exceeds observed cart quantities")
+            if quantity:
+                expected[product] = quantity
+            else:
+                expected.pop(product, None)
+        with self.store.locked() as state:
+            pending = state.get("pending_cart_change")
+            if pending:
+                managed = pending.get("native_managed")
+                if (not managed or managed["command_id"] != self.command_id
+                        or managed["verified"] != before or pending["expected"] != before):
+                    raise HouseholdError("reconcile the original native managed batch before dispatch")
+                managed = deepcopy(managed)
+            else:
+                plan = state.get("cart_plan")
+                digest = self.request.get("product_plan_digest")
+                if (not isinstance(plan, dict) or not state.get("managed_product_apply_fence")
+                        or plan.get("provider") != "meny" or state.get("order_change")
+                        or re.fullmatch(r"[a-f0-9]{64}", digest or "") is None):
+                    raise HouseholdError("original managed menu/product-plan intent is required")
+                managed = {"command_id": self.command_id, "request": deepcopy(self.request),
+                           "menu_ref": deepcopy(plan["menu_ref"]), "product_plan_digest": digest,
+                           "initial_plan": deepcopy(plan), "initial": before, "verified": before}
+            state["pending_cart_change"] = {
+                "provider": "meny", "order_change": None, "operations": deepcopy(operations),
+                "before": before, "expected": expected, "native_managed": managed}
+        return True
 
     def pending_binding(self):
         state = self.store.read()
@@ -216,8 +259,28 @@ class NativeHost:
         return result
 
     def call(self, tool, arguments, *, deadline=None, **kwargs):
+        if tool == "product_search":
+            queries, size = arguments.get("queries"), arguments.get("size")
+            if (set(arguments) != {"queries", "page", "size"} or arguments["page"] != 1
+                    or type(arguments["page"]) is not int or type(size) is not int or size != 5
+                    or not isinstance(queries, list) or len(queries) != 1
+                    or not isinstance(queries[0], str) or not 1 <= len(queries[0]) <= 200):
+                raise HouseholdError("native product search requires one bounded first-page query")
+            result = self.exchange(tool, arguments, deadline=deadline)
+            if (result.get("query") != queries[0] or type(result.get("page")) is not int
+                    or result["page"] != 1 or type(result.get("requested_size")) is not int
+                    or result["requested_size"] != size
+                    or result.get("semantics") != "bounded_relevance_ranked"
+                    or result.get("authenticated") is not True or result.get("ready") is not True
+                    or type(result.get("heading_count")) is not int or result["heading_count"] != 1
+                    or not isinstance(result.get("products"), list) or len(result["products"]) > size):
+                raise HouseholdError("native product search scope or rendered results changed")
+            normalized = normalize_meny_product_search(result)
+            normalized["scope"]["requested_size"] = size
+            return normalized
         if tool == "get_cart":
-            return normalize_cart_snapshot(self.exchange("get_cart", {}, deadline=deadline))
+            self.last_cart = normalize_cart_snapshot(self.exchange("get_cart", {}, deadline=deadline))
+            return self.last_cart
         if tool == "manipulate_cart":
             operations = arguments.get("operations")
             if (set(arguments) != {"operations"} or not isinstance(operations, list)
@@ -233,10 +296,20 @@ class NativeHost:
                     raise HouseholdError("native cart batch requires exact paths and bounded deltas")
             if sum(abs(item["quantity"]) for item in operations) > 2:
                 raise HouseholdError("native cart batch exceeds the existing two-click limit")
+            managed = self.managed_intent(operations)
             result = self.exchange(tool, arguments, deadline=deadline, write=True)
             if set(result) != {"dispatched"} or result["dispatched"] is not True:
                 raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
-            return result
+            if not managed:
+                return result
+            cart = self.call("get_cart", {}, deadline=deadline)
+            live = self.app._cart_lines(cart_summary(cart))[0]
+            with self.store.locked() as state:
+                pending = state["pending_cart_change"]
+                if live != pending["expected"]:
+                    raise HouseholdError("managed native batch readback changed; reconcile without resend")
+                pending["native_managed"]["verified"] = live
+            return cart
         raise HouseholdError("native foreground provider operation is not supported")
 
 
@@ -283,7 +356,7 @@ def native_ownership(stack, root, config, *, new):
             dots.exclusive_json(path, owner, MAX_LINE)
 
 
-def application(root, config, reader, command_id, deadline, *, new=False):
+def application(root, config, reader, command_id, deadline, *, new=False, request=None):
     state = root / "state"
     if not new:
         dots.existing_root(state)
@@ -300,8 +373,9 @@ def application(root, config, reader, command_id, deadline, *, new=False):
         if new:
             with store.locked() as saved:
                 saved["native_config_sha256"] = dots.digest(dots.encoded(config))
-        host = NativeHost(store, config, reader, command_id, deadline)
+        host = NativeHost(store, config, reader, command_id, deadline, request)
         app = Application(store, host, None, external_recipe_sources={})
+        host.app = app
         if new:
             app.recipes.search(limit=1)  # The core opens SQLite lazily; create the original bank once.
         return stack, app
@@ -341,8 +415,15 @@ def command(root, value, reader):
         raise ValueError("request_id must be a canonical UUID")
     request = value["request"]
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
-            and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "reconcile_change"})):
-        raise ValueError("unsupported foreground core operation; no checkout, delivery or managed cart apply")
+            and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
+            and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "reconcile_change", "reconcile"})):
+        raise ValueError("unsupported foreground core operation; no checkout, delivery or order edits")
+    if request.get("operation") == "products" and request.get("action") == "apply" and (
+            request.get("partial_product_plan_digest") or request.get("partial_apply") or request.get("product_plan")):
+        raise ValueError("native managed apply requires a complete reviewed product_plan_ref/digest")
+    if request.get("operation") == "cart" and request.get("action") == "reconcile" and (
+            request.get("decision") != "keep_current" or request.get("exclude_product_ids")):
+        raise ValueError("native cart decisions support keep_current without quantity changes; then prepare/apply")
     root = dots.existing_root(root)
     on_demand._read_file(root / "command.lock", 0)
     with file_lock(root / "command.lock"):
@@ -367,16 +448,22 @@ def command(root, value, reader):
         saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
         if saved.get("native_config_sha256") != dots.digest(config_data):
             raise ValueError("original native configuration binding changed; no replacement account/context")
-        if request.get("operation") == "cart" and request.get("action") == "ensure" and not cart_writes_enabled(config, saved):
+        write = ((request.get("operation") == "cart" and request.get("action") == "ensure")
+                 or (request.get("operation") == "products" and request.get("action") == "apply"))
+        if write and not cart_writes_enabled(config, saved):
             raise ValueError("native cart writes are disabled; no intent or browser operation started")
         target.mkdir(mode=0o700)
         on_demand._sync_directory(calls)
         dots.exclusive_json(target / "intent.json", record, MAX_LINE)
         try:
-            stack, app = application(root, config, reader, command_id, time.monotonic() + 240)
+            stack, app = application(root, config, reader, command_id, time.monotonic() + 240, request=request)
             with stack:
                 result = (cart_policy(app.store, config, request) if request["operation"] == "native_cart_policy"
                           else app.handle(request))
+                with app.store.locked() as current:
+                    pending = current.get("pending_cart_change")
+                    if pending and pending.get("native_managed") and app._native_managed_finalized(current, pending):
+                        current.pop("pending_cart_change")
                 output = {"ok": True, "result": result}
         except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
             output = {"ok": False, "error": str(exc)}

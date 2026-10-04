@@ -5229,8 +5229,79 @@ class PlanningOperations:
                 "reconcile its pending menu cart question first when required"
             )
 
+    @staticmethod
+    def _native_managed_allocations(managed, verified, live):
+        original = managed["initial_plan"]
+        supplements = {key: min(value, live.get(key, 0))
+                       for key, value in original.get("supplemental_quantities", {}).items()
+                       if min(value, live.get(key, 0)) > 0}
+        added = {}
+        for key in set(original["added_quantities"]) | set(managed["initial"]) | set(verified):
+            quantity = min(max(0, original["added_quantities"].get(key, 0)
+                               + verified.get(key, 0) - managed["initial"].get(key, 0)),
+                           max(0, live.get(key, 0) - supplements.get(key, 0)))
+            if quantity:
+                added[key] = quantity
+        return added, supplements
+
+    def _native_managed_finalized(self, state, pending):
+        managed = pending["native_managed"]
+        plan = state.get("cart_plan")
+        expected = pending["expected"]
+        added, supplements = self._native_managed_allocations(managed, expected, expected)
+        if (not isinstance(plan, dict) or managed["verified"] != expected
+                or state.get("managed_product_apply_fence") or state.get("order_change")
+                or self._cart_menu_ref(state.get("menu")) != managed["menu_ref"]
+                or plan.get("menu_ref") != managed["menu_ref"]
+                or plan.get("last_synced_quantities") != expected
+                or plan.get("added_quantities") != added
+                or plan.get("supplemental_quantities", {}) != supplements
+                or plan.get("baseline_quantities") != managed["initial_plan"]["baseline_quantities"]
+                or plan.get("required_quantities") != managed["initial_plan"]["required_quantities"]
+                or plan.get("product_plan_digest") != managed["product_plan_digest"]):
+            return False
+        try:
+            authority = self._full_seed_authority(plan, managed["menu_ref"])
+        except HouseholdError:
+            return False
+        return authority.get("context") == self._product_current_context(state)
+
+    def _complete_native_managed_write(self, pending, quantities, names):
+        with self.store.locked() as state:
+            if (canonical(state.get("pending_cart_change")) != canonical(pending)
+                    or state.get("order_change")):
+                raise HouseholdError("original native managed intent or order context changed")
+            managed = pending["native_managed"]
+            if quantities == pending["expected"] and self._native_managed_finalized(state, pending):
+                state.pop("pending_cart_change")
+                return
+            if (self._cart_menu_ref(state.get("menu")) != managed["menu_ref"]
+                    or (state.get("cart_plan") or {}).get("menu_ref") != managed["menu_ref"]):
+                raise HouseholdError("original native managed menu changed; preserve pending intent")
+            # Only complete matching batch readback extends the verified prefix.
+            # EOF/timeout is not a definite stop and never invents a finished dispatch.
+            verified = pending["expected"] if quantities == pending["expected"] else managed["verified"]
+            plan = deepcopy(managed["initial_plan"])
+            added, supplements = self._native_managed_allocations(managed, verified, quantities)
+            plan["added_quantities"], plan["supplemental_quantities"] = added, supplements
+            # Unconfirmed observed units remain protected existing stock.
+            plan["baseline_quantities"] = {
+                key: value - added.get(key, 0) - supplements.get(key, 0)
+                for key, value in quantities.items()
+                if value > added.get(key, 0) + supplements.get(key, 0)}
+            self._clear_persisted_product_plan(plan)
+            self._set_cart_needs_input(plan, quantities, names)
+            state["cart_plan"] = plan
+            state.pop("product_plan_completion", None)
+            state["managed_product_apply_fence"] = {
+                "menu_ref": deepcopy(managed["menu_ref"]), "started_at": self._now().isoformat()}
+            state.pop("pending_cart_change")
+
     def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any]) -> None:
         quantities, names = self._cart_lines(cart_summary(cart))
+        if pending.get("native_managed"):
+            self._complete_native_managed_write(pending, quantities, names)
+            return
         if quantities != pending["expected"] and not pending.get("dispatch_finished"):
             raise HouseholdError("cart write is still uncertain; reconcile_change only reads and never resends")
         with self.store.locked() as state:
@@ -5315,7 +5386,9 @@ class PlanningOperations:
                 cart = self.provider_client.call("get_cart", {}, deadline=deadline)
                 self._complete_cart_write(pending, cart)
                 return {"reconciled": True, "cart_write_pending": False, "cart": cart,
-                        "next": "The saved write is verified. Rerun ensure for the original minimum if a multi-batch request was interrupted; never repeat a delta."}
+                        "next": ("Review the exact managed cart digest, then prepare/apply a fresh complete product plan; never use ensure to resume menu shopping."
+                                 if pending.get("native_managed") else
+                                 "The saved write is verified. Rerun ensure for the original minimum if a multi-batch request was interrupted; never repeat a delta.")}
             if pending:
                 raise HouseholdError("reconcile_change before another cart write; do not repeat an uncertain delta")
             change = deepcopy(state.get("order_change"))
