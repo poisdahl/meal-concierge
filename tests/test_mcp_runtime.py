@@ -525,6 +525,19 @@ async def provider_diagnostic_checks(root):
                         'source': 'adapter_json_error', 'phase': 'adapter_invocation',
                         'daemon_request_ending': 'unknown'}, failed
         assert 'synthetic-secret' not in json.dumps(failed) and SECRET not in json.dumps(failed)
+        # The standalone JSON client must preserve the same closed diagnostic.
+        for query, expected in (('wire-diagnostic', safe), ('wire-invalid-metadata', None)):
+            cli = subprocess.run(
+                [sys.executable, '-S', '-P', str(CORE / 'cli.py')],
+                input=json.dumps({'operation': 'catalog', 'action': 'products', 'query': query}),
+                text=True, capture_output=True, timeout=15,
+                env={'PATH': os.defpath, 'HOME': str(root),
+                     'MEAL_CONCIERGE_SOCKET': str(root / 'service.sock')},
+            )
+            assert cli.returncode == 1, cli.stderr + cli.stdout
+            rejected = json.loads(cli.stdout)
+            assert rejected['ok'] is False and rejected.get('provider_failure') == expected, rejected
+            assert 'synthetic-secret' not in cli.stdout and SECRET not in cli.stdout
         invalid = await call(client, 'catalog', action='products', query='wire-invalid-metadata')
         assert invalid['ok'] is False and 'provider_failure' not in invalid
         assert 'synthetic-secret' not in json.dumps(invalid)
@@ -547,7 +560,7 @@ async def provider_diagnostic_checks(root):
             assert row['candidates'] == [], row
         recovered_ref = plan['product_plan_ref']
         reads = (root / 'diagnostic-invocations').read_text().splitlines()
-        assert len(reads) == 14, reads  # Two catalog failures and twelve ingredient reads.
+        assert len(reads) == 16, reads  # Two MCP + two CLI failures and twelve ingredient reads.
         before = len((root / 'application.jsonl').read_text().splitlines())
         page = await call(client, 'products', action='get', product_plan_ref=recovered_ref,
                           section='issues', limit=5)
