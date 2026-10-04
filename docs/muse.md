@@ -174,6 +174,15 @@ requests through the same host-observation path. Review candidates and their
 package/price evidence; cart apply is unavailable even when a plan is prepared.
 Continue a preparation reference with the same explicit recurring scope.
 
+For a merchandise estimate, set **`price_mode="estimate"` on the first
+`products prepare` request**. Continuations preserve that mode. Approve the
+returned exact candidate scope, then read the resulting `product_plan_ref`
+with `products get`. An observed fixed package and merchandise price can
+produce package counts, surplus and merchandise cost even when deposit
+evidence is missing; deposit and total payable remain unknown. The default
+`price_mode="exact"` instead leaves such a candidate unresolved with
+`deposit_unobserved`. Neither mode enables cart apply in this client.
+
 Imports/saves/adaptations write local recipe/discovery SQLite data. Menu edits,
 profile changes, product selections and normal setup/planning metadata are local
 writes too. Unsupported operation/action combinations are refused before the
