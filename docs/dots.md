@@ -206,6 +206,27 @@ Keep the registry with the original household; missing ownership records fail
 without replacement. Use the same cloud user/home for every call. Do not
 change homes, identities or remove ownership records to bypass recovery.
 
+Some cloud computers have a read-only HOME, including a configured
+`XDG_STATE_HOME` under that HOME. For a **new** browser-bound household, the
+reviewed native operator can set `target_registry` in the initialization JSON
+to one supported shared workspace location, for example:
+
+```json
+{"household":"My cloud household","browser_binding":{"origin":"https://meny.no","browser_id":"actual","tab_id":"actual","account_sha256":"approved SHA256","cart_context_sha256":"approved SHA256"},"allow_cart_writes":false,"target_registry":"/absolute/private/shared-workspace/.meal-concierge-dots-targets"}
+```
+
+The path must be absolute and canonical, have that exact basename and an
+existing owned private parent, and lie outside the household's core root.
+Use the **same approved shared location for every core root on this native
+computer**; a per-core or alternate registry could admit duplicate ownership.
+The location is frozen with the original configuration. Later commands use
+that exact path, regardless of environment changes. An existing HOME registry
+prevents initialization in a different namespace. There is no automatic
+writable-directory fallback, migration or adoption, and missing original
+records still fail. Existing households keep their HOME registry by default.
+Workspace writability and observed retention do not establish a durability
+guarantee; preserve the original registry along with its households.
+
 For browser-enabled calls, keep one supported cloud execution session open
 and answer its `native_host_request` frames through that exact session's
 stdin. Use only the supported native **cloud** browser. Wait for the
