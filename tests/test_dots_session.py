@@ -553,7 +553,8 @@ class DotsSessionTests(unittest.TestCase):
                                       "start": "09:00", "end": "12:00", "selected": False}]}}
 
     def test_delivery_read_normalizes_labels_dates_and_from_price_without_writes(self):
-        code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False})
+        code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                 "browser_binding": self.binding})
         self.assertEqual(code, 0, policy)
         before = self.state()
         code, result = self.call({"operation": "delivery", "action": "list",
