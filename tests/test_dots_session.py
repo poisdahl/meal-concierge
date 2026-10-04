@@ -158,6 +158,7 @@ class DotsSessionTests(unittest.TestCase):
         code, saved_plan = self.call({"operation": "products", "action": "get",
                                      "product_plan_ref": prepared["result"]["product_plan_ref"]})
         self.assertEqual(code, 0, saved_plan)
+        self.prepared_ref = prepared["result"]["product_plan_ref"]
         return {"operation": "products", **prepared["result"]["apply_arguments"], "cart_change_requested": True}
 
     def personalized_host(self, frame):
@@ -169,7 +170,7 @@ class DotsSessionTests(unittest.TestCase):
     def test_personalized_search_preserves_scope_through_saved_plan_and_apply(self):
         request = self.managed_request(host=self.personalized_host)
         code, saved = self.call({"operation": "products", "action": "get",
-                                 "product_plan_ref": request["product_plan_ref"]})
+                                 "product_plan_ref": self.prepared_ref})
         self.assertEqual(code, 0, saved)
         plan = saved["result"]
         self.assertEqual(plan["scope"]["search_semantics"], "bounded_personalized")
