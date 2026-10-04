@@ -313,6 +313,7 @@ client._run(None,{{}},1.6)
                 'parent_pid':os.getpid()}).encode(),timeout=3)
             self.assertEqual(json.loads(output),{'ok':False,'error':'deadline_reached'})
             self.assertFalse(error)
+            self.assertEqual(len(self.helper_calls()),1)
         self.assertFalse(self.requests)
         self.assertIsNone(client.terminal_failure)
 
@@ -341,7 +342,7 @@ class CoreTests(Fixture):
         reopened = muse.ProtectedMuseApplication(StateStore(home/'state',settings),self.client(),None,external_recipe_sources={})
         result = reopened.handle({'operation':'cart','action':'reconcile_change'})
         self.assertTrue(result['reconciled'])
-        self.assertFalse(store.read()['pending_cart_change'])
+        self.assertFalse(store.read().get('pending_cart_change'))
         self.assertEqual(self.cart,{'9212':1})
         self.assertEqual(self.changes,1)
 
