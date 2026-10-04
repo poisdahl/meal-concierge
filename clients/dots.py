@@ -140,7 +140,7 @@ def load_request(root):
     return request
 
 
-def validate_observation(request, value):
+def validate_observation(request, value, *, retained=False):
     object_fields(value, {"request_id", "query", "source_url", "observed_at", "products", "candidate_refs"},
                   {"request_id", "query", "source_url", "observed_at", "products", "candidate_refs"})
     if value["request_id"] != request["request_id"] or value["query"] != request["query"]:
@@ -156,7 +156,8 @@ def validate_observation(request, value):
         raise ValueError("observation source must be a public MENY product/search URL")
     observed = timestamp(value["observed_at"])
     now = datetime.now(timezone.utc)
-    if not timestamp(request["emitted_at"]) <= observed <= now < timestamp(request["expires_at"]):
+    if (not timestamp(request["emitted_at"]) <= observed < timestamp(request["expires_at"])
+            or (not retained and not observed <= now < timestamp(request["expires_at"]))):
         raise ValueError("observation is stale, future-dated or outside its request lifetime")
     products = value["products"]
     if not isinstance(products, list) or len(products) > request["limit"]:
@@ -242,6 +243,8 @@ def inspect(root):
     root = existing_root(root)
     on_demand._read_file(root / "command.lock", 0)
     with file_lock(root / "command.lock"):
+        if os.path.lexists(root / "combination.json"):
+            return inspect_combination(root)
         request = load_request(root)
         if not os.path.lexists(root / "result.json"):
             return {"kind": "host_observed_plan", "dispatchable": False, "status": "incomplete",
@@ -249,25 +252,131 @@ def inspect(root):
         return retained_result(root, request)
 
 
+def accepted_observation(path, batch, required_ids):
+    root = existing_root(path)
+    on_demand._read_file(root / "command.lock", 0)
+    with file_lock(root / "command.lock"):
+        request = load_request(root)
+        if (request["batch"] != str(batch[0]) or request["menu_ref"] != batch[1]["menu_ref"]
+                or request["menu_sha256"] != batch[1]["menu_snapshot"]["sha256"]
+                or request["requirement_id"] not in required_ids):
+            raise ValueError("observation must belong to this exact frozen batch/menu")
+        result = retained_result(root, request)
+        if result.get("batch_ref") != request["menu_ref"]:
+            raise ValueError("retained observation result has a different menu binding")
+        data = on_demand._read_file(root / "observation.json", MAX_RESPONSE)
+        value = on_demand._json(data)
+        # Acceptance already bound the observation lifetime. Reading historical
+        # evidence does not refresh it or authorize any merchant action.
+        normalized = validate_observation(request, value, retained=True)
+        reference = {"root": str(root), "request_id": request["request_id"],
+                     "requirement_id": request["requirement_id"], "observation_sha256": digest(data),
+                     "request_sha256": digest(encoded(request)), "result_sha256": digest(encoded(result))}
+        return reference, normalized, value
+
+
+def combine(batch_path, root, value):
+    object_fields(value, {"observation_roots"}, {"observation_roots"})
+    paths = value["observation_roots"]
+    if (not isinstance(paths, list) or not 1 <= len(paths) <= 64
+            or any(not isinstance(p, str) or not p or len(p) > 2000 for p in paths)):
+        raise ValueError("observation_roots must contain 1 to 64 existing observation folders")
+    batch = batch_menu(batch_path)
+    required, _ = menu_requirements(batch[2])
+    required_ids = {r["requirement_id"] for r in required}
+    observations, approvals, references, provenance = {}, [], [], []
+    for path in paths:
+        reference, normalized, supplied = accepted_observation(path, batch, required_ids)
+        requirement_id = reference["requirement_id"]
+        if requirement_id in observations:
+            raise ValueError("only one accepted observation per requirement may be combined")
+        observations[requirement_id] = normalized
+        references.append(reference)
+        provenance.append({**reference, "source_url": supplied["source_url"],
+                           "observed_at": supplied["observed_at"]})
+        if supplied["candidate_refs"]:
+            approvals.append({"requirement_id": requirement_id,
+                              "candidate_refs": supplied["candidate_refs"], "search_query": supplied["query"]})
+    planned = build_product_plan(provider="meny", binding=batch[1]["menu_ref"], menu=batch[2],
+                                 observations=observations, candidate_approvals=approvals,
+                                 price_mode="exact", deadline=time.monotonic() + 20)
+    manifest = {"format": 1, "kind": "host_observed_menu_plan", "batch": str(batch[0]),
+                "menu_ref": batch[1]["menu_ref"], "menu_sha256": batch[1]["menu_snapshot"]["sha256"],
+                "observations": references}
+    output = {"kind": "host_observed_menu_plan", "dispatchable": False,
+              "batch_ref": batch[1]["menu_ref"], "combination_sha256": digest(encoded(manifest)),
+              "provenance": {"kind": "host_attested", "observations": provenance,
+                             "freshness": "retained evidence; not refreshed for dispatch"},
+              "status": "candidate_plan" if planned["status"] == "prepared" else "needs_input",
+              "requirements": planned["requirements"],
+              "unresolved_requirements": planned["unresolved_requirements"],
+              "candidate_totals": planned.get("totals"), "excluded_costs": planned["excluded_costs"],
+              "warnings": batch[1]["warnings"]}
+    if len(encoded(output)) > MAX_RESULT or len(encoded(manifest)) > MAX_RESPONSE:
+        raise ValueError("combined planning records exceed their byte limits")
+    root = Path(root).absolute()
+    if root.parent.resolve(strict=True) != root.parent:
+        raise ValueError("combined plan root parent must be canonical")
+    root.mkdir(mode=0o700)  # A new immutable snapshot, never an interrupted replay.
+    on_demand._sync_directory(root.parent)
+    with file_lock(root / "command.lock"):
+        exclusive_json(root / "combination.json", manifest, MAX_RESPONSE)
+        exclusive_json(root / "result.json", output, MAX_RESULT)
+    return output
+
+
+def inspect_combination(root):
+    data = on_demand._read_file(root / "combination.json", MAX_RESPONSE)
+    manifest = on_demand._json(data)
+    object_fields(manifest, {"format", "kind", "batch", "menu_ref", "menu_sha256", "observations"},
+                  {"format", "kind", "batch", "menu_ref", "menu_sha256", "observations"})
+    if manifest["format"] != 1 or manifest["kind"] != "host_observed_menu_plan":
+        raise ValueError("unsupported combined plan")
+    batch = batch_menu(manifest["batch"])
+    if batch[1]["menu_ref"] != manifest["menu_ref"] or batch[1]["menu_snapshot"]["sha256"] != manifest["menu_sha256"]:
+        raise ValueError("original combined batch/menu binding changed")
+    required, _ = menu_requirements(batch[2])
+    ids = {r["requirement_id"] for r in required}
+    references = manifest["observations"]
+    if not isinstance(references, list) or not 1 <= len(references) <= 64:
+        raise ValueError("invalid retained observation references")
+    seen = set()
+    for reference in references:
+        actual, _, _ = accepted_observation(reference["root"], batch, ids)
+        if actual != reference or actual["requirement_id"] in seen:
+            raise ValueError("original combined observation binding changed")
+        seen.add(actual["requirement_id"])
+    if not os.path.lexists(root / "result.json"):
+        return {"kind": "host_observed_menu_plan", "dispatchable": False, "status": "incomplete",
+                "message": "No completed result; no replay performed."}
+    result = on_demand._json(on_demand._read_file(root / "result.json", MAX_RESULT))
+    if (not isinstance(result, dict) or result.get("kind") != manifest["kind"]
+            or result.get("batch_ref") != manifest["menu_ref"] or result.get("dispatchable") is not False
+            or result.get("combination_sha256") != digest(data)):
+        raise ValueError("retained combined result is missing or changed")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("requirements", "request", "plan", "inspect"))
+    parser.add_argument("action", choices=("requirements", "request", "plan", "combine", "inspect"))
     parser.add_argument("--batch", type=Path)
     parser.add_argument("--root", type=Path)
     args = parser.parse_args()
     try:
-        if args.action in {"requirements", "request"} and args.batch is None:
+        if args.action in {"requirements", "request", "combine"} and args.batch is None:
             raise ValueError("this command requires --batch")
         if args.action != "requirements" and args.root is None:
             raise ValueError("this command requires --root")
-        if args.action in {"request", "plan"}:
+        if args.action in {"request", "plan", "combine"}:
             data = sys.stdin.buffer.read(MAX_RESPONSE + 1)
             if len(data) > MAX_RESPONSE:
                 raise ValueError("input exceeds its byte limit")
             value = on_demand._json(data)
         result = (requirements(args.batch) if args.action == "requirements"
                   else issue_request(args.batch, args.root, value) if args.action == "request"
-                  else plan(args.root, value) if args.action == "plan" else inspect(args.root))
+                  else plan(args.root, value) if args.action == "plan"
+                  else combine(args.batch, args.root, value) if args.action == "combine" else inspect(args.root))
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, allow_nan=False))
         return 0
     except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
