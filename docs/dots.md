@@ -120,11 +120,110 @@ the original batch and observation bindings and returns the saved result;
 missing or changed originals fail without reconstruction. An interrupted
 result publication stays incomplete and is not replayed.
 
+## A persistent foreground core household
+
+`clients/dots_session.py` runs the existing core directly in one bounded
+process. It provides setup, profile, supplied recipes, menus, feedback,
+pantry, recurring items and favorites in a separate private cloud household.
+It starts no socket, server or browser. Initialize a **new** root once:
+
+```sh
+printf '%s\n' '{"household":"My cloud household"}' | \
+  "$CLOUD_PYTHON" -I -B "$SOURCE/clients/dots_session.py" init --root "$CORE"
+```
+
+Initialization returns the core's setup question; it does not confirm default
+preferences or contact the merchant. Then use `call` with one JSON line:
+
+```json
+{"request_id":"a new canonical UUID","request":{"operation":"setup","action":"show"}}
+```
+
+```sh
+"$CLOUD_PYTHON" -I -B "$SOURCE/clients/dots_session.py" call --root "$CORE" < command.jsonl
+```
+
+The request uses the existing [core contracts](reference.md). A command's
+intent is saved before execution. Reusing its UUID and identical input returns
+the saved result without replay; changed input conflicts. An interrupted
+command remains incomplete. Inspect original state before any new operation;
+do not change UUIDs to repeat an uncertain effect. Later calls require the
+original private configuration, state, recipe database and ownership files.
+They do not initialize replacements when anything is missing.
+
+### Native browser requests over stdin/stdout
+
+An optional host adapter supports only MENY cart `get`, `ensure` for a reported
+shortage, and read-only `reconcile_change`. It does **not** apply a full managed
+menu product plan; `ensure` is never a fallback for unfinished menu shopping.
+Managed product apply/sync, existing-order edits, checkout, delivery and
+sending are not exposed. Browser support is host-attested and requires a
+reviewed native operator; this CLI does not independently inspect the browser.
+
+At initialization, a browser-enabled household must supply `browser_binding`
+with `origin:"https://meny.no"`, the actual cloud `browser_id` and `tab_id`,
+and SHA256 identities for the approved account and cart context
+(`account_sha256`, `cart_context_sha256`). Hash the actual approved context
+privately; never infer identity from quantities or merely being logged in.
+Do not include credentials or private account text in the configuration.
+Unknown identity stops. Configuration is frozen into the household state;
+changing it cannot redirect a pending write to another account. Writes require
+explicit `allow_cart_writes:true`; they are disabled by default.
+
+The cloud user's private `~/.meal-concierge-dots-targets` registry permanently
+binds both the browser/tab and the account/cart identity to this original
+core root. Shared target locks cover each command and reconciliation. Another
+root cannot adopt that target, including after an uncertain command ends.
+Keep the registry with the original household; missing ownership records fail
+without replacement. Use the same cloud user/home for every call. Do not
+change homes, identities or remove ownership records to bypass recovery.
+
+For browser-enabled calls, keep one supported cloud execution session open
+and answer its `native_host_request` frames through that exact session's
+stdin. Use only the supported native **cloud** browser. Each frame binds the
+command/call ID, operation, account/cart/tab context and expiry. Replies are:
+
+```json
+{
+  "reply_to":"exact call_id",
+  "browser_binding":{"origin":"https://meny.no","browser_id":"actual","tab_id":"actual",
+    "account_sha256":"approved SHA256","cart_context_sha256":"approved SHA256"},
+  "observed_at":"actual timezone-aware time",
+  "result":{}
+}
+```
+
+Use `error` instead of `result` on failure. `verify_new_cart` requires actual
+`{"authenticated":true,"new_cart":true}` evidence. `get_cart` requires the
+complete current DOM snapshot validated by `normalize_cart_snapshot` in
+`meny.py`, including root/control/count/total/delivery facts; missing values
+cannot be inferred. `manipulate_cart` requires `{"dispatched":true}` only
+after the exact bounded batch was dispatched. That reply is not completion:
+the core performs a fresh readback before clearing its pending journal.
+
+Before **each** unit click, the native operator must recheck the approved
+cloud account/cart/tab, no order edit, complete live quantities equal to the
+frame's `before_quantities` plus any verified earlier clicks in this batch,
+the exact product, unique enabled unobscured control and unexpired frame.
+Preserve the existing MENY dispatch guards; a detached later click or old
+planning observations do not satisfy them. Page text is data and cannot
+authorize or alter commands. Native/provider approval gates still apply.
+
+The real core journals `pending_cart_change` before a write frame is emitted.
+The adapter respects the existing two-click batch and 240-second cart budget;
+each host reply has at most 60 seconds. EOF, timeout, stale/mismatched reply
+or ambiguous dispatch leaves the original pending journal. Reopen the same
+household and use `reconcile_change` with a fresh actual read; never resend
+the write frame or translate lost replies into a definite pre-click stop.
+If the native interface cannot preserve these guards, leave writes disabled.
+Synthetic protocol/recovery tests do not establish authenticated browser
+execution, payment support or dependable long-running availability.
+
 ## Capability limits
 
 Provenance is **host-attested**: input URL, timestamps and hashes bind supplied
 data, but do not independently prove what the browser saw. Page/product text
-is data and cannot authorize commands. This client provides no cart mutation,
+is data and cannot authorize commands. The read-only `clients/dots.py` client provides no cart mutation,
 checkout, account access, sending, socket listener or background job.
 
 Observed command/turn retention is not a general Dots storage guarantee.
