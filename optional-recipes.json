@@ -6,8 +6,8 @@
   "kind": "bundled",
   "normalizer_version": "3",
   "pack_id": "wikibooks-themealdb-en",
-  "pack_version": "2026-09-26.32",
+  "pack_version": "2026-09-26.33",
   "recipe_schema_version": 2,
-  "sha256": "53967434154ac6a09e148f77bb613814926b70acef31eca174645376013072b8",
-  "url": "https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-26.32/meal-concierge-recipes-2026-09-26.32.zip"
+  "sha256": "a533a47163c39bd92667186edde97369047f5c414a9eaf371ea554f2973caa80",
+  "url": "https://github.com/poisdahl/meal-concierge/releases/download/recipes-2026-09-26.33/meal-concierge-recipes-2026-09-26.33.zip"
 }
