@@ -282,16 +282,26 @@ class DotsSessionTests(unittest.TestCase):
 
     def test_native_search_rejects_selected_card_as_ranked_scope(self):
         request = self.managed_request()
-        def selected_card(frame):
-            reply = self.host(frame)
-            if frame["operation"] == "product_search":
-                reply["result"]["semantics"] = "selected_card"
-            return reply
-        code, result = self.call({"operation": "products", "action": "prepare",
-                                  "menu_ref": request["menu_ref"]}, host=selected_card)
-        self.assertEqual(code, 0, result)
-        self.assertNotEqual(result["result"]["product_plan"]["status"], "prepared")
-        self.assertEqual(self.writes, 0)
+        for invalid in ("selected_card", PRODUCT + "?other=1", "/varer/../havregryn-1234567890123",
+                        "/varer/%2e%2e/havregryn-1234567890123", "/varer/%bad%/havregryn-1234567890123"):
+            with self.subTest(invalid_search_scope_or_path=invalid):
+                def selected_card(frame):
+                    reply = self.host(frame)
+                    if frame["operation"] == "product_search":
+                        if invalid == "selected_card":
+                            reply["result"]["semantics"] = invalid
+                        else:
+                            reply["result"]["products"][0]["product_id"] = invalid
+                    return reply
+                code, result = self.call({"operation": "products", "action": "prepare",
+                                          "menu_ref": request["menu_ref"],
+                                          "candidate_approvals": request["candidate_approvals"]}, host=selected_card)
+                self.assertEqual(code, 0, result)
+                plan = result["result"]["product_plan"]
+                self.assertNotEqual(plan["status"], "prepared")
+                self.assertIn("provider_search_unavailable_or_scope_changed",
+                              [row["reason"] for row in plan["unresolved_requirements"]])
+                self.assertEqual(self.writes, 0)
 
     def test_core_recipe_menu_and_command_recovery_without_provider(self):
         recipe = {"name": "Synthetic oats", "portions": 2,

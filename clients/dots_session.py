@@ -185,6 +185,7 @@ class NativeHost:
                     raise HouseholdError("original managed menu/product-plan intent is required")
                 managed = {"command_id": self.command_id, "request": deepcopy(self.request),
                            "menu_ref": deepcopy(plan["menu_ref"]), "product_plan_digest": digest,
+                           "context_digest": self.app._product_current_context(state),
                            "initial_plan": deepcopy(plan), "initial": before, "verified": before}
             state["pending_cart_change"] = {
                 "provider": "meny", "order_change": None, "operations": deepcopy(operations),
@@ -275,6 +276,15 @@ class NativeHost:
                     or type(result.get("heading_count")) is not int or result["heading_count"] != 1
                     or not isinstance(result.get("products"), list) or len(result["products"]) > size):
                 raise HouseholdError("native product search scope or rendered results changed")
+            for product in result["products"]:
+                path = product.get("product_id") if isinstance(product, dict) else None
+                if (not isinstance(path, str)
+                        or re.fullmatch(r"/varer/[A-Za-z0-9._~%/-]+-[0-9]{4,14}", path) is None):
+                    raise HouseholdError("native search product requires an exact public product path")
+                try:
+                    dots.public_path(path)
+                except ValueError as exc:
+                    raise HouseholdError(str(exc)) from exc
             normalized = normalize_meny_product_search(result)
             normalized["scope"]["requested_size"] = size
             return normalized

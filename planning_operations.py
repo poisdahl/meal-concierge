@@ -5261,10 +5261,10 @@ class PlanningOperations:
                 or plan.get("product_plan_digest") != managed["product_plan_digest"]):
             return False
         try:
-            authority = self._full_seed_authority(plan, managed["menu_ref"])
+            self._full_seed_authority(plan, managed["menu_ref"])
         except HouseholdError:
             return False
-        return authority.get("context") == self._product_current_context(state)
+        return managed["context_digest"] == self._product_current_context(state)
 
     def _complete_native_managed_write(self, pending, quantities, names):
         with self.store.locked() as state:
