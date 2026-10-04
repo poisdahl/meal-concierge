@@ -251,6 +251,15 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
                 candidate = candidate[:-len(suffix)]
                 break
         parsed = _strict_package(candidate)
+        if parsed is None:
+            # Observed onions declare both pieces and total mass in one stocking.
+            pieces_mass = re.fullmatch(rf"Gul ([1-9]\d*)stk ({_NUMBER})g Strømpe", text)
+            if pieces_mass is not None:
+                pieces = _canonical_quantity(pieces_mass[1], "stk")
+                size = _canonical_quantity(pieces_mass[2], "g")
+                if pieces is not None and size is not None:
+                    parsed = size
+                    contained_count = pieces[0].numerator
     elif provider in {"oda", "mathem"} and parsed is None:
         segments = [segment.strip() for segment in text.split(", ")]
         if len(segments) == 2 and _ODA_PERCENT_PREFIX.fullmatch(segments[0]):

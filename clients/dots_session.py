@@ -100,6 +100,38 @@ def configuration(value):
     return value
 
 
+def cart_writes_enabled(config, state):
+    enabled = state.get("native_cart_writes_enabled", config.get("allow_cart_writes", False))
+    if type(enabled) is not bool:
+        raise ValueError("original native cart write policy is invalid")
+    return enabled
+
+
+def validate_cart_policy(request, config):
+    if request.get("action") == "show":
+        dots.object_fields(request, {"operation", "action"}, {"operation", "action"})
+    elif request.get("action") == "set":
+        fields = {"operation", "action", "enabled", "browser_binding"}
+        dots.object_fields(request, fields, fields)
+        if type(request["enabled"]) is not bool:
+            raise ValueError("native cart write policy requires an explicit boolean")
+        if config.get("browser_binding") is None or request["browser_binding"] != config["browser_binding"]:
+            raise ValueError("native cart write policy requires the exact original browser/account/cart binding")
+    else:
+        raise ValueError("native cart write policy supports only show or set")
+
+
+def cart_policy(store, config, request):
+    with store.locked() as state:
+        if state.get("native_config_sha256") != dots.digest(dots.encoded(config)):
+            raise ValueError("original native configuration binding changed")
+        if request["action"] == "set":
+            if request["enabled"] and state.get("pending_cart_change"):
+                raise ValueError("reconcile the original pending cart change before enabling writes")
+            state["native_cart_writes_enabled"] = request["enabled"]
+        return {"enabled": cart_writes_enabled(config, state)}
+
+
 class NativeHost:
     def __init__(self, store, config, reader, command_id, deadline):
         self.store, self.config, self.reader = store, config, reader
@@ -131,9 +163,9 @@ class NativeHost:
                  "browser_binding": binding, "emitted_at": now.isoformat(), "expires_at": expires.isoformat(),
                  "effect": "cart_write" if write else "read"}
         if write:
-            if not self.config.get("allow_cart_writes"):
-                raise HouseholdError("native cart writes are disabled in this private configuration")
             with self.store.locked() as state:
+                if not cart_writes_enabled(self.config, state):
+                    raise HouseholdError("native cart writes are disabled in this private household")
                 pending = state.get("pending_cart_change")
                 if (not pending or pending.get("provider") != "meny" or pending.get("order_change")
                         or pending.get("operations") != arguments.get("operations")
@@ -288,7 +320,7 @@ def command(root, value, reader):
     if not isinstance(command_id, str) or str(uuid.UUID(command_id)) != command_id:
         raise ValueError("request_id must be a canonical UUID")
     request = value["request"]
-    if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS
+    if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "reconcile_change"})):
         raise ValueError("unsupported foreground core operation; no checkout, delivery or managed cart apply")
     root = dots.existing_root(root)
@@ -296,8 +328,8 @@ def command(root, value, reader):
     with file_lock(root / "command.lock"):
         config_data = on_demand._read_file(root / "config.json", MAX_LINE)
         config = configuration(on_demand._json(config_data))
-        if request.get("operation") == "cart" and request.get("action") == "ensure" and not config.get("allow_cart_writes"):
-            raise ValueError("native cart writes are disabled; no intent or browser operation started")
+        if request["operation"] == "native_cart_policy":
+            validate_cart_policy(request, config)
         record = {"input": value, "config_sha256": dots.digest(config_data)}
         calls = dots.existing_root(root / "calls")
         target = calls / command_id
@@ -315,13 +347,16 @@ def command(root, value, reader):
         saved = on_demand._json(on_demand._read_file(state / "state.json", on_demand.MAX_MENU))
         if saved.get("native_config_sha256") != dots.digest(config_data):
             raise ValueError("original native configuration binding changed; no replacement account/context")
+        if request.get("operation") == "cart" and request.get("action") == "ensure" and not cart_writes_enabled(config, saved):
+            raise ValueError("native cart writes are disabled; no intent or browser operation started")
         target.mkdir(mode=0o700)
         on_demand._sync_directory(calls)
         dots.exclusive_json(target / "intent.json", record, MAX_LINE)
         try:
             stack, app = application(root, config, reader, command_id, time.monotonic() + 240)
             with stack:
-                result = app.handle(request)
+                result = (cart_policy(app.store, config, request) if request["operation"] == "native_cart_policy"
+                          else app.handle(request))
                 output = {"ok": True, "result": result}
         except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
             output = {"ok": False, "error": str(exc)}

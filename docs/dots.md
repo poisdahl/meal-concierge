@@ -166,9 +166,37 @@ and SHA256 identities for the approved account and cart context
 (`account_sha256`, `cart_context_sha256`). Hash the actual approved context
 privately; never infer identity from quantities or merely being logged in.
 Do not include credentials or private account text in the configuration.
+The native operator may bind actual unmasked signed-in email and phone fields
+as a conservative account fingerprint, with a recorded deterministic private
+canonicalization rule; missing, ambiguous or changed fields stop. This is an
+observed account context, not an immutable merchant account identifier. The
+same account's logical new cart can be bound using the existing MENY gate:
+exact origin and `/varer`, no query/hash, one authenticated control and cart
+root, zero active order codes and zero abort-edit controls. No merchant cart ID
+is required. Exclude quantities, timestamps and browser/tab IDs from that
+context fingerprint; the browser/tab has its separate binding.
 Unknown identity stops. Configuration is frozen into the household state;
 changing it cannot redirect a pending write to another account. Writes require
-explicit `allow_cart_writes:true`; they are disabled by default.
+an explicit policy; they are disabled by default. `allow_cart_writes` sets the
+initial policy. Start with it false for read-only onboarding. After the native
+context and dispatch checks are verified and writes are explicitly authorized,
+use the original household's receipt-bearing `call` interface:
+
+```json
+{"request_id":"a new canonical UUID","request":{"operation":"native_cart_policy","action":"set","enabled":true,"browser_binding":{"origin":"https://meny.no","browser_id":"original cloud browser","tab_id":"original cloud tab","account_sha256":"original SHA256","cart_context_sha256":"original SHA256"}}}
+```
+
+Supply the exact original binding. This changes only the write policy in the
+original configuration-bound state, under the existing root, target and state
+locks. It preserves configuration, registry ownership and prior receipts.
+Enabling stops while a cart change is pending; reconcile that original change
+first. The same operation with `enabled:false` stops new writes without
+clearing a pending journal or disabling read-only reconciliation.
+`{"operation":"native_cart_policy","action":"show"}` reports the current
+policy. A lost policy-command ending is not permission to replay it: inspect
+the original policy and receipt. Saved command results remain retrievable after
+disabling writes. Enabling grants no checkout capability and does not replace
+native/provider approval or the required browser checks.
 
 The cloud user's private `~/.meal-concierge-dots-targets` registry permanently
 binds both the browser/tab and the account/cart identity to this original

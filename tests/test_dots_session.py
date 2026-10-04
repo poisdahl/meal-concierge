@@ -299,6 +299,93 @@ class DotsSessionTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertEqual(self.writes, 1)
 
+    def test_read_first_policy_enables_original_household_without_rebinding(self):
+        self.root = self.root.parent / "read-first-core"
+        self.binding = {**self.binding, "tab_id": "synthetic-read-first-tab",
+                        "account_sha256": "c" * 64, "cart_context_sha256": "d" * 64}
+        config = {**self.config, "browser_binding": self.binding, "allow_cart_writes": False}
+        code, result = self.run_session("init", config)
+        self.assertEqual(code, 0, result)
+        code, result = self.call({"operation": "setup", "action": "apply", "keep_current": True})
+        self.assertEqual(code, 0, result)
+        original_config = (self.root / "config.json").read_bytes()
+        registry = self.home / ".meal-concierge-dots-targets"
+        original_owners = {p.name: p.read_bytes() for p in registry.glob("*.json")}
+        original_digest = self.state()["native_config_sha256"]
+        code, result = self.call({"operation": "cart", "action": "get"})
+        self.assertEqual(code, 0, result)
+        before = self.files()
+        code, result = self.call(self.ensure())
+        self.assertEqual(code, 1, result)
+        self.assertEqual(before, self.files())
+        frames = list(self.frames)
+        policy = {"operation": "native_cart_policy", "action": "set", "enabled": True,
+                  "browser_binding": self.binding}
+        command_id = str(uuid.uuid4())
+        code, granted = self.call(policy, command_id)
+        self.assertEqual(code, 0, granted)
+        self.assertEqual(granted["result"], {"enabled": True})
+        self.assertEqual(frames, self.frames)
+        self.assertEqual((self.root / "config.json").read_bytes(), original_config)
+        self.assertEqual({p.name: p.read_bytes() for p in registry.glob("*.json")}, original_owners)
+        self.assertEqual(self.state()["native_config_sha256"], original_digest)
+        code, result = self.call(self.ensure())
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.writes, 1)
+        before = self.files()
+        code, cached = self.call(policy, command_id)
+        self.assertEqual(code, 0, cached)
+        self.assertEqual(granted, cached)
+        self.assertEqual(before, self.files())
+
+    def test_disabled_policy_preserves_pending_reconciliation_and_cached_ending(self):
+        def lose_write(frame):
+            reply = self.host(frame)
+            return None if frame["operation"] == "manipulate_cart" else reply
+        command_id = str(uuid.uuid4())
+        code, uncertain = self.call(self.ensure(), command_id, lose_write)
+        self.assertEqual(code, 1, uncertain)
+        pending = self.state()["pending_cart_change"]
+        policy = {"operation": "native_cart_policy", "action": "set", "enabled": False,
+                  "browser_binding": self.binding}
+        code, result = self.call(policy)
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.state()["pending_cart_change"], pending)
+        code, result = self.call({**policy, "enabled": True})
+        self.assertEqual(code, 1, result)
+        self.assertIn("reconcile", result["error"])
+        self.assertFalse(self.state()["native_cart_writes_enabled"])
+        before = self.files()
+        frames = list(self.frames)
+        code, cached = self.call(self.ensure(), command_id)
+        self.assertEqual(code, 1, cached)
+        self.assertEqual(cached, uncertain)
+        self.assertEqual(before, self.files())
+        code, result = self.call(self.ensure(2))
+        self.assertEqual(code, 1, result)
+        self.assertEqual(before, self.files())
+        self.assertEqual(self.frames, frames)
+        code, result = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 0, result)
+        self.assertNotIn("pending_cart_change", self.state())
+        self.assertEqual(self.writes, 1)
+        code, result = self.call({**policy, "enabled": True})
+        self.assertEqual(code, 0, result)
+        code, result = self.call({"operation": "native_cart_policy", "action": "show"})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["result"], {"enabled": True})
+
+    def test_policy_rejects_wrong_binding_and_non_boolean_without_intent(self):
+        policy = {"operation": "native_cart_policy", "action": "set", "enabled": False,
+                  "browser_binding": self.binding}
+        before = self.files()
+        for request in ({**policy, "enabled": 1},
+                        {**policy, "browser_binding": {**self.binding, "account_sha256": "c" * 64}}):
+            code, result = self.call(request)
+            self.assertEqual(code, 1, result)
+            self.assertEqual(before, self.files())
+        self.assertEqual(self.frames, [])
+
     def test_interactive_terminal_accepts_long_json_and_restores_input_mode(self):
         master, slave = os.openpty()
         original = termios.tcgetattr(slave)

@@ -122,6 +122,48 @@ def prepared(menu_value: dict, candidates: list[dict], *, max_excess: dict | Non
 
 
 class ProductObservationTests(unittest.TestCase):
+    def test_meny_onion_label_preserves_piece_count_and_total_mass(self):
+        self.assertEqual(parse_package("Gul 2stk 450g Strømpe", provider="meny"), {
+            "quantity": {"numerator": 450, "denominator": 1},
+            "unit": "g", "item_count": 1, "contained_count": 2,
+        })
+        for label in (
+            "Gul 2stk ca. 450g Strømpe", "Gul 2stk rundt 450g Strømpe",
+            "Gul 2stk 450g per stk Strømpe", "Gul 2stk 450g Strømpe 500g",
+            "Gul 2stk 450g variabel vekt Strømpe", "Gul 0stk 450g Strømpe",
+            "Gul 2,5stk 450g Strømpe", "Gul 2stk 0g Strømpe",
+            "Gul 10000000000000stk 450g Strømpe",
+        ):
+            with self.subTest(label=label):
+                self.assertIsNone(parse_package(label, provider="meny"))
+        for provider in ("oda", "mathem", None):
+            self.assertIsNone(parse_package("Gul 2stk 450g Strømpe", provider=provider))
+
+        observed = normalize_meny_product_search({
+            "provider": "meny", "query": "gul løk", "products": [{
+                "product_id": "/varer/fixture/product-700000000011",
+                "name": "Løk", "package": "Gul 2stk 450g Strømpe",
+                "price": "22,90 kr", "detail_price": "22,90 kroner.",
+                "deposit_status": "none", "available": True,
+            }],
+        }, observed_at=OBSERVED_AT)
+        for required, unit, count, coverage in (("0.5", "count", 1, 2), (500, "g", 2, 900)):
+            with self.subTest(unit=unit):
+                shopping = menu({"item": "finhakket løk", "quantity": required, "unit": unit})
+                requirement = menu_requirements(shopping)[0][0]
+                plan = build_product_plan(
+                    provider="meny", binding={"kind": "saved_menu"}, menu=shopping,
+                    observations={requirement["requirement_id"]: observed},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"],
+                        "candidate_refs": [observed["products"][0]["product_ref"]],
+                    }],
+                )
+                self.assertEqual(plan["status"], "prepared")
+                selected = plan["requirements"][0]["selection"]
+                self.assertEqual(selected["package_count"], count)
+                self.assertEqual(selected["coverage"], {"numerator": coverage, "denominator": 1})
+
     def test_meny_display_sizes_survive_brand_text_and_cover_recipe_quantities(self):
         for label, amount, unit in (
             ("40g pakke", 40, "g"),
