@@ -257,6 +257,8 @@ def application(root, config, reader, command_id, deadline, *, new=False):
                 saved["native_config_sha256"] = dots.digest(dots.encoded(config))
         host = NativeHost(store, config, reader, command_id, deadline)
         app = Application(store, host, None, external_recipe_sources={})
+        if new:
+            app.recipes.search(limit=1)  # The core opens SQLite lazily; create the original bank once.
         return stack, app
     except BaseException:
         stack.close()
