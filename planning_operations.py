@@ -17,7 +17,7 @@ import secrets
 import time
 from typing import Any, Mapping
 from core import HouseholdError, cart_summary
-from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyCartStoppedError
+from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
 from recipe_selection import history_source_index, family_history_usage, compact_candidate
@@ -2547,14 +2547,16 @@ class PlanningOperations:
                 checked = {key: self._checked_product_observation(result[requested[key]], self.provider, requested[key])
                            for key in keys}
                 cache.update(checked)
-            except HouseholdError:
+            except HouseholdError as exc:
                 for key in keys:
-                    failed[key] = "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"
+                    failed[key] = {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"}
+                    if isinstance(exc, MenyBrowserError) and exc.provider_failure:
+                        failed[key]["provider_failure"] = exc.provider_failure
         observations = {}
         for requirement, hints, key in rows:
             if key not in cache:
-                observations[requirement["requirement_id"]] = {"unavailable_reason": failed.get(key,
-                    "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_pending")}
+                observations[requirement["requirement_id"]] = deepcopy(failed.get(key,
+                    {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_pending"}))
                 continue
             normalized = self._checked_product_observation(cache[key], self.provider, requested[key])
             if hints:

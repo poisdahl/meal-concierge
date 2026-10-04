@@ -18,7 +18,7 @@ from pydantic import Field
 
 # Keep isolated Python launches able to import the adjacent transport.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rpc_client import ServiceError, rpc as service_rpc, rpc_timeout, host_email_sender
+from rpc_client import ServiceError, rpc as service_rpc, rpc_timeout, host_email_sender, normalize_provider_failure
 from agent_views import (
     MCP_MENU_WIRE_BUDGET,
     _bounded_detail,
@@ -258,7 +258,8 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     except ServiceError as exc:
         # A rejected business operation is a usable service response, not an
         # unreachable MCP server. Keep real transport failures as tool errors.
-        return {"ok": False, "status": "rejected", "error": str(exc)}
+        return {"ok": False, "status": "rejected", "error": str(exc),
+                **({"provider_failure": exc.provider_failure} if exc.provider_failure else {})}
 
 
 def _agent_text(result: dict[str, Any]) -> Any:
@@ -1168,6 +1169,9 @@ def _compact_product_issue(
         for key in ("requirement_id", "reason", "repair")
         if key in issue
     }
+    diagnostic = normalize_provider_failure(issue.get("provider_failure"))
+    if diagnostic:
+        compact["provider_failure"] = diagnostic
     requirement_ids = issue.get("requirement_ids")
     if isinstance(requirement_ids, list):
         compact["requirement_ids"] = requirement_ids[:64]
@@ -1359,7 +1363,10 @@ def _issues_only_product_result_projection(
         "product_plan": plan,
         "next": (
             "In candidate_search, query='$item' means the exact item field in that same row. "
-            "Use any compact candidates shown; when candidates is empty or unsuitable, call "
+            "Unavailable, pending or deadline search issues leave matching and price unverified; "
+            "do not treat them as empty catalogs or automatically repeat failed reads. "
+            "Preserve the menu and resolved choices and report the observed failure. "
+            "For successful searches, use any compact candidates shown; when candidates is empty or unsuitable, call "
             "meal_concierge_catalog action=products with query=row.item (or the returned literal "
             "query) for that requirement. Then correct candidate_approvals or price_mode and prepare "
             + ("with this exact product_plan_ref. " if continuation else

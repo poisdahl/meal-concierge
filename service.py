@@ -64,7 +64,7 @@ from retail_mcp import (
     oda_cart_delivery_window,
     retail_delivery_slot_date,
 )
-from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MENY_ORDER_TIMEOUT, MENY_READ_TIMEOUT, MenyClient, MenyOrderChangeDispatchError, meny_checkout_reviews_match, normalize_product_ref
+from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MENY_ORDER_TIMEOUT, MENY_READ_TIMEOUT, MenyBrowserError, MenyClient, MenyOrderChangeDispatchError, meny_checkout_reviews_match, normalize_product_ref
 from agent_views import project_agent_result
 from recipes import RecipeError, RecipeStore, normalize_recipe, normalize_source_url, recipe_key, scale_recipe, validate_week
 from planner import (
@@ -1111,6 +1111,8 @@ class Server:
                 response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
             except (HouseholdError, TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as exc:
                 response = {"ok": False, "error": str(exc)}
+                if isinstance(exc, MenyBrowserError) and exc.provider_failure:
+                    response["provider_failure"] = exc.provider_failure
             try:
                 encoded = (json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n").encode()
                 if len(encoded) > MAX_REQUEST:

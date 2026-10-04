@@ -32,6 +32,7 @@ from core import (
     validate_delivery_slot,
 )
 from product_observations import normalize_meny_product_search
+from rpc_client import normalize_provider_failure
 
 
 class MenyOrderChangeDispatchError(HouseholdError):
@@ -114,8 +115,75 @@ MAX_CART_CLICKS = 2
 MENY_VIEWPORT = (1280, 900)
 
 
-class _BrowserTransportError(HouseholdError):
+class MenyBrowserError(HouseholdError):
+    def __init__(self, message: str, *, failure_class: str | None = None,
+                 source: str | None = None):
+        super().__init__(message)
+        self.provider_failure = normalize_provider_failure({
+            "provider": "meny", "class": failure_class, "source": source,
+            "phase": {"local_timeout": "local_wait", "local_spawn": "local_spawn"}.get(
+                source, "adapter_invocation"),
+            "daemon_request_ending": "unknown",
+        })
+
+
+class _BrowserTransportError(MenyBrowserError):
     pass
+
+
+def _browser_failure_class(error: str, fallback: str) -> str:
+    text = error[:4096].strip().casefold()
+    for prefix, code in (
+        ("failed to connect:", "client_connect_failed"),
+        ("failed to send:", "client_send_failed"),
+        ("failed to read:", "client_read_failed"),
+        ("invalid response:", "client_invalid_response"),
+        ("cdp command timed out:", "cdp_timeout_reported"),
+        ("cdp response channel closed", "cdp_channel_closed_reported"),
+        ("operation timed out.", "operation_timeout_reported"),
+    ):
+        if text.startswith(prefix):
+            return code
+    if any(marker in text for marker in (
+        "tab is not responding", "browser is not connected",
+        "failed to connect to browser", "connection refused",
+    )):
+        return "browser_unavailable_reported"
+    return fallback
+
+
+@contextmanager
+def _bounded_browser_stderr():
+    """Drain stderr without backpressure or retaining more than a 4 KiB prefix."""
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    prefix = bytearray()
+    stopped = threading.Event()
+
+    def drain() -> None:
+        while True:
+            try:
+                chunk = os.read(read_fd, 4096)
+            except BlockingIOError:
+                if stopped.is_set():
+                    return
+                stopped.wait(0.01)
+                continue
+            if not chunk:
+                return
+            prefix.extend(chunk[:max(0, 4096 - len(prefix))])
+            if stopped.is_set():
+                return
+
+    reader = threading.Thread(target=drain)
+    reader.start()
+    try:
+        yield write_fd, prefix
+    finally:
+        os.close(write_fd)
+        stopped.set()
+        reader.join()
+        os.close(read_fd)
 
 
 class _DeliveryReservationError(HouseholdError):
@@ -3789,34 +3857,39 @@ raise SystemExit(0 if poller.poll(int(wait_text)) else 3)
             if value := os.environ.get(name):
                 environment[name] = value
 
-        def drop_privileges() -> None:
-            os.setgroups([])
-            os.setgid(self.gid)
-            os.setuid(self.uid)
-
+        privileges = {"user": self.uid, "group": self.gid, "extra_groups": []} if os.geteuid() == 0 else {}
         try:
-            completed = subprocess.run(
-                command,
-                input=stdin,
-                stdin=subprocess.DEVNULL if stdin is None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=timeout,
-                check=False,
-                preexec_fn=drop_privileges if os.geteuid() == 0 else None,
-                env=environment,
-            )
+            with _bounded_browser_stderr() as (stderr_fd, stderr_prefix):
+                completed = subprocess.run(
+                    command,
+                    input=stdin,
+                    stdin=subprocess.DEVNULL if stdin is None else None,
+                    stdout=subprocess.PIPE,
+                    stderr=stderr_fd,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    env=environment,
+                    **privileges,
+                )
         except subprocess.TimeoutExpired as exc:
-            raise _BrowserTransportError("MENY browser is unavailable") from exc
+            raise _BrowserTransportError("MENY browser is unavailable", failure_class="local_timeout",
+                                         source="local_timeout") from exc
         except OSError as exc:
-            raise HouseholdError("MENY browser is unavailable") from exc
+            raise MenyBrowserError("MENY browser is unavailable", failure_class="local_spawn_failed",
+                                   source="local_spawn") from exc
+        stderr = stderr_prefix.decode("utf-8", errors="replace")
         try:
             envelope = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
+            source = "adapter_stderr" if stderr.strip() else "invalid_stdout"
+            code = _browser_failure_class(stderr, "adapter_exit_failed" if completed.returncode else "adapter_response_invalid")
             if completed.returncode != 0:
-                raise HouseholdError("MENY browser operation failed") from exc
-            raise HouseholdError("MENY browser response is malformed") from exc
+                raise MenyBrowserError("MENY browser operation failed", failure_class=code, source=source) from exc
+            raise MenyBrowserError("MENY browser response is malformed", failure_class=code, source=source) from exc
+        if not isinstance(envelope, Mapping):
+            raise MenyBrowserError("MENY browser operation failed" if completed.returncode else "MENY browser response is malformed",
+                                   failure_class="adapter_response_invalid", source="invalid_stdout")
         error = str(envelope.get("error") or "").casefold() if isinstance(envelope, Mapping) else ""
         transport = any(marker in error for marker in (
             "tab is not responding",
@@ -3824,13 +3897,15 @@ raise SystemExit(0 if poller.poll(int(wait_text)) else 3)
             "failed to connect to browser",
             "connection refused",
         )) or error.startswith("cdp command timed out:")
+        source = "adapter_json_error" if error else "adapter_stderr" if stderr.strip() else "adapter_exit"
+        code = _browser_failure_class(error or stderr, "adapter_exit_failed" if completed.returncode else "adapter_rejected")
         if completed.returncode != 0:
             if transport:
-                raise _BrowserTransportError("MENY browser is unavailable")
-            raise HouseholdError("MENY browser operation failed")
+                raise _BrowserTransportError("MENY browser is unavailable", failure_class=code, source=source)
+            raise MenyBrowserError("MENY browser operation failed", failure_class=code, source=source)
         if envelope.get("success") is not True or not isinstance(envelope.get("data"), dict):
             if transport:
-                raise _BrowserTransportError("MENY browser is unavailable")
-            raise HouseholdError("MENY browser rejected the operation")
+                raise _BrowserTransportError("MENY browser is unavailable", failure_class=code, source=source)
+            raise MenyBrowserError("MENY browser rejected the operation", failure_class=code, source=source)
         self._require_time()
         return envelope["data"]

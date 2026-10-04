@@ -303,6 +303,16 @@ pizza sauce, soy sauce, a substitute or a brand is suitable. Use `selection_reas
 for a useful explanation and `search_query` for a better localized search. Do not
 invent `semantic_authorization` from the user for normal culinary choices.
 
+A successful bounded search with zero products is empty only for that query.
+Rejected, unavailable or deadline results leave matching, availability and price
+unverified; they are not proof that ingredients are out of stock or unmatchable.
+Report the observed store failure and preserve the menu, stock answers and
+resolved choices. Do not invent prices or repeat a failed matching campaign.
+When returned, `provider_failure` contains closed diagnostic facts; its adapter
+phase does not prove which daemon request ran or that an earlier request ended.
+Diagnostics grant no retry or write authority. Follow the existing authorized
+recovery and uncertain-write reconciliation rules before continuing.
+
 The service computes quantified coverage, package rounding and cost. For a
 practical package estimate, give `package_count` and an honest `quantity_basis`.
 For chicken thighs listed by piece while the store sells gram-labelled packs,

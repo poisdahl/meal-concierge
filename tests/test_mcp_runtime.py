@@ -59,12 +59,29 @@ def serve(root):
     from test_meal_concierge_mathem import MathemShop
     from core import StateStore
     from service import Application, Server, config
+    from test_meny_provider_diagnostics import fake_adapter, client_for, SECRET
+
+    # Dedicated synthetic adapter process; it never launches a browser or uses a store.
+    diagnostic_client = client_for(fake_adapter(root,
+        stdout=json.dumps({"success": False, "error": "Failed to read: " + SECRET}),
+        stderr="Failed to send: " + SECRET, invocation_log=root / 'diagnostic-invocations'))
 
     class Shop(MathemShop):
         def probe(self, **kwargs):
             return {**super().probe(**kwargs), "server": {"name": root.name, "version": "synthetic"}}
 
         def call(self, tool, arguments, **kwargs):
+            if tool == "product_search" and (
+                arguments["queries"][0] in {"wire-diagnostic", "wire-invalid-metadata"} or (root / "diagnostic-mode").exists()
+            ):
+                from meny import MenyBrowserError
+                try:
+                    diagnostic_client._invoke('eval', '--stdin', stdin='1')
+                except MenyBrowserError as exc:
+                    if arguments["queries"][0] == "wire-invalid-metadata":
+                        # Simulate incompatible optional metadata at the service wire boundary.
+                        exc.provider_failure = {**exc.provider_failure, 'class': SECRET, 'raw_error': SECRET}
+                    raise
             if tool == "manipulate_cart" and (root / "hold").exists():
                 (root / "dispatched").write_text(json.dumps(arguments))
                 deadline = time.monotonic() + 20
@@ -78,6 +95,9 @@ def serve(root):
                 # product planning requires the actual requested search bound.
                 result["scope"]["requested_size"] = arguments.get("size", 1)
                 query = arguments["queries"][0]
+                if query == "wire-empty":
+                    result["products"] = []
+                    result["scope"]["returned"] = 0
                 if query.startswith("wire-continuation-"):
                     index = int(query.removeprefix("wire-continuation-").split(" ", 1)[0])
                     original = result["products"][0]
@@ -491,6 +511,70 @@ async def sdk_checks(root, process):
         assert unavailable.structured_content is None, unavailable
 
 
+async def provider_diagnostic_checks(root):
+    """Actual adapter subprocess -> service Unix RPC -> SDK stdio, including saved pages."""
+    from test_meal_concierge_recipes import full_recipe, menu
+    from test_meny_provider_diagnostics import SECRET
+
+    async with session(root) as (client, _):
+        await call(client, 'setup', action='apply', keep_current=True)
+        failed = await call(client, 'catalog', action='products', query='wire-diagnostic')
+        assert failed['ok'] is False and failed['status'] == 'rejected', failed
+        safe = failed['provider_failure']
+        assert safe == {'provider': 'meny', 'class': 'client_read_failed',
+                        'source': 'adapter_json_error', 'phase': 'adapter_invocation',
+                        'daemon_request_ending': 'unknown'}, failed
+        assert 'synthetic-secret' not in json.dumps(failed) and SECRET not in json.dumps(failed)
+        invalid = await call(client, 'catalog', action='products', query='wire-invalid-metadata')
+        assert invalid['ok'] is False and 'provider_failure' not in invalid
+        assert 'synthetic-secret' not in json.dumps(invalid)
+        empty = await call(client, 'catalog', action='products', query='wire-empty')
+        assert empty['products'] == [] and empty['scope']['returned'] == 0, empty
+        assert 'provider_failure' not in empty and empty.get('ok') is not False
+        value = full_recipe('Synthetic diagnostic shopping')
+        value['ingredients'] = [{'item': f'diagnostic ingredient {i}', 'quantity': 6, 'unit': 'stk'}
+                                for i in range(12)]
+        saved = await call(client, 'recipe_write', recipe=value, idempotency_key='diagnostic-recipe')
+        ref = {key: saved['recipe'][key] for key in ('id', 'revision')}
+        menu_ref = (await call(client, 'menu', action='save',
+                              menu=menu('2026-W40', {'recipe_ref': ref})))['menu_ref']
+        (root / 'diagnostic-mode').touch()
+        plan = await call(client, 'products', action='prepare', menu_ref=menu_ref,
+                          include_recurring=False, limit=5)
+        assert plan['status'] == 'needs_input' and plan['progress']['requirement_count'] == 12, plan
+        for row in plan['requirements']:
+            assert row['issues'][0]['provider_failure'] == safe, row
+            assert row['candidates'] == [], row
+        recovered_ref = plan['product_plan_ref']
+        reads = (root / 'diagnostic-invocations').read_text().splitlines()
+        assert len(reads) == 14, reads  # Two catalog failures and twelve ingredient reads.
+        before = len((root / 'application.jsonl').read_text().splitlines())
+        page = await call(client, 'products', action='get', product_plan_ref=recovered_ref,
+                          section='issues', limit=5)
+        issues = list(page['issues'])
+        while page['next_offset'] is not None:
+            page = await call(client, 'products', action='get', product_plan_ref=recovered_ref,
+                              section='issues', offset=page['next_offset'], limit=5)
+            issues.extend(page['issues'])
+        assert len(issues) == 12 and all(issue['provider_failure'] == safe for issue in issues)
+        assert all(issue['reason'] == 'provider_search_unavailable_or_scope_changed' for issue in issues)
+        assert 'synthetic-secret' not in json.dumps(issues)
+        records = [json.loads(line) for line in (root / 'application.jsonl').read_text().splitlines()[before:]]
+        assert all(record['request'].get('action') == 'get'
+                   for record in records if record['request']['operation'] != 'health')
+        assert (root / 'diagnostic-invocations').read_text().splitlines() == reads
+        assert (await call(client, 'menu'))['menu_ref'] == menu_ref
+        assert (await call(client, 'cart'))['lines']['items'] == []
+
+    # A fresh bridge recovers the same durable issue page without repeating provider reads.
+    async with session(root) as (client, _):
+        recovered = await call(client, 'products', action='get', product_plan_ref=recovered_ref,
+                               section='issues', limit=5)
+        assert recovered['issues'][0]['provider_failure'] == safe
+        assert (root / 'diagnostic-invocations').read_text().splitlines() == reads
+    print(json.dumps({'provider_diagnostics': 'subprocess/Unix/SDK rejection, empty catalog, persisted paged issues passed'}), flush=True)
+
+
 def cli_checks(root, service):
     """Real standalone JSON process: no site-packages, same service contract."""
     from test_meal_concierge_recipes import full_recipe
@@ -604,6 +688,8 @@ def main():
                 codex_check(root, args.codex)
         with household() as (root, process):
             cli_checks(root, process)
+        with household() as (root, process):
+            asyncio.run(provider_diagnostic_checks(root))
 
 
 if __name__ == "__main__":
