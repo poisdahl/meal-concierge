@@ -150,7 +150,7 @@ class NativeHost:
         if order_id is not None or code is not None:
             raise HouseholdError("native foreground adapter does not support existing-order edits")
         result = self.exchange("verify_new_cart", {}, deadline=deadline)
-        if result != {"authenticated": True, "new_cart": True}:
+        if set(result) != {"authenticated", "new_cart"} or any(result[key] is not True for key in result):
             raise HouseholdError("native account or new-cart mode could not be verified")
         return result
 
@@ -173,7 +173,7 @@ class NativeHost:
             if sum(abs(item["quantity"]) for item in operations) > 2:
                 raise HouseholdError("native cart batch exceeds the existing two-click limit")
             result = self.exchange(tool, arguments, deadline=deadline, write=True)
-            if result != {"dispatched": True}:
+            if set(result) != {"dispatched"} or result["dispatched"] is not True:
                 raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
             return result
         raise HouseholdError("native foreground provider operation is not supported")

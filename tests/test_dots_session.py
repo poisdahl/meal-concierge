@@ -273,6 +273,29 @@ class DotsSessionTests(unittest.TestCase):
         self.assertNotIn("pending_cart_change", self.state())
         self.assertEqual(self.frames, [])
 
+    def test_host_attestations_require_json_booleans(self):
+        def numeric_auth(frame):
+            reply = self.host(frame)
+            if frame["operation"] == "verify_new_cart":
+                reply["result"]["authenticated"] = 1
+            return reply
+        code, result = self.call(self.ensure(), host=numeric_auth)
+        self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+        self.assertNotIn("pending_cart_change", self.state())
+        def numeric_dispatch(frame):
+            reply = self.host(frame)
+            if frame["operation"] == "manipulate_cart":
+                reply["result"]["dispatched"] = 1
+            return reply
+        code, result = self.call(self.ensure(), host=numeric_dispatch)
+        self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 1)
+        self.assertIn("pending_cart_change", self.state())
+        code, result = self.call({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(code, 0, result)
+        self.assertEqual(self.writes, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
