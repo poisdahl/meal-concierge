@@ -18,6 +18,7 @@ import sys
 MAX_INPUT = 2 * 1024 * 1024
 MAX_RECORD = 64 * 1024
 MAX_PDF = 32 * 1024 * 1024
+MAX_MENU = 8 * 1024 * 1024
 MAX_COVERS = 24 * 1024 * 1024
 CHUNK = 128 * 1024
 GUIDANCE = "Offline export only; grocery actions, external sources and sending are unavailable."
@@ -198,6 +199,14 @@ def create(value, root, input_directory=None):
         if not isinstance(result.get("menu"), dict):
             raise HouseholdError("batch menu requires additional information")
         snapshot = app.handle({"operation": "menu", "action": "get"})["menu"]
+        # Freeze the materialized recipe quantities for service-free, read-only
+        # planning. Later readers never reopen or initialize household state.
+        from core import _atomic_json
+        menu_bytes = json.dumps(snapshot, ensure_ascii=False, allow_nan=False).encode()
+        if len(menu_bytes) > MAX_MENU:
+            raise ValueError("materialized menu exceeds its byte limit")
+        _atomic_json(root / "menu.json", snapshot)
+        menu_bytes = _read_file(root / "menu.json", MAX_MENU)
         rendered = render_menu(snapshot, app.recipes.assets)
         pdf = render_pdf(rendered)
         if not 0 < len(pdf) <= MAX_PDF:
@@ -219,6 +228,8 @@ def create(value, root, input_directory=None):
         if hashlib.sha256(_read_file(root / "export.pdf", MAX_PDF)).hexdigest() != metadata["sha256"]:
             raise ValueError("exported PDF verification failed")
         record.update(status="completed", artifact=artifact,
+                      menu_snapshot={"filename": "menu.json", "bytes": len(menu_bytes),
+                                     "sha256": hashlib.sha256(menu_bytes).hexdigest()},
                       menu_ref={key: snapshot[key] for key in ("menu_id", "revision", "digest")},
                       build=app.handle({"operation": "health"})["build"],
                       integration={"status": "unavailable", "message": GUIDANCE},
@@ -247,6 +258,13 @@ def inspect(root):
     pdf = _read_file(root / "export.pdf", MAX_PDF)
     if not pdf.startswith(b"%PDF-") or len(pdf) != artifact.get("bytes") or hashlib.sha256(pdf).hexdigest() != artifact.get("sha256"):
         raise ValueError("completed batch PDF is missing or changed; no regeneration performed")
+    if "menu_snapshot" in record:
+        metadata = record["menu_snapshot"]
+        if not isinstance(metadata, dict) or metadata.get("filename") != "menu.json":
+            raise ValueError("invalid batch menu metadata")
+        menu = _read_file(root / "menu.json", MAX_MENU)
+        if len(menu) != metadata.get("bytes") or hashlib.sha256(menu).hexdigest() != metadata.get("sha256"):
+            raise ValueError("completed batch menu is missing or changed; no regeneration performed")
     artifact["output_path"] = str(root / "export.pdf")
     return record
 

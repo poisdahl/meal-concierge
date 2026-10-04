@@ -115,6 +115,28 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         code, result = self.command(launcher=launcher)
         self.assertEqual(code, 0, result)
 
+    def test_frozen_menu_integrity_and_old_batch_inspection(self):
+        code, output = self.command()
+        self.assertEqual(code, 0, output)
+        metadata = output["result"]["menu_snapshot"]
+        menu = (self.root / "menu.json").read_bytes()
+        self.assertEqual(hashlib.sha256(menu).hexdigest(), metadata["sha256"])
+        self.assertEqual(len(menu), metadata["bytes"])
+        (self.root / "menu.json").write_bytes(menu + b"changed")
+        code, output = self.command("inspect")
+        self.assertEqual(code, 1, output)
+        self.assertIn("menu is missing or changed", output["error"])
+        # Earlier releases did not publish a materialized menu. They remain
+        # inspectable without initializing state or regenerating artifacts.
+        record = json.loads((self.root / "result.json").read_text())
+        record.pop("menu_snapshot")
+        (self.root / "result.json").write_text(json.dumps(record))
+        (self.root / "menu.json").unlink()
+        before = self.snapshot()
+        code, output = self.command("inspect")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(before, self.snapshot())
+
     def test_unsupported_envelope_and_cover_escape_fail_before_state_creation(self):
         for value in ({**self.value, "operation": "checkout"},
                       {**self.value, "capabilities": {"verified": True}},
