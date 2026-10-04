@@ -105,8 +105,8 @@ class ProductContinuationTests(unittest.TestCase):
         self.assertEqual(retained, failed)
         self.app = Application(self.store, self.provider, object())
         page = self.request(action='get', product_plan_ref=second['product_plan_ref'],
-                            response_view='agent', section='issues', requirement_id=failed['requirement_id'])
-        self.assertEqual(page['issues'][0]['provider_failure'], failed['provider_failure'])
+                            response_view='agent', section='requirements', requirement_id=failed['requirement_id'])
+        self.assertEqual(page['requirements'][0]['issues'][0]['provider_failure'], failed['provider_failure'])
         self.provider.call = original_call
         recovered = self.request(**second['continue_arguments'])
         self.assertTrue(all('provider_failure' not in issue
