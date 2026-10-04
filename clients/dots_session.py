@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -12,6 +12,7 @@ import re
 import select
 import stat
 import sys
+import termios
 import time
 import uuid
 
@@ -52,6 +53,24 @@ class Input:
             if not data:
                 raise HouseholdError("native host input ended; never repeat an uncertain write")
             self.buffer.extend(data)
+
+
+@contextmanager
+def input_mode():
+    # Native interactive executors use a PTY. Canonical mode truncates long
+    # JSON lines; echo also mixes host inputs into machine-readable stdout.
+    fd = sys.stdin.fileno()
+    original = termios.tcgetattr(fd) if os.isatty(fd) else None
+    try:
+        if original is not None:
+            mode = termios.tcgetattr(fd)
+            mode[3] &= ~(termios.ICANON | termios.ECHO)
+            mode[6][termios.VMIN], mode[6][termios.VTIME] = 1, 0
+            termios.tcsetattr(fd, termios.TCSANOW, mode)
+        yield
+    finally:
+        if original is not None:
+            termios.tcsetattr(fd, termios.TCSANOW, original)
 
 
 def emit(value):
@@ -313,7 +332,12 @@ def main():
     parser.add_argument("action", choices=("init", "call"))
     parser.add_argument("--root", type=Path, required=True)
     args = parser.parse_args()
-    reader = Input()
+    with input_mode():
+        emit({"kind": "core_ready", "input_max_bytes": MAX_LINE})
+        return execute(args, Input())
+
+
+def execute(args, reader):
     try:
         value = reader.line(time.monotonic() + 60)
         result = ({"ok": True, "result": init(args.root, value, reader)} if args.action == "init"

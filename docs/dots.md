@@ -180,7 +180,12 @@ change homes, identities or remove ownership records to bypass recovery.
 
 For browser-enabled calls, keep one supported cloud execution session open
 and answer its `native_host_request` frames through that exact session's
-stdin. Use only the supported native **cloud** browser. Each frame binds the
+stdin. Use only the supported native **cloud** browser. Wait for the
+`core_ready` frame before sending the initial input. Answer each subsequent
+host request once through the same session. On its
+owned interactive terminal the client disables line truncation and echo, then
+restores the terminal settings when it ends. The maximum input line is 65536
+bytes; no credentials belong in this channel. Each request binds the
 command/call ID, operation, account/cart/tab context and expiry. Replies are:
 
 ```json

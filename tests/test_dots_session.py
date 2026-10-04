@@ -7,6 +7,7 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+import termios
 import tempfile
 import unittest
 import uuid
@@ -81,6 +82,8 @@ class DotsSessionTests(unittest.TestCase):
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env={**os.environ, "HOME": str(self.home)})
         try:
+            self.assertTrue(select.select([child.stdout], [], [], 45)[0], "core readiness timeout")
+            self.assertEqual(json.loads(child.stdout.readline()), {"kind": "core_ready", "input_max_bytes": 65536})
             child.stdin.write(json.dumps(value).encode() + b"\n")
             child.stdin.flush()
             while True:
@@ -295,6 +298,36 @@ class DotsSessionTests(unittest.TestCase):
         code, result = self.call({"operation": "cart", "action": "reconcile_change"})
         self.assertEqual(code, 0, result)
         self.assertEqual(self.writes, 1)
+
+    def test_interactive_terminal_accepts_long_json_and_restores_input_mode(self):
+        master, slave = os.openpty()
+        original = termios.tcgetattr(slave)
+        child = subprocess.Popen([sys.executable, "-I", "-B", str(SOURCE / "clients/dots_session.py"),
+                                  "init", "--root", str(self.root.parent / "terminal-core")],
+                                 stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env={**os.environ, "HOME": str(self.home)})
+        try:
+            self.assertTrue(select.select([child.stdout], [], [], 45)[0])
+            self.assertEqual(json.loads(child.stdout.readline())["kind"], "core_ready")
+            self.assertFalse(termios.tcgetattr(slave)[3] & (termios.ICANON | termios.ECHO))
+            data = b" " * 5120 + b'{"household":"Synthetic terminal household"}\n'
+            while data:
+                data = data[os.write(master, data):]
+            self.assertTrue(select.select([child.stdout], [], [], 45)[0])
+            result = json.loads(child.stdout.readline())
+            self.assertTrue(result["ok"], result)
+            child.wait(timeout=10)
+            self.assertEqual(child.returncode, 0)
+            self.assertEqual(child.stderr.read(), b"")
+            self.assertEqual(termios.tcgetattr(slave), original)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
+            child.stdout.close()
+            child.stderr.close()
+            os.close(master)
+            os.close(slave)
 
 
 if __name__ == "__main__":
