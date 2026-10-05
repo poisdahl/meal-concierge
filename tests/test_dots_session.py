@@ -670,8 +670,10 @@ raise SystemExit(client.main())
         self.assertEqual(self.writes, 1)
 
     def test_managed_boundaries_block_before_intent_or_dispatch(self):
-        before = self.files()
-        for request in ({"operation": "products", "action": "apply", "partial_apply": True},
+        before, frames = self.files(), list(self.frames)
+        for request in ({"operation": "cart", "action": "ensure", "_restore_missing_cart_digest": "a" * 64},
+                        {"operation": "products", "action": "apply", "_restore_missing_cart_digest": "a" * 64},
+                        {"operation": "products", "action": "apply", "partial_apply": True},
                         {"operation": "products", "action": "apply", "restore_missing": "true", "cart_digest": "a" * 64},
                         {"operation": "products", "action": "apply", "restore_missing": True},
                         {"operation": "products", "action": "apply", "cart_digest": "a" * 64},
@@ -680,7 +682,7 @@ raise SystemExit(client.main())
                         {"operation": "cart", "action": "reconcile", "decision": "keep_current", "exclude_product_ids": [PRODUCT]}):
             code, result = self.call(request)
             self.assertEqual(code, 1, result)
-            self.assertEqual(self.files(), before)
+            self.assertEqual((self.files(), self.frames), (before, frames))
         policy = {"operation": "native_cart_policy", "action": "set", "enabled": False,
                   "browser_binding": self.binding}
         self.assertEqual(self.call(policy)[0], 0)

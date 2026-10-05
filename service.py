@@ -479,6 +479,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
+        if "_restore_missing_cart_digest" in request:
+            raise HouseholdError("_restore_missing_cart_digest is internal-only")
         validate_request_value(request)
         operation = request.get("operation")
         action = request.get("action")

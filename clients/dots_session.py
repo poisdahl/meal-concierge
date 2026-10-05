@@ -571,6 +571,8 @@ def command(root, value, reader):
             and not (request.get("operation") == "orders" and request.get("action", "list") in {"list", "get"})
             and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "clear", "reconcile_change", "reconcile"})):
         raise ValueError("unsupported foreground core operation; no checkout, delivery selection or order edits")
+    if "_restore_missing_cart_digest" in request:
+        raise ValueError("_restore_missing_cart_digest is internal-only")
     if request.get("operation") == "delivery":
         dots.object_fields(request, {"operation", "action", "dates", "response_view", "view_offset",
                                     "view_limit", "view_section"}, {"operation"})
