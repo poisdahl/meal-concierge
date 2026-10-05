@@ -30,6 +30,7 @@ CORE_OPERATIONS = {"health", "setup", "profile", "recipes", "menu", "feedback",
                    "pantry", "recurring", "product_favorites"}
 OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.owner.lock")
 MAX_LINE = 65536
+PRODUCTS_APPLY_BUDGET_SECONDS = 600
 ORDER_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
 
 
@@ -523,7 +524,8 @@ def application(root, config, reader, command_id, deadline, *, new=False, reques
             with store.locked() as saved:
                 saved["native_config_sha256"] = dots.digest(dots.encoded(config))
         host = NativeHost(store, config, reader, command_id, deadline, request)
-        app = Application(store, host, None, external_recipe_sources={})
+        app = Application(store, host, None, external_recipe_sources={},
+                          products_apply_budget_seconds=PRODUCTS_APPLY_BUDGET_SECONDS)
         host.app = app
         if new:
             app.recipes.search(limit=1)  # The core opens SQLite lazily; create the original bank once.
@@ -623,7 +625,9 @@ def command(root, value, reader):
         on_demand._sync_directory(calls)
         dots.exclusive_json(target / "intent.json", record, MAX_LINE)
         try:
-            stack, app = application(root, config, reader, command_id, time.monotonic() + 240, request=request)
+            budget = (PRODUCTS_APPLY_BUDGET_SECONDS
+                      if request.get("operation") == "products" and request.get("action") == "apply" else 240)
+            stack, app = application(root, config, reader, command_id, time.monotonic() + budget, request=request)
             with stack:
                 result = (cart_policy(app.store, config, request) if request["operation"] == "native_cart_policy"
                           else app.handle(request))

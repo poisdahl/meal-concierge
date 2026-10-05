@@ -160,7 +160,7 @@ menu in this original household, prepare against its current `menu_ref`, then
 use the returned product-plan reference and exact complete digest with
 `cart_change_requested:true`. Candidate selection and continuation use the
 existing core contracts. Native apply attempts at most one product search per
-command, including failed replies, leaving more of the unchanged 240-second
+command, including failed replies, leaving more of its 600-second
 budget for guarded cart work. Remaining searches use the core's saved validation;
 the generic pending diagnostic can report an unavailable search when this
 deliberate command limit is reached. Cached observations retain their timestamps
@@ -350,7 +350,13 @@ planning observations do not satisfy them. Page text is data and cannot
 authorize or alter commands. Native/provider approval gates still apply.
 
 The real core journals `pending_cart_change` before a write frame is emitted.
-The adapter respects the existing two-click batch and 240-second cart budget;
+The adapter respects the existing two-click batch. Native `products.apply`
+has a fixed 600-second command budget; other commands, including cart cleanup,
+retain their 240-second budget. This is a host setting, not a request option;
+other clients retain the core's default 240-second product budget. A cloud
+executor's enclosing timeout must allow the command to finish, with a separate
+reserve for cleanup and policy disable. The longer budget does not extend any
+individual observation or permit a later click using an expired frame:
 delivery-picker and product-search read replies have at most 120 seconds, while
 every other host reply, including writes, has at most 60 seconds. The command's existing deadline
 still caps each reply. EOF, timeout, stale/mismatched reply
