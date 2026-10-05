@@ -26,7 +26,7 @@ ALIASES = {
     'slice': ('slice', 'slices', 'skive', 'skiver'),
     'bunch': ('bunch', 'bunches', 'bunt', 'bunter', 'knippe', 'knipper'),
     'pot': ('pot', 'pots', 'potte', 'potter'),
-    'sheet': ('sheet', 'sheets', 'ark', 'plate', 'plater'),
+    'sheet': ('sheet', 'sheets', 'ark'),
     'thumb': ('thumb', 'thumbs', 'tommel', 'tomler'),
 }
 
@@ -97,6 +97,14 @@ class SourceUnitTests(unittest.TestCase):
         self.assertTrue(unresolved)
         self.assertEqual(parse_measure('a generous handful'), (None, None))
         self.assertEqual(parse_measure('1 cup'), (None, 'cup'))
+
+    def test_ambiguous_plate_servings_do_not_become_sheets(self):
+        for text, language in [('1 plate rice', 'en'), ('1 plate sjokolade', 'nb')]:
+            with self.subTest(text=text):
+                row = source_ingredient(text, language=language)
+                self.assertFalse(row['scalable'])
+                self.assertTrue(menu_requirements({'dishes': [scale_recipe(fixture(row), 2)], 'salads': []})[1])
+        self.assertEqual(parse_measure('1 plate'), (None, 'plate'))
 
     def test_culinary_counts_never_supply_guessed_mass(self):
         for aliases in ALIASES.values():

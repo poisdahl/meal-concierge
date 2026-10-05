@@ -34,7 +34,7 @@ UNITS = {
     **{unit: ("slice", Fraction(1)) for unit in ("slice", "slices", "skive", "skiver")},
     **{unit: ("bunch", Fraction(1)) for unit in ("bunch", "bunches", "bunt", "bunter", "knippe", "knipper")},
     **{unit: ("pot", Fraction(1)) for unit in ("pot", "pots", "potte", "potter")},
-    **{unit: ("sheet", Fraction(1)) for unit in ("sheet", "sheets", "ark", "plate", "plater")},
+    **{unit: ("sheet", Fraction(1)) for unit in ("sheet", "sheets", "ark")},
     **{unit: ("thumb", Fraction(1)) for unit in ("thumb", "thumbs", "tommel", "tomler")},
     "oz": ("g", Fraction(45359237, 1600000)),
     "lb": ("g", Fraction(45359237, 100000)),

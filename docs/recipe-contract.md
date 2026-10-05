@@ -88,7 +88,7 @@ it has ingredient-specific evidence and retains that input/conversion basis.
 
 Numeric drop(s)/dråpe(r), pinch(es)/klype(r), handful(s)/håndfull(er)/neve(r),
 slice(s)/skive(r), bunch(es)/bunt(er)/knippe(r), pot(s)/potte(r),
-sheet(s)/ark/plate(r) and thumb(s)/tommel/tomler each retain a
+sheet(s)/ark and thumb(s)/tommel/tomler each retain a
 separate canonical dimension. Their source counts scale by the exact serving
 ratio; this preserves the source measure without claiming a physical size or
 greater measurement precision. None is equivalent to grams, millilitres,
