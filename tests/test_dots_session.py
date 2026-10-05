@@ -474,7 +474,7 @@ raise SystemExit(client.main())
                 if request.get("restore_missing"):
                     # Recover a lost validating reply through the real get path.
                     code, fetched = self.call({"operation": "products", "action": "get",
-                                              "product_plan_ref": request["product_plan_ref"]})
+                                              "product_plan_ref": result["result"]["product_plan_ref"]})
                     self.assertEqual(code, 0, fetched)
                     self.assertEqual(fetched["result"]["continue_arguments"], args)
                     args = fetched["result"]["continue_arguments"]
