@@ -226,6 +226,8 @@ class TransportTests(Fixture):
                 with self.assertRaises(HouseholdError) as error:
                     self.client().call('manipulate_cart',{'operations':[{'productId':9212,'quantity':1}]})
                 self.assertNotIn(CANARY,str(error.exception))
+                if mode == 'redirect':
+                    self.assertIn('phase=initialize; HTTP 302; session_assigned=false', str(error.exception))
                 expected = 2 if mode == 'wrong_session' else 1
                 self.assertEqual(len(self.requests)-before,expected)
                 self.assertEqual(len(self.helper_calls())-helpers,expected)

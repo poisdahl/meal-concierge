@@ -182,7 +182,8 @@ class MuseProtectedMcpClient(RetailMcpClient):
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise Stopped("redirect_refused")
+        # Decline the redirect; urllib raises HTTPError for the original reply.
+        return None
 
 
 def load_message(body):
