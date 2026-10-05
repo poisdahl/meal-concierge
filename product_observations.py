@@ -267,7 +267,7 @@ def _described_package(text: str, provider: str):
             parsed, count = size, None
             # A ranged piece count never supplies exact count capacity. The
             # independently declared final mass can still be used.
-            ranged = re.fullmatch(r"([1-9][0-9]{0,2})[–-]([1-9][0-9]{0,2})\s*stk\.\s+(.+)",
+            ranged = re.fullmatch(r"([1-9][0-9]{0,2})\s*[–-]\s*([1-9][0-9]{0,2})\s*stk\.\s+(.+)",
                                   descriptors[0], re.IGNORECASE)
             if ranged and size[1] == "g" and size[2] == 1 and int(ranged[1]) <= int(ranged[2]):
                 descriptors[0] = ranged[3]
