@@ -339,7 +339,7 @@ class NativeHost:
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
         return {"status": "ready", "provider": "meny", "protocol_version": "native-host-stdio-v1",
-                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 5}
+                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 7}
 
     def verify_order_change(self, order_id, code, *, deadline=None):
         if order_id is not None or code is not None:

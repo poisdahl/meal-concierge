@@ -773,7 +773,7 @@ class DotsSessionTests(unittest.TestCase):
     def test_delivery_selection_and_address_override_stop_before_intent(self):
         for request in ({"operation": "delivery", "action": "select", "slot_ref": "anything"},
                         {"operation": "delivery", "action": "list", "address_id": "another"},
-                        {"operation": "orders", "action": "list"}):
+                        {"operation": "orders", "action": "change_begin", "order_id": "123456"}):
             before = self.files()
             frame_count = len(self.frames)
             code, result = self.call(request)
