@@ -162,8 +162,10 @@ use the returned product-plan reference and exact complete digest with
 existing core contracts. Partial apply is not exposed. `ensure` is never a
 fallback for unfinished menu shopping. Cart `reconcile` supports the exact
 digest-bound `keep_current` decision without exclusions or quantity changes;
-use fresh prepare/apply for subsequent shopping. Existing-order edits,
-checkout, delivery and sending are not exposed. Browser support is host-attested and requires a
+use fresh prepare/apply for subsequent shopping. Read-only `delivery.list`
+uses the original account's delivery picker; it does not select a slot or
+change the address. Existing-order edits, checkout, delivery selection and
+sending are not exposed. Browser support is host-attested and requires a
 reviewed native operator; this CLI does not independently inspect the browser.
 
 `cart.clear` removes the whole observed cart. Use it only for an explicit
@@ -286,6 +288,23 @@ Observe the actual rendered search results; selected cards are not a search
 scope. Product fields use the existing MENY DOM normalization, including
 actual package, availability, displayed price and linked detail/deposit
 evidence. Missing facts remain unknown and cannot become payable cost.
+
+`get_delivery_slots` accepts an optional canonical ISO `delivery_date`.
+The native operator opens the existing account's picker, reads its complete
+visible enabled slot window and dismisses it without selecting a slot.
+Preserve the selected slot and address. Reply with `authenticated:true`,
+`ready:true`, `source_url:"https://meny.no/varer"`, `dialog_count:1` and
+nonempty `slots`. Each slot uses the existing MENY raw shape:
+`slot_id`, `display` (the same exact ARIA label), `date`, `start`, `end`
+and boolean `selected`. Follow the existing `_delivery_slots` DOM extraction
+in `meny.py` through supported read APIs; do not execute its DOM-marking code.
+The complete picker must be observed even when a date was requested: the
+adapter filters after normalization, so an empty date result does not mean
+the picker was empty or failed to load. Conflicting dates, labels, duplicate
+slot references or multiple selected slots fail. “Fra” prices remain lower
+bounds; missing prices remain unavailable. Requests may specify one to seven
+ISO `dates` through `delivery.list`; address overrides and slot selection are
+rejected before a command intent or browser operation is created.
 
 Each managed batch persists its original menu/product identity, initial cart
 allocations and verified batch prefix before a write frame. The adapter
