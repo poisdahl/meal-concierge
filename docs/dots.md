@@ -175,7 +175,15 @@ an uncertain prior write requires reconciliation first. Partial apply is not
 exposed. `ensure` is never a
 fallback for unfinished menu shopping. Cart `reconcile` supports the exact
 digest-bound `keep_current` decision without exclusions or quantity changes;
-use fresh prepare/apply for subsequent shopping. Read-only `delivery.list`
+use fresh prepare/apply for subsequent shopping. Ordinary apply preserves that
+explicit decision, including missing goods. To explicitly restore missing goods,
+add `restore_missing:true` and the exact fresh `cart_digest` from that decision
+to a full reviewed `products.apply`. Preserve both fields in every returned
+continuation. Fresh product validation and the unchanged approved cart/menu
+binding are required; stale cart or product facts stop before writes. Existing
+unconfirmed units remain protected baseline, and only new verified additions
+are managed. Reconcile an uncertain effect before any new restoration; never
+resend the earlier click or adopt its attribution. Read-only `delivery.list`
 uses the original account's delivery picker; it does not select a slot or
 change the address. Existing-order edits, checkout, delivery selection and
 sending are not exposed. Browser support is host-attested and requires a
