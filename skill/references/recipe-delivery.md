@@ -65,6 +65,16 @@ with the actual destination and verified capability if it is not already enabled
    outcome/evidence. Lost begin/send/ack results require exact `get`/`reconcile`.
    Retry only after affirmative no-send evidence; preserve successful parts.
 
+In a Grok Bot **direct conversation**, return the exported PDF and available
+image files through native file output as cards in that same conversation.
+Use the existing frozen-part export and PDF renderer; preserve the exact bytes,
+filename and format. Do not answer a file request with a cloud path alone or
+generate another PDF merely to make a card. Inspect the actual card before
+acknowledging native acceptance. Preview/save claims require observing those
+controls and their results; for a requested save check, save once and compare
+the downloaded bytes with the exported file. Missing recipe images remain
+missing; never substitute an unrelated banner or generated illustration.
+
 Use the host's supported formats. Grok group rooms support recipe text but not
 PDF/image attachments through that transport. Missing attachment support must
 be reported, not hidden as a successful delivery.

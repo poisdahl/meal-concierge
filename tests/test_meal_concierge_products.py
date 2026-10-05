@@ -173,6 +173,9 @@ class ProductObservationTests(unittest.TestCase):
             ("178ml Trappeys", 178, "ml"),
             ("200g St.maria", 200, "g"),
             ("Lettkokte 1,2kg Urkraft", 1200, "g"),
+            ("Original 150ml Unknown Brand", 150, "ml"),
+            ("Unknown 1,2kg Urkraft", 1200, "g"),
+            ("Lettkokte 1,2kg Unknown", 1200, "g"),
         ):
             with self.subTest(label=label):
                 self.assertEqual(parse_package(label, provider="meny"), {
@@ -186,9 +189,8 @@ class ProductObservationTests(unittest.TestCase):
             "Ca. størrelse 40g", "om lag 40g", "under 40g", "40g+",
             "400 til 500g", "40g avrent", "40g pr. kg",
             "rundt 40g pakke", "anslagsvis 40g pakke", "40g variabel vekt",
-            "to poser 40g", "Original 150ml Unknown Brand",
+            "to poser 40g",
             "Lettkokte ca. 1,2kg Urkraft", "Lettkokte 1,2kg eller 1kg Urkraft",
-            "Unknown 1,2kg Urkraft", "Lettkokte 1,2kg Unknown",
         ):
             with self.subTest(label=label):
                 self.assertIsNone(parse_package(label, provider="meny"))
@@ -257,6 +259,72 @@ class ProductObservationTests(unittest.TestCase):
                 self.assertNotIn("package", observed["products"][0])
                 self.assertEqual(plan["status"], "needs_input")
                 self.assertEqual(plan["unresolved_requirements"][0]["reason"], "candidate_package_incompatible")
+
+    def test_package_capacity_is_independent_of_brand_variety_and_origin(self):
+        # Arbitrary descriptors exercise the grammar rather than an allowlist.
+        for description in ("New Harvest", "Ny leverandør", "Été d'Or", "Italia / Hellas", "St.nova"):
+            for provider, label in (
+                ("meny", f"{description} 2stk 450g Nytt Merke"),
+                ("oda", f"{description}, 2 stk, 450 g"),
+            ):
+                with self.subTest(provider=provider, label=label):
+                    self.assertEqual(parse_package(label, provider=provider), {
+                        "quantity": {"numerator": 450, "denominator": 1},
+                        "unit": "g", "item_count": 1, "contained_count": 2,
+                    })
+            for provider, label in (
+                ("meny", f"{description} 3 x 250ml Nytt Merke"),
+                ("oda", f"{description}, 3 x 250 ml"),
+                ("oda", f"{description}, 3 x 250 ml, 750 ml"),
+            ):
+                with self.subTest(provider=provider, label=label):
+                    self.assertEqual(parse_package(label, provider=provider), {
+                        "quantity": {"numerator": 750, "denominator": 1},
+                        "unit": "ml", "item_count": 3,
+                    })
+        ranged = parse_package("3-5 Stk. Ny sort, Italia / Hellas, 700 g", provider="oda")
+        self.assertEqual(ranged, {"quantity": {"numerator": 700, "denominator": 1},
+                                  "unit": "g", "item_count": 1})
+
+    def test_general_descriptors_do_not_hide_quantity_ambiguity(self):
+        for provider in ("meny", "oda"):
+            for label in (
+                "Ny sort ca. 500g Merke", "Ny sort, rundt 500 g", "Variabel vekt, 500 g",
+                "Ny sort 400-500g Merke", "Ny sort 2 poser 500g Merke", "Ny sort to poser 500g",
+                "Ny sort 500g per pose", "Ny sort 500g avrent", "Ny sort 500g+",
+                "Ny sort 2stk 500g hver", "Ny sort, 2 stk, 500 g per stk",
+                "Ny sort 2stk à 500g Merke", "Ny sort 500g eller 1kg Merke",
+                "Ny sort 500g 600g Merke", "Ny sort, 3 x 250 ml, 500 ml",
+                "Ny sort, 2,5 stk, 500 g", "Ny sort, 0 stk, 500 g",
+                "Ny sort, 5, 500 g", "Ny sort, 500 g,", "Ny sort,, 500 g",
+                "Ny sort ５00g Merke", "Ny sort 500g / Merke", "Ny sort -500g Merke",
+                "Ny sort 500g tilberedt", "Ny sort eleven bags 500g", "20g protein Merke",
+            ):
+                with self.subTest(provider=provider, label=label):
+                    self.assertIsNone(parse_package(label, provider=provider))
+
+    def test_new_oda_descriptors_reach_planning_without_inventing_price_or_availability(self):
+        result = normalize_retail_product_search({"result": [{
+            "query": "fixture", "hasMore": False, "products": [{
+                "id": 700011, "name": "Unseen Brand", "description": "Ny sort, Italia / Hellas, 300 g",
+                "price": "20.00", "availability": {"isAvailable": True},
+            }],
+        }]}, observed_at=OBSERVED_AT)
+        product = result["products"][0]
+        self.assertEqual(product["display"]["package"], "Ny sort, Italia / Hellas, 300 g")
+        self.assertTrue(all("total_payable_ore" not in option for option in product["purchase_options"]))
+        shopping = menu({"item": "fixture", "quantity": 450, "unit": "g"})
+        requirement = menu_requirements(shopping)[0][0]
+        plan = build_product_plan(
+            provider="oda", binding={"kind": "saved_menu"}, menu=shopping,
+            observations={requirement["requirement_id"]: result},
+            candidate_approvals=[{"requirement_id": requirement["requirement_id"],
+                                 "candidate_refs": [product["product_ref"]]}],
+            price_mode="estimate",
+        )
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual(plan["requirements"][0]["selection"]["package_count"], 2)
+        self.assertIsNone(plan["totals"]["total_payable_ore"])
 
     def test_fixture_backed_meny_forms_keep_money_and_offer_boundaries(self):
         fixture = json.loads((FIXTURES / "meny_product_observations.json").read_text(encoding="utf-8"))

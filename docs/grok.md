@@ -206,6 +206,22 @@ the shared skill for input and [recipe delivery](recipe-delivery.md) for output.
 Verify the actual file arrived in the intended conversation. Sending a path as
 text is not attachment delivery.
 
+In a **direct Bot conversation**, return the exported menu PDF and any available
+recipe image files through Grok's native file output. They appear as file cards
+in that conversation, where the user can open a preview and save the file. Use
+Meal Concierge's existing PDF renderer and frozen attachment export; no separate
+PDF generator or public upload is needed. Follow the shared skill's
+[native delivery lifecycle](../skill/references/recipe-delivery.md#native-chat-or-an-unmanaged-supported-sender)
+and retain the exact menu, destination and attachment bytes.
+
+Check that each requested file is an actual card with the expected filename and
+type. For a preview/save check, open each card, verify its content, save it once
+and compare the saved bytes with the exported file. A rendered card, an opened
+preview and a saved file are separate observations; report only those verified.
+If a recipe has no image, say so rather than substitute an unrelated picture.
+See Grok's [files and results](https://docs.x.ai/grok-bot/files-and-results#preview-generated-work)
+for the native card controls.
+
 **Grok Bot group rooms do not deliver PDF and image attachments through this integration.** Use
 complete text with dates, dishes, portions, source links and credits, or another
 verified destination. Report this limitation before promising PDF/image delivery.

@@ -1390,9 +1390,12 @@ class MathemTransportTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(parse_package(label, provider='mathem'), {
                     'quantity': {'numerator': grams, 'denominator': 1}, 'unit': 'g', 'item_count': 1})
-                self.assertIsNone(parse_package(label, provider='oda'))
-        for label in ['Sverige, ca 500 g', 'Sverige, 500 g/kg', 'Sverige, 500 g extra', 'Okänd, 500 g', 'Spanien, 250 ml', 'Sverige, 2 st', 'Sverige, 0 g']:
+                self.assertEqual(parse_package(label, provider='oda'), parse_package(label, provider='mathem'))
+        for label in ['Sverige, ca 500 g', 'Sverige, 500 g/kg', 'Sverige, 500 g extra', 'Sverige, 0 g']:
             self.assertIsNone(parse_package(label, provider='mathem'), label)
+        for label, amount, unit in [('Okänd, 500 g', 500, 'g'), ('Spanien, 250 ml', 250, 'ml'), ('Sverige, 2 st', 2, 'count')]:
+            self.assertEqual(parse_package(label, provider='mathem'), {
+                'quantity': {'numerator': amount, 'denominator': 1}, 'unit': unit, 'item_count': 1})
         menu = {'dishes': [{'shopping_requirements': [
             {'item': 'rapsolje', 'quantity': 20, 'unit': 'ml', 'scalable': True},
             {'item': 'morot', 'quantity': 400, 'unit': 'g', 'scalable': True}]}], 'salads': []}
