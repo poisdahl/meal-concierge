@@ -225,7 +225,7 @@ elif {enclosing_limit!r} == 'native_240':
         return original_application(root, config, reader, command_id,
                                     min(deadline, time.monotonic() + 240), **kwargs)
     client.application = application
-client.main()
+raise SystemExit(client.main())
 """
         self.frames = []
         return self.run_session("call", {"request_id": str(uuid.uuid4()), "request": request},
