@@ -3127,7 +3127,8 @@ class PlanningOperations:
             page["validation_progress"] = {**self._product_work_progress(record["validation_work"]),
                 "restarted": record["validation_work"].get("restarted", False)}
             page["continue_arguments"] = {"action": "apply", "product_plan_ref": reference,
-                "product_plan_digest": record["apply_arguments"]["product_plan_digest"], "cart_change_requested": True}
+                "product_plan_digest": record["apply_arguments"]["product_plan_digest"], "cart_change_requested": True,
+                **deepcopy(record["validation_work"].get("restore_arguments", {}))}
         for key, digest_key in (("apply_arguments", "product_plan_digest"),
                                 ("partial_apply_arguments", "partial_product_plan_digest")):
             arguments = record.get(key)
@@ -4252,6 +4253,7 @@ class PlanningOperations:
                 work = {"started_at": self._now().isoformat(), "restarted": True,
                         "pending_search_count": max(1, len(fresh["requirements"])), "pending_detail_count": 0}
             if self._product_work_pending(work):
+                work["restore_arguments"] = deepcopy(restore_arguments)
                 if validation_ref is None:
                     common = {"action": "apply", "menu_ref": expected_menu_ref,
                         "candidate_approvals": deepcopy(approvals),
