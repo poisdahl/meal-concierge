@@ -495,15 +495,17 @@ class MuseBrowser:
         actual = facts["items"]
         if (not isinstance(actual, list) or len(actual) != len(expected["lines"])
                 or any(not isinstance(r, Mapping) or set(r) != {"product_id", "title", "subtitle", "quantity"}
-                       or type(r["product_id"]) is not int or r["product_id"] <= 0
+                       or (r["product_id"] is not None
+                           and (type(r["product_id"]) is not int or r["product_id"] <= 0))
                        or type(r["quantity"]) is not int or not 0 < r["quantity"] <= 1_000_000
                        or not isinstance(r["title"], str) or not isinstance(r["subtitle"], str)
                        for r in actual)):
-            raise HouseholdError("Muse checkout needs independently observed IDs and integer quantities")
+            raise HouseholdError("Muse checkout needs observed IDs or null, complete row labels and integer quantities")
         account_digest = hashlib.sha256(str(reference).encode()).hexdigest()
         # The shared identity parser represents IDs as strings; retain the raw
-        # integer observations in the bound surface and convert only its input.
-        identity_rows = [{**row, "product_id": str(row["product_id"])} for row in actual]
+        # observations in the bound surface; unknown IDs use its display matcher.
+        identity_rows = [{**row, "product_id": (str(row["product_id"])
+                         if row["product_id"] is not None else None)} for row in actual]
         try:
             identity = review_checkout_lines(expected["lines"], identity_rows,
                 binding={"checkout": facts, "account": account_digest, "total": expected["total_minor"],

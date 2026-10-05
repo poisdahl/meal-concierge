@@ -318,6 +318,11 @@ class NativeCoreRpcTests(NativeFixture):
         self.deny_delegation = False
         self.pending_delegation = None
         self.final_label = "Bekreft og betal 35,00kr"
+        self.checkout_items = [{"product_id": 10, "title": "Fullkornspasta",
+                                "subtitle": "500 g, Synthetic", "quantity": 1}]
+        self.checkout_amount_rows = [{"label": "1 vare", "value": "35,00kr"},
+            {"label": "Delsum", "value": "35,00kr"}, {"label": None, "value": "0,00kr"},
+            {"label": "Total inkl. MVA", "value": "35,00kr"}]
 
     def facts(self, record):
         operation = record["operation"]
@@ -325,10 +330,8 @@ class NativeCoreRpcTests(NativeFixture):
         if operation == "checkout_review":
             return {"url": "https://oda.com/no/checkout/confirm/", "account": account,
                     "address": "Eksempelveien 1", "delivery_sections": [self.delivery],
-                    "items": [{"product_id": 10, "title": "Fullkornspasta", "subtitle": "Synthetic, 500 g", "quantity": 1}],
-                    "warnings": [], "amount_rows": [{"label": "1 vare", "value": "35,00kr"},
-                        {"label": "Delsum", "value": "35,00kr"}, {"label": None, "value": "0,00kr"},
-                        {"label": "Total inkl. MVA", "value": "35,00kr"}],
+                    "items": deepcopy(self.checkout_items),
+                    "warnings": [], "amount_rows": deepcopy(self.checkout_amount_rows),
                     "payment": {"display": "•••• 1234", "selected": True},
                     "submit_controls": [{"label": self.final_label, "enabled": True}],
                     "complete_sections": ["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]}
@@ -420,7 +423,9 @@ class NativeCoreRpcTests(NativeFixture):
 
     def test_native_approval_delegates_once_and_reconciles_exact_own_cancellation(self):
         self.browser.action_mode = "native_approval"
+        self.checkout_items[0]["product_id"] = None
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.assertIsNone(self.store.read()["pending_checkout"]["browser_review"]["surface"]["items"][0]["product_id"])
         confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
         self.assertTrue(self.rpc(confirmation)["confirmed"])
         self.assertTrue(self.rpc(confirmation)["confirmed"])
@@ -430,6 +435,42 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertTrue(self.rpc(cancellation)["cancelled"])
         self.assertTrue(self.rpc(cancellation)["cancelled"])
         self.assertEqual(self.effects, ["checkout_delegate", "cancellation_delegate"])
+
+    def test_unknown_id_requires_complete_matching_labels_and_exact_quantity(self):
+        original = {**self.checkout_items[0], "product_id": None}
+        for changes in ({"title": "Ris"}, {"subtitle": "1 kg, Synthetic"},
+                        {"subtitle": "500 g, Other"}, {"quantity": 2},
+                        {"product_id": 11}, {"product_id": "10"},
+                        {"product_id": True}, {"product_id": 0}):
+            self.checkout_items = [{**original, **changes}]
+            with self.subTest(changes=changes):
+                self.rpc({"operation": "checkout", "action": "prepare"}, expect_ok=False)
+                self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, [])
+        self.assertFalse(list((self.directory / "consumed").glob("*.json")))
+
+    def test_indistinguishable_unknown_id_rows_cannot_authorize_checkout(self):
+        self.shop.cart["items"].append({**self.shop.cart["items"][0], "product_id": 11})
+        self.shop.cart.update(count=2, subtotal=70.0)
+        self.checkout_items = [{**self.checkout_items[0], "product_id": None}] * 2
+        self.checkout_amount_rows = [{"label": "2 varer", "value": "70,00kr"},
+            {"label": "Delsum", "value": "70,00kr"}, {"label": None, "value": "0,00kr"},
+            {"label": "Total inkl. MVA", "value": "70,00kr"}]
+        self.final_label = "Bekreft og betal 70,00kr"
+        self.rpc({"operation": "checkout", "action": "prepare"}, expect_ok=False)
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, [])
+        self.assertFalse(list((self.directory / "consumed").glob("*.json")))
+
+    def test_unknown_id_becoming_proven_changes_the_frozen_review_before_dispatch(self):
+        self.browser.action_mode = "native_approval"
+        self.checkout_items[0]["product_id"] = None
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.checkout_items[0]["product_id"] = 10
+        self.rpc({"operation": "checkout", "action": "confirm",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.effects, [])
+        self.assertFalse(list((self.directory / "consumed").glob("*.json")))
 
     def test_existing_timed_confirmation_cannot_be_reinterpreted_as_native_approval(self):
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})

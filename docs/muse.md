@@ -188,8 +188,14 @@ consumed or possibly dispatched action cannot use this refusal outcome.
 observed sections in order: `account, items, warnings, amounts, delivery,
 payment, submit`. `account` contains the actual account-delivery `url` and
 visible absolute `edit_urls`; its observed address reference must match the fresh
-MCP selected address. Each item has independent integer `product_id`, integer
-`quantity`, raw `title` and `subtitle`. Warnings must be a fully observed empty
+MCP selected address. Each item has independently proven positive integer
+`product_id`, or `null` when the page exposes no ID, integer `quantity`, and raw
+complete `title` and `subtitle`. Unknown IDs pass through the shared checkout
+identity matcher: complete visible labels and exact quantities must identify
+each row uniquely. Never copy expected IDs or replace an observed conflicting
+ID with `null`. Raw IDs, including `null`, remain part of the frozen review
+surface; a changed ID or row before dispatch requires a fresh preparation.
+Warnings must be a fully observed empty
 list, not an omitted or unknown section. Each amount row contains raw `label` and
 `value`; all subtotal/discount/fee arithmetic must match the fresh cart. Amounts
 may have the observed compact currency suffix (`1309,35kr`). One
