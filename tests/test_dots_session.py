@@ -564,6 +564,117 @@ class DotsSessionTests(unittest.TestCase):
                            "slots": [{"slot_id": label, "display": label, "date": "2026-10-06",
                                       "start": "09:00", "end": "12:00", "selected": False}]}}
 
+    def rendered_orders_host(self, frame):
+        self.assertEqual(frame["browser_binding"], self.binding)
+        self.assertEqual(frame["effect"], "read")
+        self.assertLessEqual((datetime.fromisoformat(frame["expires_at"])
+                            - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), 60)
+        identity = frame["arguments"].get("order_number", "123456")
+        path = f"/trumf-profil/nettbutikk/bestilling/{identity}"
+        location = {"origin": "https://meny.no", "path": path,
+                    "query_keys": ["archived", "mworderid"], "hash": ""}
+        result = {"authenticated": True, "authenticated_count": 1, "ready": True,
+                  "main_count": 1, "heading_count": 1, "source_origin": "https://meny.no"}
+        if frame["operation"] == "get_orders":
+            result.update(source_path="/trumf-profil/nettbutikk", source_query_keys=[],
+                          source_hash="#/bestillinger", heading="Bestillinger fra de siste 6 måneder",
+                          table_count=1, columns=["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"],
+                          rendered_row_count=1, rows_complete=True, pagination_count=0,
+                          orders=[{"order_number": identity, "cell_count": 5, "links": [location, dict(location)],
+                                   "status_marker": "LEVERT", "delivery_display": "Synthetic delivery",
+                                   "time_display": "Synthetic time", "sum_display": "80,00 kr"}])
+        else:
+            self.assertEqual(frame["operation"], "get_order")
+            result.update(source_path=path, source_query_keys=location["query_keys"], source_hash="",
+                          heading="BESTILLING SYNTHETIC", order_number=identity, status_markers=["Levert"],
+                          item_heading="Bestilte varer (40)", item_count=40, item_table_count=1,
+                          item_columns=["VARE", "MENGDE"], item_rows_complete=True,
+                          products=[{"name": f"Synthetic item {i}", "quantity": 2} for i in range(18)]
+                                   + [{"name": "Synthetic last item", "quantity": 4}],
+                          amounts={"Betalt beløp (kort)": "80,00 kr"})
+        return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+
+    def test_rendered_orders_keep_qualification_through_core_agent_pages_and_receipts(self):
+        code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                 "browser_binding": self.binding})
+        self.assertEqual(code, 0, policy)
+        before = self.state()
+        request = {"operation": "orders"}
+        command_id = str(uuid.uuid4())
+        code, listed = self.call(request, command_id, self.rendered_orders_host)
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["result"]["history_scope"], "rendered_last_six_months")
+        self.assertEqual(len(listed["result"]["orders"]), 1)  # Two consistent links are one order.
+        frames = len(self.frames)
+        self.assertEqual(self.call(request, command_id, self.rendered_orders_host), (0, listed))
+        self.assertEqual(len(self.frames), frames)
+        code, detail = self.call({"operation": "orders", "action": "get", "order_id": "123456"},
+                                 host=self.rendered_orders_host)
+        self.assertEqual(code, 0, detail)
+        for value in (listed["result"], listed["result"]["orders"][0], detail["result"],
+                      detail["result"]["order"], detail["result"]["tracking"]):
+            self.assertEqual(value["evidence_kind"], "host_attested_rendered_ui")
+            self.assertEqual(value["backend_freshness"], "unverified")
+        order = detail["result"]["order"]
+        self.assertIsNone(order["order_total"])
+        self.assertEqual(order["payment_status"], "unknown")
+        self.assertNotIn("grossAmount", order)
+        self.assertEqual(order["amount_displays"], {"Betalt beløp (kort)": "80,00 kr"})
+        code, projected = self.call({"operation": "orders", "action": "get", "order_id": "123456",
+                                    "response_view": "agent", "view_offset": 18, "view_limit": 1},
+                                    host=self.rendered_orders_host)
+        self.assertEqual(code, 0, projected)
+        view = projected["result"]
+        self.assertEqual(view["order_items"]["items"][0]["quantity"], 4)
+        self.assertEqual(view["order_items"]["backend_freshness"], "unverified")
+        self.assertEqual(view["order"]["tracking"]["backend_freshness"], "unverified")
+        self.assertIn("unverified", view["next"])
+        for key in ("profile", "menu", "pending_cart_change", "cart_plan", "native_cart_writes_enabled"):
+            self.assertEqual(before.get(key), self.state().get(key))
+        self.assertEqual(self.writes, 0)
+
+    def test_rendered_orders_reject_missing_scope_identity_and_incomplete_goods(self):
+        cases = [("list", {"orders": [], "rendered_row_count": 0}),
+                 ("list", {"rows_complete": False}), ("list", {"pagination_count": 1}),
+                 ("list", {"heading": "Loading"}), ("list", {"authenticated_count": 2}),
+                 ("get", {"order_number": "987654"}), ("get", {"source_query_keys": ["edit"]}),
+                 ("get", {"item_count": 41, "item_heading": "Bestilte varer (41)"}),
+                 ("get", {"item_rows_complete": False}), ("get", {"status_markers": ["Levert", "Bekreftet"]}),
+                 ("get", {"amounts": {"Reservert beløp": "80,00 kr"}})]
+        for action, changes in cases:
+            with self.subTest(action=action, changes=changes):
+                def changed(frame):
+                    reply = self.rendered_orders_host(frame)
+                    reply["result"].update(changes)
+                    return reply
+                request = {"operation": "orders", "action": action}
+                if action == "get":
+                    request["order_id"] = "123456"
+                code, result = self.call(request, host=changed)
+                self.assertEqual(code, 1, result)
+        def conflicting_link(frame):
+            reply = self.rendered_orders_host(frame)
+            reply["result"]["orders"][0]["links"][1]["path"] = "/trumf-profil/nettbutikk/bestilling/987654"
+            return reply
+        self.assertEqual(self.call({"operation": "orders"}, host=conflicting_link)[0], 1)
+        self.assertEqual(self.writes, 0)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+
+    def test_native_orders_protected_actions_and_invalid_inputs_stop_before_intent(self):
+        before = self.files()
+        requests = [{"operation": "orders", "action": action, "order_id": "123456"}
+                    for action in ("change_begin", "cancel_prepare", "cancel_confirm", "remove_prepare")]
+        requests += [{"operation": "orders", "action": "get", "order_id": identity}
+                     for identity in ("", "../123", "synthetic", 123456)]
+        requests += [{"operation": "orders", "limit": limit} for limit in (0, 6, True)]
+        for request in requests:
+            with self.subTest(request=request):
+                code, result = self.call(request, host=self.rendered_orders_host)
+                self.assertEqual(code, 1, result)
+                self.assertEqual(self.files(), before)
+                self.assertEqual(self.frames, [])
+
     def test_delivery_read_normalizes_labels_dates_and_from_price_without_writes(self):
         code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
                                  "browser_binding": self.binding})

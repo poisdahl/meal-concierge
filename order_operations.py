@@ -1410,9 +1410,12 @@ class OrderOperations:
             if self.provider == "meny":
                 order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline, allow_recovery=request.get("_allow_browser_recovery") is True)
                 require_provider_identity(order, order_id)
+                evidence = {key: order[key] for key in ("evidence_kind", "backend_freshness", "source_origin",
+                            "source_path", "source_query_keys") if key in order}
                 return {
+                    **evidence,
                     "order": order,
-                    "tracking": {"order_id": order_id, "status": str(order.get("status") or "unknown")},
+                    "tracking": {**evidence, "order_id": order_id, "status": str(order.get("status") or "unknown")},
                 }
             order = self.provider_client.call("get_order", {"order_number": order_id}, deadline=deadline)
             tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
