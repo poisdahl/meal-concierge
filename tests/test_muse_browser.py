@@ -132,6 +132,40 @@ class NativeBrokerTests(NativeFixture):
         self.assertFalse(thread.is_alive())
         self.assertEqual(len(errors), 1)
         self.assertFalse(list((self.directory / "consumed").glob("*.json")))
+        end_request(self.directory, record["request_id"], "original-task",
+                    self.response(record, facts={"dispatch": "not_dispatched"}))
+        with self.bridge.custody():
+            pass
+
+    def test_unconsumed_refusal_closes_custody_and_revokes_live_permit(self):
+        record = self.record()
+        key = record["request_id"]
+        claim_request(self.directory, key, "original-task")
+        with self.assertRaises(HouseholdError):
+            respond_request(self.directory, key, "original-task",
+                            self.response(record, facts={"dispatch": "clicked_once"}))
+        respond_request(self.directory, key, "original-task",
+                        self.response(record, facts={"dispatch": "not_dispatched"}))
+        with self.assertRaises(HouseholdError):
+            consume_request(self.directory, key, "original-task")
+        self.assertFalse(list((self.directory / "consumed").glob("*.json")))
+        with self.bridge.custody():
+            pass
+
+    def test_consumed_action_cannot_claim_pre_dispatch_refusal(self):
+        record = self.record()
+        key = record["request_id"]
+        claim_request(self.directory, key, "original-task")
+        consume_request(self.directory, key, "original-task")
+        refusal = self.response(record, facts={"dispatch": "not_dispatched"})
+        for publish in (respond_request, end_request):
+            with self.subTest(publish=publish.__name__), self.assertRaises(HouseholdError):
+                publish(self.directory, key, "original-task", refusal)
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
+        respond_request(self.directory, key, "original-task", self.response(record, facts={"dispatch": "clicked_once"}))
+        with self.bridge.custody():
+            pass
 
     def test_duplicate_consume_and_wrong_owner_identity_refuse(self):
         record = self.record()

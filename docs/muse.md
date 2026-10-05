@@ -108,8 +108,12 @@ While the CLI waits, the trusted main native agent produces the browser evidence
 through `muse_browser`'s public functions. Records are private, bounded to 64 KiB,
 exclusively published and fsynced. The producer must:
 
-1. Read the complete emitted request and correlate its original native task and
-   actual execution receipt. Call `claim_request(directory, request_id, task_id)`
+1. Read the complete emitted request. Its `task_id` is the original native task
+   **chain anchor**, not the current successor execution ID. The trusted producer
+   must retain actual predecessor/successor receipts privately and verify the
+   current execution belongs to that chain before every steer, effect or response.
+   Do not echo the anchor as an invented current execution identity.
+   Call `claim_request(directory, request_id, task_id)`
    once **before** steering. Requests expire after at most 180 seconds for reads
    and 30 seconds for effects, or the remaining core deadline if shorter. An
    effect also carries the original core `confirmation_id`, `expires_at` and
@@ -132,6 +136,13 @@ exclusively published and fsynced. The producer must:
    old effect. Return only `{"dispatch":"clicked_once"}` after an actual known
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
+
+A completed task that refuses an effect **before** consuming its permit may
+return exactly `{"dispatch":"not_dispatched"}`. The broker accepts that ending
+only when no consumed record exists and serializes it against consumption. It
+closes native custody and forbids later consumption of the same request; it
+does not grant a replay or clear the original core confirmation journal. A
+consumed or possibly dispatched action cannot use this refusal outcome.
 
 `checkout_review` facts have exactly `url`, `account`, `address`,
 `delivery_sections`, `items`, `warnings`, `amount_rows`, `payment`,

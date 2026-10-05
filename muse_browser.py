@@ -140,6 +140,10 @@ def consume_request(directory, request_id, task_id):
         if (record["operation"] not in {"checkout_click", "cancellation_click"}
                 or claim != {"request_digest": digest(record), "task_id": task_id}):
             raise HouseholdError("Muse browser action was not claimed")
+        name = request_id + ".json"
+        if any((directory / kind / name).exists() or (directory / kind / name).is_symlink()
+               for kind in ("responses", "endings")):
+            raise HouseholdError("Muse browser task already returned; no action is authorized")
         durable_publish(directory / "consumed" / (request_id + ".json"),
                         {**claim, "consumed_at": datetime.now(timezone.utc).isoformat()})
 
@@ -161,12 +165,14 @@ def transition_lock(directory):
 def respond_request(directory, request_id, task_id, response):
     # A late actual ending closes native custody. It never makes its old facts
     # fresh for a new core operation, and cannot grant another action permit.
-    directory, record = request_record(directory, request_id, task_id, active=False)
-    validate_response(record, response, fresh=False)
-    if response["task_state"] != "completed":
-        request_record(directory, request_id, task_id)
-    validate_claim(directory, record)
-    durable_publish(directory / "responses" / (request_id + ".json"), response)
+    directory = broker_paths(directory)
+    with transition_lock(directory):
+        directory, record = request_record(directory, request_id, task_id, active=False)
+        validate_response(record, response, fresh=False)
+        if response["task_state"] != "completed":
+            request_record(directory, request_id, task_id)
+        validate_claim(directory, record, response=response)
+        durable_publish(directory / "responses" / (request_id + ".json"), response)
 
 
 def end_request(directory, request_id, task_id, response):
@@ -175,26 +181,36 @@ def end_request(directory, request_id, task_id, response):
     This closes custody only. It neither replaces the earlier observation nor
     makes expired facts usable by the core.
     """
-    directory, record = request_record(directory, request_id, task_id, active=False)
-    try:
-        prior = read_json(directory / "responses" / (request_id + ".json"))
-        validate_response(record, prior, fresh=False)
-    except (FileNotFoundError, HouseholdError):
-        prior = None
-    validate_response(record, response, fresh=False)
-    if response["task_state"] != "completed" or prior is not None and prior["task_state"] == "completed":
-        raise HouseholdError("Muse browser ending requires an unresolved original task")
-    validate_claim(directory, record)
-    durable_publish(directory / "endings" / (request_id + ".json"), response)
+    directory = broker_paths(directory)
+    with transition_lock(directory):
+        directory, record = request_record(directory, request_id, task_id, active=False)
+        try:
+            prior = read_json(directory / "responses" / (request_id + ".json"))
+            validate_response(record, prior, fresh=False)
+        except (FileNotFoundError, HouseholdError):
+            prior = None
+        validate_response(record, response, fresh=False)
+        if response["task_state"] != "completed" or prior is not None and prior["task_state"] == "completed":
+            raise HouseholdError("Muse browser ending requires an unresolved original task")
+        validate_claim(directory, record, response=response)
+        durable_publish(directory / "endings" / (request_id + ".json"), response)
 
 
-def validate_claim(directory, record):
+def validate_claim(directory, record, *, response):
     claim = {"request_digest": digest(record), "task_id": record["task_id"]}
     name = record["request_id"] + ".json"
     if required_json(directory / "claims" / name) != claim:
         raise HouseholdError("Muse browser custody record changed")
     if record["operation"].endswith("_click"):
-        consumed = required_json(directory / "consumed" / name)
+        refused = response["task_state"] == "completed" and response["facts"] == {"dispatch": "not_dispatched"}
+        try:
+            consumed = read_json(directory / "consumed" / name)
+        except FileNotFoundError:
+            if refused:
+                return
+            raise HouseholdError("Muse browser action has no consumed permit") from None
+        if refused:
+            raise HouseholdError("Muse browser consumed action cannot attest pre-dispatch refusal")
         if (not isinstance(consumed, Mapping) or set(consumed) != set(claim) | {"consumed_at"}
                 or any(consumed.get(key) != value for key, value in claim.items())
                 or not timestamp(record["issued_at"]) <= timestamp(consumed["consumed_at"]) < timestamp(record["expires_at"])):
@@ -220,10 +236,12 @@ def validate_response(record, response, *, fresh=True):
 
 
 class NativeBridge:
-    """One original native task, claimed through the supported host producer.
+    """One original native task chain, claimed through the supported producer.
 
     Host receipts and complete AX facts are attested by the main native agent.
     Echoed IDs or these files alone do not prove what a browser actually did.
+    task_id is the chain anchor; the producer privately correlates each actual
+    predecessor/successor receipt before steering or returning an observation.
     """
     def __init__(self, directory, task_id):
         self.directory = broker_paths(directory)
@@ -254,7 +272,6 @@ class NativeBridge:
                     raise HouseholdError("Muse browser custody record is invalid")
                 _, record = request_record(self.directory, claim_path.stem,
                                            original.get("task_id"), active=False)
-                validate_claim(self.directory, record)
                 try:
                     ending = read_json(self.directory / "endings" / claim_path.name)
                 except FileNotFoundError:
@@ -263,9 +280,11 @@ class NativeBridge:
                     validate_response(record, ending, fresh=False)
                     if ending["task_state"] != "completed":
                         raise HouseholdError("Muse browser has no actual task ending")
+                    validate_claim(self.directory, record, response=ending)
                     continue
                 response = required_json(reply)
                 validate_response(record, response, fresh=False)
+                validate_claim(self.directory, record, response=response)
                 if response["task_state"] != "completed":
                     if (record["operation"].endswith("_click")
                             or record["task_id"] != self.task_id
@@ -304,7 +323,7 @@ class NativeBridge:
                     time.sleep(min(0.05, max(0, cutoff - time.monotonic())))
                     continue
                 validate_response(record, response)
-                validate_claim(self.directory, record)
+                validate_claim(self.directory, record, response=response)
                 if operation.endswith("_click") and response["task_state"] != "completed":
                     raise HouseholdError("Muse browser action is unresolved; reconcile its original task")
                 return dict(response["facts"])
