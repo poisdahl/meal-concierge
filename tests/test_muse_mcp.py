@@ -410,6 +410,22 @@ runpy.run_path(sys.argv[0],run_name='__main__')
             self.assertEqual(products['products'][0]['product_ref'],9212)
             self.assertEqual(products['scope']['requested_size'],5)
             self.assertIn('cart_digest',cli({'operation':'cart','action':'get'}))
+            count, helpers = len(self.requests), len(self.helper_calls())
+            state_before = (home/'state'/'state.json').read_bytes()
+            for restore_digest in ('external-cart-digest', None):
+                rejected = subprocess.run([sys.executable,'-I','-B',str(ROOT/'cli.py')],
+                    input=json.dumps({'operation':'cart','action':'sync',
+                        '_restore_missing_cart_digest':restore_digest}).encode(),
+                    capture_output=True,timeout=8,
+                    env={**os.environ,'MEAL_CONCIERGE_SOCKET':str(home/'service.sock')})
+                self.assertEqual(rejected.returncode,1)
+                response = json.loads(rejected.stdout)
+                self.assertFalse(response['ok'])
+                self.assertIn('freshly reviewed products.apply',response['error'])
+            self.assertEqual(len(self.requests),count)
+            self.assertEqual(len(self.helper_calls()),helpers)
+            self.assertEqual(self.changes,0)
+            self.assertEqual((home/'state'/'state.json').read_bytes(),state_before)
         finally:
             if process.poll() is None:
                 process.terminate()

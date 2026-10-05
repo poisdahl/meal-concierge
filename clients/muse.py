@@ -297,6 +297,8 @@ class ProtectedMuseApplication(MuseApplication):
     def handle(self, request):
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
+        if "_restore_missing_cart_digest" in request:
+            raise HouseholdError("Muse cart restoration requires a freshly reviewed products.apply request")
         operation, action = request.get("operation"), request.get("action")
         if (not isinstance(operation, str) or action is not None and not isinstance(action, str)
                 or operation not in PROTECTED_ALLOWED or action not in PROTECTED_ALLOWED[operation]):
