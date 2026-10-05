@@ -1,5 +1,5 @@
 """Real foreground core commands and synthetic native-host recovery."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -55,6 +55,10 @@ class DotsSessionTests(unittest.TestCase):
 
     def host(self, frame):
         self.assertEqual(frame["browser_binding"], self.binding)
+        lifetime = (datetime.fromisoformat(frame["expires_at"])
+                    - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
+        self.assertGreater(lifetime, 0)
+        self.assertLessEqual(lifetime, 60)
         operation = frame["operation"]
         if operation == "verify_new_cart":
             result = {"authenticated": True, "new_cart": True}
@@ -544,6 +548,10 @@ class DotsSessionTests(unittest.TestCase):
     def delivery_host(self, frame):
         if frame["operation"] != "get_delivery_slots":
             return self.host(frame)
+        lifetime = (datetime.fromisoformat(frame["expires_at"])
+                    - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
+        self.assertGreater(lifetime, 110)
+        self.assertLessEqual(lifetime, 120)
         label = "fra 49 kr fra 49 kroner, 6. oktober klokka 09:00 til 12:00"
         return {"reply_to": frame["call_id"], "browser_binding": self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -587,6 +595,23 @@ class DotsSessionTests(unittest.TestCase):
             return reply
         code, result = self.call({"operation": "delivery"}, host=empty)
         self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+
+    def test_delivery_longer_read_window_rejects_stale_or_future_observations(self):
+        for invalid in ("stale", "future"):
+            with self.subTest(observation=invalid):
+                def changed(frame):
+                    reply = self.delivery_host(frame)
+                    if frame["operation"] == "get_delivery_slots":
+                        boundary = frame["emitted_at"] if invalid == "stale" else frame["expires_at"]
+                        offset = -1 if invalid == "stale" else 1
+                        reply["observed_at"] = (datetime.fromisoformat(boundary)
+                                                + timedelta(seconds=offset)).isoformat()
+                    return reply
+                code, result = self.call({"operation": "delivery"}, host=changed)
+                self.assertEqual(code, 1, result)
+                self.assertIn("reply identity or lifetime changed", result["error"])
+                self.assertNotIn("pending_cart_change", self.state())
         self.assertEqual(self.writes, 0)
 
     def test_delivery_rejects_changed_route_auth_picker_or_binding(self):

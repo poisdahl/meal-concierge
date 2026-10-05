@@ -306,6 +306,13 @@ bounds; missing prices remain unavailable. Requests may specify one to seven
 ISO `dates` through `delivery.list`; address overrides and slot selection are
 rejected before a command intent or browser operation is created.
 
+If the supported read evaluator lacks `Intl`, obtain the current calendar date
+from the cloud runtime with `datetime.now(ZoneInfo("Europe/Oslo"))` immediately
+before extraction. Supply numeric year, month and day as a read argument in
+place of the extraction's `Intl` expression, preserving its year-rollover rule.
+Record that calendar input privately with the observation. Do not use the
+requested delivery date as today's date or modify browser globals.
+
 Each managed batch persists its original menu/product identity, initial cart
 allocations and verified batch prefix before a write frame. The adapter
 returns a fresh complete cart snapshot to the core after dispatch, rather
@@ -331,7 +338,9 @@ authorize or alter commands. Native/provider approval gates still apply.
 
 The real core journals `pending_cart_change` before a write frame is emitted.
 The adapter respects the existing two-click batch and 240-second cart budget;
-each host reply has at most 60 seconds. EOF, timeout, stale/mismatched reply
+delivery-picker read replies have at most 120 seconds, while every other host
+reply, including writes, has at most 60 seconds. The command's existing deadline
+still caps each reply. EOF, timeout, stale/mismatched reply
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
