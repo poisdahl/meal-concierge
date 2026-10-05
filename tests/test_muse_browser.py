@@ -114,7 +114,7 @@ class NativeFixture(unittest.TestCase):
         result = {"version": 1, "request_id": str(uuid.uuid4()), "provider": "oda",
                   "operation": operation, "task_id": "original-task", "owner_pid": os.getpid(),
                   "owner_start": process_start(os.getpid()), "issued_at": now.isoformat(),
-                  "expires_at": (now + timedelta(seconds=30 if operation in ACTION_OPERATIONS else 60)).isoformat(), "payload": {}}
+                  "expires_at": (now + timedelta(seconds=30)).isoformat(), "payload": {}}
         result.update(changes)
         durable_publish(self.directory / "requests" / (result["request_id"] + ".json"), result)
         return result
