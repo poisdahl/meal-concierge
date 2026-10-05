@@ -1532,7 +1532,10 @@ process.stdout.write(eval(script));
         command = run.call_args.args[0]
         self.assertEqual(command[-2:], ["--clear-cancellation-cache", "/private/browser-profile"])
         self.assertEqual(run.call_args.kwargs["timeout"], 30.0)
-        self.assertIsNotNone(run.call_args.kwargs["preexec_fn"])
+        self.assertNotIn("preexec_fn", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["user"], browser.uid)
+        self.assertEqual(run.call_args.kwargs["group"], browser.gid)
+        self.assertEqual(run.call_args.kwargs["extra_groups"], [])
 
     def test_cancellation_opens_stable_entry_and_requires_canonical_order_url(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -4893,7 +4896,9 @@ class MenyClientTests(unittest.TestCase):
         self.assertEqual(results[0]["price_display"][reference], "fra 0 kr")
         self.assertEqual(results[1]["price_display"][reference], "fra 49 kr")
 
-    def test_delivery_selection_binds_both_native_dialog_steps(self):
+    @mock.patch("meny.datetime")
+    def test_delivery_selection_binds_both_native_dialog_steps(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._sleep = mock.Mock()
@@ -4935,7 +4940,9 @@ class MenyClientTests(unittest.TestCase):
         ])
         client._wait_for_delivery_reservation.assert_called_once_with()
 
-    def test_already_selected_delivery_refreshes_through_a_verified_temporary_slot(self):
+    @mock.patch("meny.datetime")
+    def test_already_selected_delivery_refreshes_through_a_verified_temporary_slot(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._eval = mock.Mock(side_effect=[
@@ -4945,6 +4952,7 @@ class MenyClientTests(unittest.TestCase):
                 "authenticated": True,
                 "already_selected": True,
                 "refresh_available": True,
+                "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00",
                 "refresh_slot": "fra 0 kr fra 0 kroner, 3. september klokka 08:00 til 10:00",
             },
             {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
@@ -4972,7 +4980,9 @@ class MenyClientTests(unittest.TestCase):
         self.assertEqual(client._wait_delivery_picker_closed.call_count, 3)
         self.assertEqual(client._wait_for_delivery_reservation.call_count, 2)
 
-    def test_already_selected_delivery_waits_until_the_dialog_is_closed(self):
+    @mock.patch("meny.datetime")
+    def test_already_selected_delivery_waits_until_the_dialog_is_closed(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._eval = mock.Mock(return_value={
@@ -4992,12 +5002,14 @@ class MenyClientTests(unittest.TestCase):
         client._invoke.assert_called_once_with("click", '[data-meal-concierge-action="delivery-dismiss"]')
         client._wait_delivery_picker_closed.assert_called_once_with()
 
-    def test_delivery_selection_cannot_reuse_a_tentative_open_dialog(self):
+    @mock.patch("meny.datetime")
+    def test_delivery_selection_cannot_reuse_a_tentative_open_dialog(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
-            {"ready": True, "identity": True, "authenticated": True, "already_selected": False},
+            {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
             {"ready": True, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 1},
             *([{"ready": False, "identity": True, "authenticated": True, "dialog_count": 1}] * 20),
         ])
@@ -5014,12 +5026,14 @@ class MenyClientTests(unittest.TestCase):
             mock.call("click", '[data-meal-concierge-action="delivery-confirm"]'),
         ])
 
-    def test_delivery_selection_never_confirms_a_mismatched_selected_slot(self):
+    @mock.patch("meny.datetime")
+    def test_delivery_selection_never_confirms_a_mismatched_selected_slot(self, clock):
+        clock.now.return_value = datetime(2026, 9, 2, tzinfo=ZoneInfo("Europe/Oslo"))
         client = self.client()
         client._open_delivery_picker = mock.Mock()
         client._sleep = mock.Mock()
         client._eval = mock.Mock(side_effect=[
-            {"ready": True, "identity": True, "authenticated": True, "already_selected": False},
+            {"ready": True, "identity": True, "authenticated": True, "already_selected": False, "label": "fra 0 kr fra 0 kroner, 3. september klokka 10:00 til 12:00"},
             *([{"ready": False, "identity": True, "authenticated": True, "selected_count": 1, "total_selected_count": 2}] * 20),
         ])
         client._invoke = mock.Mock(return_value={})

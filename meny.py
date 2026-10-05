@@ -370,6 +370,8 @@ def normalize_meny_delivery_slot(value: Any) -> dict[str, Any]:
 
 def normalized_selected_meny_slot(slot_ref: str, label: Any) -> dict[str, Any]:
     normalized_ref, _suffix = normalize_delivery_slot_ref(slot_ref)
+    if meny_label_slot_ref(label)[0] != normalized_ref:
+        raise HouseholdError("MENY selected delivery could not be verified")
     match = re.fullmatch(
         r"meny:(?P<date>\d{4}-\d{2}-\d{2})T(?P<start>\d{2}:\d{2})/(?P<end>\d{2}:\d{2})",
         normalized_ref,
@@ -2383,6 +2385,8 @@ __DELIVERY_BINDING__
             self._sleep(0.25)
         else:
             raise HouseholdError("MENY delivery slot changed or is unavailable")
+        if meny_label_slot_ref(marked.get("label"))[0] != slot_ref:
+            raise HouseholdError("MENY delivery slot date changed; list delivery slots again")
         selected_slot_ref = slot_ref
         selected_suffix = expected_suffix
         refreshing = False
@@ -3757,12 +3761,7 @@ __DELIVERY_BINDING__
     def _terminate_browser_session(self, deadline: float) -> bool:
         pid_file = self.socket_directory / f"{self.session}.pid"
 
-        def drop_privileges() -> None:
-            os.setgroups([])
-            os.setgid(self.gid)
-            os.setuid(self.uid)
-
-        privilege_drop = drop_privileges if os.geteuid() == 0 else None
+        privileges = {"user": self.uid, "group": self.gid, "extra_groups": []} if os.geteuid() == 0 else {}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
@@ -3814,7 +3813,7 @@ raise SystemExit(0 if poller.poll(int(wait_text)) else 3)
                 stderr=subprocess.DEVNULL,
                 timeout=min(2, remaining),
                 check=False,
-                preexec_fn=privilege_drop,
+                **privileges,
             )
         except (OSError, subprocess.TimeoutExpired):
             return False

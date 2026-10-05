@@ -3356,11 +3356,6 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             clear_cancellation_cache(profile)
             return
 
-        def drop_privileges() -> None:
-            os.setgroups([])
-            os.setgid(self.gid)
-            os.setuid(self.uid)
-
         deadline = getattr(self, "_cancellation_deadline", None)
         remaining = 30.0 if deadline is None else deadline - time.monotonic()
         if remaining <= 0:
@@ -3373,7 +3368,9 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                 stderr=subprocess.DEVNULL,
                 timeout=min(30.0, remaining),
                 check=False,
-                preexec_fn=drop_privileges,
+                user=self.uid,
+                group=self.gid,
+                extra_groups=[],
                 env={"LANG": "C.UTF-8", "PATH": os.environ.get("PATH", os.defpath)},
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -3563,11 +3560,6 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             if value := os.environ.get(name):
                 environment[name] = value
 
-        def drop_privileges() -> None:
-            os.setgroups([])
-            os.setgid(self.gid)
-            os.setuid(self.uid)
-
         timeout = 90.0
         deadlines = [
             value
@@ -3580,6 +3572,9 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             if remaining <= 0:
                 raise HouseholdError("Oda browser deadline reached")
             timeout = min(timeout, max(0.1, remaining))
+        # The service launches browsers from worker threads. Native identity
+        # options avoid running Python in the forked child before exec.
+        privileges = {"user": self.uid, "group": self.gid, "extra_groups": []} if os.geteuid() == 0 else {}
         try:
             completed = subprocess.run(
                 command,
@@ -3590,8 +3585,8 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
                 text=True,
                 timeout=timeout,
                 check=False,
-                preexec_fn=drop_privileges if os.geteuid() == 0 else None,
                 env=environment,
+                **privileges,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HouseholdError("Oda browser is unavailable") from exc
@@ -3603,7 +3598,7 @@ buttons[0].setAttribute('data-retail-delivery-slot','');return JSON.stringify({r
             envelope = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
             raise HouseholdError("Oda browser response is malformed") from exc
-        if envelope.get("success") is not True or not isinstance(envelope.get("data"), dict):
+        if not isinstance(envelope, dict) or envelope.get("success") is not True or not isinstance(envelope.get("data"), dict):
             if not check:
                 return {}
             raise HouseholdError("Oda browser rejected the operation")
