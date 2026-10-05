@@ -172,6 +172,7 @@ class ProductObservationTests(unittest.TestCase):
             ("Harissa 130g Al Amier", 130, "g"),
             ("178ml Trappeys", 178, "ml"),
             ("200g St.maria", 200, "g"),
+            ("Lettkokte 1,2kg Urkraft", 1200, "g"),
         ):
             with self.subTest(label=label):
                 self.assertEqual(parse_package(label, provider="meny"), {
@@ -186,6 +187,8 @@ class ProductObservationTests(unittest.TestCase):
             "400 til 500g", "40g avrent", "40g pr. kg",
             "rundt 40g pakke", "anslagsvis 40g pakke", "40g variabel vekt",
             "to poser 40g", "Original 150ml Unknown Brand",
+            "Lettkokte ca. 1,2kg Urkraft", "Lettkokte 1,2kg eller 1kg Urkraft",
+            "Unknown 1,2kg Urkraft", "Lettkokte 1,2kg Unknown",
         ):
             with self.subTest(label=label):
                 self.assertIsNone(parse_package(label, provider="meny"))
@@ -193,6 +196,7 @@ class ProductObservationTests(unittest.TestCase):
         for item, quantity, unit, label, count in (
             ("bladpersille", 50, "g", "40g pakke", 2),
             ("chilisaus", "2.5", "ml", "Original 150ml Cholula", 1),
+            ("havregryn", 300, "g", "Lettkokte 1,2kg Urkraft", 1),
         ):
             with self.subTest(item=item):
                 observed = normalize_meny_product_search({
@@ -215,6 +219,20 @@ class ProductObservationTests(unittest.TestCase):
                 )
                 self.assertEqual(plan["status"], "prepared")
                 self.assertEqual(plan["requirements"][0]["selection"]["package_count"], count)
+
+        oats_label = "Lettkokte 1,2kg Urkraft"
+        oats = normalize_meny_product_search({
+            "provider": "meny", "query": "havregryn", "products": [{
+                "product_id": "/varer/fixture/havregryn-7020655841165",
+                "name": "Havregryn", "package": oats_label, "price": "28,90 kr",
+            }],
+        }, observed_at=OBSERVED_AT)["products"][0]
+        self.assertEqual(oats["display"]["package"], oats_label)
+        self.assertEqual(oats["package"]["quantity"], {"numerator": 1200, "denominator": 1})
+        self.assertEqual(oats["availability"], "unknown")
+        self.assertTrue(all("total_payable_ore" not in option for option in oats["purchase_options"]))
+        for provider in (None, "oda", "mathem"):
+            self.assertIsNone(parse_package(oats_label, provider=provider))
 
         for label in ("rundt 40g pakke", "anslagsvis 40g pakke", "40g variabel vekt", "to poser 40g"):
             with self.subTest(uncertain_label=label):
