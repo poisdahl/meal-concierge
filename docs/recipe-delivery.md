@@ -47,6 +47,7 @@ For long menus, text or attachments may be split into several parts.
 |---|---|
 | Codex or Claude Code in a terminal | Can create local files; the terminal itself does not show a PDF/image preview. |
 | Codex or Claude Code in a desktop app | Use the client's file viewer for PDF and images; file access and attachment support are required. |
+| Grok Bot direct conversations | Exported menu PDFs and available image files can be returned as native cards in the same conversation, with preview and save controls. |
 | Grok Bot group rooms | Recipe text is supported; PDF and image attachments are not delivered through that room transport. |
 | NanoClaw | The generated attachment exports recipe PDFs for supported native delivery. Managed email is unavailable in that attachment; use a verified native email/chat connection or another configured client. |
 | Hermes, OpenClaw and other destinations | File delivery depends on the configured chat/sender. Have the agent check support rather than promise attachments. |
