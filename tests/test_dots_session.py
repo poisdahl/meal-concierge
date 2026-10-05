@@ -241,11 +241,15 @@ class DotsSessionTests(unittest.TestCase):
     def test_two_product_apply_continues_one_search_with_cached_time_and_expiry(self):
         milk = "/varer/meieri/melk-1234567890124"
         quantities, searches = {}, []
+        cached, validation_ref = None, None
         def host(frame):
             operation = frame["operation"]
             if operation in {"verify_new_cart", "product_search"}:
                 reply = self.host(frame)
                 if operation == "product_search":
+                    if cached is not None:
+                        work = self.state()["menu_planning"]["prepared"][validation_ref]["validation_work"]
+                        self.assertEqual(next(iter(work["searches"].values()))["observed_at"], cached["observed_at"])
                     query = frame["arguments"]["queries"][0]
                     searches.append(query)
                     if "melk" in query.casefold():
@@ -318,7 +322,8 @@ class DotsSessionTests(unittest.TestCase):
         self.assertEqual(len(searches), 1)
         self.assertEqual((quantities, self.writes), ({}, 0))
         self.assertIsNone(self.state().get("pending_cart_change"))
-        work = self.state()["menu_planning"]["prepared"][partial["result"]["product_plan_ref"]]["validation_work"]
+        validation_ref = partial["result"]["product_plan_ref"]
+        work = self.state()["menu_planning"]["prepared"][validation_ref]["validation_work"]
         cached = next(iter(work["searches"].values()))
         self.assertEqual(len(work["searches"]), 1)
         frames = len(self.frames)
@@ -329,8 +334,7 @@ class DotsSessionTests(unittest.TestCase):
         self.assertTrue(applied["result"]["applied"], applied)
         self.assertEqual(len(searches), 2)
         self.assertNotEqual(searches[0], searches[1])
-        observations = [row["observation"] for row in applied["result"]["product_plan"]["requirements"]]
-        self.assertEqual(next(o for o in observations if o["query"] == cached["query"])["observed_at"], cached["observed_at"])
+        cached = None
         self.assertEqual(quantities, {PRODUCT: 1, milk: 1})
         self.assertEqual(self.state()["cart_plan"]["added_quantities"], quantities)
         self.assertIsNone(self.state().get("pending_cart_change"))
