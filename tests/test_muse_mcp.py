@@ -61,6 +61,7 @@ class Fixture(unittest.TestCase):
         self.operations = self.directory / "ops"
         self.operations.mkdir(mode=0o700)
         self.mode, self.helper_mode = "json", "ok"
+        self.failure_method = None
         self.requests, self.cart, self.changes = [], {}, 0
         self.helper_log = self.directory / "helper.log"
         fixture = self
@@ -73,7 +74,8 @@ class Fixture(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 fixture.requests.append((body, dict(self.headers)))
                 method, rpc_id = body['method'], body.get('id')
-                if fixture.mode in {"401", "403", "redirect"}:
+                if (fixture.mode in {"401", "403", "404", "redirect"}
+                        and fixture.failure_method in {None, method}):
                     self.send_response(302 if fixture.mode == "redirect" else int(fixture.mode))
                     self.send_header('Location', fixture.endpoint + '/redirect')
                     self.send_header('Content-Length', str(len(CANARY)))
@@ -240,6 +242,37 @@ class TransportTests(Fixture):
                     self.client().probe()
                 self.assertNotIn(CANARY,str(error.exception))
                 self.assertEqual(len(self.requests),before)
+
+    def test_denial_reports_exact_phase_and_status_without_replay_or_secret_data(self):
+        phases = ('initialize', 'notifications/initialized', 'tools/list', 'tools/call')
+        for status in ('401', '403'):
+            for index, phase in enumerate(phases):
+                with self.subTest(status=status, phase=phase):
+                    self.mode, self.failure_method = status, phase
+                    client = self.client()
+                    before = len(self.requests)
+                    with self.assertRaises(HouseholdError) as error:
+                        client.call('manipulate_cart', {'operations': [{'productId': 9212, 'quantity': 1}]})
+                    message = str(error.exception)
+                    self.assertIn(f'phase={phase}; HTTP {status}; session_assigned={str(index > 0).lower()}', message)
+                    self.assertNotIn(CANARY, message)
+                    self.assertNotIn('synthetic-session', message)
+                    self.assertEqual(len(self.requests) - before, index + 1)
+                    self.assertEqual(self.changes, 0)
+                    self.assertEqual(client.terminal_failure, message)
+                    with self.assertRaisesRegex(HouseholdError, 'authorization was rejected'):
+                        client.probe()
+                    self.assertEqual(len(self.requests) - before, index + 1)
+
+        self.mode, self.failure_method = '404', 'tools/list'
+        client = self.client()
+        before = len(self.requests)
+        with self.assertRaisesRegex(HouseholdError, 'phase=tools/list; HTTP 404; session_assigned=true') as error:
+            client.probe()
+        self.assertNotIn(CANARY, str(error.exception))
+        self.assertIsNone(client.terminal_failure)
+        self.assertEqual(len(self.requests) - before, 3)
+        self.assertEqual(self.changes, 0)
 
     def test_timeout_reaps_owned_worker_before_lock_release(self):
         for mode in ('blocked','stream_forever'):

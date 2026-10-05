@@ -43,10 +43,31 @@ ERRORS = {
     "unavailable": "Muse Oda MCP is unavailable.",
 }
 RECOVERY_REQUIRED = frozenset({"authorization_required", "helper_unavailable", "attachment_invalid", "redirect_refused"})
+HTTP_PHASES = frozenset({"initialize", "notifications/initialized", "tools/list", "tools/call"})
+
+
+def http_diagnostic(value):
+    """Keep only nonsecret protocol facts from the worker's error boundary."""
+    if (not isinstance(value, dict) or set(value) != {"phase", "status", "session_assigned"}
+            or not isinstance(value["phase"], str) or value["phase"] not in HTTP_PHASES
+            or type(value["status"]) is not int or not 300 <= value["status"] <= 599
+            or type(value["session_assigned"]) is not bool):
+        return None
+    return value
+
+
+def error_message(reason, diagnostic=None):
+    message = ERRORS.get(reason, ERRORS["unavailable"])
+    if diagnostic is not None:
+        message += (f" [phase={diagnostic['phase']}; HTTP {diagnostic['status']}; "
+                    f"session_assigned={str(diagnostic['session_assigned']).lower()}]")
+    return message
 
 
 class Stopped(Exception):
-    pass
+    def __init__(self, reason, *, diagnostic=None):
+        super().__init__(reason)
+        self.diagnostic = http_diagnostic(diagnostic)
 
 
 def private_operation_directory(path):
@@ -68,10 +89,11 @@ class MuseProtectedMcpClient(RetailMcpClient):
         self.credential_name = credential_name
         self.provider, self.label = "oda", "Oda"
         self._terminal_error = None
+        self._terminal_http = None
 
     @property
     def terminal_failure(self):
-        return ERRORS[self._terminal_error] if self._terminal_error else None
+        return error_message(self._terminal_error, self._terminal_http) if self._terminal_error else None
 
     def product_dietary_evidence(self, reference, *, deadline=None):
         # The ordinary fallback uses pinned direct sockets, outside Muse routing.
@@ -131,9 +153,13 @@ class MuseProtectedMcpClient(RetailMcpClient):
                     raise ValueError()
                 if not envelope["ok"]:
                     reason = envelope.get("error")
+                    if not isinstance(reason, str):
+                        reason = "unavailable"
+                    diagnostic = http_diagnostic(envelope.get("http"))
                     if reason in RECOVERY_REQUIRED:
                         self._terminal_error = reason
-                    raise HouseholdError(ERRORS.get(reason, ERRORS["unavailable"]))
+                        self._terminal_http = diagnostic
+                    raise HouseholdError(error_message(reason, diagnostic))
                 if process.returncode != 0 or not isinstance(envelope.get("result"), dict):
                     raise ValueError()
                 return (envelope["result"] if tool is None else
@@ -272,7 +298,9 @@ def exchange(request, *, parent_pid):
             code = error.code
             error.close()
             raise Stopped("authorization_required" if code in {401, 403} else
-                          "redirect_refused" if 300 <= code < 400 else "unavailable") from None
+                          "redirect_refused" if 300 <= code < 400 else "unavailable",
+                          diagnostic={"phase": method, "status": code,
+                                      "session_assigned": session_id is not None}) from None
         except URLError:
             raise Stopped("unavailable") from None
         with response:
@@ -374,7 +402,10 @@ def worker_main():
             raise Stopped("protocol_failed")
     except BaseException as error:
         reason = str(error) if isinstance(error, Stopped) and str(error) in ERRORS else "unavailable"
-        output = json.dumps({"ok": False, "error": reason}).encode()
+        result = {"ok": False, "error": reason}
+        if isinstance(error, Stopped) and error.diagnostic is not None:
+            result["http"] = error.diagnostic
+        output = json.dumps(result).encode()
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
     sys.stdout.buffer.write(output + b"\n")

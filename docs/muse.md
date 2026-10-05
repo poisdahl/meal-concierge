@@ -50,6 +50,9 @@ Authorization, helper/attachment and redirect refusals latch for the service
 instance, so later planning batches cannot repeat rejected authentication.
 Local recipes and health remain available. Follow supported provider recovery,
 verify the prior service/worker is stopped, then restart the same service.
+HTTP failures report the protocol step, status code and whether the server had
+assigned a session. They omit response bodies, headers and session identifiers;
+a refusal alone does not establish token expiry or its cause.
 Never repeat a cart delta whose acknowledgement was lost: use
 `{"operation":"cart","action":"reconcile_change"}` to read the persisted
 journal and observed cart. Existing core confirmation and reconciliation rules
