@@ -92,8 +92,10 @@ class DotsSessionTests(unittest.TestCase):
         return {"reply_to": frame["call_id"], "browser_binding": self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
 
-    def run_session(self, action, value, host=None, environment=None):
-        child = subprocess.Popen([sys.executable, "-I", "-B", str(SOURCE / "clients/dots_session.py"),
+    def run_session(self, action, value, host=None, environment=None, launch_code=None):
+        launch = (["-c", launch_code] if launch_code is not None
+                  else [str(SOURCE / "clients/dots_session.py")])
+        child = subprocess.Popen([sys.executable, "-I", "-B", *launch,
                                  action, "--root", str(self.root)], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env={**os.environ, "HOME": str(self.home), **(environment or {})})
@@ -174,6 +176,92 @@ class DotsSessionTests(unittest.TestCase):
         if frame["operation"] == "product_search":
             reply["result"].update(semantics="bounded_personalized", sort_label="Anbefalt for deg")
         return reply
+
+    def timed_managed_apply(self, enclosing_limit=None):
+        request = self.managed_request()
+        # Only this child gets a controlled monotonic clock. The real CLI,
+        # correlated stdin/stdout replies, planner and pending journal still run.
+        launch_code = f"""
+import sys, time
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+original_monotonic = time.monotonic
+elapsed = 0
+time.monotonic = lambda: original_monotonic() + elapsed
+frames = {{}}
+cart_reads = 0
+original_emit = client.emit
+def emit(value):
+    global cart_reads
+    if value['kind'] == 'native_host_request':
+        operation = value['operation']
+        if operation == 'get_cart':
+            cart_reads += 1
+        cost = (100 if operation == 'product_search' else
+                40 if operation == 'verify_new_cart' else
+                55 if operation == 'get_cart' and cart_reads <= 3 else 1)
+        frames[value['call_id']] = cost
+    original_emit(value if value['kind'] == 'core_ready'
+                  else {{**value, 'test_elapsed_seconds': elapsed}})
+client.emit = emit
+original_line = client.Input.line
+def line(self, deadline):
+    global elapsed
+    value = original_line(self, deadline)
+    elapsed += frames.pop(value.get('reply_to'), 0)
+    if time.monotonic() >= deadline:
+        raise client.HouseholdError('controlled host reply deadline reached')
+    return value
+client.Input.line = line
+if {enclosing_limit!r} == 'application_default':
+    original_application = client.Application
+    def application(*args, **kwargs):
+        kwargs.pop('products_apply_budget_seconds')
+        return original_application(*args, **kwargs)
+    client.Application = application
+elif {enclosing_limit!r} == 'native_240':
+    original_application = client.application
+    def application(root, config, reader, command_id, deadline, **kwargs):
+        return original_application(root, config, reader, command_id,
+                                    min(deadline, time.monotonic() + 240), **kwargs)
+    client.application = application
+raise SystemExit(client.main())
+"""
+        self.frames = []
+        return self.run_session("call", {"request_id": str(uuid.uuid4()), "request": request},
+                                launch_code=launch_code)
+
+    def test_native_apply_finishes_after_240_seconds_with_bounded_frames(self):
+        code, result = self.timed_managed_apply()
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["result"]["applied"], result)
+        writes = [frame for frame in self.frames if frame["effect"] == "cart_write"]
+        self.assertGreater(writes[0]["test_elapsed_seconds"], 240)
+        self.assertLess(result["test_elapsed_seconds"], 600)
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+        state = self.state()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {PRODUCT: 3})
+        self.assertNotIn("pending_cart_change", state)
+
+    def test_default_application_budget_stops_slow_apply_before_write(self):
+        code, result = self.timed_managed_apply("application_default")
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
+
+    def test_earlier_native_deadline_stops_slow_apply_before_write(self):
+        code, result = self.timed_managed_apply("native_240")
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
 
     def test_personalized_search_preserves_scope_through_saved_plan_and_apply(self):
         request = self.managed_request(host=self.personalized_host)

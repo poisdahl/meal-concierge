@@ -158,7 +158,7 @@ from service_common import (
     validate_schedule
 )
 from recipe_operations import RecipeOperations
-from planning_operations import PlanningOperations
+from planning_operations import PRODUCT_OPERATION_TIMEOUT, PlanningOperations
 from order_operations import OrderOperations
 from email_operations import EmailOperations
 from delivery_operations import DeliveryOperations
@@ -180,8 +180,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         external_recipe_sources: Mapping[str, Any] | None = None,
         recipe_library_adapters: Mapping[str, RecipeLibraryAdapter] | None = None,
         recipe_pack_inbox: Path | None = None,
+        products_apply_budget_seconds: float = PRODUCT_OPERATION_TIMEOUT,
     ):
         self.store = store
+        self.products_apply_budget_seconds = products_apply_budget_seconds
         self.recipes = RecipeStore(store.directory / "recipes.sqlite3", str(store.config["household"]))
         self._recipe_operations_recovered = False
         library_configuration = normalize_library_configuration(store.config)
@@ -663,6 +665,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         )
         if meny_read:
             timeout = MENY_ORDER_TIMEOUT if operation in {"products", "delivery", "orders"} else MENY_READ_TIMEOUT
+            if operation == "products" and action == "apply":
+                timeout = self.products_apply_budget_seconds
             deadline = time.monotonic() + timeout
             with self._browser_operation(deadline, allow_pending_cart=operation == "cart" and action in {None, "get"}):
                 state = self.store.read()
