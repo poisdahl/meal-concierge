@@ -354,6 +354,56 @@ If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.
 
+## Read-only rendered order history
+
+The native core supports `orders` with action `list` (default limit 5, maximum
+5) or `get` with one exact decimal `order_id`. Cart policy can remain disabled.
+The host requests are `get_orders` with `page:1` and `size`, or `get_order` with
+`order_number`. All order replies have the existing 60-second read deadline.
+
+These are **rendered UI observations**, qualified everywhere as
+`evidence_kind:"host_attested_rendered_ui"` and `backend_freshness:"unverified"`.
+They do not replace MENY's network-backed getters or establish current backend
+status, payment completion, checkout or cancellation authority. Derived tracking
+reports the displayed status with the same qualification. No protected order
+action is admitted by the native facade.
+
+Each host result requires `authenticated:true`, `authenticated_count:1`,
+`ready:true`, `main_count:1`, `heading_count:1`, the observed `heading`, and
+`source_origin`, `source_path`, `source_query_keys`, `source_hash`. Observe the
+actual URL's origin/path and query **key inventory**; keep opaque query values
+private. Never reconstruct a navigation or write URL from returned evidence.
+History requires origin `https://meny.no`, path `/trumf-profil/nettbutikk`, hash
+`#/bestillinger` and no query. Detail and row links require the exact
+`/trumf-profil/nettbutikk/bestilling/<order_number>` pathname, no hash, and the
+observed `archived` and `mworderid` query keys. This contract covers the archived
+receipt shape actually observed; other route shapes remain unsupported.
+
+History requires heading `Bestillinger fra de siste 6 måneder`, `table_count:1`,
+`columns:["BESTILLINGSKODE","STATUS","UTLEVERING","TID","SUM"]`,
+`pagination_count:0`, positive `rendered_row_count`, `rows_complete:true`, and
+the first `min(size, rendered_row_count)` complete `orders`. Each row contains
+`order_number`, `cell_count:5`, one or two consistent `links` (each with
+`origin`, `path`, `query_keys`, `hash`), the dedicated `status_marker`, and
+`delivery_display`, `time_display`, `sum_display` (null for unknown displays).
+Two links in one row identify one order; conflicting identities fail. The
+returned `history_scope:"rendered_last_six_months"` is not complete account
+history. Empty history is unsupported until a positive rendered empty-state
+contract is observed; absence of rows alone is insufficient.
+
+Detail requires matching `order_number`, one `BESTILLING <code>` heading,
+`status_markers` containing at most one dedicated active marker, positive
+`item_count`, exact `item_heading:"Bestilte varer (<item_count>)"`,
+`item_table_count:1`, `item_columns:["VARE","MENGDE"]`,
+`item_rows_complete:true`, and all `products` with bounded `name` and positive
+integer `quantity`. Their quantity sum must equal the displayed item count.
+Unrecognized status remains unknown; conflicting markers fail. `amounts` is
+the uniquely labeled raw display map, currently allowing only the observed
+`Betalt beløp (kort)` label. Missing displays stay absent. This is retained as
+`amount_displays`; full `order_total` and `payment_status` remain unknown,
+and no `grossAmount` is inferred. Provenance remains on the collection, order,
+derived tracking, agent sections and paged item envelopes.
+
 ## Capability limits
 
 Provenance is **host-attested**: input URL, timestamps and hashes bind supplied

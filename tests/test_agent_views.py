@@ -145,6 +145,30 @@ class AgentViewTests(unittest.TestCase):
                 self.assertIsNone(exact["cancelled"])
                 self.assertEqual(exact["tracking_status"], "unknown")
 
+    def test_rendered_order_evidence_survives_empty_pages_sections_and_goods(self):
+        evidence = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified",
+                    "history_scope": "rendered_last_six_months"}
+        order = {**evidence, "order_number": "123456", "status": "delivered",
+                 "order_total": None, "amount_displays": {"Betalt beløp (kort)": "80,00 kr"},
+                 "products": [{"name": "Synthetic goods", "quantity": 2}]}
+        for rows in ([], [order]):
+            for section in ("summary", "items", "issues"):
+                for offset in (0, 10):
+                    with self.subTest(rows=len(rows), section=section, offset=offset):
+                        view = project_agent_result("orders", "list", {**evidence, "orders": rows},
+                                                    offset=offset, limit=1, section=section)
+                        self.assertEqual(view["backend_freshness"], "unverified")
+                        self.assertEqual(view["orders"]["evidence_kind"], "host_attested_rendered_ui")
+                        self.assertIn("backend freshness remains unverified", view["next"])
+        view = project_agent_result("orders", "get", {**evidence, "order": order,
+                                    "tracking": {**evidence, "status": "delivered"}}, offset=10, limit=1)
+        self.assertEqual(view["order_items"]["items"], [])
+        self.assertEqual(view["order_items"]["backend_freshness"], "unverified")
+        self.assertEqual(view["order"]["tracking"]["evidence_kind"], "host_attested_rendered_ui")
+        self.assertEqual(view["order"]["payment_status"], "unknown")
+        self.assertIsNone(view["order"]["order_total"])
+        self.assertNotIn("grossAmount", view["order"])
+
     def test_order_cancellation_preserves_explicit_statuses_and_positive_precedence(self):
         for status in ("cancelled", "canceled", "kansellert", "cancelled_by_customer", "canceled_by_customer"):
             with self.subTest(status=status):

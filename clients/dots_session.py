@@ -20,7 +20,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clients import dots
 from core import HouseholdError, StateStore, cart_summary
-from meny import normalize_cart_snapshot, normalize_meny_delivery_slot
+from meny import normalize_cart_snapshot, normalize_meny_delivery_slot, meny_order_card_status
 from product_observations import normalize_meny_product_search
 import on_demand
 from runtime_ownership import file_lock
@@ -30,6 +30,95 @@ CORE_OPERATIONS = {"health", "setup", "profile", "recipes", "menu", "feedback",
                    "pantry", "recurring", "product_favorites"}
 OWNER_FILES = (".service-owner.lock", "recipes.sqlite3.owner.lock", "state.json.owner.lock")
 MAX_LINE = 65536
+ORDER_UI_EVIDENCE = {"evidence_kind": "host_attested_rendered_ui", "backend_freshness": "unverified"}
+
+
+def order_ui_text(value, *, optional=False):
+    if optional and value is None:
+        return None
+    if not isinstance(value, str) or not 1 <= len(value.strip()) <= 500:
+        raise HouseholdError("native rendered order text changed")
+    return value.strip()
+
+
+def order_ui_location(origin, path, query_keys, fragment, order_id=None):
+    expected = (f"/trumf-profil/nettbutikk/bestilling/{order_id}" if order_id
+                else "/trumf-profil/nettbutikk")
+    keys = ["archived", "mworderid"] if order_id else []
+    if (origin != "https://meny.no" or path != expected
+            or fragment != ("" if order_id else "#/bestillinger")
+            or not isinstance(query_keys, list) or any(not isinstance(key, str) for key in query_keys)
+            or sorted(query_keys) != keys):
+        raise HouseholdError("native rendered order route changed")
+    return {"source_origin": origin, "source_path": path, "source_query_keys": keys}
+
+
+def normalize_order_ui(result, *, limit=None, order_id=None):
+    common = {"authenticated", "authenticated_count", "ready", "main_count", "heading_count",
+              "source_origin", "source_path", "source_query_keys", "source_hash", "heading"}
+    fields = ({"table_count", "columns", "rendered_row_count", "rows_complete", "pagination_count", "orders"}
+              if order_id is None else {"order_number", "status_markers", "item_heading", "item_count",
+                                      "item_table_count", "item_columns", "item_rows_complete", "products", "amounts"})
+    dots.object_fields(result, common | fields, common | fields)
+    if (result["authenticated"] is not True or result["ready"] is not True
+            or any(type(result[key]) is not int or result[key] != 1
+                   for key in ("authenticated_count", "main_count", "heading_count"))):
+        raise HouseholdError("native rendered order scope is unavailable")
+    evidence = {**ORDER_UI_EVIDENCE, **order_ui_location(result["source_origin"], result["source_path"],
+                result["source_query_keys"], result["source_hash"], order_id)}
+    if order_id is None:
+        count, rows = result["rendered_row_count"], result["orders"]
+        if (result["heading"] != "Bestillinger fra de siste 6 måneder"
+                or type(result["table_count"]) is not int or result["table_count"] != 1
+                or result["columns"] != ["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"]
+                or type(result["pagination_count"]) is not int or result["pagination_count"] != 0
+                or result["rows_complete"] is not True or type(count) is not int or not 1 <= count <= 10000
+                or not isinstance(rows, list) or len(rows) != min(limit, count)):
+            raise HouseholdError("native rendered history window is unavailable; empty history is not verified")
+        orders, seen = [], set()
+        for row in rows:
+            keys = {"order_number", "cell_count", "links", "status_marker", "delivery_display", "time_display", "sum_display"}
+            dots.object_fields(row, keys, keys)
+            identity = row["order_number"]
+            if (not isinstance(identity, str) or re.fullmatch(r"[0-9]{1,20}", identity) is None
+                    or identity in seen or type(row["cell_count"]) is not int or row["cell_count"] != 5
+                    or not isinstance(row["links"], list) or not 1 <= len(row["links"]) <= 2):
+                raise HouseholdError("native rendered order identities changed")
+            for link in row["links"]:
+                dots.object_fields(link, {"origin", "path", "query_keys", "hash"}, {"origin", "path", "query_keys", "hash"})
+                order_ui_location(link["origin"], link["path"], link["query_keys"], link["hash"], identity)
+            seen.add(identity)
+            orders.append({**evidence, "history_scope": "rendered_last_six_months", "order_number": identity,
+                           "status": meny_order_card_status(order_ui_text(row["status_marker"], optional=True)),
+                           **{key: order_ui_text(row[key], optional=True)
+                              for key in ("delivery_display", "time_display", "sum_display")}})
+        return {"provider": "meny", **evidence, "history_scope": "rendered_last_six_months",
+                "rendered_row_count": count, "orders": orders}
+    products, count, markers = result["products"], result["item_count"], result["status_markers"]
+    if (result["order_number"] != order_id
+            or re.fullmatch(r"BESTILLING\s+\S+", order_ui_text(result["heading"]), re.IGNORECASE) is None
+            or not isinstance(markers, list) or len(markers) > 1
+            or type(count) is not int or not 1 <= count <= 10000
+            or result["item_heading"] != f"Bestilte varer ({count})"
+            or type(result["item_table_count"]) is not int or result["item_table_count"] != 1
+            or result["item_columns"] != ["VARE", "MENGDE"] or result["item_rows_complete"] is not True
+            or not isinstance(products, list) or not 1 <= len(products) <= 1000):
+        raise HouseholdError("native rendered order detail is incomplete or changed")
+    items = []
+    for item in products:
+        dots.object_fields(item, {"name", "quantity"}, {"name", "quantity"})
+        if type(item["quantity"]) is not int or not 1 <= item["quantity"] <= 10000:
+            raise HouseholdError("native rendered order quantity changed")
+        items.append({"name": order_ui_text(item["name"]), "quantity": item["quantity"]})
+    if sum(item["quantity"] for item in items) != count:
+        raise HouseholdError("native rendered order item count changed")
+    amounts = result["amounts"]
+    if not isinstance(amounts, dict) or set(amounts) - {"Betalt beløp (kort)"}:
+        raise HouseholdError("native rendered order amount labels changed")
+    return {"provider": "meny", **evidence, "order_number": order_id,
+            "status": meny_order_card_status(order_ui_text(markers[0])) if markers else "unknown",
+            "amount_displays": {key: order_ui_text(value) for key, value in amounts.items()},
+            "order_total": None, "payment_status": "unknown", "productQuantityCount": count, "products": items}
 
 
 class Input:
@@ -250,7 +339,7 @@ class NativeHost:
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
         return {"status": "ready", "provider": "meny", "protocol_version": "native-host-stdio-v1",
-                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 5}
+                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 7}
 
     def verify_order_change(self, order_id, code, *, deadline=None):
         if order_id is not None or code is not None:
@@ -261,6 +350,18 @@ class NativeHost:
         return result
 
     def call(self, tool, arguments, *, deadline=None, **kwargs):
+        if tool == "get_orders":
+            if (set(arguments) != {"page", "size"} or type(arguments["page"]) is not int
+                    or arguments["page"] != 1 or type(arguments["size"]) is not int
+                    or not 1 <= arguments["size"] <= 5):
+                raise HouseholdError("native orders require a first rendered window of at most five rows")
+            return normalize_order_ui(self.exchange(tool, arguments, deadline=deadline), limit=arguments["size"])
+        if tool == "get_order":
+            dots.object_fields(arguments, {"order_number"}, {"order_number"})
+            order_id = arguments["order_number"]
+            if not isinstance(order_id, str) or re.fullmatch(r"[0-9]{1,20}", order_id) is None:
+                raise HouseholdError("native order requires an exact decimal identity")
+            return normalize_order_ui(self.exchange(tool, arguments, deadline=deadline), order_id=order_id)
         if tool == "get_delivery_slots":
             dots.object_fields(arguments, {"delivery_date"}, set())
             requested_date = arguments.get("delivery_date")
@@ -460,11 +561,25 @@ def command(root, value, reader):
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
             and not (request.get("operation") == "delivery" and request.get("action", "list") == "list")
+            and not (request.get("operation") == "orders" and request.get("action", "list") in {"list", "get"})
             and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "clear", "reconcile_change", "reconcile"})):
         raise ValueError("unsupported foreground core operation; no checkout, delivery selection or order edits")
     if request.get("operation") == "delivery":
         dots.object_fields(request, {"operation", "action", "dates", "response_view", "view_offset",
                                     "view_limit", "view_section"}, {"operation"})
+    if request.get("operation") == "orders":
+        action = request.get("action", "list")
+        fields = {"operation", "action", "response_view", "view_offset", "view_limit", "view_section"}
+        dots.object_fields(request, fields | ({"limit"} if action == "list" else {"order_id"}),
+                           {"operation"} | ({"order_id"} if action == "get" else set()))
+        if action == "list":
+            limit = request.get("limit", 5)
+            if type(limit) is not int or not 1 <= limit <= 5:
+                raise ValueError("native orders list limit must be one to five")
+            request = {**request, "limit": limit}
+        elif (not isinstance(request["order_id"], str)
+              or re.fullmatch(r"[0-9]{1,20}", request["order_id"]) is None):
+            raise ValueError("native orders get requires an exact decimal identity")
     if request.get("operation") == "products" and request.get("action") == "apply" and (
             request.get("partial_product_plan_digest") or request.get("partial_apply") or request.get("product_plan")):
         raise ValueError("native managed apply requires a complete reviewed product_plan_ref/digest")

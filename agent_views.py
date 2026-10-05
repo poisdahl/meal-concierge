@@ -822,12 +822,17 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     return view
 
 
+ORDER_EVIDENCE_FIELDS = ("evidence_kind", "backend_freshness", "source_origin", "source_path", "source_query_keys",
+                         "history_scope", "rendered_row_count")
+
+
 def _order_row(order: Any, *, exact: bool, tracking: Any = None) -> dict[str, Any]:
     if not isinstance(order, dict):
         return {"observed_status": "unknown", "payment_status": "unknown"}
     row = _fields(order, ("id", "order_id", "order_number", "orderNumber", "currency", "delivery_date",
                           "deliveryDate", "delivery_window", "deliverySlot", "deliverySlotDisplay",
-                          "subtotal", "total", "grossAmount"))
+                          "subtotal", "total", "grossAmount", "order_total", "amount_displays",
+                          "delivery_display", "time_display", "sum_display", *ORDER_EVIDENCE_FIELDS))
     row["normalized_order_id"] = next((str(order[key]) for key in ("order_id", "order_number", "orderNumber", "id")
                                        if order.get(key) is not None), None)
     if isinstance(row.get("deliverySlot"), dict):
@@ -838,7 +843,7 @@ def _order_row(order: Any, *, exact: bool, tracking: Any = None) -> dict[str, An
     row["payment_status"] = (order.get("payment_status") or order.get("paymentStatus") or "unknown") if exact else "unknown"
     if isinstance(tracking, dict):
         row["tracking"] = _fields(tracking, ("order_id", "orderNumber", "status", "delivery_date",
-                                              "deliveryDate", "delivery_window"))
+                                              "deliveryDate", "delivery_window", *ORDER_EVIDENCE_FIELDS))
     statuses = {str(value).casefold().strip() for value in (observed, row["tracking_status"])}
     row["cancelled"] = None
     if statuses.intersection({"cancelled", "canceled", "kansellert", "cancelled_by_customer", "canceled_by_customer"}):
@@ -855,7 +860,7 @@ def _order_items(order: Any, offset: int, limit: int) -> dict[str, Any]:
         return {"available": False, "total": None}
     source = next((key for key in ("products", "items") if isinstance(order.get(key), list)), None)
     if source is None:
-        return {"available": False, "total": None}
+        return {"available": False, "total": None, **_fields(order, ORDER_EVIDENCE_FIELDS)}
     rows = []
     for index, item in enumerate(order[source]):
         if not isinstance(item, dict):
@@ -868,21 +873,27 @@ def _order_items(order: Any, offset: int, limit: int) -> dict[str, Any]:
         rows.append({"index": index, "product_id": product_id,
                      "name": _display_text(name, 500), "quantity": item.get("quantity"),
                      "price": item.get("totalGrossAmount", item.get("total", item.get("price", product.get("price"))))})
-    return {"available": True, "source": source, **_page(rows, offset, limit, "items")}
+    return {"available": True, "source": source, **_fields(order, ORDER_EVIDENCE_FIELDS),
+            **_page(rows, offset, limit, "items")}
 
 
 def _orders_view(action: str, result: dict[str, Any], offset: int, limit: int, section: str) -> dict[str, Any]:
-    view = {"projection": "agent", "operation": "orders", "action": action}
+    view = {"projection": "agent", "operation": "orders", "action": action, **_fields(result, ORDER_EVIDENCE_FIELDS)}
     if action == "get":
         view["order"] = _order_row(result.get("order"), exact=True, tracking=result.get("tracking"))
         view["order_items"] = _order_items(result.get("order"), offset, limit)
         if isinstance(result.get("payment"), dict):
             view["payment"] = _fields(result["payment"], ("provider_status", "authorization", "charge", "source"))
+        if result.get("backend_freshness") == "unverified":
+            view["next"] = "These are displayed order facts; backend freshness and payment completion remain unverified."
         return view
     orders = result.get("orders")
     rows = [_order_row(item, exact=False) for item in orders] if isinstance(orders, list) else []
-    view["orders"] = _page(rows, offset, limit, "items") if section in {"summary", "items"} else {"total": len(rows)}
-    view["next"] = "Use orders get with the exact order ID before treating cancellation, delivery or payment as current."
+    view["orders"] = {**_fields(result, ORDER_EVIDENCE_FIELDS),
+                      **(_page(rows, offset, limit, "items") if section in {"summary", "items"} else {"total": len(rows)})}
+    view["next"] = ("Use orders get to verify displayed identity and goods; backend freshness remains unverified."
+                    if result.get("backend_freshness") == "unverified" else
+                    "Use orders get with the exact order ID before treating cancellation, delivery or payment as current.")
     return view
 
 
