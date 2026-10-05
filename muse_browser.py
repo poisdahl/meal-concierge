@@ -28,6 +28,11 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
                          require_order_binding)
 
 
+CLICK_OPERATIONS = {"checkout_click", "cancellation_click"}
+DELEGATION_OPERATIONS = {"checkout_delegate", "cancellation_delegate"}
+ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS
+
+
 def digest(value):
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
@@ -110,8 +115,8 @@ def request_record(directory, request_id, task_id, *, active=True):
             or type(record.get("version")) is not int or record["version"] != 1
             or type(record.get("owner_pid")) is not int or record["owner_pid"] <= 0
             or not isinstance(record.get("operation"), str)
-            or record["operation"] not in {"checkout_review", "checkout_click",
-                "order_binding", "cancellation_review", "cancellation_click", "payment_state"}
+            or record["operation"] not in ACTION_OPERATIONS | {"checkout_review",
+                "order_binding", "cancellation_review", "payment_state"}
             or not isinstance(record.get("payload"), Mapping)
             or not isinstance(record.get("owner_start"), str)
             or not record["owner_start"].isdigit()
@@ -137,7 +142,7 @@ def consume_request(directory, request_id, task_id):
     with transition_lock(directory):
         directory, record = request_record(directory, request_id, task_id)
         claim = required_json(directory / "claims" / (request_id + ".json"))
-        if (record["operation"] not in {"checkout_click", "cancellation_click"}
+        if (record["operation"] not in ACTION_OPERATIONS
                 or claim != {"request_digest": digest(record), "task_id": task_id}):
             raise HouseholdError("Muse browser action was not claimed")
         name = request_id + ".json"
@@ -201,7 +206,7 @@ def validate_claim(directory, record, *, response):
     name = record["request_id"] + ".json"
     if required_json(directory / "claims" / name) != claim:
         raise HouseholdError("Muse browser custody record changed")
-    if record["operation"].endswith("_click"):
+    if record["operation"] in ACTION_OPERATIONS:
         refused = response["task_state"] == "completed" and response["facts"] == {"dispatch": "not_dispatched"}
         try:
             consumed = read_json(directory / "consumed" / name)
@@ -286,7 +291,7 @@ class NativeBridge:
                 validate_response(record, response, fresh=False)
                 validate_claim(self.directory, record, response=response)
                 if response["task_state"] != "completed":
-                    if (record["operation"].endswith("_click")
+                    if (record["operation"] in ACTION_OPERATIONS
                             or record["task_id"] != self.task_id
                             or process_start(record["owner_pid"]) != record["owner_start"]):
                         raise HouseholdError("Finish the original waiting Muse task before replacement")
@@ -295,7 +300,7 @@ class NativeBridge:
             os.close(fd)
 
     def request(self, operation, payload, *, deadline=None, expires_at=None):
-        seconds = 30.0 if operation.endswith("_click") else 180.0
+        seconds = 30.0 if operation in ACTION_OPERATIONS else 180.0
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):
                 raise HouseholdError("Muse browser deadline must be finite")
@@ -324,7 +329,7 @@ class NativeBridge:
                     continue
                 validate_response(record, response)
                 validate_claim(self.directory, record, response=response)
-                if operation.endswith("_click") and response["task_state"] != "completed":
+                if operation in ACTION_OPERATIONS and response["task_state"] != "completed":
                     raise HouseholdError("Muse browser action is unresolved; reconcile its original task")
                 return dict(response["facts"])
             # Never remove a request/claim/action record on timeout or parent loss.
@@ -439,10 +444,14 @@ class MuseBrowser:
     """
     checkout_provider = "oda"
 
-    def __init__(self, directory, task_id, provider_client, *, state_store=None):
+    def __init__(self, directory, task_id, provider_client, *, state_store=None,
+                 action_mode="timed"):
+        if action_mode not in {"timed", "native_approval"}:
+            raise HouseholdError("Muse browser action mode is unsupported")
         self.bridge = NativeBridge(directory, task_id)
         self.provider_client = provider_client
         self.state_store = state_store
+        self.action_mode = action_mode
         self.last_review_at = None
 
     def _addresses(self, deadline):
@@ -523,6 +532,7 @@ class MuseBrowser:
                 "payment_display": selected["display"], "payment_choice": choice,
                 "amounts": amounts, "account_reference_digest": account_digest,
                 "surface": {"evidence_kind": "native_host_observation", **facts},
+                **({"native_action_mode": self.action_mode} if self.action_mode != "timed" else {}),
                 **({"identity_review": identity["review"]} if identity.get("review") else {})}
 
     def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
@@ -556,6 +566,13 @@ class MuseBrowser:
             raise HouseholdError("Muse browser original clicking journal changed")
         binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
                    "journal_digest": digest(pending)}
+        if self.action_mode == "native_approval":
+            # Admission commits one native task, not a click. Its purchase
+            # approval supplies fresh authority; an expired waiter cannot
+            # revoke or replay a consumed delegation.
+            operation = "cancellation_delegate" if cancellation else "checkout_delegate"
+            payload = {**payload, "authorization": {"mode": "native_approval",
+                "expiry_role": "admission", "purchase_approval_required": not cancellation}}
         return self.bridge.request(operation, {**payload, "journal_binding": binding},
                                    deadline=deadline, expires_at=pending["expires_at"])
 
@@ -624,6 +641,7 @@ class MuseBrowser:
         if final == dismiss:
             raise HouseholdError("Muse cancellation and dismissal controls are ambiguous")
         return {"available": True, "binding": binding, "consequence": text(dialog["text"]),
+                **({"native_action_mode": self.action_mode} if self.action_mode != "timed" else {}),
                 "surface": {"evidence_kind": "native_host_observation", **facts}}
 
     def submit_cancellation(self, order_id, order, review, before_click=None, *, deadline=None):

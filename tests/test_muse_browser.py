@@ -17,7 +17,8 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
 from clients import muse
-from muse_browser import (MuseBrowser, NativeBridge, checkout_amounts, claim_request,
+from muse_browser import (ACTION_OPERATIONS, DELEGATION_OPERATIONS, MuseBrowser,
+                          NativeBridge, checkout_amounts, claim_request,
                           consume_request, digest, durable_publish, end_request,
                           process_start, read_json, request_record, respond_request)
 from service import Server
@@ -250,9 +251,15 @@ class NativeBrokerTests(NativeFixture):
             claim_request(self.directory, record["request_id"], "original-task")
 
     def test_killed_waiter_preserves_consumed_custody_until_terminal_receipt(self):
+        self._killed_waiter("checkout_click")
+
+    def test_delegation_survives_owner_loss_without_replay_until_actual_ending(self):
+        self._killed_waiter("checkout_delegate")
+
+    def _killed_waiter(self, operation):
         root = str(Path(__file__).resolve().parents[1])
-        code = "import sys;sys.path.insert(0,sys.argv[1]);from muse_browser import NativeBridge;b=NativeBridge(sys.argv[2],'original-task');\nwith b.custody(): b.request('checkout_click',{})"
-        child = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, root, str(self.directory)],
+        code = "import sys;sys.path.insert(0,sys.argv[1]);from muse_browser import NativeBridge;b=NativeBridge(sys.argv[2],'original-task');\nwith b.custody(): b.request(sys.argv[3],{})"
+        child = subprocess.Popen([sys.executable, "-I", "-B", "-c", code, root, str(self.directory), operation],
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             path = wait_for(lambda: next((self.directory / "requests").glob("*.json"), None))
@@ -261,6 +268,8 @@ class NativeBrokerTests(NativeFixture):
             consume_request(self.directory, record["request_id"], "original-task")
             child.terminate()
             child.communicate(timeout=5)
+            with self.assertRaises(HouseholdError):
+                consume_request(self.directory, record["request_id"], "original-task")
             with self.assertRaises(HouseholdError), self.bridge.custody():
                 pass
             respond_request(self.directory, record["request_id"], "original-task", self.response(record))
@@ -305,6 +314,9 @@ class NativeCoreRpcTests(NativeFixture):
         self.produced = set()
         self.effects = []
         self.corrupt_effect_reply = False
+        self.defer_delegation = False
+        self.deny_delegation = False
+        self.pending_delegation = None
         self.final_label = "Bekreft og betal 35,00kr"
 
     def facts(self, record):
@@ -320,20 +332,22 @@ class NativeCoreRpcTests(NativeFixture):
                     "payment": {"display": "•••• 1234", "selected": True},
                     "submit_controls": [{"label": self.final_label, "enabled": True}],
                     "complete_sections": ["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]}
-        if operation.endswith("_click"):
-            pending = self.store.read()["pending_checkout" if operation == "checkout_click" else "pending_cancellation"]
+        if operation in ACTION_OPERATIONS:
+            pending = self.store.read()["pending_checkout" if operation.startswith("checkout_") else "pending_cancellation"]
             self.assertEqual(pending["status"], "clicking")
             self.assertEqual(record["payload"]["journal_binding"], {"confirmation_id": pending["confirmation_id"],
                 "expires_at": pending["expires_at"], "journal_digest": digest(pending)})
             self.assertLessEqual(record["expires_at"], pending["expires_at"])
-            consume_request(self.directory, record["request_id"], "original-task")
-            self.effects.append(operation)
-            if operation == "checkout_click":
-                self.shop.orders.append({"order_number": "new-order", "grossAmount": 35.0,
-                    "deliveryDate": self.delivery_date, "deliverySlotDisplay": self.delivery,
-                    "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}]})
+            if operation in DELEGATION_OPERATIONS:
+                self.assertEqual(record["payload"]["authorization"], {"mode": "native_approval",
+                    "expiry_role": "admission", "purchase_approval_required": operation == "checkout_delegate"})
             else:
-                self.shop.tracking = "cancelled"
+                self.assertNotIn("authorization", record["payload"])
+            consume_request(self.directory, record["request_id"], "original-task")
+            if operation in DELEGATION_OPERATIONS and (self.defer_delegation or self.deny_delegation):
+                self.pending_delegation = record
+                return {"dispatch": "approval_denied" if self.deny_delegation else "awaiting_purchase_approval"}
+            self.apply_effect(record)
             return {"dispatch": "clicked_once"}
         receipt = {"url": "https://oda.com/no/account/orders/new-order/", "order_id": "new-order",
                    "currency": "NOK", "receipt_address": "Eksempelveien 1", "account": account,
@@ -346,6 +360,16 @@ class NativeCoreRpcTests(NativeFixture):
                 "final_controls": [{"label": "Kanseller bestillingen min", "enabled": True}],
                 "dismiss_controls": [{"label": "Nei, ikke kanseller", "enabled": True}], "closed": True}}
         return {"status": "unknown"}
+
+    def apply_effect(self, record):
+        operation = record["operation"]
+        self.effects.append(operation)
+        if operation.startswith("checkout_"):
+            self.shop.orders.append({"order_number": "new-order", "grossAmount": 35.0,
+                "deliveryDate": self.delivery_date, "deliverySlotDisplay": self.delivery,
+                "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}]})
+        else:
+            self.shop.tracking = "cancelled"
 
     def rpc(self, request, *, expect_ok=True):
         client, connection = socket.socketpair()
@@ -361,7 +385,9 @@ class NativeCoreRpcTests(NativeFixture):
                         record = read_json(path)
                         claim_request(self.directory, record["request_id"], "original-task")
                         facts = self.facts(record)
-                        reply = self.response(record, facts=facts)
+                        state = ("waiting_for_information" if record["operation"] in DELEGATION_OPERATIONS
+                                 and self.defer_delegation else "completed")
+                        reply = self.response(record, state=state, facts=facts)
                         if record["operation"] == "checkout_click" and self.corrupt_effect_reply:
                             reply["request_digest"] = "0" * 64
                             durable_publish(self.directory / "responses" / path.name, reply)
@@ -391,6 +417,68 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertEqual(self.effects, ["checkout_click", "cancellation_click"])
         self.assertIsNone(self.store.read()["pending_checkout"])
         self.assertIsNone(self.store.read()["pending_cancellation"])
+
+    def test_native_approval_delegates_once_and_reconciles_exact_own_cancellation(self):
+        self.browser.action_mode = "native_approval"
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+        self.assertTrue(self.rpc(confirmation)["confirmed"])
+        self.assertTrue(self.rpc(confirmation)["confirmed"])
+        cancelled = self.rpc({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"})
+        cancellation = {"operation": "orders", "action": "cancel_confirm", "order_id": "new-order",
+                        "confirmation_id": cancelled["confirmation_id"]}
+        self.assertTrue(self.rpc(cancellation)["cancelled"])
+        self.assertTrue(self.rpc(cancellation)["cancelled"])
+        self.assertEqual(self.effects, ["checkout_delegate", "cancellation_delegate"])
+
+    def test_existing_timed_confirmation_cannot_be_reinterpreted_as_native_approval(self):
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.browser.action_mode = "native_approval"
+        self.rpc({"operation": "checkout", "action": "confirm",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.effects, [])
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertFalse([p for p in (self.directory / "requests").glob("*.json")
+                          if read_json(p)["operation"] in ACTION_OPERATIONS])
+
+    def test_delayed_approval_after_admission_expiry_preserves_one_attempt_until_reconciled(self):
+        self.browser.action_mode = "native_approval"
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        with self.store.locked() as state:
+            state["pending_checkout"]["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+        self.defer_delegation = True
+        confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+        self.rpc(confirmation, expect_ok=False)
+        record = self.pending_delegation
+        self.assertIsNotNone(record)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        time.sleep(max(0, (datetime.fromisoformat(record["expires_at"]) - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+        self.rpc(confirmation, expect_ok=False)
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
+        with self.assertRaises(HouseholdError):
+            consume_request(self.directory, record["request_id"], "original-task")
+        self.apply_effect(record)
+        end_request(self.directory, record["request_id"], "original-task",
+                    self.response(record, facts={"dispatch": "clicked_once"}))
+        result = self.rpc({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["order_id"], "new-order")
+        self.assertEqual(self.effects, ["checkout_delegate"])
+        self.assertIsNone(self.store.read()["pending_checkout"])
+
+    def test_denial_never_means_click_or_authorizes_another_delegation(self):
+        self.browser.action_mode = "native_approval"
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.deny_delegation = True
+        confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+        self.rpc(confirmation, expect_ok=False)
+        self.rpc(confirmation, expect_ok=False)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertEqual(len([p for p in (self.directory / "requests").glob("*.json")
+                              if read_json(p)["operation"] == "checkout_delegate"]), 1)
 
     def test_unsupported_or_foreign_target_rejected_before_provider_or_host(self):
         before = len(self.shop.calls)

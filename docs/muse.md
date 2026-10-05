@@ -75,11 +75,20 @@ The catalog-only mode and protected mode without these run options retain their
 existing behavior. Configuration alone is not verified checkout readiness.
 
 First demonstrate the host's supported original-task observation and steering
-contracts. An information handoff is not proof that a queued tool-approval click
-will recheck its permit after resumption. Before consequential use, verify the
-actual action path with a benign expired permit. If an approval can resume a
-queued action without a fresh guard, use read-only preparation and human
-checkout on that path. Never bypass a platform or bank approval.
+contracts. The default `timed` mode requires the final action to recheck its
+permit after any pause or approval. An information handoff alone does not prove
+that behavior. Verify that path with a benign expired permit before using it.
+Never bypass a platform or bank approval.
+
+Alternatively, explicitly select `--browser-action-mode native_approval` on
+the runner below. This admits **one native task delegation** while the original
+core confirmation is valid. Muse's fresh purchase approval then supplies final
+financial authority; the old confirmation is an admission deadline, not a
+permit for a delayed click. This mode relies on Muse's documented exact-details
+purchase approval for merchant-stored cards and its trusted native producer.
+It does not require Sentinel to independently authenticate every cart or address
+observation. Configuration and synthetic tests do not demonstrate actual payment.
+Qualify the real purchase card and original task ending on the supported host.
 
 Within the existing canonical shared provider operation directory, create one
 private `browser/` directory and private `requests/`, `claims/`, `consumed/`,
@@ -95,7 +104,7 @@ to replace a pending attempt. Start the ordinary foreground runner with:
   --browser-task-id "$ACTUAL_ORIGINAL_BROWSER_TASK_ID"
 ```
 
-The flags must be paired, are run-only, and require protected Oda mode. The
+The directory/task flags must be paired, are run-only, and require protected Oda mode. The
 browser directory must be exactly `operation_directory/browser`. Native checkout
 uses the ordinary JSON CLI: `checkout prepare`, then the unchanged
 `confirmation_id` with `checkout confirm` or `checkout reconcile`. Reconciliation
@@ -116,9 +125,15 @@ exclusively published and fsynced. The producer must:
    Call `claim_request(directory, request_id, task_id)`
    once **before** steering. Requests expire after at most 180 seconds for reads
    and 30 seconds for effects, or the remaining core deadline if shorter. An
-   effect also carries the original core `confirmation_id`, `expires_at` and
+   action also carries the original core `confirmation_id`, `expires_at` and
    digest of its persisted clicking journal in `payload.journal_binding`; its
-   request expiry cannot extend that original confirmation.
+   admission expiry cannot extend that original confirmation. The default mode
+   emits `checkout_click` or `cancellation_click`. Native approval mode emits
+   `checkout_delegate` or `cancellation_delegate` and additionally carries
+   `authorization={mode:native_approval, expiry_role:admission,
+   purchase_approval_required:true/false}`. Checkout requires fresh purchase
+   approval; cancellation uses the reviewed exact-order authorization and every
+   platform approval required for that action.
 2. Use supported native controls and direct raw observations. Expand one complete
    item and amount section. Do not copy expected MCP IDs, quantities, amounts or
    addresses into observations, remap names to IDs, invent DOM counts, invent a
@@ -129,15 +144,38 @@ exclusively published and fsynced. The producer must:
    `respond_request(...)`. Preserve the original raw handoff/activity and actual
    execution ending privately. These are host-attested observations, not
    independently verified DOM evidence or an atomic browser transaction.
-4. For an effect, recheck the live original owner, expiry, exact fresh review,
+4. For a timed `*_click`, recheck the live original owner, expiry, exact fresh review,
    unique enabled control and current authorization immediately before action.
    Call `consume_request(...)` once, then dispatch only the requested final
    effect. A pause, approval, expiry or lost result never authorizes resending the
    old effect. Return only `{"dispatch":"clicked_once"}` after an actual known
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
+5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
+   review/journal, then call `consume_request(...)` once **before one sole steer**
+   of the original task chain. Consumption records delegation, not dispatch or
+   payment success. The native task must freshly verify the bound account, items,
+   quantities, delivery, payment and full payable amount before proposing its
+   one final action. Checkout requires the genuine Muse purchase approval for
+   that merchant and amount; a site, network or shell approval is insufficient.
+   Stop on a changed business scope and preserve the original attempt rather
+   than silently buying a different purchase. Never substitute a conversational
+   confirmation for an enforced platform gate. Cancellation similarly requires
+   the exact newly confirmed own order and unchanged reviewed consequences.
 
-A completed task that refuses an effect **before** consuming its permit may
+An admitted delegation may remain pending after its waiter or original admission
+deadline expires. Preserve custody, the core `clicking`/`uncertain` journal and
+the original native task. Do not re-steer, create a replacement task, renew its
+confirmation or claim that the old timed permit survived. A denied approval,
+missing acknowledgement or parent loss never grants replay. Return
+`{"dispatch":"clicked_once"}` only for a known actual single final action and
+its completed native receipt, never merely because delegation or approval
+occurred. A waiting response keeps the action unresolved. An actual late ending
+may close native custody through `respond_request`/`end_request`, without making
+old review facts fresh. Use ordinary checkout or cancellation reconciliation
+with the exact original confirmation to establish the merchant outcome.
+
+A completed task that refuses an action **before** consuming its permit may
 return exactly `{"dispatch":"not_dispatched"}`. The broker accepts that ending
 only when no consumed record exists and serializes it against consumption. It
 closes native custody and forbids later consumption of the same request; it
