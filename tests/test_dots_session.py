@@ -238,6 +238,132 @@ class DotsSessionTests(unittest.TestCase):
         self.assertEqual(code, 0, cart)
         return {"operation": "cart", "action": "clear", "cart_digest": cart["result"]["cart_digest"]}
 
+    def test_two_product_apply_continues_one_search_with_cached_time_and_expiry(self):
+        milk = "/varer/meieri/melk-1234567890124"
+        quantities, searches = {}, []
+        def host(frame):
+            operation = frame["operation"]
+            if operation in {"verify_new_cart", "product_search"}:
+                reply = self.host(frame)
+                if operation == "product_search":
+                    query = frame["arguments"]["queries"][0]
+                    searches.append(query)
+                    if "melk" in query.casefold():
+                        reply["result"]["products"] = [{"product_id": milk, "name": "Melk",
+                            "package": "200ml", "price": "10,00 kr", "detail_price": "10,00 kroner.",
+                            "deposit_status": "none", "available": True}]
+                return reply
+            self.assertEqual(frame["browser_binding"], self.binding)
+            self.assertLessEqual((datetime.fromisoformat(frame["expires_at"])
+                                - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), 60)
+            if operation == "get_cart":
+                result = self.snapshot()
+                items = [{"product_id": product, "name": "Melk" if product == milk else "Havregryn",
+                          "quantity": quantity, "price": quantity * (10 if product == milk else 20)}
+                         for product, quantity in quantities.items()]
+                result.update(items=items, item_root_count=len(items), control_count=len(items), empty=not items,
+                              total_count=int(bool(items)), subtotal_count=int(bool(items)),
+                              subtotal=sum(item["price"] for item in items) if items else None,
+                              total=sum(item["price"] for item in items), count=sum(quantities.values()))
+            else:
+                self.assertEqual(operation, "manipulate_cart")
+                pending = self.state()["pending_cart_change"]
+                self.assertEqual(frame["before_quantities"], quantities)
+                self.assertEqual(pending["before"], quantities)
+                self.assertEqual(pending["operations"], frame["arguments"]["operations"])
+                for item in frame["arguments"]["operations"]:
+                    self.assertIn(item["productId"], (PRODUCT, milk))
+                    self.assertEqual(item["quantity"], 1)
+                    quantities[item["productId"]] = quantities.get(item["productId"], 0) + 1
+                self.assertEqual(frame["expected_quantities"], quantities)
+                self.writes += 1
+                result = {"dispatched": True}
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+        recipe = {"name": "Synthetic oats and milk", "portions": 2,
+                  "ingredients": [{"raw": "100 g havregryn", "item": "havregryn", "quantity": 100,
+                                   "unit": "g", "scalable": True},
+                                  {"raw": "200 ml melk", "item": "melk", "quantity": 200,
+                                   "unit": "ml", "scalable": True}], "steps": ["Cook the oats."],
+                  "source": {"kind": "user", "publisher": "Synthetic kitchen", "relationship": "user_supplied"},
+                  "rights": {"storage": "full", "credit": "Synthetic test"}}
+        code, saved = self.call({"operation": "recipes", "action": "save", "recipe": recipe,
+                                 "idempotency_key": "synthetic-two-product-apply"})
+        self.assertEqual(code, 0, saved)
+        ref = saved["result"]["recipe"]
+        code, saved = self.call({"operation": "menu", "action": "save", "menu": {
+            "week": "2026-W41", "dishes": [{"recipe_ref": {"id": ref["id"], "revision": ref["revision"]},
+                                             "portions": 2}],
+            "schedule": [{"day": "2026-10-06", "meal": recipe["name"], "portions": 2}]}})
+        self.assertEqual(code, 0, saved)
+        menu = self.state()["menu"]
+        request = {"operation": "products", "action": "prepare",
+                   "menu_ref": {key: menu[key] for key in ("menu_id", "revision", "digest")}}
+        code, first = self.call(request, host=host)
+        self.assertEqual(code, 0, first)
+        request["candidate_approvals"] = [{"requirement_id": row["requirement_id"],
+            "candidate_refs": [row["observation"]["products"][0]["product_ref"]]}
+            for row in first["result"]["product_plan"]["requirements"]]
+        code, ready = self.call(request, host=host)
+        self.assertEqual(code, 0, ready)
+        self.assertEqual(ready["result"]["product_plan"]["status"], "prepared", ready)
+        apply = {"operation": "products", **ready["result"]["apply_arguments"], "cart_change_requested": True}
+        searches.clear()
+        command_id = str(uuid.uuid4())
+        code, partial = self.call(apply, command_id, host)
+        self.assertEqual(code, 0, partial)
+        self.assertEqual(partial["result"]["status"], "validating")
+        self.assertFalse(partial["result"]["applied"])
+        self.assertFalse(partial["result"]["cart_changed"])
+        self.assertEqual(len(searches), 1)
+        self.assertEqual((quantities, self.writes), ({}, 0))
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        work = self.state()["menu_planning"]["prepared"][partial["result"]["product_plan_ref"]]["validation_work"]
+        cached = next(iter(work["searches"].values()))
+        self.assertEqual(len(work["searches"]), 1)
+        frames = len(self.frames)
+        self.assertEqual(self.call(apply, command_id, host), (0, partial))
+        self.assertEqual(len(self.frames), frames)
+        code, applied = self.call({"operation": "products", **partial["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"], applied)
+        self.assertEqual(len(searches), 2)
+        self.assertNotEqual(searches[0], searches[1])
+        observations = [row["observation"] for row in applied["result"]["product_plan"]["requirements"]]
+        self.assertEqual(next(o for o in observations if o["query"] == cached["query"])["observed_at"], cached["observed_at"])
+        self.assertEqual(quantities, {PRODUCT: 1, milk: 1})
+        self.assertEqual(self.state()["cart_plan"]["added_quantities"], quantities)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        # A failed first reply consumes the allowance too; no second search is emitted.
+        def failed(frame):
+            reply = host(frame)
+            if frame["operation"] == "product_search":
+                reply.pop("result")
+                reply["error"] = "synthetic read failed"
+            return reply
+        frame_count = len(self.frames)
+        code, fresh = self.call(apply, host=failed)
+        self.assertEqual(code, 0, fresh)
+        self.assertEqual(fresh["result"]["status"], "validating")
+        self.assertEqual(fresh["result"]["validation_progress"]["pending_search_count"], 2)
+        self.assertEqual(sum(f["operation"] == "product_search" for f in self.frames[frame_count:]), 1)
+        code, fresh = self.call({"operation": "products", **fresh["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, fresh)
+        self.assertEqual(fresh["result"]["status"], "validating")
+        # An expired saved cycle cannot dispatch its cached facts.
+        state = self.state()
+        work = state["menu_planning"]["prepared"][fresh["result"]["product_plan_ref"]]["validation_work"]
+        work["started_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(state))
+        writes, reads = self.writes, len(searches)
+        code, restarted = self.call({"operation": "products", **fresh["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, restarted)
+        self.assertEqual(restarted["result"]["status"], "validating")
+        self.assertTrue(restarted["result"]["validation_progress"]["restarted"])
+        self.assertEqual(len(searches), reads + 1)
+        self.assertEqual(self.writes, writes)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+
     def test_clear_managed_cart_uses_batches_digest_and_cached_receipt_after_disable(self):
         self.assertEqual(self.call(self.managed_request())[0], 0)
         code, stale = self.call({"operation": "cart", "action": "clear", "cart_digest": "0" * 64})

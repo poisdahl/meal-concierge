@@ -159,7 +159,14 @@ through core `products` `prepare`, `get` and `apply`. Save the recipes and
 menu in this original household, prepare against its current `menu_ref`, then
 use the returned product-plan reference and exact complete digest with
 `cart_change_requested:true`. Candidate selection and continuation use the
-existing core contracts. An apply result with `status:"validating"`,
+existing core contracts. Native apply attempts at most one product search per
+command, including failed replies, leaving more of the unchanged 240-second
+budget for guarded cart work. Remaining searches use the core's saved validation;
+the generic pending diagnostic can report an unavailable search when this
+deliberate command limit is reached. Cached observations retain their timestamps
+within the existing validation cycle; expired cycles start fresh. One search
+does not guarantee enough time: stop before dispatch if guards and readback
+cannot fit. An apply result with `status:"validating"`,
 `applied:false` and `cart_changed:false` may return exact `continue_arguments`
 for the remaining reads. Send those arguments with a new command UUID in the
 same original household, preserving the earlier receipt. The continuation may

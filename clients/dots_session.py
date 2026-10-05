@@ -238,6 +238,7 @@ class NativeHost:
         self.store, self.config, self.reader = store, config, reader
         self.command_id, self.deadline = command_id, deadline
         self.calls = 0
+        self.product_searches = 0
         self.request = request or {}
         self.last_cart = None
 
@@ -396,6 +397,10 @@ class NativeHost:
                     or not isinstance(queries, list) or len(queries) != 1
                     or not isinstance(queries[0], str) or not 1 <= len(queries[0]) <= 200):
                 raise HouseholdError("native product search requires one bounded first-page query")
+            if self.request.get("operation") == "products" and self.request.get("action") == "apply":
+                if self.product_searches:
+                    raise HouseholdError("native apply validates one search per command; continue the saved validation")
+                self.product_searches += 1  # Failed replies also consume this command's read allowance.
             result = self.exchange(tool, arguments, deadline=deadline)
             if (result.get("query") != queries[0] or type(result.get("page")) is not int
                     or result["page"] != 1 or type(result.get("requested_size")) is not int
