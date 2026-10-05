@@ -8004,6 +8004,26 @@ class CartPlanTests(unittest.TestCase):
             self.assertEqual(quantities, {"10": 2})
             self.assertEqual(store.read()["cart_plan"]["approved_cart_digest"], application._cart_digest({"10": 2}))
 
+    def test_external_restore_digest_cannot_bypass_approved_keep_current(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, application, product_id = self.app(directory, "oda")
+            self.sync(application, product_id)
+            provider._mutate_cart({"operations": [{"productId": 10, "quantity": -1}]})
+            stopped = application.handle({"operation": "checkout", "action": "prepare"})
+            digest = stopped["cart_plan"]["cart_digest"]
+            application.handle({
+                "operation": "cart", "action": "reconcile", "decision": "keep_current",
+                "menu_ref": application._cart_menu_ref(store.read()["menu"]), "cart_digest": digest,
+            })
+            repeated = self.sync(application, product_id)
+            self.assertTrue(repeated["idempotent"])
+            self.assertEqual(cart_summary(repeated["cart"])["items"][0]["quantity"], 1)
+            before, calls = store.read(), list(provider.calls)
+            for value in (digest, None):
+                with self.subTest(private_digest=value), self.assertRaisesRegex(HouseholdError, "internal-only"):
+                    self.sync(application, product_id, _restore_missing_cart_digest=value)
+                self.assertEqual((store.read(), provider.calls), (before, calls))
+
     def test_missing_restore_and_explicitly_accepted_shortfall_are_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             _store, provider, _browser, application, product_id = self.app(directory, "oda")
