@@ -388,7 +388,7 @@ class NativeCoreRpcTests(NativeFixture):
                         state = ("waiting_for_information" if record["operation"] in DELEGATION_OPERATIONS
                                  and self.defer_delegation else "completed")
                         reply = self.response(record, state=state, facts=facts)
-                        if record["operation"] == "checkout_click" and self.corrupt_effect_reply:
+                        if record["operation"] in {"checkout_click", "checkout_delegate"} and self.corrupt_effect_reply:
                             reply["request_digest"] = "0" * 64
                             durable_publish(self.directory / "responses" / path.name, reply)
                         else:
@@ -511,15 +511,22 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertFalse(list((self.directory / "requests").glob("*.json")))
 
     def test_applied_effect_invalid_reply_preserves_uncertainty_and_reconciles_without_replay(self):
+        self._lost_effect_ack("checkout_click")
+
+    def test_delegated_effect_invalid_reply_preserves_uncertainty_and_reconciles_without_replay(self):
+        self.browser.action_mode = "native_approval"
+        self._lost_effect_ack("checkout_delegate")
+
+    def _lost_effect_ack(self, operation):
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})
         self.corrupt_effect_reply = True
         confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
         self.rpc(confirmation, expect_ok=False)
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
         self.rpc(confirmation, expect_ok=False)
-        self.assertEqual(self.effects, ["checkout_click"])
+        self.assertEqual(self.effects, [operation])
         effect = next(read_json(p) for p in (self.directory / "requests").glob("*.json")
-                      if read_json(p)["operation"] == "checkout_click")
+                      if read_json(p)["operation"] == operation)
         path = self.directory / "responses" / (effect["request_id"] + ".json")
         bad_reply = path.read_bytes()
         end_request(self.directory, effect["request_id"], "original-task", self.response(effect, facts={"dispatch": "clicked_once"}))
@@ -527,7 +534,7 @@ class NativeCoreRpcTests(NativeFixture):
         result = self.rpc({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
         self.assertTrue(result["confirmed"])
         self.assertEqual(result["order_id"], "new-order")
-        self.assertEqual(self.effects, ["checkout_click"])
+        self.assertEqual(self.effects, [operation])
         self.assertIsNone(self.store.read()["pending_checkout"])
 
 
