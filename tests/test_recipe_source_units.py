@@ -22,10 +22,12 @@ from test_meal_concierge_products import FakeProvider, observation, option, prod
 ALIASES = {
     'drop': ('drop', 'drops', 'dråpe', 'dråper'),
     'pinch': ('pinch', 'pinches', 'klype', 'klyper'),
-    'handful': ('handful', 'handfuls', 'håndfull', 'håndfuller'),
+    'handful': ('handful', 'handfuls', 'håndfull', 'håndfuller', 'neve', 'never'),
     'slice': ('slice', 'slices', 'skive', 'skiver'),
     'bunch': ('bunch', 'bunches', 'bunt', 'bunter', 'knippe', 'knipper'),
     'pot': ('pot', 'pots', 'potte', 'potter'),
+    'sheet': ('sheet', 'sheets', 'ark'),
+    'thumb': ('thumb', 'thumbs', 'tommel', 'tomler'),
 }
 
 
@@ -96,6 +98,14 @@ class SourceUnitTests(unittest.TestCase):
         self.assertEqual(parse_measure('a generous handful'), (None, None))
         self.assertEqual(parse_measure('1 cup'), (None, 'cup'))
 
+    def test_ambiguous_plate_servings_do_not_become_sheets(self):
+        for text, language in [('1 plate rice', 'en'), ('1 plate sjokolade', 'nb')]:
+            with self.subTest(text=text):
+                row = source_ingredient(text, language=language)
+                self.assertFalse(row['scalable'])
+                self.assertTrue(menu_requirements({'dishes': [scale_recipe(fixture(row), 2)], 'salads': []})[1])
+        self.assertEqual(parse_measure('1 plate'), (None, 'plate'))
+
     def test_culinary_counts_never_supply_guessed_mass(self):
         for aliases in ALIASES.values():
             for alias in aliases:
@@ -110,7 +120,7 @@ class SourceUnitTests(unittest.TestCase):
             'fedd', 'clove', 'cloves', 'stilk', 'stilker', 'stalk', 'stalks',
             'pk', 'pakke', 'pakker', 'package', 'packages',
         ]
-        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots',
+        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots', 'sheets', 'thumbs',
                    *(['cloves'] * 3), *(['stalks'] * 4), *(['packages'] * 5))
         rows = [source_ingredient(f'2 {unit} salt', language='nb') for unit in units]
         recipe = fixture(*rows)

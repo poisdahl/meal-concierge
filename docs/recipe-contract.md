@@ -86,8 +86,9 @@ definition ([NIST weight conversion factors](https://tsapps.nist.gov/publication
 There is no automatic volume-to-mass conversion. A reader may convert only when
 it has ingredient-specific evidence and retains that input/conversion basis.
 
-Numeric drop(s)/dråpe(r), pinch(es)/klype(r), handful(s)/håndfull(er),
-slice(s)/skive(r), bunch(es)/bunt(er)/knippe(r) and pot(s)/potte(r) each retain a
+Numeric drop(s)/dråpe(r), pinch(es)/klype(r), handful(s)/håndfull(er)/neve(r),
+slice(s)/skive(r), bunch(es)/bunt(er)/knippe(r), pot(s)/potte(r),
+sheet(s)/ark and thumb(s)/tommel/tomler each retain a
 separate canonical dimension. Their source counts scale by the exact serving
 ratio; this preserves the source measure without claiming a physical size or
 greater measurement precision. None is equivalent to grams, millilitres,
