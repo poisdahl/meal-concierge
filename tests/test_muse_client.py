@@ -67,7 +67,7 @@ class HomeTests(HomeFixture):
                 capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 1)
             self.assertIn("native browser options apply only to run" if arguments != ["run"]
-                          else "action mode requires its opted-in native browser", result.stderr)
+                          else "action mode requires its opted-in native browser", json.loads(result.stdout)["error"])
 
     def test_dedicated_home_rejects_existing_foreign_and_external_libraries(self):
         with self.assertRaises(FileExistsError):
