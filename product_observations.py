@@ -61,7 +61,7 @@ _PACKAGE_DESCRIPTION = re.compile(rf"{_PACKAGE_WORD}(?:(?:\s+|\s*/\s*){_PACKAGE_
 # These words change the meaning of a measurement. Unknown names are inert;
 # quantity qualifiers, rates and alternative sizes must never supply capacity.
 _PACKAGE_QUALIFIER = re.compile(
-    r"\b(?:ca|cirka|omtrent|rundt|anslagsvis|minst|minimum|maks|maximum|maksimum|"
+    r"(?<![\w'’])(?:ca|cirka|omtrent|rundt|anslagsvis|minst|minimum|maks|maximum|maksimum|"
     r"opptil|inntil|under|over|fra|til|eller|om lag|variabel|varierende|varierer|"
     r"avrent|avrunnet|brutto|per|pr|hver|stykket|à|á|a|x|"
     r"poser|pakker|flasker|bokser|bags|packs|bottles|cans|porsjon|porsjoner|serving|servings|"
@@ -69,7 +69,8 @@ _PACKAGE_QUALIFIER = re.compile(
     r"to|tre|fire|fem|seks|sju|syv|åtte|ni|ti|tolv|"
     r"approx|approximately|about|around|roughly|minimum|maximum|up to|"
     r"variable|drained|gross|each|or|two|three|four|five|six|"
-    r"kg|g|l|ml|stk)\b", re.IGNORECASE,
+    r"ungefär|runt|cirkavikt|varierande|avrunnen|tillagad|upp till|högst|lägst|"
+    r"kg|g|l|ml|stk)(?![\w'’])", re.IGNORECASE,
 )
 _ODA_DISCOUNT_PREFIX = re.compile(
     r"^maks\s+(?P<count>[1-9]\d{0,2})\s+til\s+nedsatt\s+pris$", re.IGNORECASE

@@ -305,7 +305,7 @@ class ProductObservationTests(unittest.TestCase):
 
     def test_new_oda_descriptors_reach_planning_without_inventing_price_or_availability(self):
         result = normalize_retail_product_search({"result": [{
-            "query": "fixture", "products": [{
+            "query": "fixture", "hasMore": False, "products": [{
                 "id": 700011, "name": "Unseen Brand", "description": "Ny sort, Italia / Hellas, 300 g",
                 "price": "20.00", "availability": {"isAvailable": True},
             }],
