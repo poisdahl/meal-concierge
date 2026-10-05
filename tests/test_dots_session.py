@@ -245,15 +245,21 @@ raise SystemExit(client.main())
 
     def test_default_application_budget_stops_slow_apply_before_write(self):
         code, result = self.timed_managed_apply("application_default")
-        self.assertEqual(code, 1, result)
-        self.assertIn("controlled host reply deadline reached", result["error"])
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
         self.assertEqual((self.quantity, self.writes), (0, 0))
         self.assertNotIn("pending_cart_change", self.state())
 
     def test_earlier_native_deadline_stops_slow_apply_before_write(self):
         code, result = self.timed_managed_apply("native_240")
-        self.assertEqual(code, 1, result)
-        self.assertIn("controlled host reply deadline reached", result["error"])
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
         self.assertEqual((self.quantity, self.writes), (0, 0))
         self.assertNotIn("pending_cart_change", self.state())
 
