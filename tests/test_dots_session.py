@@ -201,7 +201,8 @@ def emit(value):
                 40 if operation == 'verify_new_cart' else
                 55 if operation == 'get_cart' and cart_reads <= 2 else 1)
         frames[value['call_id']] = cost
-    original_emit({{**value, 'test_elapsed_seconds': elapsed}})
+    original_emit(value if value['kind'] == 'core_ready'
+                  else {{**value, 'test_elapsed_seconds': elapsed}})
 client.emit = emit
 original_line = client.Input.line
 def line(self, deadline):
