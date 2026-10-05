@@ -206,7 +206,8 @@ class NativeHost:
         self.calls += 1
         if self.calls > 64:
             raise HouseholdError("native host command exceeded its call limit")
-        deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + 60)
+        reply_seconds = 120 if operation == "get_delivery_slots" and not write else 60
+        deadline = min(self.deadline, deadline or self.deadline, time.monotonic() + reply_seconds)
         if deadline <= time.monotonic():
             raise HouseholdError("native host operation deadline reached")
         call_id = str(uuid.uuid4())
