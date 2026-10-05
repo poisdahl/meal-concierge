@@ -51,25 +51,31 @@ _VARIABLE_PACKAGE = re.compile(
     rf"(?P<amount>{_NUMBER})\s*(?P<unit>kg|g|l|ml)(?!\w)",
     re.IGNORECASE,
 )
-_ODA_PERCENT_PREFIX = re.compile(r"^(?:0|[1-9]\d{0,2})%$")
-_ODA_RANGED_COUNT_PREFIX = re.compile(
-    r"^[1-9]\d{0,2}\s*[-–]\s*[1-9]\d{0,2}\s*stk\.\s*"
-    r"Fairtrade,\s*Ecuador\s*/\s*Peru$",
-    re.IGNORECASE,
+# Numeric metadata is recognized by its role, never a product/brand/origin name.
+_PACKAGE_METADATA = re.compile(
+    r"(?:[0-9]{1,3}(?:[.,][0-9]{1,2})?%|klasse [1-3]|"
+    r"(?:lagret i )?[0-9]{1,2}(?:[–-][0-9]{1,2})? (?:måneder|mnd))", re.IGNORECASE,
+)
+_PACKAGE_WORD = r"[^\W\d_]+(?:[.'’/-][^\W\d_]+)*\.?"
+_PACKAGE_DESCRIPTION = re.compile(rf"{_PACKAGE_WORD}(?:(?:\s+|\s*/\s*){_PACKAGE_WORD})*")
+# These words change the meaning of a measurement. Unknown names are inert;
+# quantity qualifiers, rates and alternative sizes must never supply capacity.
+_PACKAGE_QUALIFIER = re.compile(
+    r"\b(?:ca|cirka|omtrent|rundt|anslagsvis|minst|minimum|maks|maximum|maksimum|"
+    r"opptil|inntil|under|over|fra|til|eller|om lag|variabel|varierende|varierer|"
+    r"avrent|avrunnet|brutto|per|pr|hver|stykket|à|á|a|x|"
+    r"poser|pakker|flasker|bokser|bags|packs|bottles|cans|porsjon|porsjoner|serving|servings|"
+    r"tilberedt|utblandet|gir|inneholder|contains|prepared|diluted|protein|fett|karbohydrat|"
+    r"to|tre|fire|fem|seks|sju|syv|åtte|ni|ti|tolv|"
+    r"approx|approximately|about|around|roughly|minimum|maximum|up to|"
+    r"variable|drained|gross|each|or|two|three|four|five|six|"
+    r"kg|g|l|ml|stk)\b", re.IGNORECASE,
 )
 _ODA_DISCOUNT_PREFIX = re.compile(
     r"^maks\s+(?P<count>[1-9]\d{0,2})\s+til\s+nedsatt\s+pris$", re.IGNORECASE
 )
 _ODA_CUSTOMER_LIMIT_PREFIX = re.compile(
     r"^maks\s+(?P<count>[1-9]\d{0,2})\s+per\s+kunde$", re.IGNORECASE
-)
-_ODA_PACKAGE_DESCRIPTOR = re.compile(
-    r"^(?:Norge|Naturell|Skinnfri|Saktevoksende kylling|Revet|Fine|Tørket|Malt|Økologisk|"
-    r"(?:Frisk )?i (?:Pose|Beger/pose)|(?:Vår laveste pris )?Nederland/\s*(?:Spania|Italia)|"
-    r"Etiopia\s*/\s*Kenya|Flate|Peru/\s*Zimbabwe|Wiig Gartneri Norge|"
-    r"Lagret i \d{1,2}[–-]\d{1,2} måneder|\d{1,2} Mnd|"
-    r"Vår laveste pris|klasse [1-3]|\d{1,3}(?:[.,]\d{1,2})?%)$",
-    re.IGNORECASE,
 )
 _MULTIBUY = re.compile(r"^(?P<take>[2-9])\s+for\s+(?P<pay>[1-8])$", re.IGNORECASE)
 _MENY_MULTI_CAMPAIGN = re.compile(
@@ -221,9 +227,79 @@ def _strict_package(value: str) -> tuple[Fraction, str, int] | None:
     return None
 
 
-def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] | None:
-    """Read a fixed package size; descriptive prefixes supply no quantity."""
+def _package_descriptor(text: str, *, limits: bool = False) -> bool:
+    """Accept descriptive words or typed metadata, without inferring a size."""
+    if (_PACKAGE_METADATA.fullmatch(text) or limits and (
+            _ODA_DISCOUNT_PREFIX.fullmatch(text) or _ODA_CUSTOMER_LIMIT_PREFIX.fullmatch(text))):
+        return True
+    return bool(_PACKAGE_DESCRIPTION.fullmatch(text) and not _PACKAGE_QUALIFIER.search(text))
 
+
+def _package_capacities(values):
+    """Combine only explicit count/total-mass or matching multipack/total pairs."""
+    if len(values) == 1:
+        return values[0], None
+    if len(values) != 2 or any(value is None for value in values):
+        return None, None
+    first, total = values
+    if (first[1:] == ("count", 1) and first[0].denominator == 1
+            and total[1] in {"g", "ml"} and total[2] == 1):
+        return total, first[0].numerator
+    if first[2] > 1 and total[2] == 1 and first[:2] == total[:2]:
+        return first, None
+    return None, None
+
+
+def _described_package(text: str, provider: str):
+    if provider in {"oda", "mathem"}:
+        # These providers separate descriptors from the final package size.
+        # Commas without a following space can be decimal separators.
+        segments = text.split(", ")
+        size = _strict_package(segments[-1])
+        if size is None or len(segments) < 2:
+            return None, None
+        descriptors = segments[:-1]
+        previous = _strict_package(descriptors[-1])
+        if previous is not None:
+            parsed, count = _package_capacities([previous, size])
+            descriptors = descriptors[:-1]
+        else:
+            parsed, count = size, None
+            # A ranged piece count never supplies exact count capacity. The
+            # independently declared final mass can still be used.
+            ranged = re.fullmatch(r"([1-9][0-9]{0,2})[–-]([1-9][0-9]{0,2})\s*stk\.\s+(.+)",
+                                  descriptors[0], re.IGNORECASE)
+            if ranged and size[1] == "g" and size[2] == 1 and int(ranged[1]) <= int(ranged[2]):
+                descriptors[0] = ranged[3]
+        if all(_package_descriptor(part, limits=provider == "oda") for part in descriptors):
+            return parsed, count
+        return None, None
+
+    # MENY puts brand/variety text on either side of the size. Consume complete
+    # measurement tokens, then validate every remaining character; never take
+    # the first number from arbitrary prose or silently discard another size.
+    matches = []
+    position = 0
+    while position < len(text):
+        candidates = [match for pattern in (_PACKAGE_BEFORE_COUNT, _PACKAGE_AFTER_COUNT, _PACKAGE_SINGLE)
+                      if (match := pattern.search(text, position)) is not None]
+        if not candidates:
+            break
+        match = min(candidates, key=lambda item: (item.start(), -item.end()))
+        matches.append(match)
+        position = match.end()
+    if not 1 <= len(matches) <= 2:
+        return None, None
+    before, after = text[:matches[0].start()].strip(), text[matches[-1].end():].strip()
+    if any(part and not _package_descriptor(part) for part in (before, after)):
+        return None, None
+    if len(matches) == 2 and text[matches[0].end():matches[1].start()].strip() not in {"", ","}:
+        return None, None
+    return _package_capacities([_strict_package(match[0]) for match in matches])
+
+
+def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] | None:
+    """Read explicit package measurements independently of product names."""
     text = _display_text(value, maximum=300)
     if text is None or _VARIABLE.search(text):
         return None
@@ -231,73 +307,8 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
         text = re.sub(r"\bst\b", "stk", text, flags=re.IGNORECASE)
     contained_count = None
     parsed = _strict_package(text)
-    if provider == "mathem" and parsed is None:
-        # Verified Swedish produce labels include origin before a fixed mass.
-        origin_mass = re.fullmatch(rf"(?:Sverige|Spanien), ({_NUMBER}) (kg|g)", text)
-        if origin_mass is not None:
-            parsed = _canonical_quantity(origin_mass[1], origin_mass[2])
-    if provider == "meny" and parsed is None:
-        candidate = text
-        if candidate.startswith("Økologisk "):
-            candidate = candidate[len("Økologisk "):]
-        # Only observed descriptors may surround MENY's fixed size.
-        for prefix in ("Jalapeno ", "Original ", "Harissa ", "Lettkokte "):
-            if candidate.startswith(prefix):
-                candidate = candidate[len(prefix):]
-                break
-        for suffix in (" Q", " Vilje", " Ode", " flaske", " boks", " pakke",
-                       " Mc Ilhenny", " Cholula", " Al Amier", " Trappeys", " St.maria", " Urkraft"):
-            if candidate.endswith(suffix):
-                candidate = candidate[:-len(suffix)]
-                break
-        parsed = _strict_package(candidate)
-        if parsed is None:
-            # Observed onions declare both pieces and total mass in one stocking.
-            pieces_mass = re.fullmatch(rf"Gul ([1-9]\d*)stk ({_NUMBER})g Strømpe", text)
-            if pieces_mass is not None:
-                pieces = _canonical_quantity(pieces_mass[1], "stk")
-                size = _canonical_quantity(pieces_mass[2], "g")
-                if pieces is not None and size is not None:
-                    parsed = size
-                    contained_count = pieces[0].numerator
-    elif provider in {"oda", "mathem"} and parsed is None:
-        segments = [segment.strip() for segment in text.split(", ")]
-        if len(segments) == 2 and _ODA_PERCENT_PREFIX.fullmatch(segments[0]):
-            parsed = _strict_package(segments[1])
-        elif len(segments) == 2 and segments[0] == "Porsjonspose":
-            parsed = _strict_package(segments[1])
-        elif len(segments) >= 2 and _ODA_RANGED_COUNT_PREFIX.fullmatch(",".join(segments[:-1])):
-            parsed = _strict_package(segments[-1])
-        elif (
-            len(segments) == 3
-            and _ODA_DISCOUNT_PREFIX.fullmatch(segments[0])
-            and segments[1] == "Naturell"
-        ):
-            parsed = _strict_package(segments[2])
-        elif len(segments) == 2:
-            multipack = _strict_package(segments[0])
-            total = _strict_package(segments[1])
-            if (
-                multipack is not None and total is not None
-                and multipack[:2] == total[:2] and multipack[2] > 1
-            ):
-                parsed = multipack
-        if provider == "oda" and parsed is None and len(segments) >= 2:
-            # Origin, variety and promotion copy precede Oda's fixed size.
-            # Only the final complete quantity supplies capacity. Other sizes,
-            # uncertain-weight qualifiers and unexplained numbers stay unresolved.
-            descriptors = segments[:-1]
-            size = _strict_package(segments[-1])
-            pieces = _strict_package(segments[-2])
-            if (size is not None and size[1] in {"g", "ml"} and size[2] == 1
-                    and pieces is not None and pieces[1:] == ("count", 1)
-                    and pieces[0].denominator == 1):
-                # "5 stk, 400 g" declares both capacities of one package.
-                contained_count = pieces[0].numerator
-                descriptors = segments[:-2]
-            if all(_ODA_DISCOUNT_PREFIX.fullmatch(segment) or _ODA_CUSTOMER_LIMIT_PREFIX.fullmatch(segment)
-                   or _ODA_PACKAGE_DESCRIPTOR.fullmatch(segment) for segment in descriptors):
-                parsed = size
+    if parsed is None and provider in {"meny", "oda", "mathem"}:
+        parsed, contained_count = _described_package(text, provider)
     if parsed is None:
         return None
     quantity, unit, item_count = parsed
