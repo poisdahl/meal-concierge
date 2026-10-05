@@ -123,7 +123,7 @@ exclusively published and fsynced. The producer must:
    current execution belongs to that chain before every steer, effect or response.
    Do not echo the anchor as an invented current execution identity.
    Call `claim_request(directory, request_id, task_id)`
-   once **before** steering. Requests expire after at most 180 seconds for reads
+   once **before** steering. Requests expire after at most 540 seconds for reads
    and 30 seconds for effects, or the remaining core deadline if shorter. An
    action also carries the original core `confirmation_id`, `expires_at` and
    digest of its persisted clicking journal in `payload.journal_binding`; its
@@ -134,10 +134,25 @@ exclusively published and fsynced. The producer must:
    purchase_approval_required:true/false}`. Checkout requires fresh purchase
    approval; cancellation uses the reviewed exact-order authorization and every
    platform approval required for that action.
+   Opted-in native Muse checkout has a 600-second total core budget, within the
+   existing 660-second CLI wait. Other clients keep their existing core budgets.
+   The longer read window accommodates complete raw fragments delivered through
+   supported browser handoffs; it does not extend action admission, observation
+   freshness or the original confirmation. Closed requests stay closed.
 2. Use supported native controls and direct raw observations. Expand one complete
    item and amount section. Do not copy expected MCP IDs, quantities, amounts or
    addresses into observations, remap names to IDs, invent DOM counts, invent a
    browser clock or replace a native task with another profile.
+   If the supported final-response preview is short, transport item fragments as
+   compact JSON lines `[ordinal, product_id, title, subtitle, quantity]`. Parse
+   only complete lines with strict JSON, exact length and types; reject booleans
+   as integers. Ordinals must be actual contiguous visible row positions. Keep
+   literal previews and actual chain receipts, discard any incomplete trailing
+   tuple, and reobserve its row. Remove only ordinal metadata when assembling
+   the normal four-key item objects. Do not shorten or fill any observed value.
+   Collect all other raw sections and actual list-end evidence in the same live
+   request, finish with an unchanged complete surface, and return once within
+   the remaining budget. Partial fragments never constitute checkout evidence.
 3. Return `request_id`, `request_digest` (canonical `digest(request)`), `task_id`,
    `observed_at` (actual main-runtime completion/handoff UTC), `task_state`
    (`completed` or `waiting_for_information`) and operation-specific `facts` via

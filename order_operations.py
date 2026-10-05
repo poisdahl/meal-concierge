@@ -2218,6 +2218,9 @@ class OrderOperations:
                     'next': 'Synchronize cart action=weekly for this menu before preparing checkout.'}
         return None
 
+    def _checkout_operation_timeout(self):
+        return MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240
+
     def _checkout_operation(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "prepare")
         if any(key in request for key in ("expected_checkout_digest", "owner_authorization")) and action != "retire_attempt":
@@ -2226,7 +2229,7 @@ class OrderOperations:
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
             raise HouseholdError("Mathem checkout is manual; use prepare for the cart summary and finish at https://www.mathem.se/se/cart/")
-        deadline = time.monotonic() + (MENY_CHECKOUT_OPERATION_TIMEOUT if self.provider == "meny" else 240)
+        deadline = time.monotonic() + self._checkout_operation_timeout()
         if "recovery" in request and (type(request["recovery"]) is not bool or action != "prepare"):
             raise HouseholdError("recovery is a boolean option for checkout prepare only")
         if "checkout_payment" in request and action not in {"prepare", "switch_payment"}:
