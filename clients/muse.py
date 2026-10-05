@@ -58,10 +58,13 @@ NATIVE_BROWSER_GUIDANCE = ("Muse's protected Oda connection and opted-in native 
 
 
 def _owned_checkout(state, order_id):
-    return any(isinstance(row, Mapping) and row.get("kind") == "checkout"
+    return (state.get("provider") == "oda"
+        and state.get("order_snapshot_providers", {}).get(order_id, "oda") == "oda"
+        and any(isinstance(row, Mapping) and row.get("kind") == "checkout"
         and isinstance(row.get("result"), Mapping) and row["result"].get("confirmed") is True
+        and row["result"].get("changed_existing_order") is not True
         and row.get("target_id") == order_id == row["result"].get("order_id")
-        for row in state.get("protected_results", {}).values())
+        for row in state.get("protected_results", {}).values()))
 
 
 def guard_native_browser(request, state):
@@ -481,7 +484,10 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None) -> None:
         shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
         cls = ProtectedMuseApplication if protected else MuseApplication
-        app = cls(StateStore(home / "state", settings), shop, browser, external_recipe_sources={})
+        store = StateStore(home / "state", settings)
+        if browser is not None:
+            browser.state_store = store
+        app = cls(store, shop, browser, external_recipe_sources={})
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 

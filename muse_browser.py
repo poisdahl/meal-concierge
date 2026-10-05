@@ -170,17 +170,20 @@ def respond_request(directory, request_id, task_id, response):
 
 
 def end_request(directory, request_id, task_id, response):
-    """Append an actual task ending after a retained information pause.
+    """Append an actual task ending after a missing, invalid or paused reply.
 
     This closes custody only. It neither replaces the earlier observation nor
     makes expired facts usable by the core.
     """
     directory, record = request_record(directory, request_id, task_id, active=False)
-    prior = required_json(directory / "responses" / (request_id + ".json"))
-    validate_response(record, prior, fresh=False)
+    try:
+        prior = read_json(directory / "responses" / (request_id + ".json"))
+        validate_response(record, prior, fresh=False)
+    except (FileNotFoundError, HouseholdError):
+        prior = None
     validate_response(record, response, fresh=False)
-    if prior["task_state"] != "waiting_for_information" or response["task_state"] != "completed":
-        raise HouseholdError("Muse browser ending requires its original information pause")
+    if response["task_state"] != "completed" or prior is not None and prior["task_state"] == "completed":
+        raise HouseholdError("Muse browser ending requires an unresolved original task")
     validate_claim(directory, record)
     durable_publish(directory / "endings" / (request_id + ".json"), response)
 
@@ -246,34 +249,33 @@ class NativeBridge:
             # ending must be returned to the original request before replacement.
             for claim_path in (self.directory / "claims").glob("*.json"):
                 reply = self.directory / "responses" / claim_path.name
-                if not reply.exists():
-                    raise HouseholdError("Reconcile the original Muse browser task before another dispatch")
                 original = required_json(self.directory / "requests" / claim_path.name)
                 if not isinstance(original, Mapping):
                     raise HouseholdError("Muse browser custody record is invalid")
                 _, record = request_record(self.directory, claim_path.stem,
                                            original.get("task_id"), active=False)
                 validate_claim(self.directory, record)
+                try:
+                    ending = read_json(self.directory / "endings" / claim_path.name)
+                except FileNotFoundError:
+                    pass
+                else:
+                    validate_response(record, ending, fresh=False)
+                    if ending["task_state"] != "completed":
+                        raise HouseholdError("Muse browser has no actual task ending")
+                    continue
                 response = required_json(reply)
                 validate_response(record, response, fresh=False)
                 if response["task_state"] != "completed":
-                    ending_path = self.directory / "endings" / claim_path.name
-                    try:
-                        ending = read_json(ending_path)
-                    except FileNotFoundError:
-                        if (record["operation"].endswith("_click")
-                                or record["task_id"] != self.task_id
-                                or process_start(record["owner_pid"]) != record["owner_start"]):
-                            raise HouseholdError("Finish the original waiting Muse task before replacement") from None
-                    else:
-                        validate_response(record, ending, fresh=False)
-                        if ending["task_state"] != "completed":
-                            raise HouseholdError("Muse browser has no actual task ending")
+                    if (record["operation"].endswith("_click")
+                            or record["task_id"] != self.task_id
+                            or process_start(record["owner_pid"]) != record["owner_start"]):
+                        raise HouseholdError("Finish the original waiting Muse task before replacement")
             yield
         finally:
             os.close(fd)
 
-    def request(self, operation, payload, *, deadline=None):
+    def request(self, operation, payload, *, deadline=None, expires_at=None):
         seconds = 30.0 if operation.endswith("_click") else 180.0
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):
@@ -282,6 +284,10 @@ class NativeBridge:
         if seconds <= 0:
             raise HouseholdError("Muse browser deadline reached")
         start = datetime.now(timezone.utc)
+        if expires_at is not None:
+            seconds = min(seconds, (timestamp(expires_at) - start).total_seconds())
+        if seconds <= 0:
+            raise HouseholdError("Muse browser original confirmation expired")
         record = {"version": 1, "request_id": str(uuid.uuid4()), "provider": "oda",
                   "operation": operation, "task_id": self.task_id,
                   "owner_pid": os.getpid(), "owner_start": process_start(os.getpid()),
@@ -400,9 +406,10 @@ class MuseBrowser:
     """
     checkout_provider = "oda"
 
-    def __init__(self, directory, task_id, provider_client):
+    def __init__(self, directory, task_id, provider_client, *, state_store=None):
         self.bridge = NativeBridge(directory, task_id)
         self.provider_client = provider_client
+        self.state_store = state_store
         self.last_review_at = None
 
     def _addresses(self, deadline):
@@ -452,8 +459,11 @@ class MuseBrowser:
                        for r in actual)):
             raise HouseholdError("Muse checkout needs independently observed IDs and integer quantities")
         account_digest = hashlib.sha256(str(reference).encode()).hexdigest()
+        # The shared identity parser represents IDs as strings; retain the raw
+        # integer observations in the bound surface and convert only its input.
+        identity_rows = [{**row, "product_id": str(row["product_id"])} for row in actual]
         try:
-            identity = review_checkout_lines(expected["lines"], actual,
+            identity = review_checkout_lines(expected["lines"], identity_rows,
                 binding={"checkout": facts, "account": account_digest, "total": expected["total_minor"],
                          "delivery": expected["delivery_text"], "address": expected["delivery_address"]},
                 review=identity_review)
@@ -492,13 +502,28 @@ class MuseBrowser:
                 raise CheckoutPreconditionError("Muse checkout changed before dispatch")
             if before_click is not None:
                 before_click()
-            result = self.bridge.request("checkout_click", {"review": current,
-                        "review_digest": digest(current), "effect": "one_final_new_order_click"}, deadline=deadline)
+            result = self._effect_request("checkout_click", {"review": current,
+                        "review_digest": digest(current), "effect": "one_final_new_order_click"},
+                        current, deadline=deadline)
             if result != {"dispatch": "clicked_once"}:
                 raise HouseholdError("Muse checkout outcome is unknown; reconcile the original attempt")
             # The core independently reconciles exact new order/tracking/binding.
             # Never invent bank-tab context from a URL or click acknowledgement.
             return {"authentication_unresolved": True}
+
+    def _effect_request(self, operation, payload, review, *, deadline=None):
+        if self.state_store is None:
+            raise HouseholdError("Muse browser effect requires its original core state store")
+        cancellation = operation == "cancellation_click"
+        pending = self.state_store.read().get("pending_cancellation" if cancellation else "pending_checkout")
+        if (not isinstance(pending, Mapping) or pending.get("status") != "clicking"
+                or pending.get("browser" if cancellation else "browser_review") != review
+                or not isinstance(pending.get("confirmation_id"), str) or not pending["confirmation_id"]):
+            raise HouseholdError("Muse browser original clicking journal changed")
+        binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
+                   "journal_digest": digest(pending)}
+        return self.bridge.request(operation, {**payload, "journal_binding": binding},
+                                   deadline=deadline, expires_at=pending["expires_at"])
 
     def _order_binding(self, order_id, order, facts, expected_binding, deadline):
         expected = OdaBrowser._order_expectation(order_id, order)
@@ -578,8 +603,8 @@ class MuseBrowser:
                 raise CancellationPreconditionError("Muse cancellation changed before dispatch")
             if before_click is not None:
                 before_click()
-            result = self.bridge.request("cancellation_click", {"order_id": order_id,
+            result = self._effect_request("cancellation_click", {"order_id": order_id,
                         "review": current, "review_digest": digest(current),
-                        "effect": "one_final_cancellation_click"}, deadline=deadline)
+                        "effect": "one_final_cancellation_click"}, current, deadline=deadline)
             if result != {"dispatch": "clicked_once"}:
                 raise HouseholdError("Muse cancellation outcome is unknown; reconcile the original attempt")

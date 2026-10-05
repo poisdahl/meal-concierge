@@ -111,7 +111,10 @@ exclusively published and fsynced. The producer must:
 1. Read the complete emitted request and correlate its original native task and
    actual execution receipt. Call `claim_request(directory, request_id, task_id)`
    once **before** steering. Requests expire after at most 180 seconds for reads
-   and 30 seconds for effects, or the remaining core deadline if shorter.
+   and 30 seconds for effects, or the remaining core deadline if shorter. An
+   effect also carries the original core `confirmation_id`, `expires_at` and
+   digest of its persisted clicking journal in `payload.journal_binding`; its
+   request expiry cannot extend that original confirmation.
 2. Use supported native controls and direct raw observations. Expand one complete
    item and amount section. Do not copy expected MCP IDs, quantities, amounts or
    addresses into observations, remap names to IDs, invent DOM counts, invent a
@@ -167,9 +170,10 @@ The broker retains cross-process native custody after a claimed task loses its
 waiter. Ending the waiter revokes its unspent request even if the service PID
 stays alive. A consumed action with a missing or waiting reply blocks replacement.
 An actual late completed reply may close custody without making old facts fresh.
-For an existing information-pause response, append its actual terminal receipt
-with `end_request(...)`; never overwrite the original response. Only the same
-live original task's read-only information pause may continue to a fresh stage.
+For a missing, invalid or information-pause response, append its actual terminal
+receipt with `end_request(...)`; never overwrite the original response. This
+closes custody without granting another effect or refreshing earlier facts. Only
+the same live original task's read-only information pause may continue to a fresh stage.
 Timeout, parent loss or an ambiguous action keeps the core attempt uncertain;
 no replacement request, profile, cart delta or order submission is a retry.
 

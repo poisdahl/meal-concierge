@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 import uuid
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
@@ -107,6 +108,31 @@ class NativeFixture(unittest.TestCase):
 
 
 class NativeBrokerTests(NativeFixture):
+    def test_effect_permit_cannot_extend_original_confirmation_expiry(self):
+        original_expiry = datetime.now(timezone.utc) + timedelta(seconds=2)
+        errors = []
+        def waiter():
+            try:
+                with self.bridge.custody():
+                    self.bridge.request("checkout_click", {"journal_binding": {
+                        "confirmation_id": "original-confirmation", "expires_at": original_expiry.isoformat()}},
+                        expires_at=original_expiry.isoformat())
+            except HouseholdError as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        path = wait_for(lambda: next((self.directory / "requests").glob("*.json"), None))
+        record = read_json(path)
+        self.assertLessEqual(datetime.fromisoformat(record["expires_at"]), original_expiry)
+        claim_request(self.directory, record["request_id"], "original-task")
+        time.sleep(max(0, (original_expiry - datetime.now(timezone.utc)).total_seconds()) + 0.05)
+        with self.assertRaises(HouseholdError):
+            consume_request(self.directory, record["request_id"], "original-task")
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertFalse(list((self.directory / "consumed").glob("*.json")))
+
     def test_duplicate_consume_and_wrong_owner_identity_refuse(self):
         record = self.record()
         key = record["request_id"]
@@ -211,18 +237,30 @@ class NativeCoreRpcTests(NativeFixture):
         self.store = core_fixtures.StateStore(self.directory / "state", core_fixtures.CONFIG)
         self.shop = SyntheticOda()
         self.shop.cart["items"][0].update(description="500 g", brand="Synthetic")
-        self.browser = MuseBrowser(self.directory, "original-task", self.shop)
+        local = datetime.now(ZoneInfo("Europe/Oslo")) + timedelta(days=2)
+        month = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")[local.month - 1]
+        self.delivery = f"{local.day}. {month} 09:00 - 12:00"
+        self.delivery_date = local.date().isoformat()
+        self.shop.cart["delivery"]["display"] = self.delivery
+        self.shop.order_delivery = self.delivery_date
+        for offset, slot in enumerate(self.shop.delivery_slots["slots"]):
+            day = local + timedelta(days=7 * offset)
+            slot.update(slot_ref=f"oda:{day.date().isoformat()}:{slot['provider_slot_id']}",
+                start_at=day.replace(hour=9, minute=0, second=0, microsecond=0).isoformat(),
+                end_at=day.replace(hour=12, minute=0, second=0, microsecond=0).isoformat())
+        self.browser = MuseBrowser(self.directory, "original-task", self.shop, state_store=self.store)
         self.app = muse.ProtectedMuseApplication(self.store, self.shop, self.browser, external_recipe_sources={})
-        self.app._now = lambda: core_fixtures.ODA_FIXTURE_NOW
+        self.app._now = lambda: datetime.now(timezone.utc)
         self.produced = set()
         self.effects = []
+        self.corrupt_effect_reply = False
 
     def facts(self, record):
         operation = record["operation"]
         account = {"url": "https://oda.com/no/account/delivery/", "edit_urls": ["https://oda.com/no/account/delivery/edit/7/"]}
         if operation == "checkout_review":
             return {"url": "https://oda.com/no/checkout/confirm/", "account": account,
-                    "address": "Eksempelveien 1", "delivery_sections": ["5. sep 09:00 - 12:00"],
+                    "address": "Eksempelveien 1", "delivery_sections": [self.delivery],
                     "items": [{"product_id": 10, "title": "Fullkornspasta", "subtitle": "Synthetic, 500 g", "quantity": 1}],
                     "warnings": [], "amount_rows": [{"label": "1 vare", "value": "35,00 kr"},
                         {"label": "Delsum", "value": "35,00 kr"}, {"label": "Total inkl. MVA", "value": "35,00 kr"}],
@@ -232,18 +270,21 @@ class NativeCoreRpcTests(NativeFixture):
         if operation.endswith("_click"):
             pending = self.store.read()["pending_checkout" if operation == "checkout_click" else "pending_cancellation"]
             self.assertEqual(pending["status"], "clicking")
+            self.assertEqual(record["payload"]["journal_binding"], {"confirmation_id": pending["confirmation_id"],
+                "expires_at": pending["expires_at"], "journal_digest": digest(pending)})
+            self.assertLessEqual(record["expires_at"], pending["expires_at"])
             consume_request(self.directory, record["request_id"], "original-task")
             self.effects.append(operation)
             if operation == "checkout_click":
                 self.shop.orders.append({"order_number": "new-order", "grossAmount": 35.0,
-                    "deliveryDate": "2026-09-05", "deliverySlotDisplay": "5. sep 09:00 - 12:00",
+                    "deliveryDate": self.delivery_date, "deliverySlotDisplay": self.delivery,
                     "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}]})
             else:
                 self.shop.tracking = "cancelled"
             return {"dispatch": "clicked_once"}
         receipt = {"url": "https://oda.com/no/account/orders/new-order/", "order_id": "new-order",
                    "currency": "NOK", "receipt_address": "Eksempelveien 1", "account": account,
-                   "delivery_sections": ["5. sep 09:00 - 12:00"], "total_rows": ["Total 35,00 kr"],
+                   "delivery_sections": [self.delivery], "total_rows": ["Total 35,00 kr"],
                    "complete_sections": ["receipt", "account"]}
         if operation == "order_binding":
             return receipt
@@ -253,7 +294,7 @@ class NativeCoreRpcTests(NativeFixture):
                 "dismiss_controls": [{"label": "Nei, ikke kanseller", "enabled": True}], "closed": True}}
         return {"status": "unknown"}
 
-    def rpc(self, request):
+    def rpc(self, request, *, expect_ok=True):
         client, connection = socket.socketpair()
         server = Server(self.directory / "unused.sock", os.getgid(), os.getuid(), self.app)
         thread = threading.Thread(target=server._serve, args=(connection,))
@@ -267,15 +308,20 @@ class NativeCoreRpcTests(NativeFixture):
                         record = read_json(path)
                         claim_request(self.directory, record["request_id"], "original-task")
                         facts = self.facts(record)
-                        respond_request(self.directory, record["request_id"], "original-task", self.response(record, facts=facts))
+                        reply = self.response(record, facts=facts)
+                        if record["operation"] == "checkout_click" and self.corrupt_effect_reply:
+                            reply["request_digest"] = "0" * 64
+                            durable_publish(self.directory / "responses" / path.name, reply)
+                        else:
+                            respond_request(self.directory, record["request_id"], "original-task", reply)
                         self.produced.add(path.name)
                 thread.join(0.01)
             raw = b""
             while b"\n" not in raw:
                 raw += client.recv(65536)
             result = json.loads(raw)
-            self.assertTrue(result["ok"], result)
-            return result["result"]
+            self.assertEqual(result["ok"], expect_ok, result)
+            return result["result"] if result["ok"] else result
         finally:
             client.close()
             thread.join(5)
@@ -304,6 +350,38 @@ class NativeCoreRpcTests(NativeFixture):
                 self.app.handle(request)
         self.assertEqual(len(self.shop.calls), before)
         self.assertFalse(list((self.directory / "requests").glob("*.json")))
+
+    def test_amended_preexisting_or_foreign_provider_order_cannot_be_cancelled(self):
+        before = len(self.shop.calls)
+        for changed, provider in ((True, "oda"), (False, "mathem")):
+            with self.store.locked() as state:
+                state["protected_results"]["legacy-confirmation"] = {"kind": "checkout", "target_id": "existing-order",
+                    "result": {"confirmed": True, "order_id": "existing-order", "changed_existing_order": changed}}
+                state["order_snapshot_providers"]["existing-order"] = provider
+            with self.subTest(changed=changed, provider=provider), self.assertRaises(HouseholdError):
+                self.app.handle({"operation": "orders", "action": "cancel_prepare", "order_id": "existing-order"})
+        self.assertEqual(len(self.shop.calls), before)
+        self.assertFalse(list((self.directory / "requests").glob("*.json")))
+
+    def test_applied_effect_invalid_reply_preserves_uncertainty_and_reconciles_without_replay(self):
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.corrupt_effect_reply = True
+        confirmation = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+        self.rpc(confirmation, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.rpc(confirmation, expect_ok=False)
+        self.assertEqual(self.effects, ["checkout_click"])
+        effect = next(read_json(p) for p in (self.directory / "requests").glob("*.json")
+                      if read_json(p)["operation"] == "checkout_click")
+        path = self.directory / "responses" / (effect["request_id"] + ".json")
+        bad_reply = path.read_bytes()
+        end_request(self.directory, effect["request_id"], "original-task", self.response(effect, facts={"dispatch": "clicked_once"}))
+        self.assertEqual(path.read_bytes(), bad_reply)
+        result = self.rpc({"operation": "checkout", "action": "reconcile", "confirmation_id": prepared["confirmation_id"]})
+        self.assertTrue(result["confirmed"])
+        self.assertEqual(result["order_id"], "new-order")
+        self.assertEqual(self.effects, ["checkout_click"])
+        self.assertIsNone(self.store.read()["pending_checkout"])
 
 
 if __name__ == "__main__":
