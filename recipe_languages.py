@@ -124,6 +124,7 @@ def display_recipe(recipe, language=None):
                 unit = {'ts': 'tsp', 'ss': 'tbsp', 'stk': 'pieces', 'fedd': 'cloves'}.get(unit, unit)
                 unit = {'clove': 'cloves', 'stalk': 'stalks', 'package': 'packages',
                         'drop': 'drops', 'pinch': 'pinches', 'handful': 'handfuls',
-                        'slice': 'slices', 'bunch': 'bunches', 'pot': 'pots'}.get(dimension, unit)
+                        'slice': 'slices', 'bunch': 'bunches', 'pot': 'pots',
+                        'sheet': 'sheets', 'thumb': 'thumbs'}.get(dimension, unit)
             row['amount'] = (quantity_text(row['quantity']) + ' ' + unit).strip()
     return result

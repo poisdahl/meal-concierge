@@ -22,10 +22,12 @@ from test_meal_concierge_products import FakeProvider, observation, option, prod
 ALIASES = {
     'drop': ('drop', 'drops', 'dråpe', 'dråper'),
     'pinch': ('pinch', 'pinches', 'klype', 'klyper'),
-    'handful': ('handful', 'handfuls', 'håndfull', 'håndfuller'),
+    'handful': ('handful', 'handfuls', 'håndfull', 'håndfuller', 'neve', 'never'),
     'slice': ('slice', 'slices', 'skive', 'skiver'),
     'bunch': ('bunch', 'bunches', 'bunt', 'bunter', 'knippe', 'knipper'),
     'pot': ('pot', 'pots', 'potte', 'potter'),
+    'sheet': ('sheet', 'sheets', 'ark', 'plate', 'plater'),
+    'thumb': ('thumb', 'thumbs', 'tommel', 'tomler'),
 }
 
 
@@ -110,7 +112,7 @@ class SourceUnitTests(unittest.TestCase):
             'fedd', 'clove', 'cloves', 'stilk', 'stilker', 'stalk', 'stalks',
             'pk', 'pakke', 'pakker', 'package', 'packages',
         ]
-        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots',
+        english = ('drops', 'pinches', 'handfuls', 'slices', 'bunches', 'pots', 'sheets', 'thumbs',
                    *(['cloves'] * 3), *(['stalks'] * 4), *(['packages'] * 5))
         rows = [source_ingredient(f'2 {unit} salt', language='nb') for unit in units]
         recipe = fixture(*rows)
