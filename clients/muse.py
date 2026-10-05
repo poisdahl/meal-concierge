@@ -357,6 +357,10 @@ class MuseApplication(Application):
 
 
 class ProtectedMuseApplication(MuseApplication):
+    def _checkout_operation_timeout(self):
+        # Complete native observations may require several bounded handoffs.
+        return 600 if self.browser is not None else super()._checkout_operation_timeout()
+
     def _observe_terminal_failure(self):
         failure = self.provider_client.terminal_failure
         if failure:

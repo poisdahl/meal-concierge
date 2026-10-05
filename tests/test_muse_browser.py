@@ -114,7 +114,7 @@ class NativeFixture(unittest.TestCase):
         result = {"version": 1, "request_id": str(uuid.uuid4()), "provider": "oda",
                   "operation": operation, "task_id": "original-task", "owner_pid": os.getpid(),
                   "owner_start": process_start(os.getpid()), "issued_at": now.isoformat(),
-                  "expires_at": (now + timedelta(seconds=60)).isoformat(), "payload": {}}
+                  "expires_at": (now + timedelta(seconds=30 if operation in ACTION_OPERATIONS else 60)).isoformat(), "payload": {}}
         result.update(changes)
         durable_publish(self.directory / "requests" / (result["request_id"] + ".json"), result)
         return result
@@ -126,6 +126,45 @@ class NativeFixture(unittest.TestCase):
 
 
 class NativeBrokerTests(NativeFixture):
+    def test_long_read_stays_live_but_overlong_action_is_rejected(self):
+        issued = datetime.now(timezone.utc) - timedelta(seconds=181)
+        record = self.record("checkout_review", issued_at=issued.isoformat(),
+            expires_at=(issued + timedelta(seconds=540)).isoformat())
+        claim_request(self.directory, record["request_id"], "original-task")
+        respond_request(self.directory, record["request_id"], "original-task", self.response(record))
+        for operation, seconds in [("checkout_review", 541), *[(op, 31) for op in ACTION_OPERATIONS]]:
+            with self.subTest(operation=operation):
+                now = datetime.now(timezone.utc)
+                record = self.record(operation, issued_at=now.isoformat(),
+                    expires_at=(now + timedelta(seconds=seconds)).isoformat())
+                with self.assertRaises(HouseholdError):
+                    claim_request(self.directory, record["request_id"], "original-task")
+
+    def test_read_window_is_capped_by_remaining_core_deadline(self):
+        for remaining, expected in [(900, 540), (470, 470), (15, 15)]:
+            with self.subTest(remaining=remaining):
+                prior = set((self.directory / "requests").glob("*.json"))
+                results = []
+                def waiter():
+                    try:
+                        with self.bridge.custody():
+                            results.append(self.bridge.request("checkout_review", {},
+                                deadline=time.monotonic() + remaining))
+                    except Exception as exc:
+                        results.append(exc)
+                thread = threading.Thread(target=waiter)
+                thread.start()
+                path = wait_for(lambda: next((p for p in (self.directory / "requests").glob("*.json")
+                                             if p not in prior), None))
+                record = read_json(path)
+                duration = (datetime.fromisoformat(record["expires_at"]) - datetime.fromisoformat(record["issued_at"])).total_seconds()
+                claim_request(self.directory, record["request_id"], "original-task")
+                respond_request(self.directory, record["request_id"], "original-task", self.response(record))
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(results, [{}])
+                self.assertAlmostEqual(duration, expected, delta=0.1)
+
     def test_effect_permit_cannot_extend_original_confirmation_expiry(self):
         original_expiry = datetime.now(timezone.utc) + timedelta(seconds=2)
         errors = []
@@ -313,6 +352,7 @@ class NativeCoreRpcTests(NativeFixture):
         self.app._now = lambda: datetime.now(timezone.utc)
         self.produced = set()
         self.effects = []
+        self.read_windows = []
         self.corrupt_effect_reply = False
         self.defer_delegation = False
         self.deny_delegation = False
@@ -328,6 +368,8 @@ class NativeCoreRpcTests(NativeFixture):
         operation = record["operation"]
         account = {"url": "https://oda.com/no/account/delivery/", "edit_urls": ["https://oda.com/no/account/delivery/edit/7/"]}
         if operation == "checkout_review":
+            self.read_windows.append((datetime.fromisoformat(record["expires_at"])
+                                      - datetime.fromisoformat(record["issued_at"])).total_seconds())
             return {"url": "https://oda.com/no/checkout/confirm/", "account": account,
                     "address": "Eksempelveien 1", "delivery_sections": [self.delivery],
                     "items": deepcopy(self.checkout_items),
@@ -373,6 +415,18 @@ class NativeCoreRpcTests(NativeFixture):
                 "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10, "name": "Fullkornspasta"}, "quantity": 1, "totalGrossAmount": "35.00"}]})
         else:
             self.shop.tracking = "cancelled"
+
+    def test_native_core_read_budget_fits_cli_without_changing_other_defaults(self):
+        from rpc_client import rpc_timeout
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.assertIn("confirmation_id", prepared)
+        self.assertTrue(self.read_windows)
+        self.assertTrue(all(500 < seconds <= 540 for seconds in self.read_windows))
+        self.assertLess(self.app._checkout_operation_timeout(), rpc_timeout("checkout", {}))
+        self.app.browser = None
+        self.assertEqual(self.app._checkout_operation_timeout(), 240)
+        self.app.provider = "meny"
+        self.assertEqual(self.app._checkout_operation_timeout(), 600)
 
     def rpc(self, request, *, expect_ok=True):
         client, connection = socket.socketpair()

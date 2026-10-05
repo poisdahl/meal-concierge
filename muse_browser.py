@@ -31,6 +31,8 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
 CLICK_OPERATIONS = {"checkout_click", "cancellation_click"}
 DELEGATION_OPERATIONS = {"checkout_delegate", "cancellation_delegate"}
 ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS
+READ_OPERATION_TIMEOUT = 540.0
+ACTION_OPERATION_TIMEOUT = 30.0
 
 
 def digest(value):
@@ -120,7 +122,8 @@ def request_record(directory, request_id, task_id, *, active=True):
             or not isinstance(record.get("payload"), Mapping)
             or not isinstance(record.get("owner_start"), str)
             or not record["owner_start"].isdigit()
-            or not 0 < (timestamp(record["expires_at"]) - timestamp(record["issued_at"])).total_seconds() <= 180
+            or not 0 < (timestamp(record["expires_at"]) - timestamp(record["issued_at"])).total_seconds()
+                <= (ACTION_OPERATION_TIMEOUT if record["operation"] in ACTION_OPERATIONS else READ_OPERATION_TIMEOUT)
             or active and (((directory / "closed" / (request_id + ".json")).exists()
                            or (directory / "closed" / (request_id + ".json")).is_symlink())
                 or process_start(record.get("owner_pid")) != record.get("owner_start")
@@ -300,7 +303,7 @@ class NativeBridge:
             os.close(fd)
 
     def request(self, operation, payload, *, deadline=None, expires_at=None):
-        seconds = 30.0 if operation in ACTION_OPERATIONS else 180.0
+        seconds = ACTION_OPERATION_TIMEOUT if operation in ACTION_OPERATIONS else READ_OPERATION_TIMEOUT
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):
                 raise HouseholdError("Muse browser deadline must be finite")
