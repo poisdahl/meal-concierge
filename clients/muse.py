@@ -51,6 +51,74 @@ PROTECTED_ALLOWED = {**ALLOWED,
     "product_favorites": {"list", "add", "remove"}, "recurring": {"list", "add", "remove", "substitute"},
     "menu": ALLOWED["menu"] | {"lock", "clear", "replan_prepare", "replan_apply", "batch_prepare", "batch_apply"},
 }
+NATIVE_BROWSER_GUIDANCE = ("Muse's protected Oda connection and opted-in native browser support manual new "
+    "saved-card checkout and cancellation of this household's confirmed checkout orders. "
+    "Native task receipts, fresh reviews and provider/device approval remain required. "
+    "Order edits, payment retry/switching, weekly checkout, email and scheduling are unavailable.")
+
+
+def _owned_checkout(state, order_id):
+    return (state.get("provider") == "oda"
+        and state.get("order_snapshot_providers", {}).get(order_id, "oda") == "oda"
+        and any(isinstance(row, Mapping) and row.get("kind") == "checkout"
+        and isinstance(row.get("result"), Mapping) and row["result"].get("confirmed") is True
+        and row["result"].get("changed_existing_order") is not True
+        and row.get("target_id") == order_id == row["result"].get("order_id")
+        for row in state.get("protected_results", {}).values()))
+
+
+def guard_native_browser(request, state):
+    """Keep the optional adapter on the implemented manual core paths."""
+    operation, action = request["operation"], request.get("action")
+    if operation == "checkout":
+        allowed = {"operation", "action", "checkout_payment", "identity_review"} if action == "prepare" else {
+            "operation", "action", "confirmation_id"}
+        if set(request) - (allowed | {"contract"}):
+            raise HouseholdError("Muse native checkout requires a manual new-order request")
+        if state.get("order_change"):
+            raise HouseholdError("Finish the original order change outside Muse native checkout")
+        pending = state.get("pending_checkout")
+        if action != "prepare":
+            confirmation = request.get("confirmation_id")
+            if not isinstance(confirmation, str) or not confirmation:
+                raise HouseholdError("Muse checkout requires the exact confirmation_id")
+            record = state.get("protected_results", {}).get(confirmation)
+            if (isinstance(record, Mapping) and record.get("kind") == "checkout"
+                    and isinstance(record.get("result"), Mapping)
+                    and record["result"].get("confirmed") is True):
+                return
+            if not isinstance(pending, Mapping) or pending.get("confirmation_id") != confirmation:
+                raise HouseholdError("Muse checkout confirmation does not match its original journal")
+        if pending and (not isinstance(pending, Mapping) or any(pending.get(key) for key in (
+                "order_change", "occurrence", "automatic_checkout", "scheduler_context", "recovery", "payment_switch"))
+                or (pending.get("checkout_payment") or {}).get("method") != "saved_card"):
+            raise HouseholdError("Preserve the unsupported original checkout journal")
+        from core import checkout_payment_settings
+        payment = request.get("checkout_payment", state.get("checkout_payment")) if action == "prepare" else pending["checkout_payment"]
+        if checkout_payment_settings(payment, "oda")["method"] != "saved_card":
+            raise HouseholdError("Muse native checkout supports saved-card payment only")
+    else:
+        if set(request) - {"operation", "action", "order_id", "confirmation_id", "contract"}:
+            raise HouseholdError("Muse cancellation requires its original order and confirmation")
+        if action == "cancel_prepare":
+            order_id = request.get("order_id")
+        else:
+            confirmation = request.get("confirmation_id")
+            if not isinstance(confirmation, str) or not confirmation:
+                raise HouseholdError("Muse cancellation requires the exact confirmation_id")
+            record = state.get("protected_results", {}).get(confirmation)
+            if (isinstance(record, Mapping) and record.get("kind") == "cancellation"
+                    and isinstance(record.get("result"), Mapping) and record["result"].get("cancelled") is True):
+                order_id = record.get("target_id")
+            else:
+                pending = state.get("pending_cancellation")
+                if not isinstance(pending, Mapping) or pending.get("confirmation_id") != confirmation:
+                    raise HouseholdError("Muse cancellation confirmation does not match its original journal")
+                order_id = pending.get("order_id")
+            if request.get("order_id") is not None and request["order_id"] != order_id:
+                raise HouseholdError("Muse cancellation target differs from its original journal")
+        if not isinstance(order_id, str) or not order_id or not _owned_checkout(state, order_id):
+            raise HouseholdError("Muse native cancellation requires this household's confirmed new checkout order")
 
 
 def guard_local_recipes(request):
@@ -300,18 +368,24 @@ class ProtectedMuseApplication(MuseApplication):
         if "_restore_missing_cart_digest" in request:
             raise HouseholdError("Muse cart restoration requires a freshly reviewed products.apply request")
         operation, action = request.get("operation"), request.get("action")
+        native = (self.browser is not None and (
+            operation == "checkout" and isinstance(action, str) and action in {"prepare", "confirm", "reconcile"}
+            or operation == "orders" and isinstance(action, str) and action in {"cancel_prepare", "cancel_confirm", "cancel_reconcile"}))
         if (not isinstance(operation, str) or action is not None and not isinstance(action, str)
-                or operation not in PROTECTED_ALLOWED or action not in PROTECTED_ALLOWED[operation]):
+                or not native and (operation not in PROTECTED_ALLOWED or action not in PROTECTED_ALLOWED[operation])):
             raise HouseholdError("Unsupported Muse operation/action. " + PROTECTED_GUIDANCE)
+        if native:
+            guard_native_browser(request, self.store.read())
         guard_local_recipes(request)
         self._observe_terminal_failure()
         try:
             result = Application.handle(self, request)
         finally:
             self._observe_terminal_failure()
-        result["client_guidance"] = PROTECTED_GUIDANCE
+        guidance = NATIVE_BROWSER_GUIDANCE if self.browser is not None else PROTECTED_GUIDANCE
+        result["client_guidance"] = guidance
         if operation == "profile" and action == "overview":
-            result["details"] = PROTECTED_GUIDANCE
+            result["details"] = guidance
         return result
 
     def _refresh_integration(self, *args, **kwargs):
@@ -327,14 +401,17 @@ class ProtectedMuseApplication(MuseApplication):
                 "connection_check": {"status": "verified" if ready else "unknown",
                     "scope": "Last protected MCP initialize/tools-list only; account, address and payment readiness remain unverified.",
                     "next_action": None if ready else "Inspect the original error and use Muse's provider recovery guidance before restarting."},
-                "browser_check": {"status": "not_configured", "next_action": None},
+                "browser_check": {"status": "configured" if self.browser is not None else "not_configured",
+                    "last_checkout_review_at": getattr(self.browser, "last_review_at", None), "next_action": None},
                 "delivery_check": {"status": "unknown"}, "payment_check": {"status": "unknown"},
-                "local_recipes_available": True, "note": PROTECTED_GUIDANCE}
+                "local_recipes_available": True,
+                "note": NATIVE_BROWSER_GUIDANCE if self.browser is not None else PROTECTED_GUIDANCE}
 
-    @staticmethod
-    def _user_guide():
+    def _user_guide(self):
         return {**MuseApplication._user_guide(),
-                "after_setup": "Plan from exact local recipe candidates, prepare products, review and apply guarded cart changes, and select delivery. Browser checkout is unavailable.",
+                "after_setup": ("Plan from exact local recipe candidates, prepare products, review and apply guarded cart changes, and select delivery. "
+                    + ("Use a fresh native review for manual new saved-card checkout; preserve task and core journals for reconciliation."
+                       if self.browser is not None else "Browser checkout is unavailable.")),
                 "presentation": "Explain demonstrated Muse capabilities and unverified checkout readiness in the user's language."}
 
 
@@ -386,18 +463,31 @@ def load_home(home: Path):
     return settings
 
 
-def serve(home: Path) -> None:
+def serve(home: Path, *, browser_directory=None, browser_task_id=None) -> None:
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
+    if (browser_directory is None) != (browser_task_id is None):
+        raise HouseholdError("Muse native browser requires both directory and original task identity")
+    if browser_directory is not None and not protected:
+        raise HouseholdError("Muse native browser requires protected Oda mode")
+    browser = None
     if protected:
         from muse_mcp import MuseProtectedMcpClient
         shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
+        if browser_directory is not None:
+            if Path(browser_directory) != shop.operation_directory / "browser":
+                raise HouseholdError("Muse browser must use the canonical shared provider browser directory")
+            from muse_browser import MuseBrowser
+            browser = MuseBrowser(browser_directory, browser_task_id, shop)
     else:
         shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
         cls = ProtectedMuseApplication if protected else MuseApplication
-        app = cls(StateStore(home / "state", settings), shop, None, external_recipe_sources={})
+        store = StateStore(home / "state", settings)
+        if browser is not None:
+            browser.state_store = store
+        app = cls(store, shop, browser, external_recipe_sources={})
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 
@@ -429,17 +519,21 @@ def main() -> int:
     parser.add_argument("--request-id")
     parser.add_argument("--credential-name", help="Muse connected custom Oda credential reference, never a token")
     parser.add_argument("--operation-directory", type=Path, help="existing private shared directory for every native Oda client")
+    parser.add_argument("--browser-directory", type=Path, help="existing canonical private native browser broker; run only")
+    parser.add_argument("--browser-task-id", help="actual original Muse browser task identity; run only")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
             raise HouseholdError("Muse home must be absolute")
+        if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None):
+            raise HouseholdError("Muse native browser options apply only to run")
         if args.action == "init":
             if not args.provider or not args.household:
                 raise HouseholdError("init requires --provider and --household")
             initialize(args.home, args.provider, args.household, credential_name=args.credential_name,
                        operation_directory=args.operation_directory)
         elif args.action == "run":
-            serve(args.home)
+            serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id)
         else:
             if not args.request_id:
                 raise HouseholdError("respond requires --request-id")
