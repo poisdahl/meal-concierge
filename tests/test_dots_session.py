@@ -244,12 +244,16 @@ client.main()
         self.assertNotIn("pending_cart_change", state)
 
     def test_default_application_budget_stops_slow_apply_before_write(self):
-        self.timed_managed_apply("application_default")
+        code, result = self.timed_managed_apply("application_default")
+        self.assertEqual(code, 1, result)
+        self.assertIn("controlled host reply deadline reached", result["error"])
         self.assertEqual((self.quantity, self.writes), (0, 0))
         self.assertNotIn("pending_cart_change", self.state())
 
     def test_earlier_native_deadline_stops_slow_apply_before_write(self):
-        self.timed_managed_apply("native_240")
+        code, result = self.timed_managed_apply("native_240")
+        self.assertEqual(code, 1, result)
+        self.assertIn("controlled host reply deadline reached", result["error"])
         self.assertEqual((self.quantity, self.writes), (0, 0))
         self.assertNotIn("pending_cart_change", self.state())
 
