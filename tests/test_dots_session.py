@@ -55,11 +55,15 @@ class DotsSessionTests(unittest.TestCase):
 
     def host(self, frame):
         self.assertEqual(frame["browser_binding"], self.binding)
+        operation = frame["operation"]
         lifetime = (datetime.fromisoformat(frame["expires_at"])
                     - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
         self.assertGreater(lifetime, 0)
-        self.assertLessEqual(lifetime, 60)
-        operation = frame["operation"]
+        if operation == "product_search":
+            self.assertGreater(lifetime, 110)
+            self.assertLessEqual(lifetime, 120)
+        else:
+            self.assertLessEqual(lifetime, 60)
         if operation == "verify_new_cart":
             result = {"authenticated": True, "new_cart": True}
         elif operation == "get_cart":

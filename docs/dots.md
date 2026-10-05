@@ -159,7 +159,13 @@ through core `products` `prepare`, `get` and `apply`. Save the recipes and
 menu in this original household, prepare against its current `menu_ref`, then
 use the returned product-plan reference and exact complete digest with
 `cart_change_requested:true`. Candidate selection and continuation use the
-existing core contracts. Partial apply is not exposed. `ensure` is never a
+existing core contracts. An apply result with `status:"validating"`,
+`applied:false` and `cart_changed:false` may return exact `continue_arguments`
+for the remaining reads. Send those arguments with a new command UUID in the
+same original household, preserving the earlier receipt. The continuation may
+dispatch once validation finishes, so its policy and write guards must be ready;
+an uncertain prior write requires reconciliation first. Partial apply is not
+exposed. `ensure` is never a
 fallback for unfinished menu shopping. Cart `reconcile` supports the exact
 digest-bound `keep_current` decision without exclusions or quantity changes;
 use fresh prepare/apply for subsequent shopping. Read-only `delivery.list`
@@ -338,8 +344,8 @@ authorize or alter commands. Native/provider approval gates still apply.
 
 The real core journals `pending_cart_change` before a write frame is emitted.
 The adapter respects the existing two-click batch and 240-second cart budget;
-delivery-picker read replies have at most 120 seconds, while every other host
-reply, including writes, has at most 60 seconds. The command's existing deadline
+delivery-picker and product-search read replies have at most 120 seconds, while
+every other host reply, including writes, has at most 60 seconds. The command's existing deadline
 still caps each reply. EOF, timeout, stale/mismatched reply
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
