@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -20,7 +20,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clients import dots
 from core import HouseholdError, StateStore, cart_summary
-from meny import normalize_cart_snapshot
+from meny import normalize_cart_snapshot, normalize_meny_delivery_slot
 from product_observations import normalize_meny_product_search
 import on_demand
 from runtime_ownership import file_lock
@@ -249,7 +249,7 @@ class NativeHost:
     def probe(self, **kwargs):
         self.verify_order_change(None, None, deadline=kwargs.get("deadline"))
         return {"status": "ready", "provider": "meny", "protocol_version": "native-host-stdio-v1",
-                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 4}
+                "server": {"name": "host-attested native cloud MENY"}, "tool_count": 5}
 
     def verify_order_change(self, order_id, code, *, deadline=None):
         if order_id is not None or code is not None:
@@ -260,6 +260,33 @@ class NativeHost:
         return result
 
     def call(self, tool, arguments, *, deadline=None, **kwargs):
+        if tool == "get_delivery_slots":
+            dots.object_fields(arguments, {"delivery_date"}, set())
+            requested_date = arguments.get("delivery_date")
+            if requested_date is not None and (
+                    not isinstance(requested_date, str)
+                    or date.fromisoformat(requested_date).isoformat() != requested_date):
+                raise HouseholdError("native delivery date must be a canonical ISO date")
+            result = self.exchange(tool, arguments, deadline=deadline)
+            if (set(result) != {"authenticated", "ready", "source_url", "dialog_count", "slots"}
+                    or result["authenticated"] is not True or result["ready"] is not True
+                    or result["source_url"] != "https://meny.no/varer"
+                    or type(result["dialog_count"]) is not int or result["dialog_count"] != 1
+                    or not isinstance(result["slots"], list) or not result["slots"]):
+                raise HouseholdError("native delivery picker scope or rendered slots changed")
+            slots, display = [], {}
+            for raw in result["slots"]:
+                slot = normalize_meny_delivery_slot(raw)
+                if slot["slot_ref"] in display:
+                    raise HouseholdError("native delivery slot identity changed")
+                slots.append(slot)
+                display[slot["slot_ref"]] = raw["display"]
+            if sum(slot["selected"] for slot in slots) > 1:
+                raise HouseholdError("native delivery selection is ambiguous")
+            if requested_date is not None:
+                slots = [slot for slot in slots if slot["slot_ref"].startswith(f"meny:{requested_date}T")]
+                display = {slot["slot_ref"]: display[slot["slot_ref"]] for slot in slots}
+            return {"provider": "meny", "slots": slots, "display": display}
         if tool == "product_search":
             queries, size = arguments.get("queries"), arguments.get("size")
             if (set(arguments) != {"queries", "page", "size"} or arguments["page"] != 1
@@ -431,8 +458,12 @@ def command(root, value, reader):
     request = value["request"]
     if not isinstance(request, dict) or (request.get("operation") not in CORE_OPERATIONS | {"native_cart_policy"}
             and not (request.get("operation") == "products" and request.get("action", "prepare") in {"prepare", "get", "apply"})
+            and not (request.get("operation") == "delivery" and request.get("action", "list") == "list")
             and not (request.get("operation") == "cart" and request.get("action", "get") in {"get", "ensure", "clear", "reconcile_change", "reconcile"})):
-        raise ValueError("unsupported foreground core operation; no checkout, delivery or order edits")
+        raise ValueError("unsupported foreground core operation; no checkout, delivery selection or order edits")
+    if request.get("operation") == "delivery":
+        dots.object_fields(request, {"operation", "action", "dates", "response_view", "view_offset",
+                                    "view_limit", "view_section"}, {"operation"})
     if request.get("operation") == "products" and request.get("action") == "apply" and (
             request.get("partial_product_plan_digest") or request.get("partial_apply") or request.get("product_plan")):
         raise ValueError("native managed apply requires a complete reviewed product_plan_ref/digest")
