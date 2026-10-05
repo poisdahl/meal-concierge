@@ -344,6 +344,12 @@ def text(value):
     return " ".join(unicodedata.normalize("NFC", value).split())
 
 
+def native_amount_minor(label, value):
+    # Native AX joins adjacent number/currency nodes on the observed page.
+    value = re.sub(r"(?<=\d)(kr|NOK)$", r" \1", text(value), flags=re.IGNORECASE)
+    return oda_checkout_amount_minor(label, value)
+
+
 def checkout_amounts(rows, product_count, expected_total):
     """Validate the complete native summary from its observed label/value rows.
 
@@ -361,11 +367,19 @@ def checkout_amounts(rows, product_count, expected_total):
     for row in rows:
         if not isinstance(row, Mapping) or set(row) != {"label", "value"}:
             raise HouseholdError("Muse checkout amount row changed")
-        label, value = text(row["label"]), text(row["value"])
+        label = "" if row["label"] is None else text(row["label"])
+        value = text(row["value"])
+        if not label:
+            # One observed zero with no label has no financial effect. Preserve
+            # it in the raw surface without inventing a delivery or fee meaning.
+            if "unlabeled_zero" in observed or native_amount_minor("Total inkl. MVA", value) != 0:
+                raise HouseholdError("Muse unlabeled checkout amount is nonzero or ambiguous")
+            observed["unlabeled_zero"] = 0
+            continue
         key = labels.get(label)
         if key is None or key in observed:
             raise HouseholdError("Muse checkout amount rows are unknown or ambiguous")
-        observed[key] = oda_checkout_amount_minor(label, value)
+        observed[key] = native_amount_minor(label, value)
     if not {"product_subtotal", "discounted_subtotal", "provider_total"} <= observed.keys():
         raise HouseholdError("Muse checkout required amount row is missing")
     subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
@@ -497,8 +511,9 @@ class MuseBrowser:
                 or choice.get("card_last4") is not None and selected["display"][-4:] != choice["card_last4"]):
             raise HouseholdError("Muse selected saved-card identity is unavailable or changed")
         final = controls(facts["submit_controls"], r"(?:Bekreft og betal|Confirm and pay)(?: .*)?")
-        money = re.findall(r"(?:^|\s)(\d+(?:[ .]\d{3})*,\d{2} (?:kr|NOK))\b", final["label"], re.IGNORECASE)
-        if len(money) != 1 or oda_checkout_amount_minor("Total inkl. MVA", money[0]) != expected["total_minor"]:
+        money = re.fullmatch(r"(?:Bekreft og betal|Confirm and pay) (\d+(?:[ .]\d{3})*,\d{2} ?(?:kr|NOK))",
+                             final["label"], re.IGNORECASE)
+        if money is None or native_amount_minor("Total inkl. MVA", money[1]) != expected["total_minor"]:
             raise HouseholdError("Muse final payment control amount changed")
         amounts = checkout_amounts(facts["amount_rows"], expected["product_count"], expected["total_minor"])
         self.last_review_at = datetime.now(timezone.utc).isoformat()

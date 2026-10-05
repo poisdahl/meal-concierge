@@ -50,6 +50,23 @@ class NativeAmountTests(unittest.TestCase):
         self.assertEqual(result["other_fees"], {"Tillegg for mindre bestilling": 15.0})
         self.assertEqual(result["delivery_price"], 29.0)
 
+    def test_native_compact_currency_and_one_unlabeled_zero_preserve_fee_unknown(self):
+        rows = [{"label": "34 varer", "value": "1309,10kr"},
+                {"label": "Du sparer", "value": "−29,90kr"},
+                {"label": "Delsum", "value": "1279,20kr"},
+                {"label": "Leveringsemballasje", "value": "30,15kr"},
+                {"label": "", "value": "0,00kr"},
+                {"label": "Total inkl. MVA", "value": "1309,35kr"}]
+        result = checkout_amounts(rows, 34, 130935)
+        self.assertEqual(result["provider_total"], 1309.35)
+        self.assertEqual(result["bags"], 30.15)
+        self.assertIsNone(result["delivery_price"])
+        for extra in ({"label": None, "value": "1,00kr"},
+                      {"label": "", "value": "0,00kr"},
+                      {"label": "Unknown charge", "value": "0,00kr"}):
+            with self.subTest(extra=extra), self.assertRaises(HouseholdError):
+                checkout_amounts(rows + [extra], 34, 130935)
+
     def test_ambiguous_missing_and_unknown_rows_are_not_filled(self):
         cases = [ROWS + [ROWS[4]], ROWS[:2] + ROWS[3:],
                  ROWS + [{"label": "Extra charge", "value": "10,00 kr"}]]
@@ -275,19 +292,20 @@ class NativeCoreRpcTests(NativeFixture):
         month = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")[local.month - 1]
         self.delivery = f"{local.day}. {month} 09:00 - 12:00"
         self.delivery_date = local.date().isoformat()
-        self.shop.cart["delivery"]["display"] = self.delivery
+        self.shop.cart["delivery"]["display"] = f"Hjemlevering mellom kl 09 og 12, {local.day}. {month}"
         self.shop.order_delivery = self.delivery_date
         for offset, slot in enumerate(self.shop.delivery_slots["slots"]):
             day = local + timedelta(days=7 * offset)
             slot.update(slot_ref=f"oda:{day.date().isoformat()}:{slot['provider_slot_id']}",
                 start_at=day.replace(hour=9, minute=0, second=0, microsecond=0).isoformat(),
-                end_at=day.replace(hour=12, minute=0, second=0, microsecond=0).isoformat())
+                end_at=day.replace(hour=12, minute=0, second=0, microsecond=0).isoformat(), price_ore=0)
         self.browser = MuseBrowser(self.directory, "original-task", self.shop, state_store=self.store)
         self.app = muse.ProtectedMuseApplication(self.store, self.shop, self.browser, external_recipe_sources={})
         self.app._now = lambda: datetime.now(timezone.utc)
         self.produced = set()
         self.effects = []
         self.corrupt_effect_reply = False
+        self.final_label = "Bekreft og betal 35,00kr"
 
     def facts(self, record):
         operation = record["operation"]
@@ -296,10 +314,11 @@ class NativeCoreRpcTests(NativeFixture):
             return {"url": "https://oda.com/no/checkout/confirm/", "account": account,
                     "address": "Eksempelveien 1", "delivery_sections": [self.delivery],
                     "items": [{"product_id": 10, "title": "Fullkornspasta", "subtitle": "Synthetic, 500 g", "quantity": 1}],
-                    "warnings": [], "amount_rows": [{"label": "1 vare", "value": "35,00 kr"},
-                        {"label": "Delsum", "value": "35,00 kr"}, {"label": "Total inkl. MVA", "value": "35,00 kr"}],
+                    "warnings": [], "amount_rows": [{"label": "1 vare", "value": "35,00kr"},
+                        {"label": "Delsum", "value": "35,00kr"}, {"label": None, "value": "0,00kr"},
+                        {"label": "Total inkl. MVA", "value": "35,00kr"}],
                     "payment": {"display": "•••• 1234", "selected": True},
-                    "submit_controls": [{"label": "Bekreft og betal 35,00 kr", "enabled": True}],
+                    "submit_controls": [{"label": self.final_label, "enabled": True}],
                     "complete_sections": ["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]}
         if operation.endswith("_click"):
             pending = self.store.read()["pending_checkout" if operation == "checkout_click" else "pending_cancellation"]
@@ -384,6 +403,12 @@ class NativeCoreRpcTests(NativeFixture):
                 self.app.handle(request)
         self.assertEqual(len(self.shop.calls), before)
         self.assertFalse(list((self.directory / "requests").glob("*.json")))
+
+    def test_final_label_does_not_accept_matching_suffix_of_malformed_amount(self):
+        self.final_label = "Bekreft og betal 1 35,00kr"
+        self.rpc({"operation": "checkout", "action": "prepare"}, expect_ok=False)
+        self.assertEqual(self.effects, [])
+        self.assertIsNone(self.store.read()["pending_checkout"])
 
     def test_amended_preexisting_or_foreign_provider_order_cannot_be_cancelled(self):
         before = len(self.shop.calls)

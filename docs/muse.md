@@ -153,7 +153,11 @@ visible absolute `edit_urls`; its observed address reference must match the fres
 MCP selected address. Each item has independent integer `product_id`, integer
 `quantity`, raw `title` and `subtitle`. Warnings must be a fully observed empty
 list, not an omitted or unknown section. Each amount row contains raw `label` and
-`value`; all subtotal/discount/fee arithmetic must match the fresh cart. Payment
+`value`; all subtotal/discount/fee arithmetic must match the fresh cart. Amounts
+may have the observed compact currency suffix (`1309,35kr`). One
+unlabeled (`null` or empty label) zero amount is retained without assigning it a
+fee meaning; a nonzero, repeated or named unknown row is rejected. Raw values
+remain unchanged in the bound surface. Payment
 contains the actually selected masked `display` (`•••• 1234`) and `selected`.
 `submit_controls` contains the one observed final label (including amount) and
 its `enabled` state. A Vipps default is not a saved-card observation; this
