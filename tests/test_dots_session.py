@@ -326,18 +326,18 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, cart)
         return {"operation": "cart", "action": "clear", "cart_digest": cart["result"]["cart_digest"]}
 
-    def test_two_product_apply_continues_one_search_with_cached_time_and_expiry(self):
+    def two_product_request(self, cache=None):
         milk = "/varer/meieri/melk-1234567890124"
         quantities, searches = {}, []
-        cached, validation_ref = None, None
+        cache = cache if cache is not None else {}
         def host(frame):
             operation = frame["operation"]
             if operation in {"verify_new_cart", "product_search"}:
                 reply = self.host(frame)
                 if operation == "product_search":
-                    if cached is not None:
-                        work = self.state()["menu_planning"]["prepared"][validation_ref]["validation_work"]
-                        self.assertEqual(next(iter(work["searches"].values()))["observed_at"], cached["observed_at"])
+                    if cache.get("cached") is not None:
+                        work = self.state()["menu_planning"]["prepared"][cache["validation_ref"]]["validation_work"]
+                        self.assertEqual(next(iter(work["searches"].values()))["observed_at"], cache["cached"]["observed_at"])
                     query = frame["arguments"]["queries"][0]
                     searches.append(query)
                     if "melk" in query.casefold():
@@ -400,6 +400,11 @@ raise SystemExit(client.main())
         self.assertEqual(code, 0, ready)
         self.assertEqual(ready["result"]["product_plan"]["status"], "prepared", ready)
         apply = {"operation": "products", **ready["result"]["apply_arguments"], "cart_change_requested": True}
+        return apply, host, quantities, searches, milk
+
+    def test_two_product_apply_continues_one_search_with_cached_time_and_expiry(self):
+        cache = {}
+        apply, host, quantities, searches, milk = self.two_product_request(cache)
         searches.clear()
         command_id = str(uuid.uuid4())
         code, partial = self.call(apply, command_id, host)
@@ -411,8 +416,10 @@ raise SystemExit(client.main())
         self.assertEqual((quantities, self.writes), ({}, 0))
         self.assertIsNone(self.state().get("pending_cart_change"))
         validation_ref = partial["result"]["product_plan_ref"]
+        cache["validation_ref"] = validation_ref
         work = self.state()["menu_planning"]["prepared"][validation_ref]["validation_work"]
         cached = next(iter(work["searches"].values()))
+        cache["cached"] = cached
         self.assertEqual(len(work["searches"]), 1)
         frames = len(self.frames)
         self.assertEqual(self.call(apply, command_id, host), (0, partial))
@@ -422,7 +429,7 @@ raise SystemExit(client.main())
         self.assertTrue(applied["result"]["applied"], applied)
         self.assertEqual(len(searches), 2)
         self.assertNotEqual(searches[0], searches[1])
-        cached = None
+        cache["cached"] = None
         self.assertEqual(quantities, {PRODUCT: 1, milk: 1})
         self.assertEqual(self.state()["cart_plan"]["added_quantities"], quantities)
         self.assertIsNone(self.state().get("pending_cart_change"))
@@ -455,6 +462,86 @@ raise SystemExit(client.main())
         self.assertEqual(len(searches), reads + 1)
         self.assertEqual(self.writes, writes)
         self.assertIsNone(self.state().get("pending_cart_change"))
+
+    def restore_partial_two_product_cart(self, lose_reply=False):
+        apply, host, quantities, searches, milk = self.two_product_request()
+        def finish(request, operator=host):
+            for _ in range(3):
+                code, result = self.call(request, host=operator)
+                if result.get("result", {}).get("status") != "validating":
+                    return code, result
+                args = result["result"]["continue_arguments"]
+                if request.get("restore_missing"):
+                    self.assertTrue(args["restore_missing"])
+                    self.assertEqual(args["cart_digest"], request["cart_digest"])
+                request = {"operation": "products", **args}
+            self.fail("two-product validation failed to finish")
+        def partial(frame):
+            if frame["operation"] == "manipulate_cart":
+                self.assertEqual(frame["expected_quantities"], {PRODUCT: 1, milk: 1})
+                quantities[milk] = 1
+                self.writes += 1
+                return None  # Milk happened; the whole two-unit batch was not acknowledged.
+            return host(frame)
+        code, first = finish(apply, partial)
+        self.assertEqual(code, 0, first)
+        self.assertFalse(first["result"]["applied"])
+        self.assertIsNotNone(self.state().get("pending_cart_change"))
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"}, host=host)
+        self.assertEqual(code, 0, recovered)
+        state = self.state()
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {milk: 1})
+        self.assertEqual(state["cart_plan"]["added_quantities"], {})
+        digest = state["cart_plan"]["pending_cart_digest"]
+        code, decision = self.call({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                                   "menu_ref": state["cart_plan"]["menu_ref"], "cart_digest": digest}, host=host)
+        self.assertEqual(code, 0, decision)
+        code, ordinary = finish(apply)
+        self.assertEqual(code, 0, ordinary)
+        self.assertTrue(ordinary["result"]["applied"])
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        restoration = {**apply, "restore_missing": True, "cart_digest": digest}
+        code, stale = finish({**restoration, "cart_digest": "0" * 64})
+        self.assertEqual(code, 1, stale)
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        def changed(frame):
+            reply = host(frame)
+            if frame["operation"] == "product_search":
+                reply["result"]["products"][0].update(price="999,00 kr", detail_price="999,00 kroner.")
+            return reply
+        code, drift = finish(restoration, changed)
+        self.assertEqual(code, 0, drift)
+        self.assertFalse(drift["result"]["applied"])
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        writes = []
+        def restore_host(frame):
+            if frame["operation"] == "manipulate_cart":
+                writes.append(frame)
+                self.assertEqual(frame["arguments"]["operations"], [{"productId": PRODUCT, "quantity": 1}])
+                self.assertEqual(frame["before_quantities"], {milk: 1})
+            reply = host(frame)
+            return None if lose_reply and frame["operation"] == "manipulate_cart" else reply
+        code, restored = finish(restoration, restore_host)
+        self.assertEqual(code, 0, restored)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual((quantities, self.writes), ({milk: 1, PRODUCT: 1}, 2))
+        if lose_reply:
+            self.assertFalse(restored["result"]["applied"])
+            self.assertIsNotNone(self.state().get("pending_cart_change"))
+            code, recovered = self.call({"operation": "cart", "action": "reconcile_change"}, host=host)
+            self.assertEqual(code, 0, recovered)
+            self.assertEqual(self.writes, 2)
+        else:
+            self.assertTrue(restored["result"]["applied"])
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        self.assertEqual(self.state()["cart_plan"]["baseline_quantities"], {milk: 1})
+        self.assertEqual(self.state()["cart_plan"]["added_quantities"], {PRODUCT: 1})
+
+    def test_explicit_restore_missing_preserves_partial_baseline_and_keep_current(self):
+        self.restore_partial_two_product_cart()
+
+    def test_restore_missing_lost_reply_reconciles_without_replay_or_double_attribution(self):
+        self.restore_partial_two_product_cart(lose_reply=True)
 
     def test_clear_managed_cart_uses_batches_digest_and_cached_receipt_after_disable(self):
         self.assertEqual(self.call(self.managed_request())[0], 0)
@@ -579,6 +666,10 @@ raise SystemExit(client.main())
     def test_managed_boundaries_block_before_intent_or_dispatch(self):
         before = self.files()
         for request in ({"operation": "products", "action": "apply", "partial_apply": True},
+                        {"operation": "products", "action": "apply", "restore_missing": "true", "cart_digest": "a" * 64},
+                        {"operation": "products", "action": "apply", "restore_missing": True},
+                        {"operation": "products", "action": "apply", "cart_digest": "a" * 64},
+                        {"operation": "products", "action": "prepare", "restore_missing": True, "cart_digest": "a" * 64},
                         {"operation": "cart", "action": "reconcile", "decision": "restore_missing"},
                         {"operation": "cart", "action": "reconcile", "decision": "keep_current", "exclude_product_ids": [PRODUCT]}):
             code, result = self.call(request)

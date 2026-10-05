@@ -593,6 +593,13 @@ def command(root, value, reader):
     if request.get("operation") == "cart" and request.get("action") == "reconcile" and (
             request.get("decision") != "keep_current" or request.get("exclude_product_ids")):
         raise ValueError("native cart decisions support keep_current without quantity changes; then prepare/apply")
+    restore = request.get("restore_missing", False)
+    if (type(restore) is not bool or (restore and (
+            request.get("operation") != "products" or request.get("action") != "apply"
+            or not isinstance(request.get("cart_digest"), str)
+            or re.fullmatch(r"[a-f0-9]{64}", request["cart_digest"]) is None))
+            or (not restore and request.get("operation") == "products" and request.get("cart_digest") is not None)):
+        raise ValueError("restore_missing requires full products.apply and its exact current cart_digest")
     root = dots.existing_root(root)
     on_demand._read_file(root / "command.lock", 0)
     with file_lock(root / "command.lock"):
