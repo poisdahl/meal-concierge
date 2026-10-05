@@ -199,7 +199,7 @@ def emit(value):
             cart_reads += 1
         cost = (100 if operation == 'product_search' else
                 40 if operation == 'verify_new_cart' else
-                55 if operation == 'get_cart' and cart_reads <= 2 else 1)
+                55 if operation == 'get_cart' and cart_reads <= 3 else 1)
         frames[value['call_id']] = cost
     original_emit(value if value['kind'] == 'core_ready'
                   else {{**value, 'test_elapsed_seconds': elapsed}})
