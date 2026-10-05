@@ -241,12 +241,12 @@ def parse_package(value: Any, *, provider: str | None = None) -> dict[str, Any] 
         if candidate.startswith("Økologisk "):
             candidate = candidate[len("Økologisk "):]
         # Only observed descriptors may surround MENY's fixed size.
-        for prefix in ("Jalapeno ", "Original ", "Harissa "):
+        for prefix in ("Jalapeno ", "Original ", "Harissa ", "Lettkokte "):
             if candidate.startswith(prefix):
                 candidate = candidate[len(prefix):]
                 break
         for suffix in (" Q", " Vilje", " Ode", " flaske", " boks", " pakke",
-                       " Mc Ilhenny", " Cholula", " Al Amier", " Trappeys", " St.maria"):
+                       " Mc Ilhenny", " Cholula", " Al Amier", " Trappeys", " St.maria", " Urkraft"):
             if candidate.endswith(suffix):
                 candidate = candidate[:-len(suffix)]
                 break

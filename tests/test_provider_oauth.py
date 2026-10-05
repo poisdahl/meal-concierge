@@ -39,7 +39,7 @@ from retail_mcp import RetailMcpClient, REQUIRED_TOOLS
 from core import HouseholdError
 
 
-TEST_ROOT = Path("/tmp/meal-concierge-mc04-20260906")
+TEST_ROOT = Path(tempfile.gettempdir()) / "meal-concierge-mc04-20260906"
 ISSUER = "https://login.synthetic.invalid/"
 SECRET_MARKER = "SYNTHETIC-SECRET-DO-NOT-LOG"
 REAL_ASYNC_CLIENT = httpx2.AsyncClient

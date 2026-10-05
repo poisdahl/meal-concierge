@@ -3127,7 +3127,8 @@ class PlanningOperations:
             page["validation_progress"] = {**self._product_work_progress(record["validation_work"]),
                 "restarted": record["validation_work"].get("restarted", False)}
             page["continue_arguments"] = {"action": "apply", "product_plan_ref": reference,
-                "product_plan_digest": record["apply_arguments"]["product_plan_digest"], "cart_change_requested": True}
+                "product_plan_digest": record["apply_arguments"]["product_plan_digest"], "cart_change_requested": True,
+                **deepcopy(record["validation_work"].get("restore_arguments", {}))}
         for key, digest_key in (("apply_arguments", "product_plan_digest"),
                                 ("partial_apply_arguments", "partial_product_plan_digest")):
             arguments = record.get(key)
@@ -3663,6 +3664,15 @@ class PlanningOperations:
 
     def _products_operation(self, request: Mapping[str, Any], *, validation_record=None, validation_ref=None) -> dict[str, Any]:
         action = request.get("action", "prepare")
+        restore = request.get("restore_missing", False)
+        restore_digest = request.get("cart_digest")
+        if (type(restore) is not bool or (restore and (
+                action != "apply" or request.get("partial_apply") is True
+                or not isinstance(restore_digest, str)
+                or re.fullmatch(r"[a-f0-9]{64}", restore_digest) is None))
+                or (not restore and restore_digest is not None)):
+            raise HouseholdError("restore_missing requires full products.apply and its exact current cart_digest")
+        restore_arguments = {"restore_missing": True, "cart_digest": restore_digest} if restore else {}
         include_recurring = request.get("include_recurring", True)
         if type(include_recurring) is not bool:
             raise HouseholdError("include_recurring must be a boolean")
@@ -3693,7 +3703,8 @@ class PlanningOperations:
                 self._clear_persisted_product_plan(state.get("cart_plan"))
             return {"recorded": True, "menu_ref": reference, "ingredient_decisions": list(merged.values()),
                     "cart_changed": False, "next": "Use these recorded ingredients for this menu; prepare/apply its updated products for an authorized shop."}
-        deadline = time.monotonic() + PRODUCT_OPERATION_TIMEOUT
+        timeout = self.products_apply_budget_seconds if action == "apply" else PRODUCT_OPERATION_TIMEOUT
+        deadline = time.monotonic() + timeout
         if request.get("_deadline") is not None:
             deadline = min(deadline, request["_deadline"])
         request = {**request, "_deadline": deadline}
@@ -3715,7 +3726,7 @@ class PlanningOperations:
                 raise HouseholdError("product_plan_ref apply requires its exact reviewed digest and available apply arguments")
             return self._products_operation({
                 **deepcopy(dict(arguments)), "cart_change_requested": request.get("cart_change_requested"),
-                "_deadline": deadline,
+                **restore_arguments, "_deadline": deadline,
             }, validation_record=record if not partial else None,
                validation_ref=request["product_plan_ref"] if not partial else None)
         if action == "prepare":
@@ -4242,6 +4253,7 @@ class PlanningOperations:
                 work = {"started_at": self._now().isoformat(), "restarted": True,
                         "pending_search_count": max(1, len(fresh["requirements"])), "pending_detail_count": 0}
             if self._product_work_pending(work):
+                work["restore_arguments"] = deepcopy(restore_arguments)
                 if validation_ref is None:
                     common = {"action": "apply", "menu_ref": expected_menu_ref,
                         "candidate_approvals": deepcopy(approvals),
@@ -4266,7 +4278,7 @@ class PlanningOperations:
                     "menu_ref": expected_menu_ref, "product_plan_ref": validation_ref,
                     "validation_progress": {**self._product_work_progress(work), "restarted": restarted},
                     "continue_arguments": {"action": "apply", "product_plan_ref": validation_ref,
-                        "product_plan_digest": supplied["product_plan_digest"], "cart_change_requested": True},
+                        "product_plan_digest": supplied["product_plan_digest"], "cart_change_requested": True, **restore_arguments},
                     "next": "Selected-product reads remain. Continue these exact arguments; no cart write has occurred."}
             # A completed cycle is consumed before either drift review or cart
             # dispatch. Replaying a completed apply starts a fresh read cycle.
@@ -4289,7 +4301,7 @@ class PlanningOperations:
                     return {"ok": False, "reason": "selected-product validation expired before cart sync",
                             "next": "Repeat the same reviewed apply to refresh validation; no cart write occurred.",
                             **({"continue_arguments": {"action": "apply", "product_plan_ref": validation_ref,
-                                "product_plan_digest": supplied["product_plan_digest"], "cart_change_requested": True}}
+                                "product_plan_digest": supplied["product_plan_digest"], "cart_change_requested": True, **restore_arguments}}
                                if validation_ref is not None else {})}
                 return {"ok": self._cart_menu_ref(current.get("menu")) == expected_menu_ref
                         and self._product_current_context(current) == context,
@@ -4300,7 +4312,7 @@ class PlanningOperations:
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref,
                     "_include_recurring": include_recurring,
                     "_allow_empty_requirements": True, "_before_cart_write": final_product_prewrite_check,
-                    "_expected_product_context": context}, deadline)
+                    "_expected_product_context": context, "_restore_missing_cart_digest": restore_digest if restore else None}, deadline)
                 if not cart_result.get("synced"):
                     return {
                         "applied": False,
@@ -4360,6 +4372,7 @@ class PlanningOperations:
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
                 "_expected_product_context": context,
+                "_restore_missing_cart_digest": restore_digest if restore else None,
             }, deadline)
             if cart_result.get("synced") is not True:
                 return {
@@ -4741,6 +4754,12 @@ class PlanningOperations:
                 and current.get("provider") == self.provider
                 and canonical(current.get("menu_ref")) == canonical(menu_ref)
             )
+            restore_digest = request.get("_restore_missing_cart_digest")
+            if restore_digest is not None and (
+                    not same_plan or current.get("status") != "active"
+                    or current.get("approved_cart_digest") != restore_digest
+                    or self._cart_digest(first_live) != restore_digest):
+                raise HouseholdError("restore_missing requires the unchanged current keep_current cart decision")
             if not same_plan:
                 current = self._new_cart_plan(
                     menu_ref, first_live, first_names, requirements, requirement_names,
@@ -4759,7 +4778,7 @@ class PlanningOperations:
                 current["start_as_extra_product_ids"] = sorted(start_as_extra)
                 current["product_names"].update(requirement_names)
                 first_digest = self._cart_digest(first_live)
-                if not requirements_changed and current.get("approved_cart_digest") == first_digest:
+                if not requirements_changed and current.get("approved_cart_digest") == first_digest and restore_digest is None:
                     current["status"] = "active"
                     current["pending_cart_digest"] = None
                     current["last_synced_quantities"] = dict(first_live)

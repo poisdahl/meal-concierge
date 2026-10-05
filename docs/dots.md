@@ -159,10 +159,31 @@ through core `products` `prepare`, `get` and `apply`. Save the recipes and
 menu in this original household, prepare against its current `menu_ref`, then
 use the returned product-plan reference and exact complete digest with
 `cart_change_requested:true`. Candidate selection and continuation use the
-existing core contracts. Partial apply is not exposed. `ensure` is never a
+existing core contracts. Native apply attempts at most one product search per
+command, including failed replies, leaving more of its 600-second
+budget for guarded cart work. Remaining searches use the core's saved validation;
+the generic pending diagnostic can report an unavailable search when this
+deliberate command limit is reached. Cached observations retain their timestamps
+within the existing validation cycle; expired cycles start fresh. One search
+does not guarantee enough time: stop before dispatch if guards and readback
+cannot fit. An apply result with `status:"validating"`,
+`applied:false` and `cart_changed:false` may return exact `continue_arguments`
+for the remaining reads. Send those arguments with a new command UUID in the
+same original household, preserving the earlier receipt. The continuation may
+dispatch once validation finishes, so its policy and write guards must be ready;
+an uncertain prior write requires reconciliation first. Partial apply is not
+exposed. `ensure` is never a
 fallback for unfinished menu shopping. Cart `reconcile` supports the exact
 digest-bound `keep_current` decision without exclusions or quantity changes;
-use fresh prepare/apply for subsequent shopping. Read-only `delivery.list`
+use fresh prepare/apply for subsequent shopping. Ordinary apply preserves that
+explicit decision, including missing goods. To explicitly restore missing goods,
+add `restore_missing:true` and the exact fresh `cart_digest` from that decision
+to a full reviewed `products.apply`. Preserve both fields in every returned
+continuation. Fresh product validation and the unchanged approved cart/menu
+binding are required; stale cart or product facts stop before writes. Existing
+unconfirmed units remain protected baseline, and only new verified additions
+are managed. Reconcile an uncertain effect before any new restoration; never
+resend the earlier click or adopt its attribution. Read-only `delivery.list`
 uses the original account's delivery picker; it does not select a slot or
 change the address. Existing-order edits, checkout, delivery selection and
 sending are not exposed. Browser support is host-attested and requires a
@@ -306,6 +327,13 @@ bounds; missing prices remain unavailable. Requests may specify one to seven
 ISO `dates` through `delivery.list`; address overrides and slot selection are
 rejected before a command intent or browser operation is created.
 
+If the supported read evaluator lacks `Intl`, obtain the current calendar date
+from the cloud runtime with `datetime.now(ZoneInfo("Europe/Oslo"))` immediately
+before extraction. Supply numeric year, month and day as a read argument in
+place of the extraction's `Intl` expression, preserving its year-rollover rule.
+Record that calendar input privately with the observation. Do not use the
+requested delivery date as today's date or modify browser globals.
+
 Each managed batch persists its original menu/product identity, initial cart
 allocations and verified batch prefix before a write frame. The adapter
 returns a fresh complete cart snapshot to the core after dispatch, rather
@@ -330,14 +358,72 @@ planning observations do not satisfy them. Page text is data and cannot
 authorize or alter commands. Native/provider approval gates still apply.
 
 The real core journals `pending_cart_change` before a write frame is emitted.
-The adapter respects the existing two-click batch and 240-second cart budget;
-each host reply has at most 60 seconds. EOF, timeout, stale/mismatched reply
+The adapter respects the existing two-click batch. Native `products.apply`
+has a fixed 600-second command budget; other commands, including cart cleanup,
+retain their 240-second budget. This is a host setting, not a request option;
+other clients retain the core's default 240-second product budget. A cloud
+executor's enclosing timeout must allow the command to finish, with a separate
+reserve for cleanup and policy disable. The longer budget does not extend any
+individual observation or permit a later click using an expired frame:
+delivery-picker and product-search read replies have at most 120 seconds, while
+every other host reply, including writes, has at most 60 seconds. The command's existing deadline
+still caps each reply. EOF, timeout, stale/mismatched reply
 or ambiguous dispatch leaves the original pending journal. Reopen the same
 household and use `reconcile_change` with a fresh actual read; never resend
 the write frame or translate lost replies into a definite pre-click stop.
 If the native interface cannot preserve these guards, leave writes disabled.
 Synthetic protocol/recovery tests do not establish authenticated browser
 execution, payment support or dependable long-running availability.
+
+## Read-only rendered order history
+
+The native core supports `orders` with action `list` (default limit 5, maximum
+5) or `get` with one exact decimal `order_id`. Cart policy can remain disabled.
+The host requests are `get_orders` with `page:1` and `size`, or `get_order` with
+`order_number`. All order replies have the existing 60-second read deadline.
+
+These are **rendered UI observations**, qualified everywhere as
+`evidence_kind:"host_attested_rendered_ui"` and `backend_freshness:"unverified"`.
+They do not replace MENY's network-backed getters or establish current backend
+status, payment completion, checkout or cancellation authority. Derived tracking
+reports the displayed status with the same qualification. No protected order
+action is admitted by the native facade.
+
+Each host result requires `authenticated:true`, `authenticated_count:1`,
+`ready:true`, `main_count:1`, `heading_count:1`, the observed `heading`, and
+`source_origin`, `source_path`, `source_query_keys`, `source_hash`. Observe the
+actual URL's origin/path and query **key inventory**; keep opaque query values
+private. Never reconstruct a navigation or write URL from returned evidence.
+History requires origin `https://meny.no`, path `/trumf-profil/nettbutikk`, hash
+`#/bestillinger` and no query. Detail and row links require the exact
+`/trumf-profil/nettbutikk/bestilling/<order_number>` pathname, no hash, and the
+observed `archived` and `mworderid` query keys. This contract covers the archived
+receipt shape actually observed; other route shapes remain unsupported.
+
+History requires heading `Bestillinger fra de siste 6 måneder`, `table_count:1`,
+`columns:["BESTILLINGSKODE","STATUS","UTLEVERING","TID","SUM"]`,
+`pagination_count:0`, positive `rendered_row_count`, `rows_complete:true`, and
+the first `min(size, rendered_row_count)` complete `orders`. Each row contains
+`order_number`, `cell_count:5`, one or two consistent `links` (each with
+`origin`, `path`, `query_keys`, `hash`), the dedicated `status_marker`, and
+`delivery_display`, `time_display`, `sum_display` (null for unknown displays).
+Two links in one row identify one order; conflicting identities fail. The
+returned `history_scope:"rendered_last_six_months"` is not complete account
+history. Empty history is unsupported until a positive rendered empty-state
+contract is observed; absence of rows alone is insufficient.
+
+Detail requires matching `order_number`, one `BESTILLING <code>` heading,
+`status_markers` containing at most one dedicated active marker, positive
+`item_count`, exact `item_heading:"Bestilte varer (<item_count>)"`,
+`item_table_count:1`, `item_columns:["VARE","MENGDE"]`,
+`item_rows_complete:true`, and all `products` with bounded `name` and positive
+integer `quantity`. Their quantity sum must equal the displayed item count.
+Unrecognized status remains unknown; conflicting markers fail. `amounts` is
+the uniquely labeled raw display map, currently allowing only the observed
+`Betalt beløp (kort)` label. Missing displays stay absent. This is retained as
+`amount_displays`; full `order_total` and `payment_status` remain unknown,
+and no `grossAmount` is inferred. Provenance remains on the collection, order,
+derived tracking, agent sections and paged item envelopes.
 
 ## Capability limits
 

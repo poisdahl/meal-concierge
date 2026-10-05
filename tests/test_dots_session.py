@@ -1,5 +1,5 @@
 """Real foreground core commands and synthetic native-host recovery."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import fcntl
 import json
 import os
@@ -56,6 +56,14 @@ class DotsSessionTests(unittest.TestCase):
     def host(self, frame):
         self.assertEqual(frame["browser_binding"], self.binding)
         operation = frame["operation"]
+        lifetime = (datetime.fromisoformat(frame["expires_at"])
+                    - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
+        self.assertGreater(lifetime, 0)
+        if operation == "product_search":
+            self.assertGreater(lifetime, 110)
+            self.assertLessEqual(lifetime, 120)
+        else:
+            self.assertLessEqual(lifetime, 60)
         if operation == "verify_new_cart":
             result = {"authenticated": True, "new_cart": True}
         elif operation == "get_cart":
@@ -84,8 +92,10 @@ class DotsSessionTests(unittest.TestCase):
         return {"reply_to": frame["call_id"], "browser_binding": self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
 
-    def run_session(self, action, value, host=None, environment=None):
-        child = subprocess.Popen([sys.executable, "-I", "-B", str(SOURCE / "clients/dots_session.py"),
+    def run_session(self, action, value, host=None, environment=None, launch_code=None):
+        launch = (["-c", launch_code] if launch_code is not None
+                  else [str(SOURCE / "clients/dots_session.py")])
+        child = subprocess.Popen([sys.executable, "-I", "-B", *launch,
                                  action, "--root", str(self.root)], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env={**os.environ, "HOME": str(self.home), **(environment or {})})
@@ -167,6 +177,92 @@ class DotsSessionTests(unittest.TestCase):
             reply["result"].update(semantics="bounded_personalized", sort_label="Anbefalt for deg")
         return reply
 
+    def timed_managed_apply(self, enclosing_limit=None):
+        request = self.managed_request()
+        # Only this child gets a controlled monotonic clock. The real CLI,
+        # correlated stdin/stdout replies, planner and pending journal still run.
+        launch_code = f"""
+import sys, time
+sys.path.insert(0, {str(SOURCE)!r})
+from clients import dots_session as client
+original_monotonic = time.monotonic
+elapsed = 0
+time.monotonic = lambda: original_monotonic() + elapsed
+frames = {{}}
+cart_reads = 0
+original_emit = client.emit
+def emit(value):
+    global cart_reads
+    if value['kind'] == 'native_host_request':
+        operation = value['operation']
+        if operation == 'get_cart':
+            cart_reads += 1
+        cost = (100 if operation == 'product_search' else
+                40 if operation == 'verify_new_cart' else
+                55 if operation == 'get_cart' and cart_reads <= 3 else 1)
+        frames[value['call_id']] = cost
+    original_emit(value if value['kind'] == 'core_ready'
+                  else {{**value, 'test_elapsed_seconds': elapsed}})
+client.emit = emit
+original_line = client.Input.line
+def line(self, deadline):
+    global elapsed
+    value = original_line(self, deadline)
+    elapsed += frames.pop(value.get('reply_to'), 0)
+    if time.monotonic() >= deadline:
+        raise client.HouseholdError('controlled host reply deadline reached')
+    return value
+client.Input.line = line
+if {enclosing_limit!r} == 'application_default':
+    original_application = client.Application
+    def application(*args, **kwargs):
+        kwargs.pop('products_apply_budget_seconds')
+        return original_application(*args, **kwargs)
+    client.Application = application
+elif {enclosing_limit!r} == 'native_240':
+    original_application = client.application
+    def application(root, config, reader, command_id, deadline, **kwargs):
+        return original_application(root, config, reader, command_id,
+                                    min(deadline, time.monotonic() + 240), **kwargs)
+    client.application = application
+raise SystemExit(client.main())
+"""
+        self.frames = []
+        return self.run_session("call", {"request_id": str(uuid.uuid4()), "request": request},
+                                launch_code=launch_code)
+
+    def test_native_apply_finishes_after_240_seconds_with_bounded_frames(self):
+        code, result = self.timed_managed_apply()
+        self.assertEqual(code, 0, result)
+        self.assertTrue(result["result"]["applied"], result)
+        writes = [frame for frame in self.frames if frame["effect"] == "cart_write"]
+        self.assertGreater(writes[0]["test_elapsed_seconds"], 240)
+        self.assertLess(result["test_elapsed_seconds"], 600)
+        self.assertEqual((self.quantity, self.writes), (3, 2))
+        state = self.state()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {PRODUCT: 3})
+        self.assertNotIn("pending_cart_change", state)
+
+    def test_default_application_budget_stops_slow_apply_before_write(self):
+        code, result = self.timed_managed_apply("application_default")
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
+
+    def test_earlier_native_deadline_stops_slow_apply_before_write(self):
+        code, result = self.timed_managed_apply("native_240")
+        self.assertEqual(code, 0, result)
+        self.assertFalse(result["result"]["applied"])
+        self.assertTrue(result["result"]["outcome_unknown"])
+        self.assertEqual(result["result"]["reason"], "cart_write_verification_unavailable")
+        self.assertGreater(result["test_elapsed_seconds"], 240)
+        self.assertEqual((self.quantity, self.writes), (0, 0))
+        self.assertNotIn("pending_cart_change", self.state())
+
     def test_personalized_search_preserves_scope_through_saved_plan_and_apply(self):
         request = self.managed_request(host=self.personalized_host)
         code, saved = self.call({"operation": "products", "action": "get",
@@ -229,6 +325,229 @@ class DotsSessionTests(unittest.TestCase):
         code, cart = self.call({"operation": "cart", "action": "get"})
         self.assertEqual(code, 0, cart)
         return {"operation": "cart", "action": "clear", "cart_digest": cart["result"]["cart_digest"]}
+
+    def two_product_request(self, cache=None):
+        milk = "/varer/meieri/melk-1234567890124"
+        quantities, searches = {}, []
+        cache = cache if cache is not None else {}
+        def host(frame):
+            operation = frame["operation"]
+            if operation in {"verify_new_cart", "product_search"}:
+                reply = self.host(frame)
+                if operation == "product_search":
+                    if cache.get("cached") is not None:
+                        work = self.state()["menu_planning"]["prepared"][cache["validation_ref"]]["validation_work"]
+                        self.assertEqual(next(iter(work["searches"].values()))["observed_at"], cache["cached"]["observed_at"])
+                    query = frame["arguments"]["queries"][0]
+                    searches.append(query)
+                    if "melk" in query.casefold():
+                        reply["result"]["products"] = [{"product_id": milk, "name": "Melk",
+                            "package": "200ml", "price": "10,00 kr", "detail_price": "10,00 kroner.",
+                            "deposit_status": "none", "available": True}]
+                return reply
+            self.assertEqual(frame["browser_binding"], self.binding)
+            self.assertLessEqual((datetime.fromisoformat(frame["expires_at"])
+                                - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), 60)
+            if operation == "get_cart":
+                result = self.snapshot()
+                items = [{"product_id": product, "name": "Melk" if product == milk else "Havregryn",
+                          "quantity": quantity, "price": quantity * (10 if product == milk else 20)}
+                         for product, quantity in quantities.items()]
+                result.update(items=items, item_root_count=len(items), control_count=len(items), empty=not items,
+                              total_count=int(bool(items)), subtotal_count=int(bool(items)),
+                              subtotal=sum(item["price"] for item in items) if items else None,
+                              total=sum(item["price"] for item in items), count=sum(quantities.values()))
+            else:
+                self.assertEqual(operation, "manipulate_cart")
+                pending = self.state()["pending_cart_change"]
+                self.assertEqual(frame["before_quantities"], quantities)
+                self.assertEqual(pending["before"], quantities)
+                self.assertEqual(pending["operations"], frame["arguments"]["operations"])
+                for item in frame["arguments"]["operations"]:
+                    self.assertIn(item["productId"], (PRODUCT, milk))
+                    self.assertEqual(item["quantity"], 1)
+                    quantities[item["productId"]] = quantities.get(item["productId"], 0) + 1
+                self.assertEqual(frame["expected_quantities"], quantities)
+                self.writes += 1
+                result = {"dispatched": True}
+            return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                    "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+        recipe = {"name": "Synthetic oats and milk", "portions": 2,
+                  "ingredients": [{"raw": "100 g havregryn", "item": "havregryn", "quantity": 100,
+                                   "unit": "g", "scalable": True},
+                                  {"raw": "200 ml melk", "item": "melk", "quantity": 200,
+                                   "unit": "ml", "scalable": True}], "steps": ["Cook the oats."],
+                  "source": {"kind": "user", "publisher": "Synthetic kitchen", "relationship": "user_supplied"},
+                  "rights": {"storage": "full", "credit": "Synthetic test"}}
+        code, saved = self.call({"operation": "recipes", "action": "save", "recipe": recipe,
+                                 "idempotency_key": "synthetic-two-product-apply"})
+        self.assertEqual(code, 0, saved)
+        ref = saved["result"]["recipe"]
+        code, saved = self.call({"operation": "menu", "action": "save", "menu": {
+            "week": "2026-W41", "dishes": [{"recipe_ref": {"id": ref["id"], "revision": ref["revision"]},
+                                             "portions": 2}],
+            "schedule": [{"day": "2026-10-06", "meal": recipe["name"], "portions": 2}]}})
+        self.assertEqual(code, 0, saved)
+        menu = self.state()["menu"]
+        request = {"operation": "products", "action": "prepare",
+                   "menu_ref": {key: menu[key] for key in ("menu_id", "revision", "digest")}}
+        code, first = self.call(request, host=host)
+        self.assertEqual(code, 0, first)
+        request["candidate_approvals"] = [{"requirement_id": row["requirement_id"],
+            "candidate_refs": [row["observation"]["products"][0]["product_ref"]]}
+            for row in first["result"]["product_plan"]["requirements"]]
+        code, ready = self.call(request, host=host)
+        self.assertEqual(code, 0, ready)
+        self.assertEqual(ready["result"]["product_plan"]["status"], "prepared", ready)
+        apply = {"operation": "products", **ready["result"]["apply_arguments"], "cart_change_requested": True}
+        return apply, host, quantities, searches, milk
+
+    def test_two_product_apply_continues_one_search_with_cached_time_and_expiry(self):
+        cache = {}
+        apply, host, quantities, searches, milk = self.two_product_request(cache)
+        searches.clear()
+        command_id = str(uuid.uuid4())
+        code, partial = self.call(apply, command_id, host)
+        self.assertEqual(code, 0, partial)
+        self.assertEqual(partial["result"]["status"], "validating")
+        self.assertFalse(partial["result"]["applied"])
+        self.assertFalse(partial["result"]["cart_changed"])
+        self.assertEqual(len(searches), 1)
+        self.assertEqual((quantities, self.writes), ({}, 0))
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        validation_ref = partial["result"]["product_plan_ref"]
+        cache["validation_ref"] = validation_ref
+        work = self.state()["menu_planning"]["prepared"][validation_ref]["validation_work"]
+        cached = next(iter(work["searches"].values()))
+        cache["cached"] = cached
+        self.assertEqual(len(work["searches"]), 1)
+        frames = len(self.frames)
+        self.assertEqual(self.call(apply, command_id, host), (0, partial))
+        self.assertEqual(len(self.frames), frames)
+        code, applied = self.call({"operation": "products", **partial["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, applied)
+        self.assertTrue(applied["result"]["applied"], applied)
+        self.assertEqual(len(searches), 2)
+        self.assertNotEqual(searches[0], searches[1])
+        cache["cached"] = None
+        self.assertEqual(quantities, {PRODUCT: 1, milk: 1})
+        self.assertEqual(self.state()["cart_plan"]["added_quantities"], quantities)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        # A failed first reply consumes the allowance too; no second search is emitted.
+        def failed(frame):
+            reply = host(frame)
+            if frame["operation"] == "product_search":
+                reply.pop("result")
+                reply["error"] = "synthetic read failed"
+            return reply
+        frame_count = len(self.frames)
+        code, fresh = self.call(apply, host=failed)
+        self.assertEqual(code, 0, fresh)
+        self.assertEqual(fresh["result"]["status"], "validating")
+        self.assertEqual(fresh["result"]["validation_progress"]["pending_search_count"], 2)
+        self.assertEqual(sum(f["operation"] == "product_search" for f in self.frames[frame_count:]), 1)
+        code, fresh = self.call({"operation": "products", **fresh["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, fresh)
+        self.assertEqual(fresh["result"]["status"], "validating")
+        # An expired saved cycle cannot dispatch its cached facts.
+        state = self.state()
+        work = state["menu_planning"]["prepared"][fresh["result"]["product_plan_ref"]]["validation_work"]
+        work["started_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        (self.root / "state/state.json").write_text(json.dumps(state))
+        writes, reads = self.writes, len(searches)
+        code, restarted = self.call({"operation": "products", **fresh["result"]["continue_arguments"]}, host=host)
+        self.assertEqual(code, 0, restarted)
+        self.assertEqual(restarted["result"]["status"], "validating")
+        self.assertTrue(restarted["result"]["validation_progress"]["restarted"])
+        self.assertEqual(len(searches), reads + 1)
+        self.assertEqual(self.writes, writes)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+
+    def restore_partial_two_product_cart(self, lose_reply=False):
+        apply, host, quantities, searches, milk = self.two_product_request()
+        def finish(request, operator=host):
+            for _ in range(3):
+                code, result = self.call(request, host=operator)
+                if result.get("result", {}).get("status") != "validating":
+                    return code, result
+                args = result["result"]["continue_arguments"]
+                if request.get("restore_missing"):
+                    # Recover a lost validating reply through the real get path.
+                    code, fetched = self.call({"operation": "products", "action": "get",
+                                              "product_plan_ref": result["result"]["product_plan_ref"]})
+                    self.assertEqual(code, 0, fetched)
+                    self.assertEqual(fetched["result"]["continue_arguments"], args)
+                    args = fetched["result"]["continue_arguments"]
+                    self.assertTrue(args["restore_missing"])
+                    self.assertEqual(args["cart_digest"], request["cart_digest"])
+                request = {"operation": "products", **args}
+            self.fail("two-product validation failed to finish")
+        def partial(frame):
+            if frame["operation"] == "manipulate_cart":
+                self.assertEqual(frame["expected_quantities"], {PRODUCT: 1, milk: 1})
+                quantities[milk] = 1
+                self.writes += 1
+                return None  # Milk happened; the whole two-unit batch was not acknowledged.
+            return host(frame)
+        code, first = finish(apply, partial)
+        self.assertEqual(code, 0, first)
+        self.assertFalse(first["result"]["applied"])
+        self.assertIsNotNone(self.state().get("pending_cart_change"))
+        code, recovered = self.call({"operation": "cart", "action": "reconcile_change"}, host=host)
+        self.assertEqual(code, 0, recovered)
+        state = self.state()
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {milk: 1})
+        self.assertEqual(state["cart_plan"]["added_quantities"], {})
+        digest = state["cart_plan"]["pending_cart_digest"]
+        code, decision = self.call({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                                   "menu_ref": state["cart_plan"]["menu_ref"], "cart_digest": digest}, host=host)
+        self.assertEqual(code, 0, decision)
+        code, ordinary = finish(apply)
+        self.assertEqual(code, 0, ordinary)
+        self.assertTrue(ordinary["result"]["applied"])
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        restoration = {**apply, "restore_missing": True, "cart_digest": digest}
+        code, stale = finish({**restoration, "cart_digest": "0" * 64})
+        self.assertEqual(code, 1, stale)
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        def changed(frame):
+            reply = host(frame)
+            if frame["operation"] == "product_search":
+                reply["result"]["products"][0].update(price="999,00 kr", detail_price="999,00 kroner.")
+            return reply
+        code, drift = finish(restoration, changed)
+        self.assertEqual(code, 0, drift)
+        self.assertFalse(drift["result"]["applied"])
+        self.assertEqual((quantities, self.writes), ({milk: 1}, 1))
+        writes = []
+        def restore_host(frame):
+            if frame["operation"] == "manipulate_cart":
+                writes.append(frame)
+                self.assertEqual(frame["arguments"]["operations"], [{"productId": PRODUCT, "quantity": 1}])
+                self.assertEqual(frame["before_quantities"], {milk: 1})
+            reply = host(frame)
+            return None if lose_reply and frame["operation"] == "manipulate_cart" else reply
+        code, restored = finish(restoration, restore_host)
+        self.assertEqual(code, 0, restored)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual((quantities, self.writes), ({milk: 1, PRODUCT: 1}, 2))
+        if lose_reply:
+            self.assertFalse(restored["result"]["applied"])
+            self.assertIsNotNone(self.state().get("pending_cart_change"))
+            code, recovered = self.call({"operation": "cart", "action": "reconcile_change"}, host=host)
+            self.assertEqual(code, 0, recovered)
+            self.assertEqual(self.writes, 2)
+        else:
+            self.assertTrue(restored["result"]["applied"])
+        self.assertIsNone(self.state().get("pending_cart_change"))
+        self.assertEqual(self.state()["cart_plan"]["baseline_quantities"], {milk: 1})
+        self.assertEqual(self.state()["cart_plan"]["added_quantities"], {PRODUCT: 1})
+
+    def test_explicit_restore_missing_preserves_partial_baseline_and_keep_current(self):
+        self.restore_partial_two_product_cart()
+
+    def test_restore_missing_lost_reply_reconciles_without_replay_or_double_attribution(self):
+        self.restore_partial_two_product_cart(lose_reply=True)
 
     def test_clear_managed_cart_uses_batches_digest_and_cached_receipt_after_disable(self):
         self.assertEqual(self.call(self.managed_request())[0], 0)
@@ -353,6 +672,10 @@ class DotsSessionTests(unittest.TestCase):
     def test_managed_boundaries_block_before_intent_or_dispatch(self):
         before = self.files()
         for request in ({"operation": "products", "action": "apply", "partial_apply": True},
+                        {"operation": "products", "action": "apply", "restore_missing": "true", "cart_digest": "a" * 64},
+                        {"operation": "products", "action": "apply", "restore_missing": True},
+                        {"operation": "products", "action": "apply", "cart_digest": "a" * 64},
+                        {"operation": "products", "action": "prepare", "restore_missing": True, "cart_digest": "a" * 64},
                         {"operation": "cart", "action": "reconcile", "decision": "restore_missing"},
                         {"operation": "cart", "action": "reconcile", "decision": "keep_current", "exclude_product_ids": [PRODUCT]}):
             code, result = self.call(request)
@@ -544,6 +867,10 @@ class DotsSessionTests(unittest.TestCase):
     def delivery_host(self, frame):
         if frame["operation"] != "get_delivery_slots":
             return self.host(frame)
+        lifetime = (datetime.fromisoformat(frame["expires_at"])
+                    - datetime.fromisoformat(frame["emitted_at"])).total_seconds()
+        self.assertGreater(lifetime, 110)
+        self.assertLessEqual(lifetime, 120)
         label = "fra 49 kr fra 49 kroner, 6. oktober klokka 09:00 til 12:00"
         return {"reply_to": frame["call_id"], "browser_binding": self.binding,
                 "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -551,6 +878,117 @@ class DotsSessionTests(unittest.TestCase):
                            "source_url": "https://meny.no/varer", "dialog_count": 1,
                            "slots": [{"slot_id": label, "display": label, "date": "2026-10-06",
                                       "start": "09:00", "end": "12:00", "selected": False}]}}
+
+    def rendered_orders_host(self, frame):
+        self.assertEqual(frame["browser_binding"], self.binding)
+        self.assertEqual(frame["effect"], "read")
+        self.assertLessEqual((datetime.fromisoformat(frame["expires_at"])
+                            - datetime.fromisoformat(frame["emitted_at"])).total_seconds(), 60)
+        identity = frame["arguments"].get("order_number", "123456")
+        path = f"/trumf-profil/nettbutikk/bestilling/{identity}"
+        location = {"origin": "https://meny.no", "path": path,
+                    "query_keys": ["archived", "mworderid"], "hash": ""}
+        result = {"authenticated": True, "authenticated_count": 1, "ready": True,
+                  "main_count": 1, "heading_count": 1, "source_origin": "https://meny.no"}
+        if frame["operation"] == "get_orders":
+            result.update(source_path="/trumf-profil/nettbutikk", source_query_keys=[],
+                          source_hash="#/bestillinger", heading="Bestillinger fra de siste 6 måneder",
+                          table_count=1, columns=["BESTILLINGSKODE", "STATUS", "UTLEVERING", "TID", "SUM"],
+                          rendered_row_count=1, rows_complete=True, pagination_count=0,
+                          orders=[{"order_number": identity, "cell_count": 5, "links": [location, dict(location)],
+                                   "status_marker": "LEVERT", "delivery_display": "Synthetic delivery",
+                                   "time_display": "Synthetic time", "sum_display": "80,00 kr"}])
+        else:
+            self.assertEqual(frame["operation"], "get_order")
+            result.update(source_path=path, source_query_keys=location["query_keys"], source_hash="",
+                          heading="BESTILLING SYNTHETIC", order_number=identity, status_markers=["Levert"],
+                          item_heading="Bestilte varer (40)", item_count=40, item_table_count=1,
+                          item_columns=["VARE", "MENGDE"], item_rows_complete=True,
+                          products=[{"name": f"Synthetic item {i}", "quantity": 2} for i in range(18)]
+                                   + [{"name": "Synthetic last item", "quantity": 4}],
+                          amounts={"Betalt beløp (kort)": "80,00 kr"})
+        return {"reply_to": frame["call_id"], "browser_binding": self.binding,
+                "observed_at": datetime.now(timezone.utc).isoformat(), "result": result}
+
+    def test_rendered_orders_keep_qualification_through_core_agent_pages_and_receipts(self):
+        code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
+                                 "browser_binding": self.binding})
+        self.assertEqual(code, 0, policy)
+        before = self.state()
+        request = {"operation": "orders"}
+        command_id = str(uuid.uuid4())
+        code, listed = self.call(request, command_id, self.rendered_orders_host)
+        self.assertEqual(code, 0, listed)
+        self.assertEqual(listed["result"]["history_scope"], "rendered_last_six_months")
+        self.assertEqual(len(listed["result"]["orders"]), 1)  # Two consistent links are one order.
+        frames = len(self.frames)
+        self.assertEqual(self.call(request, command_id, self.rendered_orders_host), (0, listed))
+        self.assertEqual(len(self.frames), frames)
+        code, detail = self.call({"operation": "orders", "action": "get", "order_id": "123456"},
+                                 host=self.rendered_orders_host)
+        self.assertEqual(code, 0, detail)
+        for value in (listed["result"], listed["result"]["orders"][0], detail["result"],
+                      detail["result"]["order"], detail["result"]["tracking"]):
+            self.assertEqual(value["evidence_kind"], "host_attested_rendered_ui")
+            self.assertEqual(value["backend_freshness"], "unverified")
+        order = detail["result"]["order"]
+        self.assertIsNone(order["order_total"])
+        self.assertEqual(order["payment_status"], "unknown")
+        self.assertNotIn("grossAmount", order)
+        self.assertEqual(order["amount_displays"], {"Betalt beløp (kort)": "80,00 kr"})
+        code, projected = self.call({"operation": "orders", "action": "get", "order_id": "123456",
+                                    "response_view": "agent", "view_offset": 18, "view_limit": 1},
+                                    host=self.rendered_orders_host)
+        self.assertEqual(code, 0, projected)
+        view = projected["result"]
+        self.assertEqual(view["order_items"]["items"][0]["quantity"], 4)
+        self.assertEqual(view["order_items"]["backend_freshness"], "unverified")
+        self.assertEqual(view["order"]["tracking"]["backend_freshness"], "unverified")
+        self.assertIn("unverified", view["next"])
+        for key in ("profile", "menu", "pending_cart_change", "cart_plan", "native_cart_writes_enabled"):
+            self.assertEqual(before.get(key), self.state().get(key))
+        self.assertEqual(self.writes, 0)
+
+    def test_rendered_orders_reject_missing_scope_identity_and_incomplete_goods(self):
+        cases = [("list", {"orders": [], "rendered_row_count": 0}),
+                 ("list", {"rows_complete": False}), ("list", {"pagination_count": 1}),
+                 ("list", {"heading": "Loading"}), ("list", {"authenticated_count": 2}),
+                 ("get", {"order_number": "987654"}), ("get", {"source_query_keys": ["edit"]}),
+                 ("get", {"item_count": 41, "item_heading": "Bestilte varer (41)"}),
+                 ("get", {"item_rows_complete": False}), ("get", {"status_markers": ["Levert", "Bekreftet"]}),
+                 ("get", {"amounts": {"Reservert beløp": "80,00 kr"}})]
+        for action, changes in cases:
+            with self.subTest(action=action, changes=changes):
+                def changed(frame):
+                    reply = self.rendered_orders_host(frame)
+                    reply["result"].update(changes)
+                    return reply
+                request = {"operation": "orders", "action": action}
+                if action == "get":
+                    request["order_id"] = "123456"
+                code, result = self.call(request, host=changed)
+                self.assertEqual(code, 1, result)
+        def conflicting_link(frame):
+            reply = self.rendered_orders_host(frame)
+            reply["result"]["orders"][0]["links"][1]["path"] = "/trumf-profil/nettbutikk/bestilling/987654"
+            return reply
+        self.assertEqual(self.call({"operation": "orders"}, host=conflicting_link)[0], 1)
+        self.assertEqual(self.writes, 0)
+        self.assertIsNone(self.state().get("pending_cart_change"))
+
+    def test_native_orders_protected_actions_and_invalid_inputs_stop_before_intent(self):
+        before = self.files()
+        requests = [{"operation": "orders", "action": action, "order_id": "123456"}
+                    for action in ("change_begin", "cancel_prepare", "cancel_confirm", "remove_prepare")]
+        requests += [{"operation": "orders", "action": "get", "order_id": identity}
+                     for identity in ("", "../123", "synthetic", 123456)]
+        requests += [{"operation": "orders", "limit": limit} for limit in (0, 6, True)]
+        for request in requests:
+            with self.subTest(request=request):
+                code, result = self.call(request, host=self.rendered_orders_host)
+                self.assertEqual(code, 1, result)
+                self.assertEqual(self.files(), before)
+                self.assertEqual(self.frames, [])
 
     def test_delivery_read_normalizes_labels_dates_and_from_price_without_writes(self):
         code, policy = self.call({"operation": "native_cart_policy", "action": "set", "enabled": False,
@@ -587,6 +1025,23 @@ class DotsSessionTests(unittest.TestCase):
             return reply
         code, result = self.call({"operation": "delivery"}, host=empty)
         self.assertEqual(code, 1, result)
+        self.assertEqual(self.writes, 0)
+
+    def test_delivery_longer_read_window_rejects_stale_or_future_observations(self):
+        for invalid in ("stale", "future"):
+            with self.subTest(observation=invalid):
+                def changed(frame):
+                    reply = self.delivery_host(frame)
+                    if frame["operation"] == "get_delivery_slots":
+                        boundary = frame["emitted_at"] if invalid == "stale" else frame["expires_at"]
+                        offset = -1 if invalid == "stale" else 1
+                        reply["observed_at"] = (datetime.fromisoformat(boundary)
+                                                + timedelta(seconds=offset)).isoformat()
+                    return reply
+                code, result = self.call({"operation": "delivery"}, host=changed)
+                self.assertEqual(code, 1, result)
+                self.assertIn("reply identity or lifetime changed", result["error"])
+                self.assertNotIn("pending_cart_change", self.state())
         self.assertEqual(self.writes, 0)
 
     def test_delivery_rejects_changed_route_auth_picker_or_binding(self):
@@ -633,7 +1088,7 @@ class DotsSessionTests(unittest.TestCase):
     def test_delivery_selection_and_address_override_stop_before_intent(self):
         for request in ({"operation": "delivery", "action": "select", "slot_ref": "anything"},
                         {"operation": "delivery", "action": "list", "address_id": "another"},
-                        {"operation": "orders", "action": "list"}):
+                        {"operation": "orders", "action": "change_begin", "order_id": "123456"}):
             before = self.files()
             frame_count = len(self.frames)
             code, result = self.call(request)
