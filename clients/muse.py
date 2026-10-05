@@ -402,6 +402,7 @@ class ProtectedMuseApplication(MuseApplication):
                     "scope": "Last protected MCP initialize/tools-list only; account, address and payment readiness remain unverified.",
                     "next_action": None if ready else "Inspect the original error and use Muse's provider recovery guidance before restarting."},
                 "browser_check": {"status": "configured" if self.browser is not None else "not_configured",
+                    "action_mode": getattr(self.browser, "action_mode", None),
                     "last_checkout_review_at": getattr(self.browser, "last_review_at", None), "next_action": None},
                 "delivery_check": {"status": "unknown"}, "payment_check": {"status": "unknown"},
                 "local_recipes_available": True,
@@ -463,12 +464,15 @@ def load_home(home: Path):
     return settings
 
 
-def serve(home: Path, *, browser_directory=None, browser_task_id=None) -> None:
+def serve(home: Path, *, browser_directory=None, browser_task_id=None,
+          browser_action_mode="timed") -> None:
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
     if (browser_directory is None) != (browser_task_id is None):
         raise HouseholdError("Muse native browser requires both directory and original task identity")
+    if browser_action_mode != "timed" and browser_directory is None:
+        raise HouseholdError("Muse action mode requires its opted-in native browser")
     if browser_directory is not None and not protected:
         raise HouseholdError("Muse native browser requires protected Oda mode")
     browser = None
@@ -479,7 +483,8 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None) -> None:
             if Path(browser_directory) != shop.operation_directory / "browser":
                 raise HouseholdError("Muse browser must use the canonical shared provider browser directory")
             from muse_browser import MuseBrowser
-            browser = MuseBrowser(browser_directory, browser_task_id, shop)
+            browser = MuseBrowser(browser_directory, browser_task_id, shop,
+                                  action_mode=browser_action_mode)
     else:
         shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
@@ -521,11 +526,14 @@ def main() -> int:
     parser.add_argument("--operation-directory", type=Path, help="existing private shared directory for every native Oda client")
     parser.add_argument("--browser-directory", type=Path, help="existing canonical private native browser broker; run only")
     parser.add_argument("--browser-task-id", help="actual original Muse browser task identity; run only")
+    parser.add_argument("--browser-action-mode", choices=("timed", "native_approval"),
+                        help="final-action authority: timed permit or one-shot native approval delegation; run only")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
             raise HouseholdError("Muse home must be absolute")
-        if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None):
+        if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None
+                                     or args.browser_action_mode is not None):
             raise HouseholdError("Muse native browser options apply only to run")
         if args.action == "init":
             if not args.provider or not args.household:
@@ -533,7 +541,8 @@ def main() -> int:
             initialize(args.home, args.provider, args.household, credential_name=args.credential_name,
                        operation_directory=args.operation_directory)
         elif args.action == "run":
-            serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id)
+            serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id,
+                  browser_action_mode=args.browser_action_mode or "timed")
         else:
             if not args.request_id:
                 raise HouseholdError("respond requires --request-id")
