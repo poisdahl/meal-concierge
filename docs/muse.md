@@ -150,9 +150,22 @@ exclusively published and fsynced. The producer must:
    literal previews and actual chain receipts, discard any incomplete trailing
    tuple, and reobserve its row. Remove only ordinal metadata when assembling
    the normal four-key item objects. Do not shorten or fill any observed value.
-   Collect all other raw sections and actual list-end evidence in the same live
-   request, finish with an unchanged complete surface, and return once within
-   the remaining budget. Partial fragments never constitute checkout evidence.
+   Checkout account evidence may instead come from a fresh preparatory read
+   immediately before the current prepare or confirm call. Retain its actual raw
+   account URL, visible edit links, address, completion receipt/time and original
+   native chain privately. Return to the same checkout and separately restore
+   the explicitly authorized existing saved card if navigation reset it, before
+   adapter inspection begins. Disclose this pre-call composition; do not claim
+   the account facts were collected inside the broker request or backdate them.
+   Repeat this account read before **each** prepare and confirm; never reuse it
+   from an earlier operation, failed request or confirmation. Lost continuity or
+   a change in ownership, sign-in, account, address, delivery or cart invalidates
+   the preparatory evidence. The fresh MCP selected-reference/address check is
+   unchanged; account observations must not be copied from its expected values.
+   Collect all remaining raw checkout sections and actual list-end evidence in
+   the same live request, without navigating away to the account page. Finish
+   with an unchanged complete surface and return once within the remaining
+   budget. Partial fragments never constitute checkout evidence.
 3. Return `request_id`, `request_digest` (canonical `digest(request)`), `task_id`,
    `observed_at` (actual main-runtime completion/handoff UTC), `task_state`
    (`completed` or `waiting_for_information`) and operation-specific `facts` via
