@@ -210,6 +210,80 @@ closes native custody and forbids later consumption of the same request; it
 does not grant a replay or clear the original core confirmation journal. A
 consumed or possibly dispatched action cannot use this refusal outcome.
 
+### Native producer commands
+
+The installed source includes `muse_browser_producer.py`: thin `claim`,
+`consume`, `respond` and `end` commands using the existing broker functions.
+No session-specific scripts, handcrafted records or compact all-match packets
+are required. The producer takes literal JSON from the supported browser's
+**automatic result delivery**. A task acceptance receipt is not a completion;
+`list_tasks`' short final-response preview is not the full automatic handoff.
+Do not substitute that preview or a desktop accessibility excerpt for the actual
+received payload. Automatic delivery has no documented completeness guarantee:
+qualify it with a realistic-sized JSON result, complete row/field counts and
+begin/end sentinels before serving checkout. A small result is insufficient.
+
+Use the ordinary JSON CLI with its supported background executor and immediately
+serve its new request. Keep that waiter and original service alive. Substitute
+the actual emitted request ID and original native chain anchor below:
+
+```sh
+"$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" claim \
+  --directory "$MUSE_BROWSER_DIRECTORY" \
+  --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN"
+```
+
+Claim once before steering. For each prepare or confirm, obtain the fresh
+preparatory account evidence described above before the ordinary call, return
+to checkout and restore the authorized saved card. Then ask the original native
+browser task for **one complete literal JSON observation**, using the exact
+operation-specific facts schema below. Acknowledge its acceptance and end the
+main turn so the automatic result can arrive. Do not poll a preview as a result
+getter. Observe all items, amounts, controls and list ends; do not copy expected
+cart fields or manufacture missing data. Keep preparatory account provenance
+separate and disclose its composition with the checkout observation.
+
+Capture only the actual complete automatic JSON payload, its genuine native
+ending/completion UTC and chain receipts. Never reconstruct a truncated body,
+fill missing fields, wrap prose into invented facts or restamp an ending. If it
+is unavailable, partial, paused or not completed, preserve the original task;
+finish its custody honestly before any fresh operation. Qualify the browser's
+observation behavior separately with a public-page positive control and a
+clearly wrong supplied comparison that must produce mismatch or honest unknown.
+Host records and hashes alone do not prove inspection.
+
+After a genuine completed handoff, publish its exact JSON facts once, targeting
+a handoff within ten seconds. The source still requires observation age at most
+thirty seconds and an active original request:
+
+```sh
+"$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" respond \
+  --directory "$MUSE_BROWSER_DIRECTORY" \
+  --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN" \
+  --observed-at "$ACTUAL_HANDOFF_UTC" --ending-state completed \
+  < "$ACTUAL_NATIVE_JSON"
+```
+
+Use closed stdin and a bounded supported executor, for example
+`subprocess.run(..., input=bytes, timeout=60)`. The 64 KiB input limit is not a
+clock. Keep captured payloads/receipts private (0700 directories, 0600 files).
+The canonical broker's `publications/<request_id>.json` consumes the publication
+attempt before JSON, claim and freshness checks. A caller cannot choose another
+output root to bypass the fence. Never correct and repeat the same publication,
+including after an error or lost acknowledgement. Reconcile the original files
+and ordinary CLI result instead. A successful `{"published":true}` means only
+that the source response was written; core acceptance and a confirmation must
+come from the actual ordinary CLI result. No publication authorizes payment.
+
+`consume` needs no stdin and keeps the existing one-use action admission rules.
+`end` takes the **actual completed task's literal ending facts** and genuine UTC
+using the same arguments as `respond`. It records unresolved native custody,
+including late financial endings, without refreshing old facts or authorizing
+replay. Do not call it while a task is still waiting or already has a completed
+response. Reconcile any financial outcome with the original confirmation.
+Errors contain fixed `error.stage` and `error.category` values on stderr and a
+nonzero exit, without echoing private paths or observation values.
+
 `checkout_review` facts have exactly `url`, `account`, `address`,
 `delivery_sections`, `items`, `warnings`, `amount_rows`, `payment`,
 `submit_controls`, and `complete_sections`. The latter must attest the complete
