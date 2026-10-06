@@ -145,7 +145,9 @@ def household():
         }))
         with (root / "service.log").open("w+") as log:
             process = subprocess.Popen([sys.executable, "-I", str(HERE), "--serve", str(root)],
-                                       env={"PATH": os.defpath, "HOME": str(root)}, stdout=log, stderr=log)
+                                       env={"PATH": os.defpath, "HOME": str(root),
+                                            "MC01_MACOS_SMOKE": os.environ.get("MC01_MACOS_SMOKE", "0")},
+                                       stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 10
                 while not (root / "service.sock").exists():
