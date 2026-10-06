@@ -55,7 +55,8 @@ build of Python 3.12.12, so the macOS job pins the latest supported 3.12 patch
 available there rather than claiming an identical patch-level runtime. It runs
 the synthetic installer and browser-setting boundaries, then the real
 SDK/stdio/Unix socket probe, including kernel peer credentials on the runner.
-Installer tests cover
+That probe explicitly attests Python 3.12.10 for the macOS job; Linux continues
+to attest Python 3.12.12. Installer tests cover
 launchd lifecycle commands with mocks; they do not install a persistent launchd
 service. This smoke job does not establish live browser login, a working desktop
 agent, or retailer/payment behavior. It does not change branch protection;
