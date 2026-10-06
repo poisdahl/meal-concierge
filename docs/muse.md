@@ -218,7 +218,9 @@ payment, submit`. `account` contains the actual account-delivery `url` and
 visible absolute `edit_urls`; its observed address reference must match the fresh
 MCP selected address. `address` is the literal checkout delivery-address value,
 not an account-page heading or a composite label. Keep preparatory account-page
-provenance separate from that value.
+provenance separate from that value. `delivery_sections` is a list containing
+one complete observed delivery-slot string, including its date and time. Keep
+the section heading separate from that value.
 
 Product display mismatches return the existing `line_difference` diagnostic with
 unresolved rows and a digest. Use the [bound identity-review continuation](runtime-reference.md)
