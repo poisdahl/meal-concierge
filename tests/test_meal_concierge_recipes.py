@@ -5566,6 +5566,9 @@ class RecipeFlowTests(unittest.TestCase):
                 self.used = True
                 return b"{" + (b"x" * MAX_REQUEST) + b"}\n"
 
+            def settimeout(self, _timeout):
+                pass
+
             def sendall(self, value):
                 self.sent += value
 
@@ -5593,6 +5596,9 @@ class RecipeFlowTests(unittest.TestCase):
                 data, self.data = self.data, b""
                 return data
 
+            def settimeout(self, _timeout):
+                pass
+
             def sendall(self, value):
                 self.sent += value
 
@@ -5618,6 +5624,9 @@ class RecipeFlowTests(unittest.TestCase):
             def recv(self, _size):
                 data, self.data = self.data, b""
                 return data
+
+            def settimeout(self, _timeout):
+                pass
 
             def sendall(self, value):
                 self.sent += value
