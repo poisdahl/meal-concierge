@@ -83,6 +83,16 @@ are checked against the native Unix limit before staging. Use shorter explicit
 | `backups/` | Private, complete offline state/config copies made before migration |
 | `runtime.json` | Exact installation paths, owner and selected/previous code release |
 
+Household JSON commits sync the temporary file, atomically replace the destination,
+then sync its parent directory before reporting success. Directory open or sync
+errors are propagated, including on filesystems that do not support directory
+sync. An error after replacement can leave the new journal visible: it does not
+mean the old state survived or that an external action is safe to repeat. Preserve
+the current journal and reconcile pending operations after storage is healthy.
+This protocol covers replacement in the existing state directory; it does not
+establish power-loss guarantees for every filesystem, storage device, or newly
+created ancestor directory.
+
 Oda/Mathem OAuth uses the installed MCP SDK without Hermes. Provider readiness
 is separate from service health. Existing Compose and explicit legacy runner
 paths remain supported by `service.py`; native adoption does not convert Compose
