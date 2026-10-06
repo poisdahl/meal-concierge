@@ -517,7 +517,9 @@ class MuseBrowser:
         except ValueError:
             raise HouseholdError("Muse checkout identity review is stale or invalid") from None
         if identity.get("matched") is not True:
-            raise HouseholdError("Muse checkout product identity or quantity differs from the current cart")
+            raise HouseholdError("Muse checkout product identity or quantity differs from the current cart "
+                + json.dumps({"line_difference": identity["issue"]},
+                             sort_keys=True, separators=(",", ":")))
         selected = facts["payment"]
         if (not isinstance(selected, Mapping) or set(selected) != {"display", "selected"}
                 or selected["selected"] is not True

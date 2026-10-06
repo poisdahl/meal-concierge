@@ -526,6 +526,39 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertEqual(self.effects, [])
         self.assertFalse(list((self.directory / "consumed").glob("*.json")))
 
+    def test_rpc_exposes_display_review_and_accepts_bound_continuation(self):
+        self.browser.action_mode = "native_approval"
+        self.checkout_items[0].update(product_id=None, title="Pasta",
+                                     subtitle="Fullkorn, 500 g, Synthetic")
+        failed = self.rpc({"operation": "checkout", "action": "prepare"}, expect_ok=False)
+        prefix = "Muse checkout product identity or quantity differs from the current cart "
+        self.assertTrue(failed["error"].startswith(prefix))
+        issue = json.loads(failed["error"][len(prefix):])["line_difference"]
+        self.assertEqual([row["index"] for row in issue["expected"]], [0])
+        self.assertEqual([row["index"] for row in issue["actual"]], [0])
+        self.assertIsNone(issue["actual"][0]["product_id"])
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, [])
+
+        review = {"digest": issue["digest"], "decisions": [{
+            "expected_index": 0, "actual_index": 0,
+            "reason": "The checkout splits full-grain pasta wording between title and subtitle; brand, pack size and quantity agree.",
+        }]}
+        self.checkout_items[0]["title"] = "Spaghetti"
+        stale = self.rpc({"operation": "checkout", "action": "prepare",
+                          "identity_review": review}, expect_ok=False)
+        self.assertEqual(stale["error"], "Muse checkout identity review is stale or invalid")
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, [])
+        self.checkout_items[0]["title"] = "Pasta"
+        prepared = self.rpc({"operation": "checkout", "action": "prepare",
+                             "identity_review": review})
+        self.assertEqual(self.store.read()["pending_checkout"]["browser_review"]["identity_review"], review)
+        confirmed = self.rpc({"operation": "checkout", "action": "confirm",
+                              "confirmation_id": prepared["confirmation_id"]})
+        self.assertTrue(confirmed["confirmed"])
+        self.assertEqual(self.effects, ["checkout_delegate"])
+
     def test_existing_timed_confirmation_cannot_be_reinterpreted_as_native_approval(self):
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})
         self.browser.action_mode = "native_approval"
