@@ -285,6 +285,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         }
 
     def _refresh_integration(self, deadline: float | None = None, *, allow_recovery: bool = False) -> None:
+        # Only an explicit connection probe establishes readiness. Successful
+        # household operations may be entirely local or replay saved results.
         try:
             if self.provider == "meny" and (deadline is not None or allow_recovery):
                 probe = self.provider_client.probe(deadline=deadline, allow_recovery=allow_recovery)
@@ -558,14 +560,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "message": str(exc),
                 }
             raise
-        if self.provider == "meny" and request.get("operation") in {"catalog", "products", "cart", "delivery", "orders", "checkout"} and not (operation == "products" and action == "get"):
-            self.integration = {
-                "status": "ready",
-                "provider": "meny",
-                "protocol_version": "browser-v1",
-                "server": {"name": "MENY website"},
-                "tool_count": 11,
-            }
         if operation == "products" and action in {"prepare", "get"}:
             state = self.store.read()
             result["pantry_review"] = pantry_review(state["profile"], self._household_today(state))

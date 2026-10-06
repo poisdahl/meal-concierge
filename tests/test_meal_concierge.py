@@ -9358,7 +9358,82 @@ class FlowTests(unittest.TestCase):
                 app.handle({"operation": "catalog", "action": "products", "query": "brokkoli"})
             self.assertEqual(app.integration["status"], "awaiting_login")
             app.handle({"operation": "catalog", "action": "products", "query": "brokkoli"})
+            # A successful operation does not substitute for a connection probe.
+            # Status performs the existing guarded probe after login recovers.
+            self.assertEqual(app.integration["status"], "awaiting_login")
+            provider.probe = mock.Mock(return_value={
+                "protocol_version": "browser-v1", "server": {"name": "MENY website"}, "tool_count": 11,
+            })
+            status = app.handle({"operation": "status"})
             self.assertEqual(app.integration["status"], "ready")
+            self.assertEqual(status["store_readiness"]["connection_check"]["status"], "verified")
+            provider.probe.assert_called_once()
+
+    def test_meny_local_ingredient_decisions_preserve_connection_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeOda()
+            provider.call = mock.Mock(side_effect=AssertionError("local decision contacted provider"))
+            provider.probe = mock.Mock(side_effect=HouseholdError("MENY login is required"))
+            app = Application(store, provider, None)
+            recipe = {"schema_version": 2, "name": "Synthetic carrots", "portions": 2,
+                      "ingredients": [{"item": "carrots", "raw": "100 g carrots", "quantity": 100, "unit": "g"}],
+                      "steps": ["Cook the carrots."],
+                      "source": {"kind": "user", "relationship": "user_supplied"},
+                      "rights": {"storage": "full"}}
+            menu = app.handle({"operation": "menu", "action": "save", "menu": {
+                "week": "2026-W40", "dishes": [recipe], "salads": [],
+            }})["menu"]
+            request = {"operation": "products", "action": "record_ingredients",
+                       "menu_ref": app._cart_menu_ref(menu), "ingredient_decisions": [{
+                           "source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 0},
+                           "action": "have_all",
+                       }]}
+            for status in ("unavailable", "awaiting_login", "ready"):
+                with self.subTest(status=status):
+                    evidence = {"status": status, "provider": "meny", "message": "prior observation"}
+                    app.integration = deepcopy(evidence)
+                    result = app.handle(request)
+                    self.assertTrue(result["recorded"])
+                    self.assertFalse(result["cart_changed"])
+                    self.assertEqual(app.integration, evidence)
+                    provider.probe.assert_not_called()
+                    provider.call.assert_not_called()
+            app.integration = {"status": "awaiting_login", "provider": "meny"}
+            app.handle(request)
+            status = app.handle({"operation": "status"})
+            self.assertEqual(status["integration"]["status"], "awaiting_login")
+            self.assertEqual(status["store_readiness"]["connection_check"]["status"], "needs_user_action")
+            provider.probe.assert_called_once()
+
+    def test_meny_replayed_checkout_preserves_connection_and_pending_payment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeOda()
+            provider.call = mock.Mock(side_effect=AssertionError("replay contacted provider"))
+            provider.probe = mock.Mock(side_effect=AssertionError("pending payment was navigated away"))
+            app = Application(store, provider, None)
+            pending = {"status": "awaiting_user_payment", "confirmation_id": "current-payment"}
+            with store.locked() as state:
+                app._store_protected_result(state, "completed-payment", "checkout", {
+                    "confirmed": True, "order_id": "synthetic-order",
+                })
+                state["pending_checkout"] = deepcopy(pending)
+            for connection in ("unavailable", "awaiting_login", "ready"):
+                with self.subTest(connection=connection):
+                    evidence = {"status": connection, "provider": "meny", "message": "prior observation"}
+                    app.integration = deepcopy(evidence)
+                    for action in ("confirm", "reconcile"):
+                        result = app.handle({"operation": "checkout", "action": action,
+                                             "confirmation_id": "completed-payment"})
+                        self.assertTrue(result["idempotent"])
+                        self.assertTrue(result["confirmed"])
+                        self.assertEqual(app.integration, evidence)
+                    app.handle({"operation": "status"})
+                    self.assertEqual(app.integration, evidence)
+                    self.assertEqual(store.read()["pending_checkout"], pending)
+                    provider.probe.assert_not_called()
+                    provider.call.assert_not_called()
 
     def test_meny_status_defers_startup_probe_and_checks_on_first_status(self):
         with tempfile.TemporaryDirectory() as temp:
