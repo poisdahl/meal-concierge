@@ -199,3 +199,42 @@ or client failures mean the journey was not successfully evaluated.
 
 This complements the deterministic product-preview, stale-reference and payment
 recovery tests. The native fixture does not simulate a retailer catalog or payment.
+
+### Interpreting agent measurements
+
+MCP discovery advertises the server's available tools. A host can defer tool
+schemas until search or selection; the protocol alone does not tell us which
+schemas enter each model request. Catalog characters are not context tokens,
+latency, or evidence that all 31 tools are loaded at once.
+
+Run `python -I -B tests/measure_agent_catalog.py` with the pinned runtime to
+measure the advertised catalog offline, without a client, account or service.
+The result specifies its JSON serialization and leaves observed model-context
+tokens unknown. Compare this measure only with the same serialization.
+
+The optional conversation probe writes `benchmark-context.json` and
+`journey-metrics.jsonl` inside the fresh scratch directory. Supply
+`--host-version VERSION --model MODEL --tool-loading deferred` only when those
+values are known from the actual host; otherwise leave them unknown. These flags
+record operator observations, not client configuration or independent telemetry.
+Each native attempt records elapsed time and completed service-call counts,
+including failures and the deliberately interrupted cart attempt. A dispatch
+still in flight when the client exits may complete later and is not counted in
+that attempt's snapshot. These are service requests, not total model tool calls.
+Only the final run verdict establishes that all existing outcome and safety
+assertions passed; a returned client response alone does not. A failed run means
+the assertions were not all completed, not necessarily a safety defect.
+
+Run each comparison in a new scratch directory with the same source revision,
+host/version/model, fixture and loading mode. Use repeated runs and inspect
+outcome failures before comparing timing or call counts. Do not impose a hard
+latency or call-count budget before measuring ordinary variation. Any later
+interface change must retain purchase authorization, no-shopping and duplicate
+cart-dispatch assertions. Use host telemetry, when available, to investigate
+actual prompt exposure; do not estimate it from catalog size.
+
+Scratch conversations and client stderr may contain client/account metadata even
+though the household is synthetic. Keep scratch directories outside the checkout
+and review aggregate fields before sharing them. Do not commit transcripts,
+credentials, client settings or raw logs. The benchmark does not run automatically
+in CI and does not establish live shopping or payment success.
