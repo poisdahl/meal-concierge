@@ -176,8 +176,10 @@ async def session(root, *, killable=False, socket=None):
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
     args = ["-I", str(HERE), "--bridge", str(root)] if killable else ["-I", str(CORE / "mcp_server.py")]
-    params = StdioServerParameters(command=sys.executable, args=args,
-                                  env={"MEAL_CONCIERGE_SOCKET": str(socket or root / "service.sock"), "HOME": str(root)}, cwd=str(root))
+    server_env = {"MEAL_CONCIERGE_SOCKET": str(socket or root / "service.sock"), "HOME": str(root)}
+    if os.environ.get("MC01_MACOS_SMOKE") == "1":
+        server_env["MC01_MACOS_SMOKE"] = "1"
+    params = StdioServerParameters(command=sys.executable, args=args, env=server_env, cwd=str(root))
     with (root / "bridge.log").open("a") as log:
         async with stdio_client(params, errlog=log) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=15) as client:
