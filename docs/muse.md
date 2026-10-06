@@ -216,7 +216,14 @@ consumed or possibly dispatched action cannot use this refusal outcome.
 observed sections in order: `account, items, warnings, amounts, delivery,
 payment, submit`. `account` contains the actual account-delivery `url` and
 visible absolute `edit_urls`; its observed address reference must match the fresh
-MCP selected address. Each item has independently proven positive integer
+MCP selected address. `address` is the literal checkout delivery-address value,
+not an account-page heading or a composite label. Keep preparatory account-page
+provenance separate from that value.
+
+Product display mismatches return the existing `line_difference` diagnostic with
+unresolved rows and a digest. Use the [bound identity-review continuation](runtime-reference.md)
+for genuinely cosmetic differences; retain literal observations and unchanged
+quantity and proven-ID guards. Each item has independently proven positive integer
 `product_id`, or `null` when the page exposes no ID, integer `quantity`, and raw
 complete `title` and `subtitle`. Unknown IDs pass through the shared checkout
 identity matcher: complete visible labels and exact quantities must identify
