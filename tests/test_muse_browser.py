@@ -633,8 +633,41 @@ class NativeCoreRpcTests(NativeFixture):
             "quantity": 2, "totalGrossAmount": "70.00"}]})
         result = self.rpc({"operation": "checkout", "action": "reconcile",
                            "confirmation_id": prepared["confirmation_id"]})
-        self.assertNotIn("preparation_available", result)
+        self.assertFalse(result["preparation_available"])
         self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_matching_paid_order_cannot_be_owned_by_an_unclaimed_delegation(self):
+        prepared, _ = self.unserved_delegation()
+        self.shop.orders.append({"order_number": "other-actor-order", "grossAmount": 35.0,
+            "deliveryDate": self.delivery_date, "deliverySlotDisplay": self.delivery,
+            "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10},
+            "quantity": 1, "totalGrossAmount": "35.00"}]})
+        self.shop.tracking = "paid_and_modifiable"
+        before_requests = set((self.directory / "requests").glob("*.json"))
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        self.assertFalse(result["confirmed"])
+        self.assertFalse(result["preparation_available"])
+        self.assertNotIn(prepared["confirmation_id"], self.store.read()["protected_results"])
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertEqual(set((self.directory / "requests").glob("*.json")), before_requests)
+
+    def test_conflicting_current_order_identity_preserves_uncertainty(self):
+        self.shop.orders.append({"orderNumber": "old-order", "order_number": "old-order"})
+        prepared, _ = self.unserved_delegation()
+        self.shop.orders[-1]["order_number"] = "new-order"
+        self.rpc({"operation": "checkout", "action": "reconcile",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+
+    def test_malformed_retained_order_list_preserves_uncertainty(self):
+        # A malformed baseline is present before preparation, so the actual
+        # generated delegation still binds the unchanged original journal.
+        self.shop.orders.append({})
+        prepared, _ = self.unserved_delegation()
+        self.rpc({"operation": "checkout", "action": "reconcile",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
 
     def test_changed_journal_binding_cannot_retire_unclaimed_delegate(self):
         prepared, _ = self.unserved_delegation()
