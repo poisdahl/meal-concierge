@@ -86,6 +86,7 @@ def guard_native_browser(request, state):
             if (isinstance(record, Mapping) and record.get("kind") == "checkout"
                     and isinstance(record.get("result"), Mapping)
                     and (record["result"].get("confirmed") is True
+                         or action == "reconcile" and record["result"].get("cancelled") is True
                          or action == "reconcile" and record["result"].get("payment_dispatched") is False
                          and isinstance(record["result"].get("nondispatch_evidence"), Mapping))):
                 return
