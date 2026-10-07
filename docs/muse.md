@@ -225,7 +225,11 @@ begin/end sentinels before serving checkout. A small result is insufficient.
 
 Use the ordinary JSON CLI with its supported background executor and immediately
 serve its new request. Keep that waiter and original service alive. Substitute
-the actual emitted request ID and original native chain anchor below:
+the actual emitted request ID and original native chain anchor below. Invoke
+the installed `cli.py`; do not replace it with a hand-written socket client or
+shorten its 660-second checkout RPC wait. Any executor timeout must outlast that
+wait with headroom for CLI startup and its separate health preflight. Retain its
+actual stdout, stderr, exit and native job receipt:
 
 ```sh
 "$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" claim \
@@ -235,8 +239,12 @@ the actual emitted request ID and original native chain anchor below:
 
 Claim once before steering. For each prepare or confirm, obtain the fresh
 preparatory account evidence described above before the ordinary call, return
-to checkout and restore the authorized saved card. Then ask the original native
-browser task for **one complete literal JSON observation**, using the exact
+to checkout and restore the authorized saved card. Continue the latest proven
+live successor of the original browser chain; retain its ancestry receipts while
+keeping the original chain anchor as the producer's `task_id`. Inspect that live
+checkout without navigating or reloading after restoration, since doing so may
+reset the selected payment. Then ask the native browser task for
+**one complete literal JSON observation**, using the exact
 operation-specific facts schema below. Acknowledge its acceptance and end the
 main turn so the automatic result can arrive. Do not poll a preview as a result
 getter. Observe all items, amounts, controls and list ends; do not copy expected
@@ -286,9 +294,10 @@ nonzero exit, without echoing private paths or observation values.
 
 `checkout_review` facts have exactly `url`, `account`, `address`,
 `delivery_sections`, `items`, `warnings`, `amount_rows`, `payment`,
-`submit_controls`, and `complete_sections`. The latter must attest the complete
-observed sections in order: `account, items, warnings, amounts, delivery,
-payment, submit`. `account` contains the actual account-delivery `url` and
+`submit_controls`, and `complete_sections`. The latter is the array
+`["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]`,
+returned only after observing every complete section; it is never a boolean.
+`account` has exactly two keys: the actual account-delivery `url` and the list of
 visible absolute `edit_urls`; its observed address reference must match the fresh
 MCP selected address. `address` is the literal checkout delivery-address value,
 not an account-page heading or a composite label. Keep preparatory account-page
@@ -301,7 +310,9 @@ unresolved rows and a digest. Use the [bound identity-review continuation](runti
 for genuinely cosmetic differences; retain literal observations and unchanged
 quantity and proven-ID guards. Each item has independently proven positive integer
 `product_id`, or `null` when the page exposes no ID, integer `quantity`, and raw
-complete `title` and `subtitle`. Unknown IDs pass through the shared checkout
+complete string `title` and `subtitle`. When the row visibly has no subtitle,
+return `""`; never use `null` or fill an uninspected subtitle with an empty string.
+Unknown IDs pass through the shared checkout
 identity matcher: complete visible labels and exact quantities must identify
 each row uniquely. Never copy expected IDs or replace an observed conflicting
 ID with `null`. Raw IDs, including `null`, remain part of the frozen review
