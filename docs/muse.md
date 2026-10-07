@@ -384,7 +384,28 @@ adapter never changes the payment method while inspecting.
 `order_binding` facts contain the exact order-page `url`, `order_id`, `currency`
 (`NOK`), independently observed `receipt_address`, `account`, one
 `delivery_sections` entry, one `total_rows` entry and `complete_sections`
-(`receipt, account`). Binding uses **all** MCP address candidates and preserves
+(`receipt, account`). Preserve the JSON types: `account` is an object,
+`delivery_sections` and `total_rows` are singleton arrays of literal strings,
+and `complete_sections` is `["receipt", "account"]`.
+
+For this receipt read, visit the actual `https://oda.com/no/account/delivery/`
+page. Its `account` object has exactly `url` and `edit_urls`: the observed page
+URL and all visible absolute address-edit links matching
+`https://oda.com/no/account/delivery/edit/<positive-integer>/`. The main account
+page and its section links do not supply this evidence. Resolve actual relative
+hrefs against the observed page URL using normal browser link resolution; never
+construct address IDs from MCP values.
+If supported inspection cannot read a link, a proven nonfinal Edit navigation
+may reveal its actual URL. Return to the delivery-account page before capture;
+do not save, activate or select an address.
+
+Capture the unique labelled total row from the primary receipt price summary,
+including its adjacent amount, as the single `total_rows` string. A separate VAT
+breakdown may repeat a total label; it is not the primary summary. Do not flatten
+the whole breakdown into one row or choose a row by the expected amount, its
+position or punctuation. Missing or ambiguous container evidence stays unknown.
+
+Binding uses **all** MCP address candidates and preserves
 the original checkout account/address, rather than today's selected address.
 The producer must preserve any outstanding payment page during these reads; if
 supported inspection cannot do so, leave the attempt unresolved. `payment_state`
@@ -470,8 +491,13 @@ Ask Muse to start this foreground command in its supported background executor:
 "$MUSE_PYTHON" -I -B "$MUSE_SOURCE/clients/muse.py" run --home "$MUSE_HOME"
 ```
 
-Retain the native execution ID and actual process identity. The runner uses the
-existing state/listener ownership locks and a private profile **lock directory**;
+Run the foreground command itself in the background executor; do not detach it
+with `&`, `nohup`, `subprocess.Popen`, or a launcher that exits after spawning.
+Retain the native execution ID and actual process identity. The owning execution
+must remain running for the runner's lifetime. An execution that returns exit
+zero while its service process remains alive does not establish this ownership.
+The runner uses the existing state/listener ownership locks and a private profile
+**lock directory**;
 it launches no browser. Only one runner can own that household. The same client
 can reopen its own home after its previous execution is verified stopped.
 There is no promise of an always-on service or scheduled work across host sessions.
