@@ -545,6 +545,48 @@ class MuseBrowser:
                 **({"native_action_mode": self.action_mode} if self.action_mode != "timed" else {}),
                 **({"identity_review": identity["review"]} if identity.get("review") else {})}
 
+    def checkout_nondispatch_evidence(self, pending, *, deadline=None):
+        """Prove one closed delegation never acquired native action authority."""
+        if (self.action_mode != "native_approval" or not isinstance(pending, Mapping)
+                or pending.get("status") != "uncertain"
+                or pending.get("order_change") or pending.get("recovery")
+                or pending.get("authentication_unresolved") is not True):
+            return None
+        binding = {"confirmation_id": pending["confirmation_id"],
+                   "expires_at": pending["expires_at"],
+                   "journal_digest": digest({**pending, "status": "clicking"})}
+        matches = []
+        with self.bridge.custody(), transition_lock(self.bridge.directory):
+            for path in (self.bridge.directory / "requests").glob("*.json"):
+                raw = required_json(path)
+                payload = raw.get("payload") if isinstance(raw, Mapping) else None
+                journal = payload.get("journal_binding") if isinstance(payload, Mapping) else None
+                if not isinstance(journal, Mapping) or journal.get("confirmation_id") != binding["confirmation_id"]:
+                    continue
+                _, record = request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)
+                payload = record["payload"]
+                if (record["operation"] != "checkout_delegate"
+                        or payload != {"review": pending["browser_review"],
+                            "review_digest": digest(pending["browser_review"]),
+                            "effect": "one_final_new_order_click", "journal_binding": binding,
+                            "authorization": {"mode": "native_approval", "expiry_role": "admission",
+                                              "purchase_approval_required": True}}):
+                    return None
+                for kind in ("claims", "consumed", "responses", "endings", "publications"):
+                    other = self.bridge.directory / kind / path.name
+                    if other.exists() or other.is_symlink():
+                        return None
+                closed = required_json(self.bridge.directory / "closed" / path.name)
+                if (not isinstance(closed, Mapping)
+                        or set(closed) != {"request_digest", "task_id", "closed_at"}
+                        or closed["request_digest"] != digest(record)
+                        or closed["task_id"] != record["task_id"]
+                        or not timestamp(record["expires_at"]) <= timestamp(closed["closed_at"]) <= datetime.now(timezone.utc)):
+                    return None
+                matches.append({"request_id": record["request_id"],
+                                "request_digest": digest(record), "closed_at": closed["closed_at"]})
+        return matches[0] if len(matches) == 1 else None
+
     def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
         with self.bridge.custody():
             try:

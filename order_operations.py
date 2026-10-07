@@ -5134,6 +5134,9 @@ class OrderOperations:
             and pending.get("status") == "uncertain"
             and self.browser.checkout_payment_not_dispatched(pending["browser_review"], deadline=deadline)
         )
+        nondispatch_reader = getattr(self.browser, "checkout_nondispatch_evidence", None)
+        nondispatch_evidence = (nondispatch_reader(pending, deadline=deadline)
+                               if self.provider == "oda" and callable(nondispatch_reader) else None)
         confirmation_order_id = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
@@ -5143,6 +5146,11 @@ class OrderOperations:
         candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping)
                       and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids
                       and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in abandoned_order_ids]
+        merchant_list_unchanged = (
+            isinstance(after.get("orders"), list)
+            and all(isinstance(item, Mapping) and str(item.get("orderNumber") or item.get("order_number")
+                    or item.get("id") or "") in before_ids for item in after["orders"])
+        )
         exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                                  if self.provider == "mathem" else None)
         retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None
@@ -5501,6 +5509,16 @@ class OrderOperations:
                 if pending.get("recovery"):
                     self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
                         target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+            elif nondispatch_evidence and merchant_list_unchanged:
+                terminal = {"confirmed": False, "confirmation_id": pending["confirmation_id"],
+                            "expired": False, "order": None, "tracking": None,
+                            "payment_dispatched": False, "retry_allowed": False,
+                            "preparation_available": True, "nondispatch_evidence": nondispatch_evidence,
+                            "next": "The original delegation closed without action authority. Do not reuse this confirmation; prepare a fresh checkout."}
+                self._store_protected_result(state, pending["confirmation_id"], "checkout", terminal)
+                self._release_detached_checkout_usage(state, pending)
+                state["pending_checkout"] = None
+                return terminal
             elif expired_unpaid or undispatched_retryable:
                 self._release_detached_checkout_usage(state, pending)
                 state["pending_checkout"] = None

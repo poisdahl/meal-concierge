@@ -389,6 +389,7 @@ class NativeCoreRpcTests(NativeFixture):
         self.read_windows = []
         self.corrupt_effect_reply = False
         self.defer_delegation = False
+        self.skip_delegation = False
         self.deny_delegation = False
         self.pending_delegation = None
         self.final_label = "Bekreft og betal 35,00kr"
@@ -535,6 +536,13 @@ class NativeCoreRpcTests(NativeFixture):
                 for path in (self.directory / "requests").glob("*.json"):
                     if path.name not in self.produced:
                         record = read_json(path)
+                        if record["operation"] == "checkout_delegate" and self.skip_delegation:
+                            if self.skip_delegation in {"claim", "consume"}:
+                                claim_request(self.directory, record["request_id"], "original-task")
+                            if self.skip_delegation == "consume":
+                                consume_request(self.directory, record["request_id"], "original-task")
+                            self.produced.add(path.name)
+                            continue
                         claim_request(self.directory, record["request_id"], "original-task")
                         facts = self.facts(record)
                         state = ("waiting_for_information" if record["operation"] in DELEGATION_OPERATIONS
@@ -584,6 +592,121 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertTrue(self.rpc(cancellation)["cancelled"])
         self.assertTrue(self.rpc(cancellation)["cancelled"])
         self.assertEqual(self.effects, ["checkout_delegate", "cancellation_delegate"])
+
+    def unserved_delegation(self, skip=True):
+        self.browser.action_mode = "native_approval"
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.skip_delegation = skip
+        with core_fixtures.mock.patch("muse_browser.ACTION_OPERATION_TIMEOUT", 0.3):
+            self.rpc({"operation": "checkout", "action": "confirm",
+                      "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+        self.assertEqual(self.effects, [])
+        record = next(read_json(p) for p in (self.directory / "requests").glob("*.json")
+                      if read_json(p)["operation"] == "checkout_delegate")
+        return prepared, record
+
+    def test_expired_unclaimed_delegate_retires_without_replaying_confirmation(self):
+        prepared, record = self.unserved_delegation()
+        original = (self.directory / "requests" / (record["request_id"] + ".json")).read_bytes()
+        request = {"operation": "checkout", "action": "reconcile",
+                   "confirmation_id": prepared["confirmation_id"]}
+        result = self.rpc(request)
+        self.assertFalse(result["confirmed"])
+        self.assertFalse(result["payment_dispatched"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertTrue(result["preparation_available"])
+        self.assertEqual(result["nondispatch_evidence"]["request_digest"], digest(record))
+        self.assertIsNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.rpc(request)["nondispatch_evidence"], result["nondispatch_evidence"])
+        self.rpc({**request, "action": "confirm"}, expect_ok=False)
+        self.assertEqual(self.effects, [])
+        self.assertEqual((self.directory / "requests" / (record["request_id"] + ".json")).read_bytes(), original)
+        fresh = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.assertNotEqual(fresh["confirmation_id"], prepared["confirmation_id"])
+
+    def test_new_merchant_order_keeps_original_delegation_uncertain(self):
+        prepared, _ = self.unserved_delegation()
+        self.shop.orders.append({"order_number": "unrelated-order", "grossAmount": 70.0,
+            "deliveryDate": self.delivery_date, "deliverySlotDisplay": self.delivery,
+            "deliveryAddress": "Eksempelveien 1", "products": [{"product": {"id": 10},
+            "quantity": 2, "totalGrossAmount": "70.00"}]})
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        self.assertNotIn("preparation_available", result)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_changed_journal_binding_cannot_retire_unclaimed_delegate(self):
+        prepared, _ = self.unserved_delegation()
+        with self.store.locked() as state:
+            state["pending_checkout"]["browser_review"]["surface"]["items"][0]["title"] = "Other item"
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        self.assertFalse(result["retry_allowed"])
+        self.assertNotIn("preparation_available", result)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+
+    def test_claimed_delegate_does_not_gain_nondispatch_disposition(self):
+        prepared, _ = self.unserved_delegation(skip="claim")
+        self.rpc({"operation": "checkout", "action": "reconcile",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+
+    def test_consumed_delegate_preserves_uncertainty(self):
+        prepared, _ = self.unserved_delegation(skip="consume")
+        self.rpc({"operation": "checkout", "action": "reconcile",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
+
+    def test_dangling_claim_and_changed_closure_refuse_disposition(self):
+        prepared, record = self.unserved_delegation()
+        closed = self.directory / "closed" / (record["request_id"] + ".json")
+        original = read_json(closed)
+        closed.write_text(json.dumps({**original, "request_digest": "0" * 64}))
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        self.assertNotIn("preparation_available", result)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+        closed.write_text(json.dumps(original))
+        (self.directory / "claims" / closed.name).symlink_to(self.directory / "missing")
+        self.rpc({"operation": "checkout", "action": "reconcile",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_multiple_matching_delegations_cannot_retire_confirmation(self):
+        prepared, record = self.unserved_delegation()
+        other = self.record("checkout_delegate", payload=record["payload"],
+                            issued_at=record["issued_at"], expires_at=record["expires_at"])
+        durable_publish(self.directory / "closed" / (other["request_id"] + ".json"),
+                        {"request_digest": digest(other), "task_id": other["task_id"],
+                         "closed_at": datetime.now(timezone.utc).isoformat()})
+        self.produced.add(other["request_id"] + ".json")
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        self.assertNotIn("preparation_available", result)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_retirement_and_late_admission_cannot_both_succeed(self):
+        prepared, record = self.unserved_delegation()
+        outcomes = []
+        barrier = threading.Barrier(2)
+        def late_claim():
+            barrier.wait(5)
+            try:
+                claim_request(self.directory, record["request_id"], "original-task")
+                outcomes.append("claimed")
+            except HouseholdError:
+                outcomes.append("refused")
+        contender = threading.Thread(target=late_claim)
+        contender.start()
+        barrier.wait(5)
+        result = self.rpc({"operation": "checkout", "action": "reconcile",
+                           "confirmation_id": prepared["confirmation_id"]})
+        contender.join(5)
+        self.assertFalse(contender.is_alive())
+        self.assertEqual(outcomes, ["refused"])
+        self.assertTrue(result["preparation_available"])
+        self.assertEqual(self.effects, [])
 
     def test_unknown_id_requires_complete_matching_labels_and_exact_quantity(self):
         original = {**self.checkout_items[0], "product_id": None}
