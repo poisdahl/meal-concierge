@@ -435,6 +435,9 @@ class NativeCoreRpcTests(NativeFixture):
                    "complete_sections": ["receipt", "account"]}
         if operation == "order_binding":
             return receipt
+        if operation == "cancelled_checkout_binding":
+            return {"receipt": receipt, "checkout_completion": {
+                "request_id": record["payload"]["original_checkout_request_id"], "order_id": "new-order"}}
         if operation == "cancellation_review":
             return {"receipt": receipt, "dialog": {"text": "Vil du kansellere bestillingen? Ingen gebyr.",
                 "final_controls": [{"label": "Kanseller bestillingen min", "enabled": True}],
@@ -858,6 +861,137 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertEqual(self.store.read()["pending_checkout"]["status"], "uncertain")
         self.assertEqual(len([p for p in (self.directory / "requests").glob("*.json")
                               if read_json(p)["operation"] == "checkout_delegate"]), 1)
+
+    def cancelled_before_first_attribution(self):
+        self.browser.action_mode = "native_approval"
+        self.defer_delegation = True
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        self.rpc({"operation": "checkout", "action": "confirm",
+                  "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        record = self.pending_delegation
+        self.apply_effect(record)
+        self.shop.tracking = "cancelled"
+        end_request(self.directory, record["request_id"], "original-task",
+                    self.response(record, facts={"dispatch": "clicked_once"}))
+        self.assertNotIn("unpaid_order_id", self.store.read()["pending_checkout"])
+        return {"operation": "checkout", "action": "reconcile",
+                "confirmation_id": prepared["confirmation_id"]}, record
+
+    def test_cancelled_before_first_attribution_closes_original_rpc_without_replay(self):
+        preexisting = deepcopy(self.shop.orders)
+        request, _ = self.cancelled_before_first_attribution()
+        result = self.rpc(request)
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertEqual(result["order_id"], "new-order")
+        self.assertEqual(result["payment_resolution"], {"authorization_release": "unknown", "refund": "unknown"})
+        self.assertEqual(self.rpc(request), result)
+        self.rpc({**request, "action": "confirm"}, expect_ok=False)
+        self.rpc({"operation": "orders", "action": "cancel_prepare", "order_id": "new-order"}, expect_ok=False)
+        state = self.store.read()
+        self.assertIsNone(state["pending_checkout"])
+        self.assertIsNone(state["pending_cancellation"])
+        self.assertFalse(state["email_jobs"])
+        self.assertFalse(state["recurring_fulfilled"])
+        self.assertEqual(self.shop.orders[:-1], preexisting)
+        self.assertEqual(self.effects, ["checkout_delegate"])
+
+    def corrupt_cancelled_facts(self, change):
+        original = self.facts
+        def changed(record):
+            facts = original(record)
+            if record["operation"] == "cancelled_checkout_binding":
+                change(facts)
+            return facts
+        return core_fixtures.mock.patch.object(self, "facts", side_effect=changed)
+
+    def test_cancelled_candidate_requires_actual_original_completion_order(self):
+        request, _ = self.cancelled_before_first_attribution()
+        with self.corrupt_cancelled_facts(lambda facts: facts["checkout_completion"].update(order_id="another-order")):
+            self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, ["checkout_delegate"])
+
+    def test_cancelled_candidate_requires_current_original_account(self):
+        request, _ = self.cancelled_before_first_attribution()
+        with self.corrupt_cancelled_facts(lambda facts: facts["receipt"]["account"].update(
+                edit_urls=["https://oda.com/no/account/delivery/edit/8/"])):
+            self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_requires_genuine_original_ending(self):
+        request, record = self.cancelled_before_first_attribution()
+        ending = self.directory / "endings" / (record["request_id"] + ".json")
+        ending.unlink()
+        self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, ["checkout_delegate"])
+
+    def test_cancelled_candidate_rechecks_status_after_binding(self):
+        request, _ = self.cancelled_before_first_attribution()
+        with self.corrupt_cancelled_facts(lambda facts: setattr(self.shop, "tracking", "paid_and_modifiable")):
+            self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rechecks_original_journal_after_binding(self):
+        request, _ = self.cancelled_before_first_attribution()
+        def change(facts):
+            with self.store.locked() as state:
+                state["pending_checkout"]["candidate_binding_ambiguous"] = True
+        with self.corrupt_cancelled_facts(change):
+            self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_does_not_choose_between_identical_new_orders(self):
+        request, _ = self.cancelled_before_first_attribution()
+        another = deepcopy(self.shop.orders[-1])
+        another["order_number"] = "another-order"
+        self.shop.orders.append(another)
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_conflicting_provider_aliases(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders[-1]["orderNumber"] = "conflicting-order"
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_duplicate_merchant_identities(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders.append(deepcopy(self.shop.orders[0]))
+        self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_changed_currency(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders[-1]["currency"] = "SEK"
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_changed_goods(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders[-1]["products"][0]["quantity"] = 2
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_changed_amount(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders[-1]["grossAmount"] = 36
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+
+    def test_cancelled_candidate_rejects_changed_delivery(self):
+        request, _ = self.cancelled_before_first_attribution()
+        self.shop.orders[-1]["deliverySlotDisplay"] = self.delivery.replace("09:00", "08:00")
+        result = self.rpc(request)
+        self.assertFalse(result.get("cancelled", False))
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
 
     def test_unsupported_or_foreign_target_rejected_before_provider_or_host(self):
         before = len(self.shop.calls)

@@ -118,7 +118,7 @@ def request_record(directory, request_id, task_id, *, active=True):
             or type(record.get("owner_pid")) is not int or record["owner_pid"] <= 0
             or not isinstance(record.get("operation"), str)
             or record["operation"] not in ACTION_OPERATIONS | {"checkout_review",
-                "order_binding", "cancellation_review", "payment_state"}
+                "order_binding", "cancelled_checkout_binding", "cancellation_review", "payment_state"}
             or not isinstance(record.get("payload"), Mapping)
             or not isinstance(record.get("owner_start"), str)
             or not record["owner_start"].isdigit()
@@ -661,6 +661,53 @@ class MuseBrowser:
             facts = self.bridge.request("order_binding", {"order_id": order_id,
                        "preserve_payment_page": True}, deadline=deadline)
             return self._order_binding(order_id, order, facts, expected_binding, deadline)
+
+    def read_cancelled_checkout_binding(self, pending, order_id, order, *, expected_binding, deadline=None):
+        """Correlate an original completion with a fresh already-cancelled receipt."""
+        require_order_binding(expected_binding)
+        OdaBrowser._order_url(order_id)
+        if (self.action_mode != "native_approval" or pending.get("status") != "uncertain"
+                or pending.get("order_change") or pending.get("recovery")
+                or pending.get("automatic_checkout") or pending.get("unpaid_order_id")
+                or pending.get("authentication_unresolved") is not True):
+            raise HouseholdError("Muse cancelled checkout requires its original uncertain delegation")
+        binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
+                   "journal_digest": digest({**pending, "status": "clicking"})}
+        originals = []
+        with self.bridge.custody():
+            with transition_lock(self.bridge.directory):
+                for path in (self.bridge.directory / "requests").glob("*.json"):
+                    raw = required_json(path)
+                    payload = raw.get("payload") if isinstance(raw, Mapping) else None
+                    journal = payload.get("journal_binding") if isinstance(payload, Mapping) else None
+                    if not isinstance(journal, Mapping) or journal.get("confirmation_id") != pending["confirmation_id"]:
+                        continue
+                    _, record = request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)
+                    if (record["operation"] != "checkout_delegate" or record["payload"] != {
+                            "review": pending["browser_review"], "review_digest": digest(pending["browser_review"]),
+                            "effect": "one_final_new_order_click", "journal_binding": binding,
+                            "authorization": {"mode": "native_approval", "expiry_role": "admission",
+                                              "purchase_approval_required": True}}):
+                        raise HouseholdError("Muse original checkout delegation changed")
+                    name = record["request_id"] + ".json"
+                    ending_path = self.bridge.directory / "endings" / name
+                    ending = required_json(ending_path if ending_path.exists() else self.bridge.directory / "responses" / name)
+                    validate_response(record, ending, fresh=False)
+                    validate_claim(self.bridge.directory, record, response=ending)
+                    if ending["task_state"] != "completed" or ending["facts"] != {"dispatch": "clicked_once"}:
+                        raise HouseholdError("Muse original checkout has no known completed dispatch")
+                    originals.append(record)
+            if len(originals) != 1:
+                raise HouseholdError("Muse original checkout completion is unavailable or ambiguous")
+            original = originals[0]
+            facts = self.bridge.request("cancelled_checkout_binding", {
+                "order_id": order_id, "original_checkout_request_id": original["request_id"],
+                "original_request_digest": digest(original), "preserve_payment_page": True}, deadline=deadline)
+            if (set(facts) != {"receipt", "checkout_completion"}
+                    or facts["checkout_completion"] != {"request_id": original["request_id"], "order_id": order_id}
+                    or not isinstance(facts["receipt"], Mapping)):
+                raise HouseholdError("Muse original checkout completion does not identify this cancelled order")
+            return self._order_binding(order_id, order, facts["receipt"], expected_binding, deadline)
 
     def order_payment_state(self, order_id, *, deadline=None):
         OdaBrowser._order_url(order_id)

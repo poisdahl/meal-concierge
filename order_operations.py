@@ -5283,6 +5283,53 @@ class OrderOperations:
                     "retry_allowed": False,
                     "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     "next": "The exact merchant order is cancelled. Do not confirm or retry its payment."}
+        cancelled_binding_reader = getattr(self.browser, "read_cancelled_checkout_binding", None)
+        if (self.provider == "oda" and order is not None
+                and tracking_status in {"cancelled", "canceled"}
+                and candidate_id and candidate_id == details_id == tracking_id
+                and retained_unpaid_id is None and not candidate_ambiguous
+                and not candidate_evidence_unresolved and callable(cancelled_binding_reader)
+                and not pending.get("order_change") and not pending.get("recovery")
+                and not pending.get("automatic_checkout")):
+            # A cancelled order may precede the first successful attribution.
+            # Its original native completion must identify it; matching goods
+            # alone cannot attribute another actor's otherwise identical order.
+            for merchant_list in (pending["orders_before"], after):
+                rows = merchant_list.get("orders") if isinstance(merchant_list, Mapping) else None
+                if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+                    raise HouseholdError("Cancelled checkout reconciliation requires valid order lists")
+                identities = set()
+                for row in rows:
+                    identity = safe_order_id(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or ""))
+                    require_provider_identity(row, identity)
+                    if identity in identities:
+                        raise HouseholdError("Cancelled checkout reconciliation found duplicate order identities")
+                    identities.add(identity)
+            require_provider_identity(order, candidate_id)
+            require_provider_identity(tracking, candidate_id, tracking=True)
+            address = pending["summary"]["delivery"]["address"]
+            expected_binding = require_order_binding({
+                "account_reference_digest": pending["browser_review"].get("account_reference_digest"),
+                "receipt_address": address})
+            observed = cancelled_binding_reader(pending, candidate_id, order,
+                expected_binding=expected_binding, deadline=deadline)
+            if canonical(require_order_binding(observed)) != canonical(expected_binding):
+                raise HouseholdError("The cancelled order account differs from the pending checkout")
+            current = self.provider_client.call("get_order", {"order_number": candidate_id}, deadline=deadline)
+            current_tracking = self.provider_client.call("order_tracking", {"order_number": candidate_id}, deadline=deadline)
+            require_provider_identity(current, candidate_id)
+            require_provider_identity(current_tracking, candidate_id, tracking=True)
+            addressed = current if "deliveryAddress" in current or "delivery_address" in current else {
+                **current, "deliveryAddress": observed["receipt_address"]}
+            if (str(current_tracking.get("status") or "").casefold() not in {"cancelled", "canceled"}
+                    or not order_matches_checkout(addressed, pending["summary"], provider="oda")):
+                raise HouseholdError("The cancelled merchant order changed while verifying its receipt")
+            with self.store.locked() as state:
+                if state.get("pending_cancellation") or canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("The checkout changed while verifying merchant cancellation")
+                self._mark_order_cancelled(state, candidate_id, provider=self.provider, active_provider=self.provider)
+                self._archive_cancelled_checkout(state, pending, candidate_id)
+                return deepcopy(state["protected_results"][pending["confirmation_id"]]["result"])
         recovery_dispatched = bool(
             pending.get("recovery")
             and pending["recovery"].get("status") != "awaiting_confirmation"

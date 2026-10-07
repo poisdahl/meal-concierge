@@ -113,6 +113,23 @@ cancel_prepare` with the confirmed own order ID, then `cancel_confirm` or
 `cancel_reconcile` with the exact original confirmation and matching order.
 Existing core journals, delivery guards and confirmation policy remain in force.
 
+If an original delegated checkout was cancelled before its first successful
+reconciliation, reconcile that original confirmation. A unique matching order
+alone does not establish ownership. The `cancelled_checkout_binding` read carries
+the exact original delegation request ID/digest and candidate order ID. Its
+literal facts must be `{"checkout_completion":{"request_id":"original request",
+"order_id":"actual created order"},"receipt":{...}}`, where `receipt` is the
+ordinary complete `order_binding` observation. The trusted producer must obtain
+the created order reference from the retained **actual original checkout
+completion**, then separately read the fresh current cancelled receipt/account.
+Echoing the candidate ID, matching a total or copying historical checkout facts
+is insufficient. Missing completion provenance or receipt fields keeps the
+attempt uncertain. The core rechecks current merchant details and cancelled
+tracking before closing the unchanged journal. Its terminal result is
+`confirmed:false`, `cancelled:true`, `retry_allowed:false`, with refund and
+authorization release unknown. Only reconciliation of that terminal result is
+idempotent; it grants neither another payment nor cancellation authority.
+
 While the CLI waits, the trusted main native agent uses the installed
 [native producer commands](#native-producer-commands) to deliver browser evidence.
 Resolve the qualified source path and prepare invocation arguments before
@@ -199,7 +216,7 @@ exclusively published and fsynced. The producer must:
 
 An admitted delegation may remain pending after its waiter or original admission
 deadline expires. Preserve custody, the core `clicking`/`uncertain` journal and
-the original native task. Do not re-steer, create a replacement task, renew its
+the original native task. Do not repeat an effect steer, create a replacement task, renew its
 confirmation or claim that the old timed permit survived. A denied approval,
 missing acknowledgement or parent loss never grants replay. Return
 `{"dispatch":"clicked_once"}` only for a known actual single final action and
@@ -211,7 +228,16 @@ If a valid completed response already exists, preserve it rather than appending
 another ending. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
 
-After publishing a confirmation review, immediately serve each subsequent broker
+A documented information reply may resume the **same** admitted task when its
+actual retained action history establishes that no final effect occurred. The
+reply must answer the pending information request, preserve the original
+delegation and freshly recheck its complete scope before any proposal. It cannot
+invent platform approval, consume another permit or retry an attempted effect.
+Every actual platform/bank approval remains enforced separately. A purchase
+completed without an observed native purchase card does not qualify the required
+purchase-approval guarantee.
+
+During every CLI operation, including reconciliation, immediately serve each emitted broker
 request before waiting for the CLI's final result. A successful review can emit a
 separate action delegation with a thirty-second admission window. Waiting for
 CLI completion first leaves that delegation unserved.
