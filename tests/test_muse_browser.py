@@ -20,7 +20,8 @@ from clients import muse
 from muse_browser import (ACTION_OPERATIONS, DELEGATION_OPERATIONS, MuseBrowser,
                           NativeBridge, checkout_amounts, claim_request,
                           consume_request, digest, durable_publish, end_request,
-                          process_start, read_json, request_record, respond_request)
+                          original_checkout_completed, process_start, read_json,
+                          request_record, respond_request)
 from service import Server
 import test_meal_concierge as core_fixtures
 
@@ -862,7 +863,7 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertEqual(len([p for p in (self.directory / "requests").glob("*.json")
                               if read_json(p)["operation"] == "checkout_delegate"]), 1)
 
-    def cancelled_before_first_attribution(self):
+    def cancelled_before_first_attribution(self, *, rich_completion=False):
         self.browser.action_mode = "native_approval"
         self.defer_delegation = True
         self.shop.orders.append({"order_number": "preexisting-order", "currency": "NOK",
@@ -876,11 +877,71 @@ class NativeCoreRpcTests(NativeFixture):
         record = self.pending_delegation
         self.apply_effect(record)
         self.shop.tracking = "cancelled"
+        completion = (self.rich_checkout_completion() if rich_completion
+                      else {"dispatch": "clicked_once"})
         end_request(self.directory, record["request_id"], "original-task",
-                    self.response(record, facts={"dispatch": "clicked_once"}))
+                    self.response(record, facts=completion))
         self.assertNotIn("unpaid_order_id", self.store.read()["pending_checkout"])
         return {"operation": "checkout", "action": "reconcile",
                 "confirmation_id": prepared["confirmation_id"]}, record
+
+    def rich_checkout_completion(self):
+        return {"outcome": "completed", "order_number": "new-order",
+                "confirmation_url": "https://oda.com/no/checkout/success/?orderNumber=new-order",
+                "total": "35.00", "currency": "NOK",
+                "delivery_slot": f"{self.delivery_date} 09:00-12:00",
+                "delivery_address": "Eksempelveien 1", "payment_method": "saved Visa **** 1234",
+                "clicked_once": True, "receipt": "genuine browser-observed order confirmation page"}
+
+    def test_cancelled_rich_completion_closes_without_rewriting_or_replaying(self):
+        request, record = self.cancelled_before_first_attribution(rich_completion=True)
+        ending = self.directory / "endings" / (record["request_id"] + ".json")
+        original_bytes = ending.read_bytes()
+        preexisting = deepcopy(self.shop.orders[:-1])
+        result = self.rpc(request)
+        self.assertFalse(result["confirmed"])
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result["retry_allowed"])
+        self.assertEqual(result["payment_resolution"], {"authorization_release": "unknown", "refund": "unknown"})
+        request_count = len(list((self.directory / "requests").glob("*.json")))
+        provider_calls = len(self.shop.calls)
+        self.assertEqual(self.rpc(request), {**result, "idempotent": True})
+        self.assertEqual(len(list((self.directory / "requests").glob("*.json"))), request_count)
+        self.assertEqual(len(self.shop.calls), provider_calls)
+        self.assertEqual(ending.read_bytes(), original_bytes)
+        self.assertEqual(self.shop.orders[:-1], preexisting)
+        self.assertEqual(self.effects, ["checkout_delegate"])
+
+    def test_rich_completion_rejects_contradictory_or_ambiguous_historical_facts(self):
+        request, _ = self.cancelled_before_first_attribution(rich_completion=True)
+        pending = self.store.read()["pending_checkout"]
+        facts = self.rich_checkout_completion()
+        changes = [
+            {"clicked_once": 1}, {"clicked_once": False}, {"outcome": "unknown"},
+            {"order_number": "another-order"}, {"currency": "SEK"}, {"total": "34.00"},
+            {"total": "35e0"}, {"delivery_address": "Another address"},
+            {"payment_method": "saved Visa **** 5678"}, {"receipt": ""},
+            {"delivery_slot": f"{self.delivery_date} 09:00-13:00"},
+            {"delivery_slot": f"{int(self.delivery_date[:4]) + 1}{self.delivery_date[4:]} 09:00-12:00"},
+            {"confirmation_url": facts["confirmation_url"] + "&orderNumber=another-order"},
+            {"confirmation_url": facts["confirmation_url"].replace("oda.com", "oda.com.example.org")},
+            {"extra": "field"},
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                self.assertFalse(original_checkout_completed({**facts, **change}, pending, "new-order"))
+        for key in facts:
+            with self.subTest(missing=key):
+                incomplete = dict(facts)
+                del incomplete[key]
+                self.assertFalse(original_checkout_completed(incomplete, pending, "new-order"))
+        wrong_pending = deepcopy(pending)
+        wrong_pending["summary"]["payment_method"] = "vipps"
+        self.assertFalse(original_checkout_completed(facts, wrong_pending, "new-order"))
+        with self.corrupt_cancelled_facts(lambda observed: observed["checkout_completion"].update(order_id="another-order")):
+            self.rpc(request, expect_ok=False)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, ["checkout_delegate"])
 
     def test_cancelled_before_first_attribution_closes_original_rpc_without_replay(self):
         request, _ = self.cancelled_before_first_attribution()

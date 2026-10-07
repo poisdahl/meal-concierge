@@ -16,9 +16,10 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from zoneinfo import ZoneInfo
 
 from core import (CancellationPreconditionError, CheckoutPreconditionError,
-                  HouseholdError, checkout_payment_settings)
+                  HouseholdError, checkout_payment_settings, validate_delivery_slot)
 from checkout_identity import review_checkout_lines
 from clients.muse import private_directory, read_json as _read_json, timestamp
 from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
@@ -26,6 +27,7 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
                          cancellation_delivery_matches, cancellation_total_matches,
                          checkout_delivery_matches, oda_checkout_amount_minor,
                          require_order_binding)
+from service_common import money_cents
 
 
 CLICK_OPERATIONS = {"checkout_click", "cancellation_click"}
@@ -432,6 +434,37 @@ def address_text(value):
     return result
 
 
+def original_checkout_completed(facts, pending, order_id):
+    """Accept a retained native completion without rewriting its evidence."""
+    if facts == {"dispatch": "clicked_once"}:
+        return True
+    keys = {"outcome", "order_number", "confirmation_url", "total", "currency",
+            "delivery_slot", "delivery_address", "payment_method", "clicked_once", "receipt"}
+    if (not isinstance(facts, Mapping) or set(facts) != keys
+            or facts["clicked_once"] is not True
+            or any(not isinstance(facts[key], str) or not facts[key].strip()
+                   for key in keys - {"clicked_once"})
+            or facts["outcome"] != "completed" or facts["currency"] != "NOK"
+            or facts["order_number"] != order_id
+            or facts["confirmation_url"] != f"https://oda.com/no/checkout/success/?orderNumber={order_id}"
+            or re.fullmatch(r"(?:0|[1-9][0-9]*)\.[0-9]{2}", facts["total"]) is None):
+        return False
+    summary = pending["summary"]
+    delivery = summary["delivery"]
+    slot = validate_delivery_slot(delivery["slot"])
+    start, end = (datetime.fromisoformat(slot[key].replace("Z", "+00:00"))
+                  .astimezone(ZoneInfo("Europe/Oslo")) for key in ("start_at", "end_at"))
+    payment = re.fullmatch(r"saved Visa \*{4} ([0-9]{4})", facts["payment_method"])
+    return bool(
+        start.date() == end.date() and not (start.second or start.microsecond or end.second or end.microsecond)
+        and facts["delivery_slot"] == f"{start:%Y-%m-%d %H:%M}-{end:%H:%M}"
+        and money_cents(facts["total"]) == money_cents(summary["total"])
+        and address_text(facts["delivery_address"]).casefold() == address_text(delivery["address"]).casefold()
+        and summary.get("payment_method") == "saved_card" and payment
+        and pending["browser_review"].get("payment_display") == f"•••• {payment[1]}"
+    )
+
+
 def controls(value, pattern):
     if (not isinstance(value, list) or len(value) != 1
             or not isinstance(value[0], Mapping) or set(value[0]) != {"label", "enabled"}
@@ -694,7 +727,8 @@ class MuseBrowser:
                     ending = required_json(ending_path if ending_path.exists() else self.bridge.directory / "responses" / name)
                     validate_response(record, ending, fresh=False)
                     validate_claim(self.bridge.directory, record, response=ending)
-                    if ending["task_state"] != "completed" or ending["facts"] != {"dispatch": "clicked_once"}:
+                    if (ending["task_state"] != "completed"
+                            or not original_checkout_completed(ending["facts"], pending, order_id)):
                         raise HouseholdError("Muse original checkout has no known completed dispatch")
                     originals.append(record)
             if len(originals) != 1:
