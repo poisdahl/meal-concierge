@@ -129,6 +129,11 @@ tracking before closing the unchanged journal. Its terminal result is
 `confirmed:false`, `cancelled:true`, `retry_allowed:false`, with refund and
 authorization release unknown. Only reconciliation of that terminal result is
 idempotent; it grants neither another payment nor cancellation authority.
+Recovery also recognizes the original native detailed completion format when
+its exact order reference, confirmation URL, amount, address, saved card and
+absolute delivery window agree with the frozen checkout. This compatibility
+check preserves the immutable completion record and still requires the fresh
+completion-provenance and cancelled-receipt read above.
 
 While the CLI waits, the trusted main native agent uses the installed
 [native producer commands](#native-producer-commands) to deliver browser evidence.
