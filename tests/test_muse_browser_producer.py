@@ -18,6 +18,9 @@ from muse_browser_producer import ProducerError, parse_json
 
 SOURCE = Path(__file__).resolve().parents[1]
 PRODUCER = SOURCE / "muse_browser_producer.py"
+# Allow several real subprocesses to start while the source waiter is active;
+# cloud startup time must not replace the publication-custody assertions.
+WAITER_SECONDS = 30
 FACTS = {
     "url": "https://oda.com/no/checkout/confirm/",
     "account": {"url": "https://oda.com/no/account/delivery/",
@@ -65,12 +68,12 @@ class ProducerCLITests(unittest.TestCase):
         def waiter():
             try:
                 with self.bridge.custody():
-                    self.results.append(self.bridge.request("checkout_review", {}, deadline=time.monotonic() + 4))
+                    self.results.append(self.bridge.request("checkout_review", {}, deadline=time.monotonic() + WAITER_SECONDS))
             except HouseholdError as error:
                 self.errors.append(error)
         self.worker = threading.Thread(target=waiter)
         self.worker.start()
-        self.addCleanup(self.worker.join, 6)
+        self.addCleanup(self.worker.join, WAITER_SECONDS + 2)
         cutoff = time.monotonic() + 2
         while time.monotonic() < cutoff:
             paths = list((self.broker / "requests").glob("*.json"))
@@ -127,7 +130,7 @@ class ProducerCLITests(unittest.TestCase):
         self.assert_failure(self.run_cli("respond", b"{}"), "publish", "invocation_consumed")
         ending = self.run_cli("end", b'{"synthetic_ending":"incomplete native payload"}')
         self.assertEqual(ending.returncode, 0, ending.stderr)
-        self.worker.join(5)
+        self.worker.join(WAITER_SECONDS + 2)
         self.assertEqual(self.results, [])
         self.assertEqual(len(self.errors), 1)
         self.assertTrue((self.broker / "endings" / (self.key + ".json")).exists())
@@ -153,7 +156,7 @@ class ProducerCLITests(unittest.TestCase):
         self.assertTrue(self.worker.is_alive())
         self.assert_failure(self.run_cli("respond", json.dumps(FACTS).encode()),
                             "publish", "response_write_uncertain")
-        self.worker.join(5)
+        self.worker.join(WAITER_SECONDS + 2)
         self.assertEqual(self.results, [])
         self.assertEqual(len(self.errors), 1)
         self.assertEqual(list((self.broker / "responses").glob("*.json")), [])
