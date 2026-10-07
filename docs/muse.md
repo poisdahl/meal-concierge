@@ -186,7 +186,7 @@ exclusively published and fsynced. The producer must:
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
 5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
-   review/journal, then call `consume_request(...)` once **before one sole steer**
+   review/journal, then run `consume` once **before one sole steer**
    of the original task chain. Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
@@ -204,9 +204,11 @@ confirmation or claim that the old timed permit survived. A denied approval,
 missing acknowledgement or parent loss never grants replay. Return
 `{"dispatch":"clicked_once"}` only for a known actual single final action and
 its completed native receipt, never merely because delegation or approval
-occurred. A waiting response keeps the action unresolved. An actual late ending
-may close native custody through `respond_request`/`end_request`, without making
-old review facts fresh. Use ordinary checkout or cancellation reconciliation
+occurred. While the native task is waiting, preserve custody; the installed
+producer CLI accepts only genuine `completed` receipts. After actual completion,
+use `end` for late or unresolved custody, without making old review facts fresh.
+If a valid completed response already exists, preserve it rather than appending
+another ending. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
 
 After publishing a confirmation review, immediately serve each subsequent broker
