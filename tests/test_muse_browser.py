@@ -865,6 +865,11 @@ class NativeCoreRpcTests(NativeFixture):
     def cancelled_before_first_attribution(self):
         self.browser.action_mode = "native_approval"
         self.defer_delegation = True
+        self.shop.orders.append({"order_number": "preexisting-order", "currency": "NOK",
+            "grossAmount": 20.0, "deliveryDate": self.delivery_date,
+            "deliverySlotDisplay": self.delivery, "deliveryAddress": "Eksempelveien 1",
+            "products": [{"product": {"id": 20, "name": "Synthetic oats"},
+                          "quantity": 1, "totalGrossAmount": "20.00"}]})
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})
         self.rpc({"operation": "checkout", "action": "confirm",
                   "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
@@ -878,8 +883,9 @@ class NativeCoreRpcTests(NativeFixture):
                 "confirmation_id": prepared["confirmation_id"]}, record
 
     def test_cancelled_before_first_attribution_closes_original_rpc_without_replay(self):
-        preexisting = deepcopy(self.shop.orders)
         request, _ = self.cancelled_before_first_attribution()
+        preexisting = deepcopy(self.shop.orders[:-1])
+        self.assertEqual(len(preexisting), 1)
         result = self.rpc(request)
         self.assertFalse(result["confirmed"])
         self.assertTrue(result["cancelled"])
