@@ -203,6 +203,19 @@ may close native custody through `respond_request`/`end_request`, without making
 old review facts fresh. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
 
+After publishing a confirmation review, immediately serve each subsequent broker
+request before waiting for the CLI's final result. A successful review can emit a
+separate action delegation with a thirty-second admission window. Waiting for
+CLI completion first leaves that delegation unserved.
+
+An expired delegation that was never claimed can be closed through ordinary
+checkout reconciliation. The adapter verifies the exact original clicking
+journal and review, its genuine closed record, and absence of any claim,
+consumption or native reply. A competing delegation or changed binding keeps
+uncertainty. The core also checks the current merchant list, retains terminal
+nondispatch evidence and retires the original confirmation. Only a new checkout
+preparation is then available; the retired confirmation never grants an action.
+
 A completed task that refuses an action **before** consuming its permit may
 return exactly `{"dispatch":"not_dispatched"}`. The broker accepts that ending
 only when no consumed record exists and serializes it against consumption. It

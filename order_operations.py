@@ -5134,6 +5134,9 @@ class OrderOperations:
             and pending.get("status") == "uncertain"
             and self.browser.checkout_payment_not_dispatched(pending["browser_review"], deadline=deadline)
         )
+        nondispatch_reader = getattr(self.browser, "checkout_nondispatch_evidence", None)
+        nondispatch_evidence = (nondispatch_reader(pending, deadline=deadline)
+                               if self.provider == "oda" and callable(nondispatch_reader) else None)
         confirmation_order_id = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
@@ -5143,6 +5146,37 @@ class OrderOperations:
         candidates = [item for item in after.get("orders", []) if isinstance(item, Mapping)
                       and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in before_ids
                       and str(item.get("orderNumber") or item.get("order_number") or item.get("id") or "") not in abandoned_order_ids]
+        if nondispatch_evidence:
+            def exact_order_ids(value):
+                rows = value.get("orders") if isinstance(value, Mapping) else None
+                if not isinstance(rows, list) or any(not isinstance(row, Mapping) for row in rows):
+                    raise HouseholdError("Nondispatch reconciliation requires valid merchant order lists")
+                ids = set()
+                for row in rows:
+                    identity = safe_order_id(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or ""))
+                    require_provider_identity(row, identity)
+                    if identity in ids:
+                        raise HouseholdError("Nondispatch reconciliation found duplicate merchant order identities")
+                    ids.add(identity)
+                return ids
+            merchant_list_unchanged = exact_order_ids(after) <= exact_order_ids(pending.get("orders_before"))
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("checkout changed while verifying its unclaimed delegation")
+                if not merchant_list_unchanged:
+                    return {"confirmed": False, "confirmation_id": pending["confirmation_id"],
+                            "retry_allowed": False, "payment_dispatched": False,
+                            "preparation_available": False,
+                            "next": "Merchant orders changed outside the unclaimed delegation. Preserve this attempt; do not attribute another order or reuse its confirmation."}
+                terminal = {"confirmed": False, "confirmation_id": pending["confirmation_id"],
+                            "expired": False, "order": None, "tracking": None,
+                            "payment_dispatched": False, "retry_allowed": False,
+                            "preparation_available": True, "nondispatch_evidence": nondispatch_evidence,
+                            "next": "The original delegation closed without action authority. Do not reuse this confirmation; prepare a fresh checkout."}
+                self._store_protected_result(state, pending["confirmation_id"], "checkout", terminal)
+                self._release_detached_checkout_usage(state, pending)
+                state["pending_checkout"] = None
+                return terminal
         exact_failed_order_id = ((pending.get("payment_failure") or {}).get("order_id")
                                  if self.provider == "mathem" else None)
         retained_unpaid_id = pending.get("unpaid_order_id") if self.provider in {"oda", "mathem"} else None

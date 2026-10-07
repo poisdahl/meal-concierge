@@ -85,7 +85,9 @@ def guard_native_browser(request, state):
             record = state.get("protected_results", {}).get(confirmation)
             if (isinstance(record, Mapping) and record.get("kind") == "checkout"
                     and isinstance(record.get("result"), Mapping)
-                    and record["result"].get("confirmed") is True):
+                    and (record["result"].get("confirmed") is True
+                         or action == "reconcile" and record["result"].get("payment_dispatched") is False
+                         and isinstance(record["result"].get("nondispatch_evidence"), Mapping))):
                 return
             if not isinstance(pending, Mapping) or pending.get("confirmation_id") != confirmation:
                 raise HouseholdError("Muse checkout confirmation does not match its original journal")
