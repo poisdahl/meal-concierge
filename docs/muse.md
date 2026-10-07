@@ -113,8 +113,12 @@ cancel_prepare` with the confirmed own order ID, then `cancel_confirm` or
 `cancel_reconcile` with the exact original confirmation and matching order.
 Existing core journals, delivery guards and confirmation policy remain in force.
 
-While the CLI waits, the trusted main native agent produces the browser evidence
-through `muse_browser`'s public functions. Records are private, bounded to 64 KiB,
+While the CLI waits, the trusted main native agent uses the installed
+[native producer commands](#native-producer-commands) to deliver browser evidence.
+Resolve the qualified source path and prepare invocation arguments before
+steering. Do not handwrite or repair broker records, construct response envelopes,
+or substitute direct broker-function calls for those commands. The function names
+below describe the underlying contract. Records are private, bounded to 64 KiB,
 exclusively published and fsynced. The producer must:
 
 1. Read the complete emitted request. Its `task_id` is the original native task
@@ -122,9 +126,10 @@ exclusively published and fsynced. The producer must:
    must retain actual predecessor/successor receipts privately and verify the
    current execution belongs to that chain before every steer, effect or response.
    Do not echo the anchor as an invented current execution identity.
-   Call `claim_request(directory, request_id, task_id)`
-   once **before** steering. Requests expire after at most 540 seconds for reads
-   and 30 seconds for effects, or the remaining core deadline if shorter. An
+   Run the `claim` command once **before** steering; it calls
+   `claim_request(directory, request_id, task_id)`. Requests expire after at most
+   540 seconds for reads and 30 seconds for effects, or the remaining core
+   deadline if shorter. An
    action also carries the original core `confirmation_id`, `expires_at` and
    digest of its persisted clicking journal in `payload.journal_binding`; its
    admission expiry cannot extend that original confirmation. The default mode
@@ -166,21 +171,22 @@ exclusively published and fsynced. The producer must:
    the same live request, without navigating away to the account page. Finish
    with an unchanged complete surface and return once within the remaining
    budget. Partial fragments never constitute checkout evidence.
-3. Return `request_id`, `request_digest` (canonical `digest(request)`), `task_id`,
-   `observed_at` (actual main-runtime completion/handoff UTC), `task_state`
-   (`completed` or `waiting_for_information`) and operation-specific `facts` via
-   `respond_request(...)`. Preserve the original raw handoff/activity and actual
-   execution ending privately. These are host-attested observations, not
+3. Immediately pass the literal operation-specific facts on closed stdin to
+   `respond`, with the actual main-runtime completion/handoff UTC. The command
+   constructs the bound response envelope and invokes `respond_request(...)`;
+   do not debug formats or permissions after the observation arrives. Preserve
+   the original raw handoff/activity and actual execution ending privately.
+   These are host-attested observations, not
    independently verified DOM evidence or an atomic browser transaction.
 4. For a timed `*_click`, recheck the live original owner, expiry, exact fresh review,
    unique enabled control and current authorization immediately before action.
-   Call `consume_request(...)` once, then dispatch only the requested final
+   Run `consume` once, then dispatch only the requested final
    effect. A pause, approval, expiry or lost result never authorizes resending the
    old effect. Return only `{"dispatch":"clicked_once"}` after an actual known
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
 5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
-   review/journal, then call `consume_request(...)` once **before one sole steer**
+   review/journal, then run `consume` once **before one sole steer**
    of the original task chain. Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
@@ -198,9 +204,11 @@ confirmation or claim that the old timed permit survived. A denied approval,
 missing acknowledgement or parent loss never grants replay. Return
 `{"dispatch":"clicked_once"}` only for a known actual single final action and
 its completed native receipt, never merely because delegation or approval
-occurred. A waiting response keeps the action unresolved. An actual late ending
-may close native custody through `respond_request`/`end_request`, without making
-old review facts fresh. Use ordinary checkout or cancellation reconciliation
+occurred. While the native task is waiting, preserve custody; the installed
+producer CLI accepts only genuine `completed` receipts. After actual completion,
+use `end` for late or unresolved custody, without making old review facts fresh.
+If a valid completed response already exists, preserve it rather than appending
+another ending. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
 
 After publishing a confirmation review, immediately serve each subsequent broker
