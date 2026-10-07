@@ -176,6 +176,9 @@ def respond_request(directory, request_id, task_id, response):
     directory = broker_paths(directory)
     with transition_lock(directory):
         directory, record = request_record(directory, request_id, task_id, active=False)
+        ending_path = directory / "endings" / (request_id + ".json")
+        if ending_path.exists() or ending_path.is_symlink():
+            raise HouseholdError("Muse browser task already ended; no new response is accepted")
         validate_response(record, response, fresh=False)
         if response["task_state"] != "completed":
             request_record(directory, request_id, task_id)

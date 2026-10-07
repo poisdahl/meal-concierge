@@ -126,6 +126,40 @@ class NativeFixture(unittest.TestCase):
 
 
 class NativeBrokerTests(NativeFixture):
+    def test_ending_and_response_are_serialized_terminal_alternatives(self):
+        record = self.record("checkout_review")
+        key = record["request_id"]
+        claim_request(self.directory, key, "original-task")
+        barrier = threading.Barrier(2)
+        outcomes = []
+        def terminal(function, name):
+            barrier.wait(2)
+            try:
+                function(self.directory, key, "original-task", self.response(record))
+                outcomes.append(name)
+            except HouseholdError:
+                outcomes.append("refused")
+        ending = threading.Thread(target=terminal, args=(end_request, "ending"))
+        response = threading.Thread(target=terminal, args=(respond_request, "response"))
+        ending.start()
+        response.start()
+        ending.join(3)
+        response.join(3)
+        self.assertFalse(ending.is_alive())
+        self.assertFalse(response.is_alive())
+        self.assertEqual(outcomes.count("refused"), 1)
+        self.assertEqual(sum((self.directory / kind / (key + ".json")).exists()
+                             for kind in ("responses", "endings")), 1)
+
+    def test_symlinked_ending_also_prevents_new_response(self):
+        record = self.record("checkout_review")
+        key = record["request_id"]
+        claim_request(self.directory, key, "original-task")
+        (self.directory / "endings" / (key + ".json")).symlink_to(self.directory / "missing")
+        with self.assertRaises(HouseholdError):
+            respond_request(self.directory, key, "original-task", self.response(record))
+        self.assertFalse((self.directory / "responses" / (key + ".json")).exists())
+
     def test_long_read_stays_live_but_overlong_action_is_rejected(self):
         issued = datetime.now(timezone.utc) - timedelta(seconds=181)
         record = self.record("checkout_review", issued_at=issued.isoformat(),
@@ -427,6 +461,67 @@ class NativeCoreRpcTests(NativeFixture):
         self.assertEqual(self.app._checkout_operation_timeout(), 240)
         self.app.provider = "meny"
         self.assertEqual(self.app._checkout_operation_timeout(), 600)
+
+    def test_public_producer_serves_ordinary_cli_preparation_over_real_socket(self):
+        source = Path(__file__).resolve().parents[1]
+        producer = source / "muse_browser_producer.py"
+        sock = self.directory / "rpc.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(sock))
+        listener.listen(1)
+        listener.settimeout(15)
+        server = Server(sock, os.getgid(), os.getuid(), self.app)
+        # A failed synthetic handoff must not leave an unbounded core worker.
+        self.app._checkout_operation_timeout = lambda: 10
+        server_errors, cli_results = [], []
+        def serve_once():
+            try:
+                # Ordinary RPC first verifies health, then sends checkout.
+                for _ in range(2):
+                    connection, _ = listener.accept()
+                    server._serve(connection)
+            except Exception as error:
+                server_errors.append(error)
+        serving = threading.Thread(target=serve_once)
+        serving.start()
+        self.addCleanup(serving.join, 16)
+        def invoke_cli():
+            cli_results.append(subprocess.run(
+                [sys.executable, "-I", "-B", str(source / "cli.py")],
+                input=b'{"operation":"checkout","action":"prepare"}',
+                env={**os.environ, "MEAL_CONCIERGE_SOCKET": str(sock)},
+                capture_output=True, timeout=15))
+        caller = threading.Thread(target=invoke_cli)
+        caller.start()
+        self.addCleanup(caller.join, 16)
+        path = wait_for(lambda: next((self.directory / "requests").glob("*.json"), None))
+        record = read_json(path)
+        common = ["--directory", str(self.directory), "--request-id", path.stem,
+                  "--task-id", "original-task"]
+        def command(name, data=b"", extra=()):
+            result = subprocess.run([sys.executable, "-I", "-B", str(producer), name,
+                                     *common, *extra], input=data, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+        command("claim")
+        # This is the synthetic transport control, not proof of native browser inspection.
+        command("respond", json.dumps(self.facts(record), ensure_ascii=False).encode(),
+                ["--observed-at", datetime.now(timezone.utc).isoformat(),
+                 "--ending-state", "completed"])
+        caller.join(5)
+        serving.join(5)
+        self.assertFalse(caller.is_alive())
+        self.assertFalse(serving.is_alive())
+        self.assertEqual(server_errors, [])
+        self.assertEqual(cli_results[0].returncode, 0, cli_results[0].stderr)
+        reply = json.loads(cli_results[0].stdout)
+        self.assertIs(reply["ok"], True)
+        prepared = reply["result"]
+        self.assertIn("confirmation_id", prepared)
+        self.assertIsNotNone(self.store.read()["pending_checkout"])
+        self.assertEqual(self.effects, [])
+        self.assertEqual(list((self.directory / "consumed").glob("*.json")), [])
 
     def rpc(self, request, *, expect_ok=True):
         client, connection = socket.socketpair()
