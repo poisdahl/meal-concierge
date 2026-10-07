@@ -965,8 +965,7 @@ class NativeCoreRpcTests(NativeFixture):
     def test_cancelled_candidate_rejects_conflicting_provider_aliases(self):
         request, _ = self.cancelled_before_first_attribution()
         self.shop.orders[-1]["orderNumber"] = "conflicting-order"
-        result = self.rpc(request)
-        self.assertFalse(result.get("cancelled", False))
+        self.rpc(request, expect_ok=False)
         self.assertIsNotNone(self.store.read()["pending_checkout"])
 
     def test_cancelled_candidate_rejects_duplicate_merchant_identities(self):
