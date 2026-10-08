@@ -17,6 +17,7 @@ import client_package_probe as probe
 from core import StateStore
 from recipes import RecipeStore
 from service import Application, config
+from measure_agent_catalog import measure
 
 
 class OfflineStore:
@@ -52,8 +53,29 @@ def fixture(root):
     return store.read()['profile'], refs, [bank.get(ref['recipe_ref']['id']) for ref in refs]
 
 
-def run(root):
+def run(root, metadata=None):
     profile, refs, recipes = fixture(root)
+    probe.write_json(root / 'benchmark-context.json', {
+        'schema_version': 1, 'host': 'claude-code',
+        'host_version': None, 'model': None, 'tool_loading': 'unknown',
+        **(metadata or {}), 'metadata_source': 'operator supplied; unknown unless specified',
+        'catalog': measure(), 'live_store_access': False,
+    })
+    try:
+        journeys(root, profile, refs, recipes)
+    except BaseException:
+        probe.append(root / 'journey-metrics.jsonl', {
+            'kind': 'run_verdict', 'task_and_safety_assertions': 'not_completed',
+            'meaning': 'Failure or interruption; inspect private logs. This is not a safety violation classification.',
+        })
+        raise
+    else:
+        probe.append(root / 'journey-metrics.jsonl', {
+            'kind': 'run_verdict', 'task_and_safety_assertions': 'passed',
+        })
+
+
+def journeys(root, profile, refs, recipes):
     original_command = probe.claude_command
     def command(*args, **kwargs):
         result = original_command(*args, **kwargs)
@@ -64,11 +86,20 @@ def run(root):
         return json.loads((root / 'state/state.json').read_text())
     def native(name,prompt,**kwargs):
         start = len(probe.records(root)); clock = time.monotonic()
-        events = probe.native(root,'claude-code',plugin,name,prompt,**kwargs)
-        calls = probe.records(root)[start:]
-        probe.append(root / 'journey-metrics.jsonl', {'case':name,'calls':len(calls),'seconds':round(time.monotonic()-clock,2),
-            'errors':sum('error' in call for call in calls), 'conversation_log':str(root / (name+'.jsonl'))})
-        return events
+        completion = 'interrupted_or_failed'
+        try:
+            events = probe.native(root,'claude-code',plugin,name,prompt,**kwargs)
+            completion = 'returned'
+            return events
+        finally:
+            calls = probe.records(root)[start:]
+            probe.append(root / 'journey-metrics.jsonl', {
+                'kind': 'native_attempt', 'case': name, 'native_completion': completion,
+                'service_calls_completed_before_client_exit': len(calls),
+                'seconds': round(time.monotonic()-clock,2),
+                'service_errors': sum('error' in call for call in calls),
+                'behavioral_verdict': 'see final run_verdict; client return alone is not success',
+            })
     with probe.service(root):
         plugin = probe.build('claude-code',root,root / 'claude-package')
         native('report','The lentil carrot skillet in my saved plan took 70 minutes of active work, and the portions were too small. Please remember that experience for future meal choices.')
@@ -122,7 +153,11 @@ def run(root):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',required=True,type=Path)
+    parser.add_argument('--host-version', help='Known client version; otherwise recorded as unknown')
+    parser.add_argument('--model', help='Known model identifier; otherwise recorded as unknown')
+    parser.add_argument('--tool-loading', choices=('unknown', 'deferred', 'eager'), default='unknown',
+                        help='Observed/documented host behavior; do not infer from server tool count')
     args=parser.parse_args()
     assert args.root.is_absolute()
     probe.attestation()
-    run(args.root)
+    run(args.root, {'host_version': args.host_version, 'model': args.model, 'tool_loading': args.tool_loading})
