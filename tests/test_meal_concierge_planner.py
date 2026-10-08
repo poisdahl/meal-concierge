@@ -195,6 +195,9 @@ class WeeklyPlannerTests(unittest.TestCase):
                 payload, self.payload = self.payload, b""
                 return payload
 
+            def settimeout(self, _timeout):
+                pass
+
             def sendall(self, value):
                 self.sent += value
 

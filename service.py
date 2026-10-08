@@ -1070,12 +1070,20 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
 from runtime_ownership import ownership, listener_ownership
 
 
+# One household normally has only a few callers. Leave headroom for status and
+# recovery alongside long provider operations, without an unbounded work queue.
+MAX_RPC_CONNECTIONS = 32
+RPC_FRAME_TIMEOUT = 10.0
+RPC_WRITE_TIMEOUT = 10.0
+
+
 class Server:
     def __init__(self, path: Path, group: int, allowed_uid: int, app: Application):
         self.path = path
         self.group = group
         self.allowed_uid = allowed_uid
         self.app = app
+        self._connections = threading.BoundedSemaphore(MAX_RPC_CONNECTIONS)
 
     def run(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1086,19 +1094,50 @@ class Server:
             listener.listen(16)
             while True:
                 connection, _ = listener.accept()
-                threading.Thread(target=self._serve, args=(connection,), daemon=True).start()
+                self._start_worker(connection)
+
+    def _start_worker(self, connection: socket.socket) -> bool:
+        if not self._connections.acquire(blocking=False):
+            # No request was read or dispatched. Do not block the accept loop
+            # trying to explain overload to a client that may never read.
+            connection.close()
+            return False
+        try:
+            threading.Thread(target=self._serve_admitted, args=(connection,), daemon=True).start()
+        except Exception:
+            connection.close()
+            self._connections.release()
+            raise
+        return True
+
+    def _serve_admitted(self, connection: socket.socket) -> None:
+        try:
+            self._serve(connection)
+        finally:
+            self._connections.release()
 
     def _serve(self, connection: socket.socket) -> None:
         with connection:
-            uid = peer_uid(connection)
-            if uid not in {0, self.allowed_uid}:
-                return
-            data = b""
-            while b"\n" not in data and len(data) <= MAX_REQUEST:
-                chunk = connection.recv(65536)
-                if not chunk:
+            try:
+                uid = peer_uid(connection)
+                if uid not in {0, self.allowed_uid}:
                     return
-                data += chunk
+                data = b""
+                deadline = time.monotonic() + RPC_FRAME_TIMEOUT
+                while b"\n" not in data and len(data) <= MAX_REQUEST:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return
+                    connection.settimeout(remaining)
+                    chunk = connection.recv(65536)
+                    if not chunk:
+                        return
+                    data += chunk
+                # This deadline covers transport only. A started operation must
+                # finish its journal/reconciliation even if the caller leaves.
+                connection.settimeout(None)
+            except OSError:
+                return
             try:
                 line, separator, _remainder = data.partition(b"\n")
                 if not separator or len(line) > MAX_REQUEST:
@@ -1120,8 +1159,9 @@ class Server:
             except (TypeError, ValueError, UnicodeError):
                 encoded = (json.dumps({"ok": False, "error": "response contains an invalid JSON value"}) + "\n").encode()
             try:
+                connection.settimeout(RPC_WRITE_TIMEOUT)
                 connection.sendall(encoded)
-            except (BrokenPipeError, ConnectionResetError):
+            except OSError:
                 return
 
 

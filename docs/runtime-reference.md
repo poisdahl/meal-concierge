@@ -9,6 +9,30 @@ Installation, service lifecycle and agent attachment
 are separate commands. The installer never registers an agent, logs in, transfers
 schedulers, sends messages or performs grocery actions.
 
+## Local RPC resource limits
+
+The household service accepts at most 32 active Unix-socket connections, with
+no application work queue. Additional connections are closed before their
+requests are read. Admitted callers have ten seconds in total to send a complete
+newline-terminated request; sending individual bytes does not extend that
+deadline. After the operation finishes, sending its response has a separate
+ten-second limit. Existing peer-UID checks and request-size limits still apply.
+
+These limits bound local transport resource use. They do not cancel operations,
+add provider execution deadlines, or reserve capacity for health and recovery
+requests: all 32 slots can still be occupied by long operations. The limit leaves
+headroom for normal household concurrency, rather than promising availability
+under saturation. Existing operation deadlines and reconciliation remain in
+force. Do not restart a service with uncertain external work merely to clear
+occupied slots.
+
+A missing response or closed connection does not establish whether a request
+was dispatched. Even though overload rejection occurs before dispatch, clients
+cannot distinguish it from losing a response after dispatch. Reconcile uncertain
+purchases, cancellations and other external actions before attempting them
+again. Once a request reaches the application, its journaling and reconciliation
+continue even if its client disconnects or cannot receive the response.
+
 ## Install and attach
 
 Use Python 3.10+ for the installer and install `uv` on PATH, or pass its verified
