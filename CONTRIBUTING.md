@@ -47,6 +47,21 @@ and are not part of the default CI run. Describe separately any synthetic tests,
 authenticated reads and explicitly authorized live operations you performed;
 a synthetic pass does not establish live payment or delivery success.
 
+CI keeps the full synthetic suite and real MCP transport probe on Ubuntu under
+the existing `Meal Concierge CI` check with Python 3.12.12. A separate
+`Meal Concierge macOS smoke` job uses macOS 15, Python 3.12.10, and the same
+dependency pins. The Actions Python runtime manifest does not provide a macOS
+build of Python 3.12.12, so the macOS job pins the latest supported 3.12 patch
+available there rather than claiming an identical patch-level runtime. It runs
+the synthetic installer and browser-setting boundaries, then the real
+SDK/stdio/Unix socket probe, including kernel peer credentials on the runner.
+That probe explicitly attests Python 3.12.10 for the macOS job; Linux continues
+to attest Python 3.12.12. Installer tests cover
+launchd lifecycle commands with mocks; they do not install a persistent launchd
+service. This smoke job does not establish live browser login, a working desktop
+agent, or retailer/payment behavior. It does not change branch protection;
+maintainers can evaluate its results before making it a required check.
+
 ## Behavioral boundaries
 
 Changes must preserve the installation's authorization policy and store, bank,

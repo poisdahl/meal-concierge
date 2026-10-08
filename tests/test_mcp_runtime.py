@@ -1,7 +1,9 @@
 """MC-01: real SDK/stdio bridge -> real Unix Server/Application, synthetic Mathem.
 
 Run in a fresh Python 3.12.12 venv with mcp-requirements.txt, using python -I.
-This deliberately lives outside the dependency-light fleet unittest roots.
+The macOS smoke sets MC01_MACOS_SMOKE=1 to attest its pinned Python 3.12.10
+patch, the compatible build available on the macOS runner. This deliberately
+lives outside the dependency-light fleet unittest roots.
 --codex additionally runs an installed, already authenticated Codex CLI; it
 does not register a server or change saved client configuration.
 """
@@ -32,7 +34,8 @@ sys.path[:0] = [str(CORE), str(HERE.parent), str(ROOT)]
 
 
 def isolated_runtime():
-    assert sys.version_info[:3] == (3, 12, 12), "tested runtime is Python 3.12.12"
+    expected_python = (3, 12, 10) if os.environ.get("MC01_MACOS_SMOKE") == "1" else (3, 12, 12)
+    assert sys.version_info[:3] == expected_python, f"tested runtime is Python {'.'.join(map(str, expected_python))}"
     assert sys.flags.isolated and sys.prefix != sys.base_prefix, "use a fresh venv with python -I"
     assert "include-system-site-packages = false" in (Path(sys.prefix) / "pyvenv.cfg").read_text()
     for name in ("hermes_cli", "hermes_agent", "tools"):
@@ -142,7 +145,9 @@ def household():
         }))
         with (root / "service.log").open("w+") as log:
             process = subprocess.Popen([sys.executable, "-I", str(HERE), "--serve", str(root)],
-                                       env={"PATH": os.defpath, "HOME": str(root)}, stdout=log, stderr=log)
+                                       env={"PATH": os.defpath, "HOME": str(root),
+                                            "MC01_MACOS_SMOKE": os.environ.get("MC01_MACOS_SMOKE", "0")},
+                                       stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 10
                 while not (root / "service.sock").exists():
@@ -171,8 +176,10 @@ async def session(root, *, killable=False, socket=None):
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
     args = ["-I", str(HERE), "--bridge", str(root)] if killable else ["-I", str(CORE / "mcp_server.py")]
-    params = StdioServerParameters(command=sys.executable, args=args,
-                                  env={"MEAL_CONCIERGE_SOCKET": str(socket or root / "service.sock"), "HOME": str(root)}, cwd=str(root))
+    server_env = {"MEAL_CONCIERGE_SOCKET": str(socket or root / "service.sock"), "HOME": str(root)}
+    if os.environ.get("MC01_MACOS_SMOKE") == "1":
+        server_env["MC01_MACOS_SMOKE"] = "1"
+    params = StdioServerParameters(command=sys.executable, args=args, env=server_env, cwd=str(root))
     with (root / "bridge.log").open("a") as log:
         async with stdio_client(params, errlog=log) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=15) as client:
