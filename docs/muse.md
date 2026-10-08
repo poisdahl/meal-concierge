@@ -515,6 +515,35 @@ readiness `unknown`, and browser readiness `not_configured`, with limited-client
 guidance. These values do not imply a failed login. Generic OAuth or Chrome setup
 from another Meal Concierge client is outside this client.
 
+## Resume after a guest restart
+
+The CLI forwards to an existing service; it never starts one. Before serving a
+new request, load a nonsecret startup note from the existing private workspace.
+Retain the exact reviewed source, interpreter, home and original run arguments
+there, together with the owned native execution identity. Keep credentials and
+secret-bearing proxy environment values out of that note.
+
+1. Check the original execution and service health. Reuse a healthy, correctly
+   owned runner. A missing socket or failed health check alone does not prove
+   that its service, workers or native browser task ended.
+2. If the guest restarted or the service disappeared, inspect the actual prior
+   owner and workers, shared provider/browser locks and outstanding broker
+   custody. Resolve pending native work before replacement; retain its original
+   journals, completion records and task chain.
+3. Once replacement is permitted, start the same foreground command above in
+   Muse's native background executor, with the original protected/browser flags
+   when configured. Reuse the existing home and broker; never repeat `init`,
+   detach the runner or copy credentials to restore it. Retain the new running
+   execution identity and verify ordinary health/status before continuing.
+4. In protected mode, a latched authorization rejection still requires Muse's
+   supported provider recovery and a quiet owned-service restart. Restoring the
+   runner does not refresh OAuth or authorize replaying the failed operation.
+   Read `status.workflow.next_action` and reconcile any uncertain original
+   mutation instead of resubmitting it.
+
+This request-time recovery does not establish an always-on service, scheduling,
+OAuth refresh durability or purchase-approval readiness.
+
 ## Fulfil a catalog observation
 
 1. Start a catalog CLI request in a second native background execution, such as
