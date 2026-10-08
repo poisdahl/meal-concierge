@@ -6,12 +6,16 @@ import os
 from pathlib import Path
 import socket
 import sys
+import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from service import Server
+from core import StateStore
+from service import Application, Server
+from test_meal_concierge import CONFIG, FakeMeny, ODA_FIXTURE_NOW
 
 
 class RpcResilienceTests(unittest.TestCase):
@@ -134,6 +138,74 @@ class RpcResilienceTests(unittest.TestCase):
             self.wait_released(server)
         app.handle.assert_called_once()
         self.assertEqual(accepted.fileno(), -1)
+
+    def test_long_checkout_completes_durably_after_disconnect_without_redispatch(self):
+        entered = threading.Event()
+        finish = threading.Event()
+        self.addCleanup(finish.set)
+
+        class SlowMeny(FakeMeny):
+            def submit_checkout(self, *args, **kwargs):
+                super().submit_checkout(*args, **kwargs)
+                entered.set()
+                if not finish.wait(20):
+                    raise AssertionError("test did not release checkout")
+                self.confirmation_order_id = "synthetic-completed-order"
+                self.orders.append({
+                    "orderNumber": self.confirmation_order_id,
+                    "order_number": self.confirmation_order_id,
+                    "id": self.confirmation_order_id, "status": "confirmed",
+                    "grossAmount": 40.0,
+                    "deliverySlotDisplay": "torsdag 3. sep. kl. 09:00-12:00",
+                    "productQuantityCount": 1,
+                    "products": [{"identity": "Brokkoli 400g", "name": "Brokkoli 400g", "quantity": 1}],
+                })
+                return {"awaiting_user_payment": False, "payment": "vipps"}
+
+        with tempfile.TemporaryDirectory() as temp, mock.patch("service.now", return_value=ODA_FIXTURE_NOW):
+            config = {**CONFIG, "provider": "meny"}
+            store = StateStore(Path(temp), config)
+            provider = SlowMeny()
+            app = Application(store, provider, None)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            confirmation_id = prepared["confirmation_id"]
+            request = {"operation": "checkout", "action": "confirm", "confirmation_id": confirmation_id}
+            server = self.server(app, capacity=1)
+            client, accepted = self.pair()
+            client.sendall((json.dumps(request) + "\n").encode())
+            self.assertTrue(server._start_worker(accepted))
+            try:
+                self.assertTrue(entered.wait(5))
+                # Exercise the real ten-second limits without shortening or
+                # mocking monotonic time. Checkout is still executing afterward.
+                time.sleep(10.1)
+                self.assertIsNone(accepted.gettimeout())
+                self.assertFalse(server._connections.acquire(blocking=False))
+                self.assertEqual(StateStore(Path(temp), config).read()["pending_checkout"]["status"], "clicking")
+                client.close()
+            finally:
+                finish.set()
+            self.wait_released(server)
+
+            reopened = StateStore(Path(temp), config)
+            completed = reopened.read()
+            self.assertIsNone(completed["pending_checkout"])
+            result = completed["protected_results"][confirmation_id]["result"]
+            self.assertTrue(result["confirmed"])
+            self.assertEqual(result["order_id"], "synthetic-completed-order")
+            server.app = Application(reopened, provider, None)
+            for action in ("reconcile", "confirm"):
+                client, accepted = self.pair()
+                client.sendall((json.dumps({**request, "action": action}) + "\n").encode())
+                self.assertTrue(server._start_worker(accepted))
+                with client.makefile("rb") as response:
+                    replay = json.loads(response.readline())
+                self.assertTrue(replay["ok"])
+                self.assertTrue(replay["result"]["confirmed"])
+                self.assertTrue(replay["result"]["idempotent"])
+                self.assertEqual(replay["result"]["order_id"], result["order_id"])
+                self.wait_released(server)
+            self.assertEqual(provider.checkout_clicks, 1)
 
     def test_unauthorized_peer_releases_admission_without_dispatch(self):
         server = self.server(capacity=1)
