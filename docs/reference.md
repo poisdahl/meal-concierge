@@ -291,6 +291,13 @@ MENY does not document a public customer API or MCP service. Its adapter uses
 the logged-in website's visible controls and exact `meny.no` product paths
 rather than private web endpoints. The service requires a persistent MENY login
 so store, lists, offers, cart and orders all belong to the intended account.
+MENY connection readiness records the last explicit provider probe. A successful
+household operation, including a local ingredient update or replayed checkout
+result, does not establish a verified connection. Ordinary provider reads also
+leave that connection evidence unchanged. When readiness is unavailable or login
+is required, normal service status runs the existing guarded probe; it skips the
+probe while an unresolved checkout or uncertain cart write needs reconciliation.
+Connection readiness does not establish checkout or payment readiness.
 MENY checkout requires home delivery and Vipps as the payment method. Prepare
 verifies the unchanged cart, reviewed amounts, delivery window and selected
 Vipps method. Confirm submits once: an actual Vipps request requires phone
