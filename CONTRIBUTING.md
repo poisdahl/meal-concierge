@@ -53,7 +53,7 @@ the existing `Meal Concierge CI` check with Python 3.12.12. A separate
 dependency pins. The Actions Python runtime manifest does not provide a macOS
 build of Python 3.12.12, so the macOS job pins the latest supported 3.12 patch
 available there rather than claiming an identical patch-level runtime. It runs
-the synthetic installer and browser-setting boundaries, then the real
+the synthetic installer, browser-setting and atomic-state durability boundaries, then the real
 SDK/stdio/Unix socket probe, including kernel peer credentials on the runner.
 That probe explicitly attests Python 3.12.10 for the macOS job; Linux continues
 to attest Python 3.12.12. Installer tests cover

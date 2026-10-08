@@ -425,7 +425,18 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        os.replace(temp, path)
+        # The file sync does not persist the directory entry changed by rename.
+        # Linux and macOS support directory fsync; do not silently continue if
+        # the filesystem rejects it. Open before replace so an open failure
+        # leaves the prior state intact.
+        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.replace(temp, path)
+            # If this fails, replacement may already be visible. Propagate the
+            # error without restoring old state or allowing external dispatch.
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         try:
             temp.unlink()
