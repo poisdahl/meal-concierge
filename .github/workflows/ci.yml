@@ -53,6 +53,8 @@ jobs:
         run: |
           "$RUNNER_TEMP/meal-concierge-tests/bin/python" -I -B -m unittest discover -s tests -p 'test_installer.py'
           "$RUNNER_TEMP/meal-concierge-tests/bin/python" -I -B -m unittest discover -s tests -p 'test_browser_launch_settings.py'
+      - name: Atomic state durability on macOS
+        run: '"$RUNNER_TEMP/meal-concierge-tests/bin/python" -I -B -m unittest discover -v -s tests -p "test_state_durability.py"'
       - name: Real MCP startup and Unix socket peer authentication with synthetic store
         env:
           MC01_MACOS_SMOKE: '1'
