@@ -168,7 +168,7 @@ class NativeBrokerTests(NativeFixture):
         claim_request(self.directory, record["request_id"], "original-task")
         respond_request(self.directory, record["request_id"], "original-task", self.response(record))
         for operation, seconds in [("checkout_review", 541),
-                                   *[(op, 91 if op == "cart_change" else 31) for op in ACTION_OPERATIONS]]:
+                                   *[(op, 151 if op == "cart_change" else 31) for op in ACTION_OPERATIONS]]:
             with self.subTest(operation=operation):
                 now = datetime.now(timezone.utc)
                 record = self.record(operation, issued_at=now.isoformat(),
@@ -177,18 +177,34 @@ class NativeBrokerTests(NativeFixture):
                     claim_request(self.directory, record["request_id"], "original-task")
         now = datetime.now(timezone.utc)
         record = self.record("cart_change", issued_at=now.isoformat(),
-            expires_at=(now + timedelta(seconds=90)).isoformat())
+            expires_at=(now + timedelta(seconds=150)).isoformat())
         claim_request(self.directory, record["request_id"], "original-task")
 
+    def test_cart_consume_refuses_an_expired_shorter_window(self):
+        now = datetime.now(timezone.utc)
+        record = self.record("cart_change", issued_at=now.isoformat(),
+            expires_at=(now + timedelta(seconds=0.2)).isoformat())
+        claim_request(self.directory, record["request_id"], "original-task")
+        time.sleep(0.25)
+        with self.assertRaises(HouseholdError):
+            consume_request(self.directory, record["request_id"], "original-task")
+        self.assertFalse((self.directory / "consumed" / (record["request_id"] + ".json")).exists())
+        end_request(self.directory, record["request_id"], "original-task",
+                    self.response(record, facts={"dispatch": "not_dispatched"}))
+
     def test_read_window_is_capped_by_remaining_core_deadline(self):
-        for remaining, expected in [(900, 540), (470, 470), (15, 15)]:
-            with self.subTest(remaining=remaining):
+        for operation, remaining, expected in [("checkout_review", 900, 540),
+                                               ("checkout_review", 470, 470),
+                                               ("checkout_review", 15, 15),
+                                               ("cart_change", 360, 150),
+                                               ("cart_change", 40, 40)]:
+            with self.subTest(operation=operation, remaining=remaining):
                 prior = set((self.directory / "requests").glob("*.json"))
                 results = []
                 def waiter():
                     try:
                         with self.bridge.custody():
-                            results.append(self.bridge.request("checkout_review", {},
+                            results.append(self.bridge.request(operation, {},
                                 deadline=time.monotonic() + remaining))
                     except Exception as exc:
                         results.append(exc)
@@ -199,6 +215,8 @@ class NativeBrokerTests(NativeFixture):
                 record = read_json(path)
                 duration = (datetime.fromisoformat(record["expires_at"]) - datetime.fromisoformat(record["issued_at"])).total_seconds()
                 claim_request(self.directory, record["request_id"], "original-task")
+                if operation == "cart_change":
+                    consume_request(self.directory, record["request_id"], "original-task")
                 respond_request(self.directory, record["request_id"], "original-task", self.response(record))
                 thread.join(5)
                 self.assertFalse(thread.is_alive())

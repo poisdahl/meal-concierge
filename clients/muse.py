@@ -532,7 +532,7 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
                     or int(operations[0]["product_id"]) >= 2**53):
                 raise HouseholdError("Muse cart change requires exactly one exact product_id and a +1 or -1 unit delta")
         from muse_native_provider import MuseCartNotDispatched
-        deadline_request = {**request, "_deadline": time.monotonic() + 240}
+        deadline_request = {**request, "_deadline": time.monotonic() + (360 if action == "change" else 240)}
         with self.provider_client.operation():
             if action == "change":
                 binding = self.provider_client.binding(self.store)

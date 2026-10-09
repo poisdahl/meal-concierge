@@ -493,7 +493,8 @@ class CoreTestsBase:
             "mcp.server.mcpserver.exceptions": mcp_exceptions,
         }):
             spec.loader.exec_module(module)
-        self.assertEqual(module.rpc_timeout("cart", {"action": "change"}), 300)
+        self.assertEqual(module.rpc_timeout("cart", {"action": "change"}), 420)
+        self.assertEqual(module.rpc_timeout("cart", {"action": "reconcile_change"}), 300)
         self.assertEqual(module.rpc_timeout("cart", {"action": "get"}), 120)
         self.assertEqual(module.rpc_timeout("delivery", {"action": "list"}), 300)
         self.assertEqual(module.rpc_timeout("checkout", {"action": "submit"}), 660)
