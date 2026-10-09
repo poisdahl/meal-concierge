@@ -138,7 +138,7 @@ class NativeReadTests(unittest.TestCase):
         self.process.terminate()
         self.process.communicate(timeout=5)
         socket = self.home / "service.sock"
-        old_inode = socket.stat().st_ino if socket.exists() else None
+        socket.unlink(missing_ok=True)
         runner = RUNNER.replace("sys.argv = sys.argv[1:]", """
 sys.path.insert(0, str(__import__('pathlib').Path(sys.argv[1]).resolve().parents[1]))
 import muse_native_provider
@@ -149,7 +149,7 @@ sys.argv = sys.argv[1:]
             str(ROOT / "clients/muse.py"), "run", "--home", str(self.home),
             "--provider-transport", transport, "--browser-directory", str(self.broker),
             "--browser-task-id", "synthetic-original-task"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_for(lambda: socket.exists() and socket.stat().st_ino != old_inode)
+        wait_for(lambda: socket.exists())
 
     def test_expired_unclaimed_startup_read_recovers_on_explicit_status(self):
         for transport in ("browser_readonly", "browser_cart"):
