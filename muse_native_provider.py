@@ -237,6 +237,7 @@ class MuseNativeReadProvider:
                 "total": totals[0] if totals else None, "amount_rows": observed_amounts,
                 "delivery": {"display": None if facts["delivery_text"] is None else text(facts["delivery_text"]),
                              "slot_id": None, "address": None if facts["address"] is None else text(facts["address"])},
+                "deliveryAddress": None if facts["address"] is None else text(facts["address"]),
                 "warnings": [text(value) for value in warnings]}
 
     @staticmethod

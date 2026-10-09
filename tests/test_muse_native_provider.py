@@ -16,7 +16,7 @@ from urllib.parse import quote_plus
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from clients import muse
-from core import HouseholdError, StateStore
+from core import HouseholdError, StateStore, cart_summary
 from muse_browser import (claim_request, consume_request, digest, durable_publish, end_request,
                           process_start, read_json, respond_request)
 from muse_native_provider import MuseNativeReadProvider, product_id
@@ -282,6 +282,24 @@ class PageBoundaryTests(unittest.TestCase):
         result = MuseNativeReadProvider._cart(facts)
         self.assertEqual(result["total"], 39.90)
         self.assertEqual(result["amount_rows"], facts["amount_rows"])
+
+    def test_shared_cart_summary_preserves_observed_or_unknown_address(self):
+        for address in ("Eksempelveien 1", None):
+            with self.subTest(address=address):
+                facts = observation("get_cart", {})
+                facts["address"] = address
+                facts["empty"] = False
+                facts["items"] = [{"url": "https://oda.com/no/products/29829-synthetic-squash/",
+                                   "title": "Synthetic squash", "subtitle": "250 g",
+                                   "quantity": 1, "price": "39,90 kr"}]
+                facts["amount_rows"] = [{"label": "Total inkl. mva", "value": "39,90kr"}]
+                result = MuseNativeReadProvider._cart(facts)
+                summary = cart_summary(result)
+                self.assertEqual(summary["delivery"]["address"], address)
+                self.assertEqual(summary["delivery"]["address"], result["delivery"]["address"])
+                self.assertIsNone(summary["delivery"]["slot_id"])
+                self.assertEqual(summary["total"], 39.90)
+                self.assertNotIn("amounts", summary)
 
     def test_cart_subtitle_requires_literal_string_including_verified_empty(self):
         facts = observation("get_cart", {})
