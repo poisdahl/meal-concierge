@@ -16,7 +16,7 @@ import re
 import secrets
 import time
 from typing import Any, Mapping
-from core import HouseholdError, cart_summary
+from core import HouseholdError, cart_contents, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
@@ -5322,7 +5322,19 @@ class PlanningOperations:
             state.pop("pending_cart_change")
 
     def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any]) -> None:
-        quantities, names = self._cart_lines(cart_summary(cart))
+        quantities, names = self._cart_lines(cart_contents(cart))
+        if pending.get("native_cart_binding"):
+            validate = getattr(self.provider_client, "validate_cart_reconciliation", None)
+            if not callable(validate):
+                raise HouseholdError("reconcile this original native cart journal through its bound native adapter")
+            if validate(pending, self.store) == "not_dispatched":
+                if quantities != pending["before"]:
+                    raise HouseholdError("cart changed after native refusal; preserve its original journal")
+                with self.store.locked() as state:
+                    if canonical(state.get("pending_cart_change")) != canonical(pending):
+                        raise HouseholdError("original native cart intent changed during refusal reconciliation")
+                    state.pop("pending_cart_change")
+                return
         if pending.get("native_managed"):
             self._complete_native_managed_write(pending, quantities, names)
             return
@@ -5384,11 +5396,11 @@ class PlanningOperations:
             state = self.store.read()
             plan = state.get("cart_plan")
             try:
-                observed_digest = {"cart_digest": self._cart_digest(self._cart_lines(cart_summary(cart))[0])}
+                observed_digest = {"cart_digest": self._cart_digest(self._cart_lines(cart_contents(cart))[0])}
             except HouseholdError:
                 # Keep incomplete retailer reads readable; never invent a writable identity.
                 observed_digest = {}
-            return {**cart, **observed_digest, **({"cart_write_pending": True} if state.get("pending_cart_change") else {}), **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_summary(cart))} if isinstance(plan, Mapping) else {})}
+            return {**cart, **observed_digest, **({"cart_write_pending": True} if state.get("pending_cart_change") else {}), **({"meal_concierge_cart_plan": self._cart_plan_view(plan, cart_contents(cart))} if isinstance(plan, Mapping) else {})}
         if action not in {"change", "apply", "set", "update", "clear", "ensure", "reconcile_change"}:
             raise HouseholdError("unknown cart action")
         deadline = time.monotonic() + MENY_CART_TIMEOUT if self.provider == "meny" else request.get("_deadline")
@@ -5404,6 +5416,11 @@ class PlanningOperations:
                     return {"reconciled": True, "cart_write_pending": False}
                 if pending["provider"] != self.provider:
                     raise HouseholdError("pending cart provider changed")
+                if pending.get("native_cart_binding"):
+                    validate = getattr(self.provider_client, "validate_cart_reconciliation", None)
+                    if not callable(validate):
+                        raise HouseholdError("reconcile this original native cart journal through its bound native adapter")
+                    validate(pending, self.store)
                 if self.provider == "meny":
                     change = pending.get("order_change") or {}
                     self.browser.verify_order_change(change.get("order_id"), change.get("code"), deadline=deadline)
@@ -5439,7 +5456,7 @@ class PlanningOperations:
                     if ordered is None:
                         raise HouseholdError(f"{self.provider.title()} ordered quantities cannot be verified")
             cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-            before, _names = self._cart_lines(cart_summary(cart))
+            before, _names = self._cart_lines(cart_contents(cart))
             if change and self.provider in {"oda", "mathem"} and before != change.get("expected_cart_quantities", {}):
                 raise HouseholdError(f"{self.provider.title()} addition cart changed outside this edit; abort with retain_cart=true, then review its destination again")
             if action == "clear":
@@ -5490,7 +5507,7 @@ class PlanningOperations:
                         raise HouseholdError("cart quantity cannot become negative")
                 expected = {key: value for key, value in expected.items() if value}
                 latest = self.provider_client.call("get_cart", {}, deadline=deadline)
-                if self._cart_lines(cart_summary(latest))[0] != before:
+                if self._cart_lines(cart_contents(latest))[0] != before:
                     raise HouseholdError("cart changed before the update; read it again without repeating a delta")
                 with self.store.locked() as locked:
                     if locked.get("pending_cart_change") or canonical(locked.get("order_change")) != canonical(change):
@@ -5504,6 +5521,8 @@ class PlanningOperations:
                     pending = {"provider": self.provider, "before": before, "expected": expected,
                                "order_change": deepcopy(change), "operations": batch,
                                **({"clear_requested": True} if action == "clear" else {})}
+                    if request.get("_native_cart_binding") is not None:
+                        pending["native_cart_binding"] = request["_native_cart_binding"]
                     if action == "clear":
                         locked["product_selection_generation"] = secrets.token_hex(16)
                     locked["pending_cart_change"] = deepcopy(pending)

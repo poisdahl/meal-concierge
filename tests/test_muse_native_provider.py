@@ -84,9 +84,9 @@ class NativeReadTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.produce)
         self.thread.start()
         self.addCleanup(self.finish)
-        self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", RUNNER,
+        self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", getattr(self, "runner", RUNNER),
             str(ROOT / "clients/muse.py"), "run", "--home", str(self.home),
-            "--provider-transport", "browser_readonly", "--browser-directory", str(self.broker),
+            "--provider-transport", getattr(self, "transport", "browser_readonly"), "--browser-directory", str(self.broker),
             "--browser-task-id", "synthetic-original-task"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for(lambda: (self.home / "service.sock").exists())
         self.rpc({"operation": "health"})
@@ -320,6 +320,28 @@ class PageBoundaryTests(unittest.TestCase):
         self.assertIsNone(result["delivery"]["slot_id"])
         self.assertIsNone(result["delivery"]["address"])
         self.assertNotIn("cart_digest", result)
+
+    def test_operation_lease_spans_nested_calls_and_releases_after_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ops = Path(temporary)
+            (ops / "browser").mkdir(mode=0o700)
+            for name in ("requests", "claims", "consumed", "responses", "endings", "closed"):
+                (ops / "browser" / name).mkdir(mode=0o700)
+            provider = MuseNativeReadProvider(ops, "synthetic-original-task")
+            provider.bridge.request = lambda *_args, **_kwargs: {"response": {
+                "task_state": "completed", "request_id": "synthetic-request",
+                "observed_at": datetime.now(timezone.utc).isoformat(), "facts": observation("get_cart", {})}}
+            other = MuseNativeReadProvider(ops, "synthetic-other-task")
+            with self.assertRaisesRegex(RuntimeError, "synthetic finalization failure"):
+                with provider.operation():
+                    provider.call("get_cart", {})
+                    with provider.operation():
+                        provider.call("get_cart", {})
+                    with self.assertRaisesRegex(HouseholdError, "another Oda operation"):
+                        other.call("get_cart", {})
+                    raise RuntimeError("synthetic finalization failure")
+            with other.operation():
+                pass
 
     def test_default_address_is_not_invented_selected_address(self):
         result = MuseNativeReadProvider._addresses(observation("get_delivery_addresses", {}))

@@ -60,6 +60,9 @@ NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog,
     "Cart changes, delivery selection, checkout, orders, email and scheduling are unavailable.")
 NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
                       "cart": {None, "get"}, "delivery": {"addresses"}}
+NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
+    "after a fresh complete cart read and an enabled original-context policy. Reconcile uncertain changes "
+    "without repeating them. Whole-menu product apply, delivery selection, checkout and orders remain unavailable.")
 
 
 def _owned_checkout(state, order_id):
@@ -469,6 +472,108 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
         return {**MuseApplication._user_guide(), "after_setup": NATIVE_READ_GUIDANCE}
 
 
+class NativeCartMuseApplication(NativeReadMuseApplication):
+    def _policy(self, request):
+        from muse_native_provider import fields
+        action = request.get("action")
+        if action == "show":
+            fields({k: v for k, v in request.items() if k != "contract"}, {"operation", "action"})
+            binding = self.provider_client.binding(self.store)
+            policy = self.store.read().get("muse_native_cart_policy")
+            return {"enabled": policy == {"enabled": True, "binding_digest": binding},
+                    "binding_digest": binding, "max_unit_delta": 1}
+        allowed = {"operation", "action", "enabled", "binding_digest", "contract"}
+        if (action != "set" or set(request) - allowed or type(request.get("enabled")) is not bool):
+            raise HouseholdError("Muse native cart policy requires show or an explicit set boolean")
+        if request["enabled"]:
+            with self.provider_client.operation():
+                self.provider_client.call("get_delivery_addresses", {})
+                binding = self.provider_client.binding(self.store)
+                if request.get("binding_digest") != binding:
+                    raise HouseholdError("Muse cart policy requires its exact reviewed original binding_digest")
+                with self.store.locked() as state:
+                    if any(state.get(key) for key in ("pending_cart_change", "pending_checkout", "pending_cancellation", "order_change")):
+                        raise HouseholdError("reconcile original pending operations before enabling Muse cart writes")
+                    state["muse_native_cart_policy"] = {"enabled": True, "binding_digest": binding}
+        else:
+            # Disable future admission; an already issued exact action retains
+            # its original bounded authority and must still be reconciled.
+            with self.store.locked() as state:
+                policy = state.get("muse_native_cart_policy") or {}
+                state["muse_native_cart_policy"] = {"enabled": False, "binding_digest": policy.get("binding_digest")}
+        return {"enabled": request["enabled"], "scope": "future_admission"}
+
+    def handle(self, request):
+        if not isinstance(request, Mapping):
+            raise HouseholdError("request must be an object")
+        if request.get("operation") == "native_cart_policy":
+            return self._policy(request)
+        if request.get("operation") != "cart":
+            return super().handle(request)
+        action = request.get("action", "get")
+        if (action is not None and not isinstance(action, str)
+                or action not in {None, "get", "change", "reconcile_change"}):
+            raise HouseholdError("Muse browser cart mode supports get, one-unit change and read-only reconcile_change")
+        if request.get("response_view", "full") != "full" or any(str(key).startswith("_") for key in request):
+            raise HouseholdError("Muse browser cart requests require full observations and public arguments")
+        if action == "change":
+            if (set(request) - {"operation", "action", "operations", "cart_digest", "response_view", "contract"}
+                    or not isinstance(request.get("cart_digest"), str)
+                    or re.fullmatch(r"[a-f0-9]{64}", request["cart_digest"]) is None):
+                raise HouseholdError("Muse unit change requires its freshly reviewed cart_digest")
+            operations = request.get("operations")
+            if (not isinstance(operations, list) or len(operations) != 1 or not isinstance(operations[0], Mapping)
+                    or set(operations[0]) != {"product_id", "quantity"}
+                    or type(operations[0]["quantity"]) is not int or abs(operations[0]["quantity"]) != 1
+                    or not isinstance(operations[0]["product_id"], str)
+                    or re.fullmatch(r"[1-9][0-9]{0,15}", operations[0]["product_id"]) is None
+                    or int(operations[0]["product_id"]) >= 2**53):
+                raise HouseholdError("Muse cart change requires exactly one exact product_id and a +1 or -1 unit delta")
+        from muse_native_provider import MuseCartNotDispatched
+        deadline_request = {**request, "_deadline": time.monotonic() + 240}
+        with self.provider_client.operation():
+            if action == "change":
+                binding = self.provider_client.binding(self.store)
+                if self.store.read().get("muse_native_cart_policy") != {"enabled": True, "binding_digest": binding}:
+                    raise HouseholdError("Muse native cart writes are disabled for this original context")
+                with self.provider_client.change(self, deadline_request):
+                    try:
+                        result = Application.handle(self, deadline_request)
+                    except MuseCartNotDispatched as exc:
+                        from service_common import canonical
+                        with self.store.locked() as state:
+                            if canonical(state.get("pending_cart_change")) != canonical(exc.pending):
+                                raise HouseholdError("Muse original refused cart intent changed; preserve its journal")
+                            state.pop("pending_cart_change")
+                        result = {"cart_change_dispatched": False, "reason": str(exc),
+                                  "next": "Read the current cart before reviewing another change."}
+            else:
+                result = Application.handle(self, deadline_request)
+        result["client_guidance"] = NATIVE_CART_GUIDANCE
+        return result
+
+    def _cart(self, request):
+        binding = self.provider_client.binding(self.store)
+        action = request.get("action", "get")
+        if action == "reconcile_change":
+            pending = self.store.read().get("pending_cart_change")
+            if pending and (not isinstance(pending.get("native_cart_binding"), Mapping)
+                    or pending["native_cart_binding"].get("binding_digest") != binding or pending.get("order_change")):
+                raise HouseholdError("Muse cart reconciliation requires the original native cart binding")
+        if action == "change":
+            marker = {"binding_digest": binding, "intent_id": str(uuid.uuid4())}
+            self.provider_client._operation.change["marker"] = marker
+            request = {**request, "_native_cart_binding": marker}
+        return Application._cart(self, request)
+
+    def _store_readiness(self, checkout_payment=None):
+        return {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
+                "browser_check": {"status": "configured", "scope": "one_unit_cart"}, "note": NATIVE_CART_GUIDANCE}
+
+    def _user_guide(self):
+        return {**MuseApplication._user_guide(), "after_setup": NATIVE_CART_GUIDANCE}
+
+
 def initialize(home: Path, provider: str, household: str, *, credential_name=None, operation_directory=None) -> None:
     if provider not in ORIGINS or not household.strip() or len(household) > 100:
         raise HouseholdError("Muse initialization requires a provider and bounded household name")
@@ -522,9 +627,9 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
-    if provider_transport not in {"mcp", "browser_readonly"}:
+    if provider_transport not in {"mcp", "browser_readonly", "browser_cart"}:
         raise HouseholdError("Muse provider transport is unsupported")
-    native_read = provider_transport == "browser_readonly"
+    native_read = provider_transport in {"browser_readonly", "browser_cart"}
     if native_read and (not protected or browser_directory is None or browser_task_id is None
                         or browser_action_mode != "timed"):
         raise HouseholdError("Muse browser read mode requires the existing protected home and browser options, without an action mode")
@@ -539,7 +644,11 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
         from muse_mcp import MuseProtectedMcpClient
         if native_read:
             from muse_native_provider import MuseNativeReadProvider
-            shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id)
+            if provider_transport == "browser_cart":
+                from muse_native_provider import MuseNativeCartProvider
+                shop = MuseNativeCartProvider(marker["operation_directory"], browser_task_id)
+            else:
+                shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id)
         else:
             shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
         if browser_directory is not None:
@@ -552,7 +661,8 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
     else:
         shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
-        cls = NativeReadMuseApplication if native_read else ProtectedMuseApplication if protected else MuseApplication
+        cls = (NativeCartMuseApplication if provider_transport == "browser_cart" else
+               NativeReadMuseApplication if native_read else ProtectedMuseApplication if protected else MuseApplication)
         store = StateStore(home / "state", settings)
         if browser is not None:
             browser.state_store = store
@@ -592,7 +702,7 @@ def main() -> int:
     parser.add_argument("--browser-task-id", help="actual original Muse browser task identity; run only")
     parser.add_argument("--browser-action-mode", choices=("timed", "native_approval"),
                         help="final-action authority: timed permit or one-shot native approval delegation; run only")
-    parser.add_argument("--provider-transport", choices=("mcp", "browser_readonly"),
+    parser.add_argument("--provider-transport", choices=("mcp", "browser_readonly", "browser_cart"),
                         help="explicit protected MCP or native browser reads; run only")
     args = parser.parse_args()
     try:

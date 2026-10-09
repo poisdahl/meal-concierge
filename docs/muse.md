@@ -165,6 +165,67 @@ not qualify selected-address, delivery, payment, session longevity or complete
 Meal Concierge shopping support. Configuration and synthetic tests do not
 replace real host qualification.
 
+## Opt-in native unit cart changes
+
+`--provider-transport browser_cart` uses the same protected home, canonical
+browser directory and original task-chain anchor as `browser_readonly`. It keeps
+the read-only transport unchanged and adds only `cart.change` for one exact
+product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`.
+This bounded adapter is a prerequisite for measuring real cart behavior; it
+does not implement whole-menu `products.prepare/apply`, delivery selection,
+checkout, order reads or cancellation.
+
+Writes start disabled. In the ordinary CLI, inspect
+`{"operation":"native_cart_policy","action":"show"}` and explicitly set
+`enabled:true` with its exact returned `binding_digest`. Enabling performs a
+fresh account read and refuses pending operations. The persistent policy binds
+the original home/configuration, account edit links, shared operation directory
+and browser chain. A different binding requires a separately reviewed enable;
+it cannot inherit authorization. To disable, use
+`{"operation":"native_cart_policy","action":"set","enabled":false}`.
+Disabling is local and blocks future admission even while a browser task is
+unresolved. It does not cancel an already-issued exact action or revoke its
+original bounded permit; that action may still complete and requires reconciliation.
+
+Get the complete current cart with `response_view:"full"`, review its returned
+`cart_digest`, then request exactly one unit:
+
+```json
+{"operation":"cart","action":"change","cart_digest":"<fresh returned digest>","operations":[{"product_id":"<exact observed product ID>","quantity":1}],"response_view":"full"}
+```
+
+The runner keeps the shared Oda and browser leases through both prewrite reads,
+the native action, fresh full readback and core finalization. Cart quantities
+can be validated when no checkout total is displayed; the total stays unknown,
+and payment paths still require strict monetary facts. The ordinary core
+`pending_cart_change` is committed before emitting an immutable `cart_change`
+broker request. Its payload binds the original account, before/expected cart
+quantities and intent digest. The cart action has a finite 90-second initial
+budget within a 240-second operation; this is not a measured latency guarantee.
+Existing checkout/cancellation permits retain their 30-second limits.
+
+The native producer must freshly verify explicit sign-in, exact account links,
+the complete ordinary cart, absence of order-edit context, and one unique,
+enabled, visible, unobscured control for the exact product. Consume the original
+permit immediately before one unit click; never repeat a click. Attest
+`{"dispatch":"dispatched"}` only after its actual native task completion.
+Before any consumption or click, an actual completed refusal may attest
+`{"dispatch":"not_dispatched"}`. That refusal clears only its matching core
+intent. A unique intent ID prevents a later identical delta from reusing an old
+refusal. A genuine late, unconsumed refusal can be reconciled after fresh readback
+confirms the unchanged before-cart. An ambiguous or consumed action cannot claim
+pre-dispatch refusal. Other provider transports cannot clear these native journals.
+
+After action-specific completion, a separate fresh complete cart observation
+must match every expected quantity before the core clears the pending journal.
+Timeout, a waiting task, lost acknowledgment or different quantities leave the
+original journal pending. Retain/reconcile the original native task ending
+through the qualified producer before another browser observation; then use
+`cart.reconcile_change` to read only. Never resubmit the delta or use a different
+profile, home or broker to escape custody. Passing synthetic RPC tests does not
+prove merchant control behavior, latency or authentication longevity; qualify
+those separately through a bounded real unit test before broader shopping.
+
 ## Opt-in native browser checkout
 
 The optional Oda adapter uses the host's **existing native browser task**, not a
