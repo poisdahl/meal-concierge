@@ -55,6 +55,11 @@ NATIVE_BROWSER_GUIDANCE = ("Muse's protected Oda connection and opted-in native 
     "saved-card checkout and cancellation of this household's confirmed checkout orders. "
     "Native task receipts, fresh reviews and provider/device approval remain required. "
     "Order edits, payment retry/switching, weekly checkout, email and scheduling are unavailable.")
+NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog, cart and address observations "
+    "from the existing cloud profile, plus local recipes and menu planning. Missing page facts remain unknown. "
+    "Cart changes, delivery selection, checkout, orders, email and scheduling are unavailable.")
+NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
+                      "cart": {None, "get"}, "delivery": {"addresses"}}
 
 
 def _owned_checkout(state, order_id):
@@ -423,6 +428,47 @@ class ProtectedMuseApplication(MuseApplication):
                 "presentation": "Explain demonstrated Muse capabilities and unverified checkout readiness in the user's language."}
 
 
+class NativeReadMuseApplication(ProtectedMuseApplication):
+    def handle(self, request):
+        if not isinstance(request, Mapping):
+            raise HouseholdError("request must be an object")
+        operation, action = request.get("operation"), request.get("action")
+        if (not isinstance(operation, str) or action is not None and not isinstance(action, str)
+                or operation not in NATIVE_READ_ALLOWED or action not in NATIVE_READ_ALLOWED[operation]):
+            raise HouseholdError("Unsupported Muse browser read operation/action. " + NATIVE_READ_GUIDANCE)
+        if operation in {"cart", "delivery"} and request.get("response_view") == "agent":
+            raise HouseholdError("Muse browser cart/address observations require response_view=full to preserve unknown fields")
+        guard_local_recipes(request)
+        self._observe_terminal_failure()
+        try:
+            result = Application.handle(self, request)
+        finally:
+            self._observe_terminal_failure()
+        result["client_guidance"] = NATIVE_READ_GUIDANCE
+        return result
+
+    def _cart(self, request):
+        # Do not reconstruct a saved plan or writable cart digest from a partial
+        # page read. In particular, an empty page need not display a payable total.
+        return self.provider_client.call("get_cart", {}, deadline=request.get("_deadline"))
+
+    def _delivery(self, request):
+        return self.provider_client.call("get_delivery_addresses", {}, deadline=request.get("_deadline"))
+
+    def _store_readiness(self, checkout_payment=None):
+        ready = self.integration.get("status") == "ready"
+        return {"provider": self.provider, "provider_transport": "browser_readonly",
+                "connection_check": {"status": "verified" if ready else "unknown",
+                    "scope": "Last native browser account-page read only. MCP/OAuth durability remains unverified.",
+                    "next_action": None if ready else "Inspect the original native observation and existing profile."},
+                "browser_check": {"status": "configured", "scope": "read_only"},
+                "delivery_check": {"status": "unknown"}, "payment_check": {"status": "unavailable"},
+                "local_recipes_available": True, "note": NATIVE_READ_GUIDANCE}
+
+    def _user_guide(self):
+        return {**MuseApplication._user_guide(), "after_setup": NATIVE_READ_GUIDANCE}
+
+
 def initialize(home: Path, provider: str, household: str, *, credential_name=None, operation_directory=None) -> None:
     if provider not in ORIGINS or not household.strip() or len(household) > 100:
         raise HouseholdError("Muse initialization requires a provider and bounded household name")
@@ -472,10 +518,16 @@ def load_home(home: Path):
 
 
 def serve(home: Path, *, browser_directory=None, browser_task_id=None,
-          browser_action_mode="timed") -> None:
+          browser_action_mode="timed", provider_transport="mcp") -> None:
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
+    if provider_transport not in {"mcp", "browser_readonly"}:
+        raise HouseholdError("Muse provider transport is unsupported")
+    native_read = provider_transport == "browser_readonly"
+    if native_read and (not protected or browser_directory is None or browser_task_id is None
+                        or browser_action_mode != "timed"):
+        raise HouseholdError("Muse browser read mode requires the existing protected home and browser options, without an action mode")
     if (browser_directory is None) != (browser_task_id is None):
         raise HouseholdError("Muse native browser requires both directory and original task identity")
     if browser_action_mode != "timed" and browser_directory is None:
@@ -485,17 +537,22 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
     browser = None
     if protected:
         from muse_mcp import MuseProtectedMcpClient
-        shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
+        if native_read:
+            from muse_native_provider import MuseNativeReadProvider
+            shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id)
+        else:
+            shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
         if browser_directory is not None:
             if Path(browser_directory) != shop.operation_directory / "browser":
                 raise HouseholdError("Muse browser must use the canonical shared provider browser directory")
-            from muse_browser import MuseBrowser
-            browser = MuseBrowser(browser_directory, browser_task_id, shop,
-                                  action_mode=browser_action_mode)
+            if not native_read:
+                from muse_browser import MuseBrowser
+                browser = MuseBrowser(browser_directory, browser_task_id, shop,
+                                      action_mode=browser_action_mode)
     else:
         shop = HostObservationShop(home / "observations", settings["provider"])
     with ownership(home / "state", home / "profile-lock"):
-        cls = ProtectedMuseApplication if protected else MuseApplication
+        cls = NativeReadMuseApplication if native_read else ProtectedMuseApplication if protected else MuseApplication
         store = StateStore(home / "state", settings)
         if browser is not None:
             browser.state_store = store
@@ -535,12 +592,14 @@ def main() -> int:
     parser.add_argument("--browser-task-id", help="actual original Muse browser task identity; run only")
     parser.add_argument("--browser-action-mode", choices=("timed", "native_approval"),
                         help="final-action authority: timed permit or one-shot native approval delegation; run only")
+    parser.add_argument("--provider-transport", choices=("mcp", "browser_readonly"),
+                        help="explicit protected MCP or native browser reads; run only")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
             raise HouseholdError("Muse home must be absolute")
         if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None
-                                     or args.browser_action_mode is not None):
+                                     or args.browser_action_mode is not None or args.provider_transport is not None):
             raise HouseholdError("Muse native browser options apply only to run")
         if args.action == "init":
             if not args.provider or not args.household:
@@ -549,7 +608,8 @@ def main() -> int:
                        operation_directory=args.operation_directory)
         elif args.action == "run":
             serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id,
-                  browser_action_mode=args.browser_action_mode or "timed")
+                  browser_action_mode=args.browser_action_mode or "timed",
+                  provider_transport=args.provider_transport or "mcp")
         else:
             if not args.request_id:
                 raise HouseholdError("respond requires --request-id")

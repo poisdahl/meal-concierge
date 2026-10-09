@@ -81,6 +81,25 @@ def private_operation_directory(path):
     return path
 
 
+@contextmanager
+def oda_operation_lock(directory):
+    directory = private_operation_directory(directory)
+    descriptor = os.open(directory / ".oda-household.lock",
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise HouseholdError("Muse Oda operation lock must be a private owned file")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise HouseholdError("another Oda operation is active") from None
+        yield descriptor
+    finally:
+        # Never LOCK_UN: a child may retain this same open file description.
+        os.close(descriptor)
+
+
 class MuseProtectedMcpClient(RetailMcpClient):
     def __init__(self, operation_directory, credential_name):
         if not isinstance(credential_name, str) or CONNECTOR_NAME.fullmatch(credential_name) is None:
@@ -101,21 +120,8 @@ class MuseProtectedMcpClient(RetailMcpClient):
 
     @contextmanager
     def _operation_lock(self):
-        private_operation_directory(self.operation_directory)
-        descriptor = os.open(self.operation_directory / ".oda-household.lock",
-                             os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        try:
-            info = os.fstat(descriptor)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise HouseholdError("Muse Oda operation lock must be a private owned file")
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                raise HouseholdError("another Oda operation is active") from None
+        with oda_operation_lock(self.operation_directory) as descriptor:
             yield descriptor
-        finally:
-            # Never LOCK_UN: the child retains this same open file description.
-            os.close(descriptor)
 
     def _worker_command(self, descriptor):
         return [sys.executable, "-I", "-B", str(Path(__file__).resolve()), str(descriptor)]
