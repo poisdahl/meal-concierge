@@ -2,15 +2,17 @@
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
+import json
 import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest import mock
 
 from core import HouseholdError, StateStore
 from clients import muse
-from muse_browser import claim_request, consume_request, digest, end_request, read_json, respond_request
+from muse_browser import claim_request, consume_request, digest, durable_publish, end_request, read_json, respond_request
 from muse_native_provider import MuseNativeCartProvider
 from service import Application
 from test_muse_client import RUNNER
@@ -85,6 +87,10 @@ sys.argv = sys.argv[1:]
                 served.add(path.name)
                 try:
                     record = read_json(path)
+                    if record["operation"] == "cart_change" and self.action_result == "unclaimed":
+                        self.action_records.append(record)
+                        self.seen.append("cart_change")
+                        continue
                     claim_request(self.broker, record["request_id"], record["task_id"])
                     if record["operation"] == "cart_change":
                         pending = read_json(self.home / "state/state.json")["pending_cart_change"]
@@ -319,6 +325,107 @@ sys.argv = sys.argv[1:]
                 "observed_at": datetime.now(timezone.utc).isoformat(), "task_state": "completed",
                 "facts": {"dispatch": "not_dispatched"}})
         self.assertEqual(self.store.read()["pending_cart_change"], current)
+
+    def unclaimed_change(self):
+        self.enable()
+        self.action_result = "unclaimed"
+        with mock.patch("muse_browser.CART_ACTION_TIMEOUT", 1.0):
+            self.change(1, ok=False)
+        self.rpc({"operation": "native_cart_policy", "action": "set", "enabled": False})
+        return deepcopy(self.store.read()["pending_cart_change"]), self.action_records[0]
+
+    def test_closed_unclaimed_change_reconciles_without_ending_or_replay(self):
+        pending, record = self.unclaimed_change()
+        name = record["request_id"] + ".json"
+        preserved = {path: path.read_bytes() for path in self.broker.glob("*/*.json")}
+        with self.assertRaisesRegex(HouseholdError, "expired"):
+            claim_request(self.broker, record["request_id"], record["task_id"])
+        self.assertTrue(self.rpc({"operation": "cart", "action": "reconcile_change"})["reconciled"])
+        self.assertNotIn("pending_cart_change", self.store.read())
+        self.rpc({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(self.quantity, 0)
+        self.assertEqual(len(self.action_records), 1)
+        for path, original in preserved.items():
+            self.assertEqual(path.read_bytes(), original)
+        for kind in ("claims", "consumed", "responses", "endings", "publications"):
+            self.assertFalse((self.broker / kind / name).exists())
+        self.assertEqual(pending["before"], {})
+
+    def test_unclaimed_reconciliation_refuses_each_admission_record_and_dangling_symlink(self):
+        pending, record = self.unclaimed_change()
+        for kind in ("claims", "consumed", "responses", "endings", "publications"):
+            directory = self.broker / kind
+            directory.mkdir(mode=0o700, exist_ok=True)
+            path = directory / (record["request_id"] + ".json")
+            for symbolic in (False, True):
+                with self.subTest(kind=kind, symbolic=symbolic):
+                    if symbolic:
+                        path.symlink_to(directory / "absent")
+                    else:
+                        path.write_text("{}")
+                    self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+                    self.assertEqual(self.store.read()["pending_cart_change"], pending)
+                    path.unlink()
+        self.assertEqual(len(self.action_records), 1)
+
+    def test_unclaimed_reconciliation_requires_original_payload_closure_binding_and_unique_request(self):
+        pending, record = self.unclaimed_change()
+        name = record["request_id"] + ".json"
+        request_path = self.broker / "requests" / name
+        closed_path = self.broker / "closed" / name
+        request_bytes, closed_bytes = request_path.read_bytes(), closed_path.read_bytes()
+        closed = read_json(closed_path)
+        for replacement in ({**closed, "request_digest": "a" * 64},
+                            {**closed, "task_id": "different-anchor"},
+                            {**closed, "closed_at": record["issued_at"]},
+                            {**closed, "closed_at": "2999-01-01T00:00:00+00:00"}):
+            with self.subTest(closed=replacement):
+                closed_path.write_text(json.dumps(replacement))
+                self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+                self.assertEqual(self.store.read()["pending_cart_change"], pending)
+        closed_path.write_bytes(closed_bytes)
+        changed = deepcopy(record)
+        changed["payload"]["expected_quantities"] = {}
+        request_path.write_text(json.dumps(changed))
+        closed_path.write_text(json.dumps({**closed, "request_digest": digest(changed)}))
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        request_path.write_bytes(request_bytes)
+        closed_path.write_bytes(closed_bytes)
+        duplicate = {**record, "request_id": str(uuid.uuid4())}
+        duplicate_path = self.broker / "requests" / (duplicate["request_id"] + ".json")
+        durable_publish(duplicate_path, duplicate)
+        refused = self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertIn("ambiguous", refused["error"])
+        duplicate_path.unlink()
+        request_path.unlink()
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        request_path.write_bytes(request_bytes)
+        with self.store.locked() as state:
+            state["pending_cart_change"]["native_cart_binding"]["binding_digest"] = "a" * 64
+        altered = self.store.read()["pending_cart_change"]
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertEqual(self.store.read()["pending_cart_change"], altered)
+        # The producer may also observe the deliberately injected duplicate.
+        self.assertEqual({row["request_id"] for row in self.action_records} - {duplicate["request_id"]},
+                         {record["request_id"]})
+
+    def test_unclaimed_reconciliation_preserves_changed_cart_and_journal_race(self):
+        pending, _record = self.unclaimed_change()
+        self.quantity = 1
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertEqual(self.store.read()["pending_cart_change"], pending)
+        self.quantity = 0
+
+        def replace_journal(tool, facts):
+            if tool == "get_cart":
+                with self.store.locked() as state:
+                    state["pending_cart_change"]["native_cart_binding"]["intent_id"] = str(uuid.uuid4())
+            return facts
+
+        self.transform = replace_journal
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertNotEqual(self.store.read()["pending_cart_change"], pending)
+        self.assertEqual(len(self.action_records), 1)
 
 
 if __name__ == "__main__":
