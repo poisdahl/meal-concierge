@@ -120,7 +120,7 @@ def request_record(directory, request_id, task_id, *, active=True):
             or type(record.get("owner_pid")) is not int or record["owner_pid"] <= 0
             or not isinstance(record.get("operation"), str)
             or record["operation"] not in ACTION_OPERATIONS | {"checkout_review",
-                "order_binding", "cancelled_checkout_binding", "cancellation_review", "payment_state"}
+                "order_binding", "cancelled_checkout_binding", "cancellation_review", "payment_state", "provider_read"}
             or not isinstance(record.get("payload"), Mapping)
             or not isinstance(record.get("owner_start"), str)
             or not record["owner_start"].isdigit()
@@ -299,7 +299,7 @@ class NativeBridge:
                 validate_response(record, response, fresh=False)
                 validate_claim(self.directory, record, response=response)
                 if response["task_state"] != "completed":
-                    if (record["operation"] in ACTION_OPERATIONS
+                    if (record["operation"] in ACTION_OPERATIONS | {"provider_read"}
                             or record["task_id"] != self.task_id
                             or process_start(record["owner_pid"]) != record["owner_start"]):
                         raise HouseholdError("Finish the original waiting Muse task before replacement")
@@ -307,7 +307,7 @@ class NativeBridge:
         finally:
             os.close(fd)
 
-    def request(self, operation, payload, *, deadline=None, expires_at=None):
+    def request(self, operation, payload, *, deadline=None, expires_at=None, include_response=False):
         seconds = ACTION_OPERATION_TIMEOUT if operation in ACTION_OPERATIONS else READ_OPERATION_TIMEOUT
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):
@@ -339,6 +339,9 @@ class NativeBridge:
                 validate_claim(self.directory, record, response=response)
                 if operation in ACTION_OPERATIONS and response["task_state"] != "completed":
                     raise HouseholdError("Muse browser action is unresolved; reconcile its original task")
+                if include_response:
+                    return {"response": dict(response), "issued_at": record["issued_at"],
+                            "expires_at": record["expires_at"]}
                 return dict(response["facts"])
             # Never remove a request/claim/action record on timeout or parent loss.
             raise HouseholdError("Muse browser result is unknown; reconcile its original task without replay")
