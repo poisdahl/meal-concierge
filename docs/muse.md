@@ -134,6 +134,15 @@ Address edit links must be genuine
 must remain the same across this runner's reads. Keep private values in the
 original cloud; do not place them in source, feedback or exported test fixtures.
 
+Public search pages may omit authoritative sign-in controls. For catalog/cart
+reads, establish `signed_in` from fresh explicit authentication evidence on the
+delivery-account page in the same continuous profile flow. Missing or redacted
+controls mean unknown; stop instead of publishing a guessed `false` boolean.
+Retain requested-page facts and account evidence privately outside the exact
+facts schema, with genuine receipt ordering and actual per-route observation
+times when available (otherwise record them as unknown). Do not invent times,
+restamp cached facts or infer authentication from a prior task.
+
 - Address facts add `rows`, each with `edit_url`, literal `address`, boolean
   `default`, and `selected` as an actually observed boolean or `null`. A standard
   address marker does not prove the currently selected delivery address.
