@@ -189,7 +189,7 @@ class MuseNativeReadProvider:
             url = urlsplit(facts["url"])
             valid = (url.scheme == "https" and url.hostname == "oda.com" and url.port in {None, 443}
                      and url.username is None and url.password is None and not url.fragment
-                     and url.path == "/no/search/"
+                     and url.path in {"/no/search/", "/no/search/products/"}
                      and parse_qs(url.query).get("q") == arguments["queries"])
         except (ValueError, TypeError):
             valid = False
