@@ -82,13 +82,23 @@ Never bypass a platform or bank approval.
 
 Alternatively, explicitly select `--browser-action-mode native_approval` on
 the runner below. This admits **one native task delegation** while the original
-core confirmation is valid. Muse's fresh purchase approval then supplies final
-financial authority; the old confirmation is an admission deadline, not a
-permit for a delayed click. This mode relies on Muse's documented exact-details
-purchase approval for merchant-stored cards and its trusted native producer.
+core confirmation is valid. Fresh user authorization of the complete purchase
+review then supplies final financial authority; the old confirmation is an
+admission deadline, not a permit for a delayed click. For a merchant-stored card,
+Muse's installed `~/docs/chat/payments-and-purchases.md` guidance requires an
+explicit human response authorizing submission
+of the exact reviewed order now, for its stated total and observed masked card.
+The native agent relays that authorization and card selection through the same
+admitted browser task using `browser.steer_task`, without `wallet_payment`.
+Card selection or acceptance of review details alone does not authorize submission.
+This mode relies on that host workflow and its trusted native producer; the host
+guidance does not specify a special purchase-card UI or a machine-verifiable
+approval receipt.
 It does not require Sentinel to independently authenticate every cart or address
 observation. Configuration and synthetic tests do not demonstrate actual payment.
-Qualify the real purchase card and original task ending on the supported host.
+Qualify the actual human authorization, same-task continuation and original task
+ending on the supported host. Preserve every separately required browser,
+platform and bank approval.
 
 Within the existing canonical shared provider operation directory, create one
 private `browser/` directory and private `requests/`, `claims/`, `consumed/`,
@@ -212,8 +222,11 @@ exclusively published and fsynced. The producer must:
    of the original task chain. Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
-   one final action. Checkout requires the genuine Muse purchase approval for
-   that merchant and amount; a site, network or shell approval is insufficient.
+   one final action. `purchase_approval_required:true` requires fresh explicit
+   human authorization of that complete purchase review, including the merchant,
+   amount and observed masked card. Retain the actual human-origin response and
+   its connection to the review; an assistant-written assertion is insufficient.
+   A site, network or shell approval is insufficient.
    Stop on a changed business scope and preserve the original attempt rather
    than silently buying a different purchase. Never substitute a conversational
    confirmation for an enforced platform gate. Cancellation similarly requires
@@ -238,9 +251,10 @@ actual retained action history establishes that no final effect occurred. The
 reply must answer the pending information request, preserve the original
 delegation and freshly recheck its complete scope before any proposal. It cannot
 invent platform approval, consume another permit or retry an attempted effect.
-Every actual platform/bank approval remains enforced separately. A purchase
-completed without an observed native purchase card does not qualify the required
-purchase-approval guarantee.
+Every actual browser/platform/bank approval remains enforced separately. Qualifying
+this purchase authorization path requires the actual review-bound human response
+and genuine same-task continuation. A successful purchase alone does not establish
+that authorization workflow.
 
 During every CLI operation, including reconciliation, immediately serve each emitted broker
 request before waiting for the CLI's final result. A successful review can emit a
