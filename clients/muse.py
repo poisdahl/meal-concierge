@@ -433,6 +433,11 @@ class ProtectedMuseApplication(MuseApplication):
 
 
 class NativeReadMuseApplication(ProtectedMuseApplication):
+    def _refresh_integration(self, *args, **kwargs):
+        # A missed native observation may be retried by explicit status. The
+        # provider still enforces actual login/account failures and task custody.
+        return Application._refresh_integration(self, *args, **kwargs)
+
     def handle(self, request):
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")

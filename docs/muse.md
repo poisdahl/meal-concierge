@@ -104,6 +104,12 @@ through the existing canonical browser broker. Each payload contains `tool` and
 accepted. Serve them through the existing native producer claim/respond/end
 protocol. Serve the startup account request while the runner starts, before
 waiting for its socket or calling health: startup waits for that observation.
+If an unclaimed startup read expires, an explicit `status` call can request a
+fresh bounded account observation without restarting. Run that status call in
+the supported background executor and serve its broker request concurrently.
+Health remains local. Actual signed-out or changed-account failures remain
+latched, and unresolved native task custody must be reconciled before another
+read. Protected MCP status still does not retry rejected authentication.
 No action permit is consumed. Each operation has a 90-second bound,
 within the ordinary CLI wait, and requires a genuine completed task with fresh
 automatic JSON delivery. Preserve late endings and unknown custody after a
