@@ -36,7 +36,7 @@ def observation(tool, arguments):
         return {**common, "url": "https://oda.com/no/cart/", "empty": True, "items": [],
                 "amount_rows": [], "delivery_text": "Monday 12 October", "address": None, "warnings": []}
     query = arguments["queries"][0]
-    return {**common, "url": "https://oda.com/no/search/?q=" + quote_plus(query), "query": query,
+    return {**common, "url": "https://oda.com/no/search/products/?q=" + quote_plus(query), "query": query,
             "page": 1, "size": arguments["size"], "hasMore": True,
             "products": [{"url": "https://oda.com/no/products/29829-synthetic-squash/", "name": "Synthetic squash",
                           "description": "250 g", "price": "39,90 kr", "unitPrice": "159,60 kr",
@@ -223,6 +223,26 @@ class PageBoundaryTests(unittest.TestCase):
     def test_product_id_digit_bound_is_checked_before_integer_conversion(self):
         with self.assertRaises(HouseholdError):
             product_id("https://oda.com/no/products/" + "9" * 5000 + "-synthetic/")
+
+    def test_catalog_search_redirect_preserves_url_and_query_boundary(self):
+        arguments = {"queries": ["gul squash"], "page": 1, "size": 1}
+        now = datetime.now(timezone.utc)
+        response = {"request_id": "synthetic-request", "observed_at": now.isoformat()}
+        receipt = {"issued_at": (now - timedelta(seconds=1)).isoformat(),
+                   "expires_at": (now + timedelta(seconds=30)).isoformat()}
+        facts = observation("product_search", arguments)
+        for path in ("/no/search/", "/no/search/products/"):
+            with self.subTest(path=path):
+                facts["url"] = "https://oda.com" + path + "?q=gul%20squash"
+                result = MuseNativeReadProvider._catalog(facts, arguments, response, receipt)
+                self.assertEqual(result["source"]["url"], facts["url"])
+                self.assertEqual(result["products"][0]["product_id"], 29829)
+        for url in ("https://oda.com/no/search/products/?q=other",
+                    "https://oda.com/no/search/recipes/?q=gul%20squash"):
+            with self.subTest(url=url):
+                facts["url"] = url
+                with self.assertRaisesRegex(HouseholdError, "search page changed"):
+                    MuseNativeReadProvider._catalog(facts, arguments, response, receipt)
 
     def test_deduplicated_catalog_keeps_display_bound_to_its_product_id(self):
         arguments = {"queries": ["squash"], "page": 1, "size": 3}
