@@ -2,6 +2,7 @@
 from collections.abc import Mapping
 from copy import deepcopy
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import math
 import re
 import threading
@@ -11,7 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 from clients.muse import MAX_PRODUCTS, validate_response as catalog_response
 from core import HouseholdError, cart_contents
 from muse_browser import (NativeBridge, account_links, digest, native_amount_minor, text,
-                          read_json, request_record, validate_claim, validate_response)
+                          read_json, required_json, request_record, timestamp, transition_lock,
+                          validate_claim, validate_response)
 from muse_mcp import oda_operation_lock, private_operation_directory
 
 
@@ -309,17 +311,33 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
             raise HouseholdError("original Muse cart binding and native custody are required for reconciliation")
         # The unique intent is part of the digest: identical later deltas cannot
         # reuse an earlier task's refusal or completion.
-        matches = []
-        for path in (self.bridge.directory / "requests").glob("*.json"):
-            record = read_json(path)
-            if not isinstance(record, Mapping) or not isinstance(record.get("payload"), Mapping):
-                raise HouseholdError("Muse browser request record changed; preserve the journal")
-            if record.get("operation") == "cart_change" and record["payload"].get("intent_digest") == digest(pending):
-                matches.append(request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)[1])
-        if len(matches) != 1:
-            raise HouseholdError("Muse original cart request is unavailable or ambiguous; preserve the journal")
-        record = matches[0]
-        name = record["request_id"] + ".json"
+        with transition_lock(self.bridge.directory):
+            matches = []
+            for path in (self.bridge.directory / "requests").glob("*.json"):
+                record = read_json(path)
+                if not isinstance(record, Mapping) or not isinstance(record.get("payload"), Mapping):
+                    raise HouseholdError("Muse browser request record changed; preserve the journal")
+                if record.get("operation") == "cart_change" and record["payload"].get("intent_digest") == digest(pending):
+                    matches.append(request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)[1])
+            if len(matches) != 1:
+                raise HouseholdError("Muse original cart request is unavailable or ambiguous; preserve the journal")
+            record = matches[0]
+            name = record["request_id"] + ".json"
+            if not (self.bridge.directory / "claims" / name).exists():
+                if record["payload"] != self._cart_payload(pending):
+                    raise HouseholdError("Muse original unclaimed cart payload changed; preserve the journal")
+                for kind in ("claims", "consumed", "responses", "endings", "publications"):
+                    path = self.bridge.directory / kind / name
+                    if path.exists() or path.is_symlink():
+                        raise HouseholdError("Muse cart admission evidence exists; preserve the journal")
+                closed = required_json(self.bridge.directory / "closed" / name)
+                if (not isinstance(closed, Mapping)
+                        or set(closed) != {"request_digest", "task_id", "closed_at"}
+                        or closed["request_digest"] != digest(record)
+                        or closed["task_id"] != record["task_id"]
+                        or not timestamp(record["expires_at"]) <= timestamp(closed["closed_at"]) <= datetime.now(timezone.utc)):
+                    raise HouseholdError("Muse original unclaimed cart request has no valid expired closure")
+                return "not_dispatched"
         try:
             ending = read_json(self.bridge.directory / "endings" / name)
         except FileNotFoundError:
@@ -329,6 +347,20 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
         if ending["task_state"] != "completed":
             raise HouseholdError("Muse original cart task has no actual ending")
         return "not_dispatched" if ending["facts"] == {"dispatch": "not_dispatched"} else "ended"
+
+    def _cart_payload(self, pending):
+        return {
+            "intent_digest": digest(pending), "operations": pending["operations"],
+            "before_quantities": pending["before"], "expected_quantities": pending["expected"],
+            "account": {"url": "https://oda.com/no/account/delivery/",
+                        "edit_urls": ["https://oda.com/no/account/delivery/edit/" + str(key) + "/"
+                                      for key in sorted(self._account_ids)]},
+            "cart_url": "https://oda.com/no/cart/", "order_change": None,
+            "preconditions": ["fresh explicit sign-in and exact account links",
+                              "complete ordinary cart equals before_quantities; no order edit",
+                              "one exact product and unique enabled visible unobscured control",
+                              "consume the original unexpired permit immediately before one unit click",
+                              "never repeat a click; retain the actual task ending"]}
 
     def call(self, tool, arguments, *, deadline=None):
         change = getattr(self._operation, "change", None)
@@ -363,18 +395,7 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
             raise HouseholdError("Muse original enabled cart policy or pending intent changed; preserve its journal")
         if policy != {"enabled": True, "binding_digest": binding}:
             raise MuseCartNotDispatched(pending)
-        facts = self.bridge.request("cart_change", {
-            "intent_digest": digest(pending), "operations": operations,
-            "before_quantities": pending["before"], "expected_quantities": pending["expected"],
-            "account": {"url": "https://oda.com/no/account/delivery/",
-                        "edit_urls": ["https://oda.com/no/account/delivery/edit/" + str(key) + "/"
-                                      for key in sorted(self._account_ids)]},
-            "cart_url": "https://oda.com/no/cart/", "order_change": None,
-            "preconditions": ["fresh explicit sign-in and exact account links",
-                              "complete ordinary cart equals before_quantities; no order edit",
-                              "one exact product and unique enabled visible unobscured control",
-                              "consume the original unexpired permit immediately before one unit click",
-                              "never repeat a click; retain the actual task ending"]}, deadline=deadline)
+        facts = self.bridge.request("cart_change", self._cart_payload(pending), deadline=deadline)
         if facts == {"dispatch": "not_dispatched"}:
             raise MuseCartNotDispatched(pending)
         if facts != {"dispatch": "dispatched"}:

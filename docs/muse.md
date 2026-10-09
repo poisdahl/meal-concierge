@@ -221,6 +221,15 @@ do not guarantee latency or cancel a late physical action. Freshness remains
 30 seconds, and remaining operation time can shorten each request window.
 Existing checkout/cancellation permits retain their 30-second limits.
 
+If an exact cart action expires and closes without ever being claimed, ordinary
+`cart.reconcile_change` can prove that it acquired no native action authority.
+It requires the unique original request, complete matching intent/account
+payload, valid expired closure and absence of claim, consumption, response,
+ending or publication records. A fresh complete cart must still equal the
+original before-cart before only that pending journal is cleared. Broker
+records remain intact; this neither invents a task ending nor permits replay.
+Claimed or ambiguous actions retain the actual-ending requirements below.
+
 The native producer must freshly verify explicit sign-in, exact account links,
 the complete ordinary cart, absence of order-edit context, and one unique,
 enabled, visible, unobscured control for the exact product. Consume the original
