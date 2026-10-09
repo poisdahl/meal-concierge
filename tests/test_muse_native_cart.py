@@ -131,6 +131,7 @@ sys.argv = sys.argv[1:]
                          "operations": [{"product_id": "29829", "quantity": quantity}]}, ok=ok)
 
     def test_unit_add_remove_real_rpc_preserves_unknown_total_and_original_records(self):
+        self.assertEqual(self.rpc({"operation": "health"})["client_guidance"], muse.NATIVE_CART_GUIDANCE)
         self.change(1, ok=False)
         self.assertFalse(self.action_records)
         self.enable()

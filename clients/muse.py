@@ -509,7 +509,9 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         if request.get("operation") == "native_cart_policy":
             return self._policy(request)
         if request.get("operation") != "cart":
-            return super().handle(request)
+            result = super().handle(request)
+            result["client_guidance"] = NATIVE_CART_GUIDANCE
+            return result
         action = request.get("action", "get")
         if (action is not None and not isinstance(action, str)
                 or action not in {None, "get", "change", "reconcile_change"}):
