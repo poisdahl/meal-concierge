@@ -12,7 +12,7 @@ from unittest import mock
 
 from core import HouseholdError, StateStore
 from clients import muse
-from muse_browser import claim_request, consume_request, digest, end_request, read_json, respond_request
+from muse_browser import claim_request, consume_request, digest, durable_publish, end_request, read_json, respond_request
 from muse_native_provider import MuseNativeCartProvider
 from service import Application
 from test_muse_client import RUNNER
@@ -393,8 +393,9 @@ sys.argv = sys.argv[1:]
         closed_path.write_bytes(closed_bytes)
         duplicate = {**record, "request_id": str(uuid.uuid4())}
         duplicate_path = self.broker / "requests" / (duplicate["request_id"] + ".json")
-        duplicate_path.write_text(json.dumps(duplicate))
-        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        durable_publish(duplicate_path, duplicate)
+        refused = self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertIn("ambiguous", refused["error"])
         duplicate_path.unlink()
         request_path.unlink()
         self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
@@ -404,7 +405,9 @@ sys.argv = sys.argv[1:]
         altered = self.store.read()["pending_cart_change"]
         self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
         self.assertEqual(self.store.read()["pending_cart_change"], altered)
-        self.assertEqual(len(self.action_records), 1)
+        # The producer may also observe the deliberately injected duplicate.
+        self.assertEqual({row["request_id"] for row in self.action_records} - {duplicate["request_id"]},
+                         {record["request_id"]})
 
     def test_unclaimed_reconciliation_preserves_changed_cart_and_journal_race(self):
         pending, _record = self.unclaimed_change()
