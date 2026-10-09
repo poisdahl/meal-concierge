@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT
 sys.path.insert(0, str(CORE))
 
-from core import DEFAULT_PROFILE, HouseholdError, StateStore, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, due_recurring, oslo_local_timestamp, put_item, validate_delivery_slot  # noqa: E402
+from core import DEFAULT_PROFILE, HouseholdError, StateStore, cart_contents, cart_summary, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, due_recurring, oslo_local_timestamp, put_item, validate_delivery_slot  # noqa: E402
 from migrate import migrate  # noqa: E402
 from retail_mcp import normalize_retail_delivery_slot, normalize_retail_delivery_slots, retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date  # noqa: E402
 from oda_browser import (  # noqa: E402
@@ -553,6 +553,20 @@ class CoreTestsBase:
     def test_cart_summary_rejects_huge_provider_quantity_as_a_bounded_error(self):
         with self.assertRaisesRegex(HouseholdError, "quantity is invalid"):
             cart_summary({"items": [{"product_id": 10, "name": "Pasta", "quantity": 10**1_000, "price": 1}], "subtotal": 1})
+
+    def test_cart_contents_preserves_lines_without_authorizing_missing_money(self):
+        line = {"product_id": "10", "name": "Pasta", "quantity": 2, "price": None}
+        for cart in ({"items": [line], "total": None},
+                     {"groups": [{"items": [line]}]}, {"items": [], "total": None}):
+            with self.subTest(cart=cart):
+                self.assertEqual(cart_contents(cart)["items"], [line] if cart.get("items") != [] else [])
+                with self.assertRaisesRegex(HouseholdError, "Cart total is unavailable"):
+                    cart_summary(cart)
+
+    def test_cart_contents_rejects_invalid_quantities_without_money(self):
+        for quantity in (True, 0, -1, 1.5, float("nan"), 10**1_000):
+            with self.subTest(quantity=quantity), self.assertRaisesRegex(HouseholdError, "quantity is invalid"):
+                cart_contents({"items": [{"product_id": "10", "name": "Pasta", "quantity": quantity}]})
 
     def test_unix_socket_is_assigned_to_the_configured_group(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7767,6 +7781,47 @@ process.stdout.write(eval(script));
 
 
 class CartPlanTests(unittest.TestCase):
+    def test_external_native_cart_binding_is_rejected_before_state_or_provider_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, _browser, application, product_id = self.app(directory, "oda")
+            before = store.read()
+            for binding in (None, {"binding_digest": "a" * 64, "intent_id": "external"}):
+                with self.subTest(binding=binding):
+                    with self.assertRaisesRegex(HouseholdError, "_native_cart_binding is internal-only"):
+                        application.handle({"operation": "cart", "action": "change",
+                            "operations": [{"product_id": product_id, "quantity": 1}],
+                            "_native_cart_binding": binding})
+                    self.assertEqual(store.read(), before)
+                    self.assertEqual(provider.calls, [])
+
+    def test_line_only_cart_change_and_reopened_read_keep_unknown_checkout_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, browser, application, product_id = self.app(directory, "oda")
+            original_call = provider.call
+
+            def without_total(tool, arguments, **kwargs):
+                result = original_call(tool, arguments, **kwargs)
+                if tool in {"get_cart", "manipulate_cart"}:
+                    result.pop("subtotal", None)
+                    result["total"] = None
+                return result
+
+            provider.call = without_total
+            result = application.handle({"operation": "cart", "action": "change",
+                "operations": [{"product_id": product_id, "quantity": 1}]})
+            self.assertIsNone(result["total"])
+            self.assertNotIn("pending_cart_change", store.read())
+            reopened = Application(StateStore(Path(directory), CONFIG), provider, browser)
+            read = reopened.handle({"operation": "cart", "action": "get"})
+            self.assertEqual(read["cart_digest"], reopened._cart_digest({product_id: 2}))
+            self.assertIsNone(read["total"])
+            agent_read = reopened.handle({"operation": "cart", "action": "get", "response_view": "agent"})
+            self.assertEqual(agent_read["cart_normalization"], "unavailable")
+            self.assertNotIn("cart_digest", agent_read)
+            self.assertEqual(sum(tool == "manipulate_cart" for tool, _ in provider.calls), 1)
+            with self.assertRaisesRegex(HouseholdError, "total is unavailable"):
+                cart_summary(read)
+
     @staticmethod
     def menu(revision=1, digest="a" * 64):
         return {

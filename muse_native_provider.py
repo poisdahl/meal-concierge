@@ -1,13 +1,17 @@
 """Read-only Oda page observations from Muse's existing native browser profile."""
 from collections.abc import Mapping
+from copy import deepcopy
+from contextlib import contextmanager
 import math
 import re
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
 from clients.muse import MAX_PRODUCTS, validate_response as catalog_response
-from core import HouseholdError
-from muse_browser import NativeBridge, account_links, native_amount_minor, text
+from core import HouseholdError, cart_contents
+from muse_browser import (NativeBridge, account_links, digest, native_amount_minor, text,
+                          read_json, request_record, validate_claim, validate_response)
 from muse_mcp import oda_operation_lock, private_operation_directory
 
 
@@ -50,6 +54,20 @@ class MuseNativeReadProvider:
         self.bridge = NativeBridge(self.operation_directory / "browser", task_id)
         self._terminal_failure = None
         self._account_ids = None
+        self._operation = threading.local()
+
+    @contextmanager
+    def operation(self):
+        """Keep one operation's reads, action and finalization under shared custody."""
+        if getattr(self._operation, "held", False):
+            yield
+            return
+        with oda_operation_lock(self.operation_directory), self.bridge.custody():
+            self._operation.held = True
+            try:
+                yield
+            finally:
+                self._operation.held = False
 
     @property
     def terminal_failure(self):
@@ -85,7 +103,7 @@ class MuseNativeReadProvider:
             cutoff = min(cutoff, deadline)
         # Both locks are nonblocking. The read-only mode never installs checkout,
         # whose account read would otherwise re-enter browser custody.
-        with oda_operation_lock(self.operation_directory), self.bridge.custody():
+        with self.operation():
             if self.terminal_failure:
                 raise HouseholdError(self.terminal_failure)
             receipt = self.bridge.request("provider_read", {"tool": tool, "arguments": dict(arguments)},
@@ -217,3 +235,112 @@ class MuseNativeReadProvider:
             if literal is not None:
                 product["display"]["price"] = text(literal)
         return result
+
+
+class MuseCartNotDispatched(HouseholdError):
+    def __init__(self, pending):
+        super().__init__("Muse native cart task refused before dispatch")
+        self.pending = pending
+
+
+class MuseNativeCartProvider(MuseNativeReadProvider):
+    """One explicitly enabled unit delta, using the ordinary core cart journal."""
+
+    @contextmanager
+    def change(self, app, request):
+        with self.operation():
+            self._operation.change = {"app": app, "request": request, "dispatched": False}
+            try:
+                yield
+            finally:
+                del self._operation.change
+
+    def binding(self, store):
+        if not self._account_ids or self.terminal_failure:
+            raise HouseholdError("Muse cart policy requires verified original account evidence")
+        return digest({"state_directory": str(store.directory.resolve()), "configuration": store.config,
+                       "operation_directory": str(self.operation_directory),
+                       "task_id": self.bridge.task_id, "account_links": sorted(self._account_ids)})
+
+    def validate_cart_reconciliation(self, pending, store):
+        marker = pending.get("native_cart_binding")
+        if (not getattr(self._operation, "held", False) or not isinstance(marker, Mapping)
+                or set(marker) != {"binding_digest", "intent_id"}
+                or marker["binding_digest"] != self.binding(store)
+                or not isinstance(marker["intent_id"], str)
+                or re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", marker["intent_id"]) is None):
+            raise HouseholdError("original Muse cart binding and native custody are required for reconciliation")
+        # The unique intent is part of the digest: identical later deltas cannot
+        # reuse an earlier task's refusal or completion.
+        matches = []
+        for path in (self.bridge.directory / "requests").glob("*.json"):
+            record = read_json(path)
+            if not isinstance(record, Mapping) or not isinstance(record.get("payload"), Mapping):
+                raise HouseholdError("Muse browser request record changed; preserve the journal")
+            if record.get("operation") == "cart_change" and record["payload"].get("intent_digest") == digest(pending):
+                matches.append(request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)[1])
+        if len(matches) != 1:
+            raise HouseholdError("Muse original cart request is unavailable or ambiguous; preserve the journal")
+        record = matches[0]
+        name = record["request_id"] + ".json"
+        try:
+            ending = read_json(self.bridge.directory / "endings" / name)
+        except FileNotFoundError:
+            ending = read_json(self.bridge.directory / "responses" / name)
+        validate_response(record, ending, fresh=False)
+        validate_claim(self.bridge.directory, record, response=ending)
+        if ending["task_state"] != "completed":
+            raise HouseholdError("Muse original cart task has no actual ending")
+        return "not_dispatched" if ending["facts"] == {"dispatch": "not_dispatched"} else "ended"
+
+    def call(self, tool, arguments, *, deadline=None):
+        change = getattr(self._operation, "change", None)
+        if tool != "manipulate_cart":
+            result = super().call(tool, arguments, deadline=deadline)
+            if tool == "get_cart" and change is not None and not change["dispatched"]:
+                app = change["app"]
+                before = app._cart_lines(cart_contents(result))[0]
+                if app._cart_digest(before) != change["request"]["cart_digest"]:
+                    raise HouseholdError("Muse cart changed since its reviewed cart_digest; no action dispatched")
+                change["before"] = before
+            return result
+        if change is None or not getattr(self._operation, "held", False) or change["dispatched"]:
+            raise HouseholdError("Muse cart dispatch requires its original guarded unit-change operation")
+        fields(arguments, {"operations"})
+        app, request = change["app"], change["request"]
+        operations = arguments["operations"]
+        expected_operations = [{"productId": int(row["product_id"]), "quantity": row["quantity"]}
+                               for row in request["operations"]]
+        state = app.store.read()
+        pending = deepcopy(state.get("pending_cart_change"))
+        binding = self.binding(app.store)
+        policy = state.get("muse_native_cart_policy") or {}
+        if (not isinstance(pending, Mapping) or pending.get("provider") != "oda"
+                or pending.get("order_change") is not None
+                or not isinstance(pending.get("native_cart_binding"), Mapping)
+                or pending["native_cart_binding"].get("binding_digest") != binding
+                or pending["native_cart_binding"] != change.get("marker")
+                or pending.get("operations") != operations or operations != expected_operations
+                or pending.get("before") != change.get("before")
+                or state.get("pending_checkout") or state.get("pending_cancellation")):
+            raise HouseholdError("Muse original enabled cart policy or pending intent changed; preserve its journal")
+        if policy != {"enabled": True, "binding_digest": binding}:
+            raise MuseCartNotDispatched(pending)
+        facts = self.bridge.request("cart_change", {
+            "intent_digest": digest(pending), "operations": operations,
+            "before_quantities": pending["before"], "expected_quantities": pending["expected"],
+            "account": {"url": "https://oda.com/no/account/delivery/",
+                        "edit_urls": ["https://oda.com/no/account/delivery/edit/" + str(key) + "/"
+                                      for key in sorted(self._account_ids)]},
+            "cart_url": "https://oda.com/no/cart/", "order_change": None,
+            "preconditions": ["fresh explicit sign-in and exact account links",
+                              "complete ordinary cart equals before_quantities; no order edit",
+                              "one exact product and unique enabled visible unobscured control",
+                              "consume the original unexpired permit immediately before one unit click",
+                              "never repeat a click; retain the actual task ending"]}, deadline=deadline)
+        if facts == {"dispatch": "not_dispatched"}:
+            raise MuseCartNotDispatched(pending)
+        if facts != {"dispatch": "dispatched"}:
+            raise HouseholdError("Muse native cart action outcome is unknown; reconcile without replay")
+        change["dispatched"] = True
+        return facts

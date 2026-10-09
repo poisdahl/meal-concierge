@@ -803,6 +803,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     except HouseholdError:
         # A provider can omit its total. Preserve the write outcome without
         # exposing raw provider internals or minting a writable cart digest.
+        view.pop("cart_digest", None)
         view["cart_normalization"] = "unavailable"
         return view
     view.update(_fields(summary, ("count", "total", "delivery", "amounts")))

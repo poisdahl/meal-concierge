@@ -483,6 +483,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("request must be an object")
         if "_restore_missing_cart_digest" in request:
             raise HouseholdError("_restore_missing_cart_digest is internal-only")
+        if "_native_cart_binding" in request:
+            raise HouseholdError("_native_cart_binding is internal-only")
         validate_request_value(request)
         operation = request.get("operation")
         action = request.get("action")

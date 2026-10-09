@@ -1350,8 +1350,8 @@ def masked_status(state: Mapping[str, Any], integration: Mapping[str, Any]) -> d
     }
 
 
-def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
-    """Normalize supported provider carts without making their schema local authority."""
+def cart_contents(cart: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize observed cart lines independently of unavailable checkout amounts."""
     raw_lines: list[Any] = []
     groups = cart.get("groups")
     if isinstance(groups, list):
@@ -1389,6 +1389,12 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
             "quantity": int(numeric_quantity),
             "price": item.get("totalGrossAmount", item.get("price", product.get("price"))),
         })
+    return {"items": lines}
+
+
+def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize supported provider carts with strict checkout amount validation."""
+    lines = cart_contents(cart)["items"]
     total = cart.get("totalGrossAmount", cart.get("total", cart.get("subtotal")))
     try:
         numeric_total = float(str(total).replace(",", "."))

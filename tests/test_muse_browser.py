@@ -167,13 +167,18 @@ class NativeBrokerTests(NativeFixture):
             expires_at=(issued + timedelta(seconds=540)).isoformat())
         claim_request(self.directory, record["request_id"], "original-task")
         respond_request(self.directory, record["request_id"], "original-task", self.response(record))
-        for operation, seconds in [("checkout_review", 541), *[(op, 31) for op in ACTION_OPERATIONS]]:
+        for operation, seconds in [("checkout_review", 541),
+                                   *[(op, 91 if op == "cart_change" else 31) for op in ACTION_OPERATIONS]]:
             with self.subTest(operation=operation):
                 now = datetime.now(timezone.utc)
                 record = self.record(operation, issued_at=now.isoformat(),
                     expires_at=(now + timedelta(seconds=seconds)).isoformat())
                 with self.assertRaises(HouseholdError):
                     claim_request(self.directory, record["request_id"], "original-task")
+        now = datetime.now(timezone.utc)
+        record = self.record("cart_change", issued_at=now.isoformat(),
+            expires_at=(now + timedelta(seconds=90)).isoformat())
+        claim_request(self.directory, record["request_id"], "original-task")
 
     def test_read_window_is_capped_by_remaining_core_deadline(self):
         for remaining, expected in [(900, 540), (470, 470), (15, 15)]:
