@@ -7815,6 +7815,9 @@ class CartPlanTests(unittest.TestCase):
             read = reopened.handle({"operation": "cart", "action": "get"})
             self.assertEqual(read["cart_digest"], reopened._cart_digest({product_id: 2}))
             self.assertIsNone(read["total"])
+            agent_read = reopened.handle({"operation": "cart", "action": "get", "response_view": "agent"})
+            self.assertEqual(agent_read["cart_normalization"], "unavailable")
+            self.assertNotIn("cart_digest", agent_read)
             self.assertEqual(sum(tool == "manipulate_cart" for tool, _ in provider.calls), 1)
             with self.assertRaisesRegex(HouseholdError, "total is unavailable"):
                 cart_summary(read)
