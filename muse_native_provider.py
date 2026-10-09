@@ -17,6 +17,42 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 
 READ_SECONDS = 90.0
 TOOLS = {"product_search", "get_cart", "get_delivery_addresses"}
+FACTS_COMMON = (
+    "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
+    "Use fresh observed facts from the original continuous profile, never cached or invented values. "
+    "signed_in and complete are booleans. account is an object with exactly url and edit_urls: "
+    "url is the freshly observed https://oda.com/no/account/delivery/ route; edit_urls is an array "
+    "of ALL actual absolute https://oda.com/no/account/delivery/edit/<positive-integer>/ links. "
+    "Establish sign-in explicitly on that account page in the same flow. "
+)
+FACTS_CONTRACTS = {
+    "get_cart": FACTS_COMMON + (
+        "Root keys: url,signed_in,complete,account,empty,items,amount_rows,delivery_text,address,warnings. "
+        "url must be the actual https://oda.com/no/cart/ route. empty is a boolean consistent with items. "
+        "items is the complete array of objects with exactly url,title,subtitle,quantity,price: actual "
+        "product URL, literal title, literal subtitle string (empty only for verified absence), "
+        "positive integer quantity, nullable "
+        "literal price string. If subtitle is unknown, stop instead of returning null or empty. "
+        "amount_rows is an array of objects with exactly label,value, both "
+        "literal strings; never an array of flat strings. Return all observed amount rows; missing "
+        "totals remain unknown, do not invent a Total row. delivery_text and address are literal "
+        "strings or null; warnings is an array of literal strings. Observe the complete ordinary "
+        "cart, not an order-edit cart."
+    ),
+    "get_delivery_addresses": FACTS_COMMON + (
+        "Root keys: url,signed_in,complete,account,rows. url must be the actual delivery-account route. "
+        "rows is the complete array of objects with exactly edit_url,address,default,selected: "
+        "actual absolute edit URL, literal address, boolean standard-address marker, and selected "
+        "as an actually observed boolean or null. A standard marker does not prove selection."
+    ),
+    "product_search": FACTS_COMMON + (
+        "Root keys: url,signed_in,complete,account,query,page,size,hasMore,products. Preserve the actual "
+        "matching search URL and requested query,page,size; hasMore is an observed boolean. products "
+        "is the bounded array of objects with exactly url,name,description,price,unitPrice,unitName,"
+        "availability: actual product URL, required literal name, nullable literal strings for the "
+        "other text fields, and availability as an observed boolean or null."
+    ),
+}
 
 
 def fields(value, names):
@@ -106,7 +142,8 @@ class MuseNativeReadProvider:
         with self.operation():
             if self.terminal_failure:
                 raise HouseholdError(self.terminal_failure)
-            receipt = self.bridge.request("provider_read", {"tool": tool, "arguments": dict(arguments)},
+            receipt = self.bridge.request("provider_read", {"tool": tool, "arguments": dict(arguments),
+                                          "facts_contract": FACTS_CONTRACTS[tool]},
                                           deadline=cutoff, include_response=True)
             response = receipt["response"]
             if response["task_state"] != "completed":

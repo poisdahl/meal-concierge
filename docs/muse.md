@@ -124,6 +124,12 @@ copy cookies, inspect hidden endpoints or use a desktop browser for these reads.
 Signed-out results stop the provider until supported recovery and a quiet
 owned-runner restart; status does not repeat the rejected observation.
 
+Each immutable `provider_read` request carries its tool-specific `facts_contract`.
+Pass that contract to the native observation task and retain its complete actual
+result before publishing. Check the parsed cart/account shapes with the existing
+pure validators before consuming the response-publication fence; this does not
+make stale or malformed observations valid.
+
 Return literal observed facts, with these exact schemas. Every result includes
 `url`, boolean `signed_in`, boolean `complete` for the requested section, and
 `account` containing the actual account page `url` and complete observed
@@ -148,7 +154,8 @@ restamp cached facts or infer authentication from a prior task.
   address marker does not prove the currently selected delivery address.
 - Cart facts add explicit boolean `empty`, complete `items`, literal
   `amount_rows` (`label`, `value`), nullable `delivery_text` and `address`, and
-  `warnings`. Each item has its actual product `url`, `title`, `subtitle`,
+  `warnings`. Each item has its actual product `url`, literal `title` and
+  `subtitle` strings (an empty subtitle only for verified absence),
   positive integer `quantity` and nullable literal `price`. Header zero alone
   does not establish an empty cart. Missing totals remain `null`; no writable
   cart digest, slot ID or reconstructed saved plan is supplied.
@@ -200,8 +207,12 @@ can be validated when no checkout total is displayed; the total stays unknown,
 and payment paths still require strict monetary facts. The ordinary core
 `pending_cart_change` is committed before emitting an immutable `cart_change`
 broker request. Its payload binds the original account, before/expected cart
-quantities and intent digest. The cart action has a finite 90-second initial
-budget within a 240-second operation; this is not a measured latency guarantee.
+quantities and intent digest. The cart action has a finite 150-second budget
+within a 360-second change operation; the ordinary cart-change RPC waits up to
+420 seconds. Reads and reconciliation retain their 240-second operation budget.
+These bounds leave room for verification, the action and fresh readback; they
+do not guarantee latency or cancel a late physical action. Freshness remains
+30 seconds, and remaining operation time can shorten each request window.
 Existing checkout/cancellation permits retain their 30-second limits.
 
 The native producer must freshly verify explicit sign-in, exact account links,

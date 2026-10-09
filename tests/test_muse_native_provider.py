@@ -203,6 +203,23 @@ class NativeReadTests(unittest.TestCase):
         finally:
             os.close(descriptor)
 
+    def test_emitted_cart_contract_does_not_accept_display_account_or_flat_amount_rows(self):
+        for changed in ({"account": "Synthetic account"},
+                        {"amount_rows": ["Total inkl. mva 39,90 kr"]}):
+            with self.subTest(changed=changed):
+                self.transform = lambda tool, facts: {**facts, **changed}
+                self.rpc({"operation": "cart", "action": "get"}, ok=False)
+        requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")]
+        cart_requests = [record for record in requests if record["payload"].get("tool") == "get_cart"]
+        self.assertEqual(len(cart_requests), 2)
+        for record in cart_requests:
+            contract = record["payload"]["facts_contract"]
+            self.assertIn("account is an object with exactly url and edit_urls", contract)
+            self.assertIn("amount_rows is an array of objects with exactly label,value", contract)
+            self.assertIn("literal subtitle string (empty only for verified absence)", contract)
+            self.assertIn("If subtitle is unknown, stop", contract)
+            self.assertIn("never cached or invented values", contract)
+
 
 class PageBoundaryTests(unittest.TestCase):
     def test_catalog_normalizes_observed_price_without_losing_literal_display(self):
@@ -265,6 +282,16 @@ class PageBoundaryTests(unittest.TestCase):
         result = MuseNativeReadProvider._cart(facts)
         self.assertEqual(result["total"], 39.90)
         self.assertEqual(result["amount_rows"], facts["amount_rows"])
+
+    def test_cart_subtitle_requires_literal_string_including_verified_empty(self):
+        facts = observation("get_cart", {})
+        facts["empty"] = False
+        facts["items"] = [{"url": "https://oda.com/no/products/29829-synthetic-squash/",
+                           "title": "Synthetic squash", "subtitle": "", "quantity": 1, "price": None}]
+        self.assertEqual(MuseNativeReadProvider._cart(facts)["items"][0]["description"], "")
+        facts["items"][0]["subtitle"] = None
+        with self.assertRaises(HouseholdError):
+            MuseNativeReadProvider._cart(facts)
 
     def test_validation_keeps_provider_and_browser_locks_until_account_is_pinned(self):
         with tempfile.TemporaryDirectory() as temporary:
