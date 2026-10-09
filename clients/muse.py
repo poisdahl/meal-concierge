@@ -61,7 +61,8 @@ NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog,
 NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
                       "cart": {None, "get"}, "delivery": {"addresses"}}
 NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
-    "after a fresh complete cart read and an enabled original-context policy. Reconcile uncertain changes "
+    "after a fresh complete cart read and an enabled original-context policy, plus bounded product "
+    "preparation and saved-plan reads with include_recurring=false. Reconcile uncertain changes "
     "without repeating them. Whole-menu product apply, delivery selection, checkout and orders remain unavailable.")
 
 
@@ -473,6 +474,35 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
 
 
 class NativeCartMuseApplication(NativeReadMuseApplication):
+    def _prepare_or_read_products(self, request):
+        if request["action"] == "prepare":
+            if request.get("include_recurring") is not False:
+                raise HouseholdError("Muse product preparation requires include_recurring=false")
+            reference = request.get("product_plan_ref")
+            if reference is not None:
+                record = self._product_plan_record(self.store.read(), reference)
+                if record.get("include_recurring") is not False:
+                    raise HouseholdError("Muse continuation requires an original recurring-disabled product plan")
+        guard_local_recipes(request)
+        self._observe_terminal_failure()
+        try:
+            with self.product_plan_lock:
+                result = Application.handle(self, {**request, "_deadline": time.monotonic() + 240})
+                result.pop("apply_arguments", None)
+                result.pop("partial_apply_arguments", None)
+                continuation = result.get("continue_arguments")
+                if isinstance(continuation, dict):
+                    record = self._product_plan_record(self.store.read(), result["product_plan_ref"])
+                    if continuation.get("action") == "prepare" and record.get("include_recurring") is False:
+                        continuation["include_recurring"] = False
+                    else:
+                        result.pop("continue_arguments")
+                result["client_guidance"] = NATIVE_CART_GUIDANCE
+                result["next"] = "Review this local plan or continue prepare with include_recurring=false. Whole-menu cart apply is unavailable in this mode."
+                return result
+        finally:
+            self._observe_terminal_failure()
+
     def _policy(self, request):
         from muse_native_provider import fields
         action = request.get("action")
@@ -508,6 +538,9 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
             raise HouseholdError("request must be an object")
         if request.get("operation") == "native_cart_policy":
             return self._policy(request)
+        action = request.get("action")
+        if request.get("operation") == "products" and isinstance(action, str) and action in {"prepare", "get"}:
+            return self._prepare_or_read_products(request)
         if request.get("operation") != "cart":
             result = super().handle(request)
             result["client_guidance"] = NATIVE_CART_GUIDANCE

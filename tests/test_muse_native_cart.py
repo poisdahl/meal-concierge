@@ -1,6 +1,6 @@
 """Synthetic real RPC/producer unit changes; never merchant capability evidence."""
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 import sys
 import tempfile
@@ -32,6 +32,7 @@ sys.argv = sys.argv[1:]
         self.quantity = 0
         self.action_result = "dispatched"
         self.action_records = []
+        self.catalog_state = "completed"
         if sys.platform.startswith("linux"):
             read_fixture.NativeReadTests.setUp(self)
             self.store = StateStore(self.home / "state", muse.load_home(self.home))
@@ -111,7 +112,7 @@ sys.argv = sys.argv[1:]
                             facts.update(empty=False, items=[{"url": "https://oda.com/no/products/29829-synthetic-squash/",
                                 "title": "Synthetic squash", "subtitle": "250 g", "quantity": self.quantity, "price": None}])
                         facts = self.transform(tool, facts)
-                        task_state = "completed"
+                        task_state = self.catalog_state if tool == "product_search" else "completed"
                     response = {"request_id": record["request_id"], "request_digest": digest(record),
                                 "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
                                 "task_state": task_state, "facts": facts}
@@ -129,6 +130,101 @@ sys.argv = sys.argv[1:]
         cart = self.rpc({"operation": "cart", "action": "get"})
         return self.rpc({"operation": "cart", "action": "change", "cart_digest": cart_digest or cart["cart_digest"],
                          "operations": [{"product_id": "29829", "quantity": quantity}]}, ok=ok)
+
+    def prepare_menu(self, *, two_ingredients=False):
+        recipe = {"name": "Synthetic squash", "language": "nb-NO", "portions": 2,
+            "ingredients": [{"raw": "250 g squash", "quantity": 250, "unit": "g", "item": "squash", "scalable": True}],
+            "steps": ["Cook the squash."], "source": {"kind": "user", "relationship": "user_supplied",
+            "title": "Synthetic squash", "publisher": "Fixture", "external_id": "native-squash"},
+            "rights": {"storage": "full", "credit": "Fixture"}, "times": {"active_minutes": 20}}
+        if two_ingredients:
+            recipe["ingredients"].append({"raw": "100 g rice", "quantity": 100,
+                                          "unit": "g", "item": "rice", "scalable": True})
+        entry = self.rpc({"operation": "recipes", "action": "save", "recipe": recipe,
+                          "idempotency_key": "native-squash"})["recipe"]
+        planned = self.rpc({"operation": "menu", "action": "plan", "planner_input": {
+            "dates": [date.today().isoformat()],
+            "candidates": [{"recipe_ref": {"id": entry["id"], "revision": entry["revision"]}}]}})
+        menu = self.rpc({"operation": "menu", "action": "save",
+                         "planner_ref": planned["plan"]["save_ref"]})["menu"]
+        return {key: menu[key] for key in ("menu_id", "revision", "digest")}
+
+    def test_native_product_prepare_selection_and_saved_read_without_cart_authority(self):
+        reference = self.prepare_menu()
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                             "include_recurring": False, "price_mode": "estimate"})
+        product = prepared["product_plan"]["requirements"][0]["observation"]["products"][0]
+        selected = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
+            "candidate_approvals": [product["candidate_approval"]]})
+        readback = self.rpc({"operation": "products", "action": "get",
+                             "product_plan_ref": selected["product_plan_ref"]})
+        self.assertEqual(readback["status"], "prepared")
+        self.assertEqual(readback["requirements"][0]["selection"]["package_count"], 1)
+        self.assertEqual(readback["totals"]["merchandise_ore"], 3990)
+        self.assertIsNone(readback["totals"]["total_payable_ore"])
+        for result in (prepared, selected, readback):
+            self.assertNotIn("apply_arguments", result)
+            self.assertNotIn("partial_apply_arguments", result)
+            self.assertIn("apply is unavailable", result["next"])
+        self.rpc({"operation": "products", "action": "apply",
+                  "product_plan_ref": selected["product_plan_ref"]}, ok=False)
+        self.assertFalse(self.action_records)
+        self.assertNotIn("pending_cart_change", self.store.read())
+        self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+        for path, original in self.history.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_native_product_prepare_requires_explicit_recurring_scope_before_catalog_read(self):
+        reference = self.prepare_menu()
+        calls = list(self.seen)
+        for action in ([], {}):
+            result = self.rpc({"operation": "products", "action": action}, ok=False)
+            self.assertIn("Unsupported Muse browser read", result["error"])
+        for value in (None, True, 0):
+            result = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                               "include_recurring": value}, ok=False)
+            self.assertIn("include_recurring=false", result["error"])
+        self.assertEqual(self.seen, calls)
+
+    def test_native_continuation_cannot_narrow_original_recurring_enabled_scope(self):
+        reference = self.prepare_menu()
+        # An existing ordinary-core plan can precede this adapter. Its stored
+        # scope stays authoritative when read or continued through Muse.
+        prepared = Application(self.store, FakeOda(), None).handle({
+            "operation": "products", "action": "prepare", "menu_ref": reference,
+            "include_recurring": True, "price_mode": "estimate"})
+        calls = list(self.seen)
+        result = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False}, ok=False)
+        self.assertIn("original recurring-disabled", result["error"])
+        self.assertEqual(self.seen, calls)
+        readback = self.rpc({"operation": "products", "action": "get",
+                             "product_plan_ref": prepared["product_plan_ref"]})
+        self.assertNotIn("continue_arguments", readback)
+        self.assertNotIn("apply_arguments", readback)
+        self.assertFalse(self.action_records)
+
+    def test_unresolved_first_catalog_read_prevents_second_ingredient_task(self):
+        reference = self.prepare_menu(two_ingredients=True)
+        self.catalog_state = "waiting_for_information"
+        result = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                           "include_recurring": False, "price_mode": "estimate"})
+        records = [read_json(path) for path in (self.broker / "requests").glob("*.json")]
+        catalog = [record for record in records if record["payload"].get("tool") == "product_search"]
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(self.seen.count("product_search"), 1)
+        self.assertNotEqual(result["product_plan"]["status"], "prepared")
+        self.assertFalse(self.action_records)
+
+    def test_completed_incomplete_catalog_read_allows_next_ingredient_observation(self):
+        reference = self.prepare_menu(two_ingredients=True)
+        self.transform = lambda tool, facts: {**facts, "complete": False} if tool == "product_search" else facts
+        result = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                           "include_recurring": False, "price_mode": "estimate"})
+        self.assertEqual(self.seen.count("product_search"), 2)
+        self.assertNotEqual(result["product_plan"]["status"], "prepared")
+        self.assertFalse(self.action_records)
 
     def test_unit_add_remove_real_rpc_preserves_unknown_total_and_original_records(self):
         self.assertEqual(self.rpc({"operation": "health"})["client_guidance"], muse.NATIVE_CART_GUIDANCE)

@@ -178,8 +178,14 @@ replace real host qualification.
 browser directory and original task-chain anchor as `browser_readonly`. It keeps
 the read-only transport unchanged and adds only `cart.change` for one exact
 product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`.
-This bounded adapter is a prerequisite for measuring real cart behavior; it
-does not implement whole-menu `products.prepare/apply`, delivery selection,
+This bounded adapter also supports ordinary `products.prepare`, saved-plan
+`products.get` and preparation continuations using the existing cloud catalog.
+Every prepare request must explicitly set `include_recurring:false`, and a
+continuation cannot change a stored recurring-enabled scope. The existing
+bounded page-1 search and product-plan continuation budgets apply. Missing
+prices, package facts and dietary evidence remain unknown; a preparation
+result grants no cart authority. Whole-menu apply arguments are omitted.
+This mode does not implement whole-menu `products.apply`, delivery selection,
 checkout, order reads or cancellation.
 
 Writes start disabled. In the ordinary CLI, inspect
