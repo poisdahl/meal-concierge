@@ -1,5 +1,6 @@
 """Public producer CLI, literal JSON delivery and real one-use broker custody."""
 from datetime import datetime, timezone
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -12,8 +13,9 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
-from muse_browser import NativeBridge, read_json
-from muse_browser_producer import ProducerError, parse_json
+from muse_browser import NativeBridge, claim_request, read_json
+from muse_browser_producer import ProducerError, parse_json, publish, validate_native_read
+from muse_native_provider import FACTS_CONTRACTS
 
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -38,6 +40,15 @@ FACTS = {
     "submit_controls": [{"label": "SYNTHETIC — no purchase", "enabled": True}],
     "complete_sections": ["account", "items", "warnings", "amounts", "delivery", "payment", "submit"],
 }
+READ_PAYLOAD = {"tool": "get_orders", "arguments": {"page": 1, "size": 10},
+                "facts_contract": FACTS_CONTRACTS["get_orders"]}
+READ_FACTS = {
+    "url": "https://oda.com/no/account/orders/", "signed_in": True, "complete": True,
+    "account": FACTS["account"], "page": 1, "size": 10, "hasMore": True,
+    "orders": [{"url": "https://oda.com/no/account/orders/SYNTHETIC-A1/",
+                "reference": "SYNTHETIC-A1", "status": "Levert — syntetisk",
+                "delivery_text": None, "total_text": "10,00 kr"}],
+}
 
 
 class InputBoundaryTests(unittest.TestCase):
@@ -49,6 +60,30 @@ class InputBoundaryTests(unittest.TestCase):
             self.assertEqual(error.exception.stage, "input")
             self.assertIn(error.exception.category, {"invalid_json", "facts_object_required"})
             self.assertNotIn("DO-NOT-PRINT", str(error.exception))
+
+    def test_native_read_rejects_common_evidence_and_order_schema_without_repair(self):
+        malformed = []
+        for account in ({**FACTS["account"], "url": READ_FACTS["url"]},
+                        {**FACTS["account"], "edit_urls": []}):
+            malformed.append({**READ_FACTS, "account": account})
+        malformed.append({**READ_FACTS, "orders": [{
+            "reference": "SYNTHETIC-A1", "detail_href": "/no/account/orders/SYNTHETIC-A1/",
+            "status": "Levert", "delivery": None, "total": "10,00 kr"}]})
+        for facts in malformed:
+            with self.subTest(facts=facts):
+                before = deepcopy(facts)
+                with self.assertRaises(HouseholdError):
+                    validate_native_read({"operation": "provider_read", "payload": READ_PAYLOAD},
+                                         {"facts": facts})
+                self.assertEqual(facts, before)
+
+    def test_failure_observations_remain_literal_for_consumer_handling(self):
+        for facts in ({"signed_in": False, "complete": True},
+                      {"signed_in": True, "complete": False}):
+            before = deepcopy(facts)
+            validate_native_read({"operation": "provider_read", "payload": READ_PAYLOAD},
+                                 {"facts": facts})
+            self.assertEqual(facts, before)
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Muse cloud owner identity is Linux")
@@ -64,11 +99,12 @@ class ProducerCLITests(unittest.TestCase):
         self.bridge = NativeBridge(self.broker, "synthetic-native-chain")
         self.results, self.errors = [], []
 
-    def request(self):
+    def request(self, operation="checkout_review", payload=None, seconds=WAITER_SECONDS):
         def waiter():
             try:
                 with self.bridge.custody():
-                    self.results.append(self.bridge.request("checkout_review", {}, deadline=time.monotonic() + WAITER_SECONDS))
+                    self.results.append(self.bridge.request(operation, payload or {},
+                                                           deadline=time.monotonic() + seconds))
             except HouseholdError as error:
                 self.errors.append(error)
         self.worker = threading.Thread(target=waiter)
@@ -114,6 +150,71 @@ class ProducerCLITests(unittest.TestCase):
         self.assertEqual((self.broker / "responses" / (self.key + ".json")).read_bytes(), original)
         self.assertEqual(len(list((self.broker / "responses").glob("*.json"))), 1)
         self.assertTrue((self.broker / "closed" / (self.key + ".json")).exists())
+
+    def test_native_read_cli_preserves_valid_literal_facts(self):
+        self.request("provider_read", READ_PAYLOAD)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        result = self.run_cli("respond", json.dumps(READ_FACTS, ensure_ascii=False).encode())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(2)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [READ_FACTS])
+        self.assertEqual(self.errors, [])
+
+    def test_signed_out_cli_preserves_failure_for_native_terminal_latch(self):
+        self.request("provider_read", READ_PAYLOAD)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        facts = {"signed_in": False, "complete": True}
+        result = self.run_cli("respond", json.dumps(facts).encode())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(2)
+        self.assertEqual(self.results, [facts])
+        self.assertEqual(self.errors, [])
+
+    def test_native_catalog_cli_uses_request_timestamps_and_preserves_display(self):
+        payload = {"tool": "product_search", "arguments": {"queries": ["squash"], "page": 1, "size": 10},
+                   "facts_contract": FACTS_CONTRACTS["product_search"]}
+        facts = {"url": "https://oda.com/no/search/products/?q=squash", "signed_in": True,
+                 "complete": True, "account": FACTS["account"], "query": "squash", "page": 1,
+                 "size": 10, "hasMore": False, "products": [{
+                     "url": "https://oda.com/no/products/29829-synthetic-squash/", "name": "Synthetic squash",
+                     "description": "250 g", "price": "39,90 kr", "unitPrice": "159,60 kr",
+                     "unitName": "kg", "availability": True}]}
+        self.request("provider_read", payload)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        result = self.run_cli("respond", json.dumps(facts).encode())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(2)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [facts])
+        self.assertEqual(self.errors, [])
+
+    def test_invalid_native_read_consumes_attempt_and_generic_end_only_closes_custody(self):
+        self.request("provider_read", READ_PAYLOAD, seconds=2)
+        claim_request(self.broker, self.key, self.bridge.task_id)
+        facts = {**READ_FACTS, "account": {**FACTS["account"], "edit_urls": []}}
+        observed = datetime.now(timezone.utc).isoformat()
+        with self.assertRaises(ProducerError) as error:
+            publish(self.broker, self.key, self.bridge.task_id,
+                    json.dumps(facts).encode(), observed, "completed")
+        self.assertEqual((error.exception.stage, error.exception.category),
+                         ("publish", "invalid_native_read"))
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(list((self.broker / "responses").glob("*.json")), [])
+        with self.assertRaises(ProducerError) as retry:
+            publish(self.broker, self.key, self.bridge.task_id,
+                    json.dumps(READ_FACTS).encode(), observed, "completed")
+        self.assertEqual(retry.exception.category, "invocation_consumed")
+        publish(self.broker, self.key, self.bridge.task_id,
+                json.dumps(facts).encode(), observed, "completed", ending=True)
+        self.worker.join(3)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [])
+        self.assertEqual(len(self.errors), 1)
+        self.assertEqual(list((self.broker / "responses").glob("*.json")), [])
+        self.assertTrue((self.broker / "endings" / (self.key + ".json")).exists())
+        with self.bridge.custody():
+            pass
 
     def test_refused_payload_cannot_be_corrected_or_moved_and_ending_is_custody_only(self):
         self.request()

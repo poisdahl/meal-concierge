@@ -181,16 +181,26 @@ class MuseNativeReadProvider:
                 raise HouseholdError("Muse native provider needs the complete requested page section")
             source = {"kind": "host_attested", "url": facts.get("url"),
                       "request_id": response["request_id"], "observed_at": response["observed_at"]}
-            if tool == "get_delivery_addresses":
-                result = self._addresses(facts)
-            elif tool == "get_cart":
-                result = self._cart(facts)
-            elif tool == "get_orders":
-                result = self._orders(facts, arguments)
-            else:
-                result = self._catalog(facts, arguments, response, receipt)
+            result = self.validate_read_facts(tool, arguments, facts, response, receipt)
             self._account_ids = references
             return {**result, "source": source, "observation_scope": "browser_read_only"}
+
+    @classmethod
+    def validate_read_facts(cls, tool, arguments, facts, response, receipt):
+        """Validate a successful observation without establishing account continuity."""
+        if (not isinstance(facts, Mapping) or facts.get("signed_in") is not True
+                or facts.get("complete") is not True):
+            raise HouseholdError("Muse native read needs complete signed-in facts")
+        account_links(facts.get("account"))
+        if tool == "get_delivery_addresses":
+            return cls._addresses(facts)
+        if tool == "get_cart":
+            return cls._cart(facts)
+        if tool == "get_orders":
+            return cls._orders(facts, arguments)
+        if tool == "product_search":
+            return cls._catalog(facts, arguments, response, receipt)
+        raise HouseholdError("Muse native read tool is unavailable")
 
     @staticmethod
     def _addresses(facts):

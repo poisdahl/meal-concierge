@@ -68,6 +68,19 @@ def publication_fence(directory, request_id):
             {"attempted_at": datetime.now(timezone.utc).isoformat()})
 
 
+def validate_native_read(record, response):
+    if record["operation"] != "provider_read":
+        return
+    facts = response["facts"]
+    # Preserve genuine failure observations for the consumer's existing latch.
+    if facts.get("signed_in") is False or facts.get("complete") is False:
+        return
+    from muse_native_provider import MuseNativeReadProvider
+    payload = record["payload"]
+    MuseNativeReadProvider.validate_read_facts(
+        payload["tool"], payload["arguments"], facts, response, record)
+
+
 def publish(directory, request_id, task_id, data, observed_at, ending_state, *, ending=False):
     directory, record = checked("request", "custody_rejected", request_record,
                                 directory, request_id, task_id, active=not ending)
@@ -78,6 +91,8 @@ def publish(directory, request_id, task_id, data, observed_at, ending_state, *, 
                 "observed_at": observed_at, "task_state": ending_state, "facts": facts}
     checked("request", "claim_rejected", validate_claim, directory, record, response=response)
     checked("publish", "invalid_handoff", validate_response, record, response, fresh=not ending)
+    if not ending:
+        checked("publish", "invalid_native_read", validate_native_read, record, response)
     checked("publish", "response_write_uncertain", end_request if ending else respond_request,
             directory, request_id, task_id, response)
     return {"ended" if ending else "published": True}

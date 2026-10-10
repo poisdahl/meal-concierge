@@ -566,6 +566,16 @@ and ordinary CLI result instead. A successful `{"published":true}` means only
 that the source response was written; core acceptance and a confirmation must
 come from the actual ordinary CLI result. No publication authorizes payment.
 
+For complete signed-in `provider_read` facts, `respond` also runs the native
+consumer's common account-shape and tool-specific validators against the
+immutable request's tool and arguments. Invalid account evidence, field aliases
+or relative order links are rejected as `publish/invalid_native_read`; the
+publication attempt remains consumed. Facts are never repaired or normalized
+in the stored response. Genuine signed-out or incomplete observations still
+reach the consumer's existing failure handling. Original account continuity is
+checked by the running consumer, so publication success is not proof of readiness.
+`end` retains generic validation for truthful custody closure of malformed facts.
+
 `consume` needs no stdin and keeps the existing one-use action admission rules.
 `end` takes the **actual completed task's literal ending facts** and genuine UTC
 using the same arguments as `respond`. It records unresolved native custody,
