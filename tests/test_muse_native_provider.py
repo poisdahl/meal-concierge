@@ -503,12 +503,13 @@ class PageBoundaryTests(unittest.TestCase):
                         "observed_at": datetime.now(timezone.utc).isoformat(),
                         "facts": observation("get_cart", {})}}
             provider.bridge.request = response
-            def validate(facts):
+            def validate(tool, arguments, facts, result, receipt):
                 entered.set()
                 if not release.wait(3):
                     raise AssertionError("synthetic validation barrier timed out")
-                return MuseNativeReadProvider._cart(facts)
-            provider._cart = validate
+                return MuseNativeReadProvider.validate_read_facts(
+                    tool, arguments, facts, result, receipt)
+            provider.validate_read_facts = validate
             def first():
                 try:
                     provider.call("get_cart", {})
