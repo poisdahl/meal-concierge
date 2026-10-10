@@ -286,6 +286,28 @@ sys.argv = sys.argv[1:]
 
 
 class PageBoundaryTests(unittest.TestCase):
+    def test_terminal_status_preserves_unavailable_without_reprobing(self):
+        class Provider:
+            terminal_failure = None
+
+            def probe(self):
+                if self.terminal_failure:
+                    raise AssertionError("terminal native provider must not be reprobed")
+                return {}
+
+        with tempfile.TemporaryDirectory(prefix="nt-") as root:
+            home, ops = Path(root) / "h", Path(root) / "ops"
+            ops.mkdir(mode=0o700)
+            muse.initialize(home, "oda", "Synthetic household", credential_name="custom.synthetic",
+                            operation_directory=ops)
+            provider = Provider()
+            app = muse.NativeReadMuseApplication(StateStore(home / "state", muse.load_home(home)),
+                                                 provider, None, external_recipe_sources={})
+            provider.terminal_failure = "Oda native browser login is required; preserve the existing profile."
+            status = app.handle({"operation": "status"})
+            self.assertEqual(status["integration"], app.integration)
+            self.assertEqual(status["integration"]["status"], "unavailable")
+
     def test_catalog_normalizes_observed_price_without_losing_literal_display(self):
         arguments = {"queries": ["squash"], "page": 1, "size": 1}
         now = datetime.now(timezone.utc)
