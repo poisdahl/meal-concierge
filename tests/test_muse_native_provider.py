@@ -79,6 +79,7 @@ class NativeReadTests(unittest.TestCase):
         self.history = {path: path.read_bytes() for path in self.broker.glob("*/*.json")}
         self.transform = lambda tool, facts: facts
         self.state = "completed"
+        self.omit_next = False
         self.seen, self.failures = [], []
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.produce)
@@ -112,6 +113,9 @@ class NativeReadTests(unittest.TestCase):
                     self.assertEqual(record["operation"], "provider_read")
                     tool = record["payload"]["tool"]
                     self.seen.append(tool)
+                    if self.omit_next:
+                        self.omit_next = False
+                        continue
                     facts = self.transform(tool, observation(tool, record["payload"]["arguments"]))
                     claim_request(self.broker, record["request_id"], record["task_id"])
                     response = {"request_id": record["request_id"], "request_digest": digest(record),
@@ -129,6 +133,58 @@ class NativeReadTests(unittest.TestCase):
         value = json.loads(result.stdout)
         self.assertEqual(value["ok"], ok)
         return value.get("result", value)
+
+    def restart_with_short_reads(self, transport):
+        self.process.terminate()
+        self.process.communicate(timeout=5)
+        socket = self.home / "service.sock"
+        socket.unlink(missing_ok=True)
+        runner = RUNNER.replace("sys.argv = sys.argv[1:]", """
+sys.path.insert(0, str(__import__('pathlib').Path(sys.argv[1]).resolve().parents[1]))
+import muse_native_provider
+muse_native_provider.READ_SECONDS = 1.0
+sys.argv = sys.argv[1:]
+""")
+        self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", runner,
+            str(ROOT / "clients/muse.py"), "run", "--home", str(self.home),
+            "--provider-transport", transport, "--browser-directory", str(self.broker),
+            "--browser-task-id", "synthetic-original-task"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for(lambda: socket.exists())
+
+    def test_expired_unclaimed_startup_read_recovers_on_explicit_status(self):
+        for transport in ("browser_readonly", "browser_cart"):
+            with self.subTest(transport=transport):
+                self.omit_next = True
+                self.restart_with_short_reads(transport)
+                health = self.rpc({"operation": "health"})
+                self.assertEqual(health["integration"]["status"], "unavailable")
+                records = [read_json(path) for path in (self.broker / "requests").glob("*.json")]
+                expired = next(record for record in records if record["owner_pid"] == self.process.pid)
+                name = expired["request_id"] + ".json"
+                originals = {self.broker / area / name: (self.broker / area / name).read_bytes()
+                             for area in ("requests", "closed")}
+                for area in ("claims", "consumed", "responses", "endings", "publications"):
+                    self.assertFalse((self.broker / area / name).exists())
+                store = StateStore(self.home / "state", muse.load_home(self.home))
+                before, count = store.read(), len(self.seen)
+                status = self.rpc({"operation": "status"})
+                self.assertEqual(status["integration"]["status"], "ready")
+                self.assertEqual(self.seen[count:], ["get_delivery_addresses"])
+                self.rpc({"operation": "status"})
+                self.assertEqual(len(self.seen), count + 1)
+                self.assertEqual(store.read(), before)
+                self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+                for path, original in originals.items():
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_unresolved_startup_read_blocks_status_before_new_publication(self):
+        self.state = "waiting_for_information"
+        self.restart_with_short_reads("browser_cart")
+        self.assertEqual(self.rpc({"operation": "health"})["integration"]["status"], "unavailable")
+        before = set((self.broker / "requests").glob("*.json"))
+        self.state = "completed"
+        self.assertEqual(self.rpc({"operation": "status"})["integration"]["status"], "unavailable")
+        self.assertEqual(set((self.broker / "requests").glob("*.json")), before)
 
     def test_real_reads_preserve_unknowns_original_home_and_saved_plan(self):
         settings = muse.load_home(self.home)
@@ -183,6 +239,14 @@ class NativeReadTests(unittest.TestCase):
         self.rpc({"operation": "catalog", "action": "products", "query": "squash"}, ok=False)
         self.assertEqual(len(self.seen), count)
 
+    def test_changed_account_latches_without_status_reprobe(self):
+        self.transform = lambda tool, facts: {**facts, "account": {
+            **ACCOUNT, "edit_urls": ["https://oda.com/no/account/delivery/edit/102/"]}}
+        self.rpc({"operation": "cart", "action": "get"}, ok=False)
+        count = len(self.seen)
+        self.assertEqual(self.rpc({"operation": "status"})["integration"]["status"], "unavailable")
+        self.assertEqual(len(self.seen), count)
+
     def test_unknown_completeness_or_paused_task_never_becomes_cart_read(self):
         self.transform = lambda tool, facts: {**facts, "complete": None}
         self.rpc({"operation": "cart", "action": "get"}, ok=False)
@@ -222,6 +286,42 @@ class NativeReadTests(unittest.TestCase):
 
 
 class PageBoundaryTests(unittest.TestCase):
+    def test_terminal_status_preserves_unavailable_without_reprobing(self):
+        class Provider:
+            terminal_failure = None
+            initial_timeout = False
+            fail_on_probe = False
+
+            def probe(self):
+                if self.terminal_failure:
+                    raise AssertionError("terminal native provider must not be reprobed")
+                if self.fail_on_probe:
+                    self.terminal_failure = "Oda native browser login is required; preserve the existing profile."
+                    raise HouseholdError(self.terminal_failure)
+                if self.initial_timeout:
+                    self.initial_timeout = False
+                    raise HouseholdError("Synthetic native observation expired")
+                return {}
+
+        for discovered_by_status in (False, True):
+            with self.subTest(discovered_by_status=discovered_by_status), tempfile.TemporaryDirectory(prefix="nt-") as root:
+                home, ops = Path(root) / "h", Path(root) / "ops"
+                ops.mkdir(mode=0o700)
+                muse.initialize(home, "oda", "Synthetic household", credential_name="custom.synthetic",
+                                operation_directory=ops)
+                provider = Provider()
+                provider.initial_timeout = discovered_by_status
+                app = muse.NativeReadMuseApplication(StateStore(home / "state", muse.load_home(home)),
+                                                     provider, None, external_recipe_sources={})
+                if discovered_by_status:
+                    provider.fail_on_probe = True
+                else:
+                    provider.terminal_failure = "Oda native browser login is required; preserve the existing profile."
+                for _ in range(2):
+                    status = app.handle({"operation": "status"})
+                    self.assertEqual(status["integration"], app.integration)
+                    self.assertEqual(status["integration"]["status"], "unavailable")
+
     def test_catalog_normalizes_observed_price_without_losing_literal_display(self):
         arguments = {"queries": ["squash"], "page": 1, "size": 1}
         now = datetime.now(timezone.utc)
