@@ -147,8 +147,9 @@ rendered prefix, requested page/size and observed `hasMore`; `rendered_row_count
 counts those captured cards. A load-more control or additional rendered cards
 means more history exists. Neither an exhausted rendered page nor a displayed
 fulfillment status verifies backend freshness, payment or tracking. Missing card
-fields remain unknown. Both native modes support only `orders.list`; exact detail
-reads and every order mutation remain unavailable.
+fields remain unknown. Both native modes support `orders.list` and `orders.get`;
+exact detail observations remain browser-rendered evidence. Every order mutation
+remains unavailable.
 
 The producer must verify the original task/profile lineage and absence of
 conflicting browser work. All Muse browser tasks share one leased profile;
