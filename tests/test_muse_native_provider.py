@@ -35,6 +35,12 @@ def observation(tool, arguments):
     if tool == "get_cart":
         return {**common, "url": "https://oda.com/no/cart/", "empty": True, "items": [],
                 "amount_rows": [], "delivery_text": "Monday 12 October", "address": None, "warnings": []}
+    if tool == "get_orders":
+        return {**common, "url": "https://oda.com/no/account/orders/", "page": arguments["page"],
+                "size": arguments["size"], "hasMore": True,
+                "orders": [{"url": "https://oda.com/no/account/orders/SYNTHETIC-A1/",
+                            "reference": "SYNTHETIC-A1", "status": "Levert",
+                            "delivery_text": "Monday 12 October", "total_text": None}]}
     query = arguments["queries"][0]
     return {**common, "url": "https://oda.com/no/search/products/?q=" + quote_plus(query), "query": query,
             "page": 1, "size": arguments["size"], "hasMore": True,
@@ -225,10 +231,55 @@ sys.argv = sys.argv[1:]
         before = list(self.seen)
         for operation, action in (("cart", "change"), ("cart", "clear"), ("products", "apply"),
                                   ("delivery", "select"), ("checkout", "prepare"),
-                                  ("orders", "cancel_prepare"), ("orders", "list")):
+                                  ("orders", "cancel_prepare"), ("orders", "get")):
             self.rpc({"operation": operation, "action": action}, ok=False)
         self.rpc({"operation": "cart", "action": "get", "response_view": "agent"}, ok=False)
         self.assertEqual(self.seen, before)
+
+    def test_order_history_flows_through_cli_with_partial_scope_and_no_mutation(self):
+        store = StateStore(self.home / "state", muse.load_home(self.home))
+        before = store.read()
+        for transport in ("browser_readonly", "browser_cart"):
+            with self.subTest(transport=transport):
+                self.restart_with_short_reads(transport)
+                start = len(self.seen)
+                result = self.rpc({"operation": "orders", "action": "list", "limit": 1,
+                                   "response_view": "agent"})
+                self.assertEqual(self.seen[start:], ["get_orders"])
+                self.assertEqual(result["history_scope"], {"kind": "rendered_prefix", "page": 1,
+                                                          "size": 1, "hasMore": True})
+                self.assertEqual(result["backend_freshness"], "unverified")
+                row = result["orders"]["items"][0]
+                self.assertEqual(row["normalized_order_id"], "SYNTHETIC-A1")
+                self.assertEqual(row["observed_status"], "Levert")
+                self.assertEqual(row["delivery_display"], "Monday 12 October")
+                self.assertIsNone(row["sum_display"])
+                self.assertEqual(row["payment_status"], "unknown")
+                self.assertEqual(row["tracking_status"], "not_read")
+                self.assertIsNone(row["cancelled"])
+                self.assertIn("unavailable", result["next"])
+                for action in ("get", "change_begin", "cancel_prepare", "cancel_confirm", "remove_prepare"):
+                    self.rpc({"operation": "orders", "action": action, "order_id": "SYNTHETIC-A1"}, ok=False)
+                self.assertEqual(self.seen[start:], ["get_orders"])
+                self.assertEqual(store.read(), before)
+                self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+                for path, original in self.history.items():
+                    self.assertEqual(path.read_bytes(), original)
+        requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")]
+        listed = [r for r in requests if r["payload"].get("tool") == "get_orders"]
+        self.assertEqual(len(listed), 2)
+        for request in listed:
+            self.assertIn("never the entire historical account", request["payload"]["facts_contract"])
+            self.assertFalse((self.broker / "consumed" / (request["request_id"] + ".json")).exists())
+
+    def test_order_history_account_change_latches_before_later_read(self):
+        self.transform = lambda tool, facts: {**facts, "account": {
+            **ACCOUNT, "edit_urls": ["https://oda.com/no/account/delivery/edit/102/"]}}
+        self.rpc({"operation": "orders", "action": "list"}, ok=False)
+        count = len(self.seen)
+        self.assertEqual(self.rpc({"operation": "status"})["integration"]["status"], "unavailable")
+        self.rpc({"operation": "orders", "action": "list"}, ok=False)
+        self.assertEqual(len(self.seen), count)
 
     def test_signed_out_latches_without_retry_or_status_reprobe(self):
         self.transform = lambda tool, facts: {**facts, "signed_in": False}
@@ -286,6 +337,32 @@ sys.argv = sys.argv[1:]
 
 
 class PageBoundaryTests(unittest.TestCase):
+    def test_order_history_identity_prefix_and_unknown_fields(self):
+        arguments = {"page": 1, "size": 2}
+        facts = observation("get_orders", arguments)
+        result = MuseNativeReadProvider._orders(facts, arguments)
+        self.assertEqual(result["orders"][0]["orderNumber"], "SYNTHETIC-A1")
+        self.assertIsNone(result["orders"][0]["sum_display"])
+        self.assertNotIn("total", result["orders"][0])
+        self.assertNotIn("payment_status", result["orders"][0])
+        self.assertNotIn("tracking", result["orders"][0])
+        self.assertEqual(result["rendered_row_count"], 1)
+        self.assertTrue(result["history_scope"]["hasMore"])
+        for change in ({"page": True}, {"page": 2}, {"size": 1}, {"hasMore": None},
+                       {"url": "https://oda.com/no/account/orders/?page=2"},
+                       {"orders": []}, {"orders": facts["orders"] * 2}):
+            with self.subTest(change=change), self.assertRaises(HouseholdError):
+                MuseNativeReadProvider._orders({**facts, **change}, arguments)
+        empty = MuseNativeReadProvider._orders({**facts, "orders": [], "hasMore": False}, arguments)
+        self.assertEqual(empty["orders"], [])
+        card = facts["orders"][0]
+        for change in ({"reference": "SYNTHETIC-B2"}, {"url": card["url"] + "edit/"},
+                       {"url": "https://evil.invalid/no/account/orders/SYNTHETIC-A1/"},
+                       {"status": False}, {"delivery_text": []}, {"total_text": 39.90},
+                       {"payment_status": "paid"}):
+            with self.subTest(change=change), self.assertRaises(HouseholdError):
+                MuseNativeReadProvider._orders({**facts, "orders": [{**card, **change}]}, arguments)
+
     def test_terminal_status_preserves_unavailable_without_reprobing(self):
         class Provider:
             terminal_failure = None

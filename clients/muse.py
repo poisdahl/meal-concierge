@@ -55,15 +55,16 @@ NATIVE_BROWSER_GUIDANCE = ("Muse's protected Oda connection and opted-in native 
     "saved-card checkout and cancellation of this household's confirmed checkout orders. "
     "Native task receipts, fresh reviews and provider/device approval remain required. "
     "Order edits, payment retry/switching, weekly checkout, email and scheduling are unavailable.")
-NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog, cart and address observations "
+NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog, cart, address and bounded order-history observations "
     "from the existing cloud profile, plus local recipes and menu planning. Missing page facts remain unknown. "
-    "Cart changes, delivery selection, checkout, orders, email and scheduling are unavailable.")
+    "Cart changes, delivery selection, checkout, exact order details, order changes, email and scheduling are unavailable.")
 NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
-                      "cart": {None, "get"}, "delivery": {"addresses"}}
+                      "cart": {None, "get"}, "delivery": {"addresses"}, "orders": {None, "list"}}
 NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
     "after a fresh complete cart read and an enabled original-context policy, plus bounded product "
     "preparation and saved-plan reads with include_recurring=false. Reconcile uncertain changes "
-    "without repeating them. Whole-menu product apply, delivery selection, checkout and orders remain unavailable.")
+    "without repeating them. Bounded displayed order history is readable; whole-menu product apply, "
+    "delivery selection, checkout, exact order details and order changes remain unavailable.")
 
 
 def _owned_checkout(state, order_id):
@@ -456,6 +457,9 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
         finally:
             self._observe_terminal_failure()
         result["client_guidance"] = NATIVE_READ_GUIDANCE
+        if operation == "orders":
+            result["next"] = ("These are displayed order cards only. Exact order details, payment, tracking "
+                              "and order changes remain unavailable in this mode.")
         return result
 
     def _cart(self, request):
