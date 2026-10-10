@@ -41,6 +41,15 @@ def observation(tool, arguments):
                 "orders": [{"url": "https://oda.com/no/account/orders/SYNTHETIC-A1/",
                             "reference": "SYNTHETIC-A1", "status": "Levert",
                             "delivery_text": "Monday 12 October", "total_text": None}]}
+    if tool in {"get_order", "order_tracking"}:
+        reference = arguments["order_number"]
+        detail = {**common, "url": f"https://oda.com/no/account/orders/{reference}/",
+                  "reference": reference, "delivery_text": "Synthetic delivery text"}
+        if tool == "order_tracking":
+            return {**detail, "tracking_status": None}
+        return {**detail, "status": "Levert", "payment_status": "Betalt",
+                "amount_rows": [{"label": "Total inkl. MVA", "value": "123,45kr"}],
+                "goods_complete": False, "items": None}
     query = arguments["queries"][0]
     return {**common, "url": "https://oda.com/no/search/products/?q=" + quote_plus(query), "query": query,
             "page": 1, "size": arguments["size"], "hasMore": True,
@@ -84,6 +93,8 @@ class NativeReadTests(unittest.TestCase):
                      "facts": {"confirmed": False, "cancelled": True, "retry_allowed": False}})
         self.history = {path: path.read_bytes() for path in self.broker.glob("*/*.json")}
         self.transform = lambda tool, facts: facts
+        self.finite_producer = False
+        self.defer_tool, self.deferred_record = None, None
         self.state = "completed"
         self.omit_next = False
         self.seen, self.failures = [], []
@@ -123,6 +134,20 @@ class NativeReadTests(unittest.TestCase):
                         self.omit_next = False
                         continue
                     facts = self.transform(tool, observation(tool, record["payload"]["arguments"]))
+                    if self.finite_producer:
+                        producer = [sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py")]
+                        args = ["--directory", str(self.broker), "--request-id", record["request_id"],
+                                "--task-id", record["task_id"]]
+                        claimed = subprocess.run([*producer, "claim", *args], capture_output=True, timeout=5)
+                        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+                        if tool == self.defer_tool:
+                            self.deferred_record = (record, facts)
+                            continue
+                        published = subprocess.run([*producer, "respond", *args, "--observed-at",
+                            datetime.now(timezone.utc).isoformat(), "--ending-state", self.state],
+                            input=json.dumps(facts).encode(), capture_output=True, timeout=5)
+                        self.assertEqual(published.returncode, 0, published.stderr)
+                        continue
                     claim_request(self.broker, record["request_id"], record["task_id"])
                     response = {"request_id": record["request_id"], "request_digest": digest(record),
                                 "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -140,7 +165,7 @@ class NativeReadTests(unittest.TestCase):
         self.assertEqual(value["ok"], ok)
         return value.get("result", value)
 
-    def restart_with_short_reads(self, transport):
+    def restart_with_short_reads(self, transport, *, read_seconds=1.0):
         self.process.terminate()
         self.process.communicate(timeout=5)
         socket = self.home / "service.sock"
@@ -148,9 +173,9 @@ class NativeReadTests(unittest.TestCase):
         runner = RUNNER.replace("sys.argv = sys.argv[1:]", """
 sys.path.insert(0, str(__import__('pathlib').Path(sys.argv[1]).resolve().parents[1]))
 import muse_native_provider
-muse_native_provider.READ_SECONDS = 1.0
+muse_native_provider.READ_SECONDS = READ_SECONDS_TEST_VALUE
 sys.argv = sys.argv[1:]
-""")
+""".replace("READ_SECONDS_TEST_VALUE", repr(read_seconds)))
         self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", runner,
             str(ROOT / "clients/muse.py"), "run", "--home", str(self.home),
             "--provider-transport", transport, "--browser-directory", str(self.broker),
@@ -231,7 +256,7 @@ sys.argv = sys.argv[1:]
         before = list(self.seen)
         for operation, action in (("cart", "change"), ("cart", "clear"), ("products", "apply"),
                                   ("delivery", "select"), ("checkout", "prepare"),
-                                  ("orders", "cancel_prepare"), ("orders", "get")):
+                                  ("orders", "cancel_prepare")):
             self.rpc({"operation": operation, "action": action}, ok=False)
         self.rpc({"operation": "cart", "action": "get", "response_view": "agent"}, ok=False)
         self.assertEqual(self.seen, before)
@@ -258,7 +283,7 @@ sys.argv = sys.argv[1:]
                 self.assertEqual(row["tracking_status"], "not_read")
                 self.assertIsNone(row["cancelled"])
                 self.assertIn("unavailable", result["next"])
-                for action in ("get", "change_begin", "cancel_prepare", "cancel_confirm", "remove_prepare"):
+                for action in ("change_begin", "cancel_prepare", "cancel_confirm", "remove_prepare"):
                     self.rpc({"operation": "orders", "action": action, "order_id": "SYNTHETIC-A1"}, ok=False)
                 self.assertEqual(self.seen[start:], ["get_orders"])
                 self.assertEqual(store.read(), before)
@@ -271,6 +296,110 @@ sys.argv = sys.argv[1:]
         for request in listed:
             self.assertIn("never the entire historical account", request["payload"]["facts_contract"])
             self.assertFalse((self.broker / "consumed" / (request["request_id"] + ".json")).exists())
+
+    def test_exact_order_cli_uses_finite_producer_and_preserves_unknowns(self):
+        self.finite_producer = True
+        store = StateStore(self.home / "state", muse.load_home(self.home))
+        before = store.read()
+        for transport in ("browser_readonly", "browser_cart"):
+            self.restart_with_short_reads(transport, read_seconds=10.0)
+            for view in ("full", "agent"):
+                start = len(self.seen)
+                result = self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1",
+                                   "response_view": view})
+                self.assertEqual(self.seen[start:], ["get_order", "order_tracking"])
+                self.assertEqual(result["backend_freshness"], "unverified")
+                if view == "full":
+                    self.assertEqual(result["order"]["orderNumber"], "SYNTHETIC-A1")
+                    self.assertNotIn("products", result["order"])
+                    self.assertIsNone(result["tracking"]["status"])
+                    self.assertEqual(result["order"]["payment_status"], "Betalt")
+                    self.assertNotIn("total", result["order"])
+                else:
+                    self.assertEqual(result["order"]["normalized_order_id"], "SYNTHETIC-A1")
+                    self.assertFalse(result["order_items"]["available"])
+                    self.assertIsNone(result["order_items"]["total"])
+                    self.assertEqual(result["order"]["tracking_status"], "unknown")
+                    self.assertIsNone(result["order"]["cancelled"])
+                self.assertIn("unverified", result["next"])
+                self.assertEqual(store.read(), before)
+                self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+                for path, original in self.history.items():
+                    self.assertEqual(path.read_bytes(), original)
+            self.transform = lambda tool, facts: ({**facts, "goods_complete": True, "items": [{
+                "url": None, "name": "Synthetic product 250 ml", "quantity": -2,
+                "price": "-12,00kr", "labels": ["Refundert", "Erstatning"]}]}
+                if tool == "get_order" else facts)
+            goods = self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1",
+                              "response_view": "agent"})["order_items"]
+            self.assertTrue(goods["available"])
+            self.assertEqual(goods["items"][0]["quantity"], -2)
+            self.assertIsNone(goods["items"][0]["product_id"])
+            self.assertEqual(goods["items"][0]["status_labels"], ["Refundert", "Erstatning"])
+            self.transform = lambda tool, facts: facts
+
+    def test_exact_order_second_read_changed_account_latches(self):
+        self.transform = lambda tool, facts: ({**facts, "account": {**ACCOUNT,
+            "edit_urls": ["https://oda.com/no/account/delivery/edit/102/"]}}
+            if tool == "order_tracking" else facts)
+        self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"}, ok=False)
+        count = len(self.seen)
+        self.assertEqual(self.rpc({"operation": "status"})["integration"]["status"], "unavailable")
+        self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"}, ok=False)
+        self.assertEqual(len(self.seen), count)
+
+    def test_exact_order_holds_custody_across_both_reads(self):
+        waiting, release = threading.Event(), threading.Event()
+        def hold_tracking(tool, facts):
+            if tool == "order_tracking":
+                waiting.set()
+                self.assertTrue(release.wait(5))
+            return facts
+        self.transform = hold_tracking
+        command = subprocess.Popen([sys.executable, "-I", "-B", str(ROOT / "cli.py")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "MEAL_CONCIERGE_SOCKET": str(self.home / "service.sock")})
+        try:
+            command.stdin.write(json.dumps({"operation": "orders", "action": "get",
+                                          "order_id": "SYNTHETIC-A1"}).encode())
+            command.stdin.close()
+            self.assertTrue(waiting.wait(5))
+            seen = list(self.seen)
+            self.rpc({"operation": "cart", "action": "get"}, ok=False)
+            self.assertEqual(self.seen, seen)
+            self.rpc({"operation": "health"})
+        finally:
+            release.set()
+            command.wait(timeout=5)
+            command.stdout.close()
+            command.stderr.close()
+        self.assertEqual(command.returncode, 0)
+
+    def test_exact_order_second_timeout_requires_actual_ending_without_replay(self):
+        self.finite_producer = True
+        self.restart_with_short_reads("browser_readonly", read_seconds=3.0)
+        self.defer_tool = "order_tracking"
+        self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"}, ok=False)
+        self.assertIsNotNone(self.deferred_record)
+        record, facts = self.deferred_record
+        first = [path for path in (self.broker / "responses").glob("*.json")
+                 if read_json(path)["facts"].get("reference") == "SYNTHETIC-A1"]
+        self.assertEqual(len(first), 1)
+        original = first[0].read_bytes()
+        seen = list(self.seen)
+        self.rpc({"operation": "cart", "action": "get"}, ok=False)
+        self.assertEqual(self.seen, seen)
+        self.assertFalse((self.broker / "responses" / (record["request_id"] + ".json")).exists())
+        ending = subprocess.run([sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py"),
+            "end", "--directory", str(self.broker), "--request-id", record["request_id"],
+            "--task-id", record["task_id"], "--observed-at", datetime.now(timezone.utc).isoformat(),
+            "--ending-state", "completed"], input=json.dumps(facts).encode(), capture_output=True, timeout=5)
+        self.assertEqual(ending.returncode, 0, ending.stderr)
+        self.assertEqual(first[0].read_bytes(), original)
+        self.assertFalse((self.broker / "responses" / (record["request_id"] + ".json")).exists())
+        self.rpc({"operation": "cart", "action": "get"})
+        self.assertEqual(self.seen.count("get_order"), 1)
+        self.assertEqual(self.seen.count("order_tracking"), 1)
 
     def test_order_history_account_change_latches_before_later_read(self):
         self.transform = lambda tool, facts: {**facts, "account": {
@@ -337,6 +466,33 @@ sys.argv = sys.argv[1:]
 
 
 class PageBoundaryTests(unittest.TestCase):
+    def test_exact_detail_identity_and_unavailable_or_complete_goods(self):
+        arguments = {"order_number": "SYNTHETIC-A1"}
+        facts = observation("get_order", arguments)
+        normalized = MuseNativeReadProvider._order_detail(facts, arguments, tracking=False)
+        self.assertNotIn("products", normalized)
+        self.assertEqual(normalized["payment_status"], "Betalt")
+        self.assertNotIn("total", normalized)
+        for changes in ({"reference": "SYNTHETIC-OTHER"},
+                        {"url": "https://oda.com/no/account/orders/SYNTHETIC-OTHER/"},
+                        {"url": facts["url"] + "?edit=true"}, {"items": []},
+                        {"goods_complete": 1}, {"payment_status": False}):
+            with self.subTest(changes=changes), self.assertRaises(HouseholdError):
+                MuseNativeReadProvider._order_detail({**facts, **changes}, arguments, tracking=False)
+        complete = {**facts, "goods_complete": True, "items": [{"url": None,
+            "name": "Synthetic product 250 ml", "quantity": -2, "price": "-12,00kr",
+            "labels": ["Refundert"]}]}
+        row = MuseNativeReadProvider._order_detail(complete, arguments, tracking=False)["products"][0]
+        self.assertIsNone(row["id"])
+        self.assertEqual(row["quantity"], -2)
+        self.assertEqual(row["status_labels"], ["Refundert"])
+        self.assertEqual(MuseNativeReadProvider._order_detail(
+            {**facts, "goods_complete": True, "items": []}, arguments, tracking=False)["products"], [])
+        tracking = observation("order_tracking", arguments)
+        self.assertIsNone(MuseNativeReadProvider._order_detail(tracking, arguments, tracking=True)["status"])
+        with self.assertRaises(HouseholdError):
+            MuseNativeReadProvider._order_detail({**tracking, "reference": "OTHER"}, arguments, tracking=True)
+
     def test_order_history_identity_prefix_and_unknown_fields(self):
         arguments = {"page": 1, "size": 2}
         facts = observation("get_orders", arguments)

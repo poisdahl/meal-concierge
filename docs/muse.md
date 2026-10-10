@@ -71,8 +71,8 @@ browser remains signed in, an explicit read-only transport can use that browser
 without reconnecting or exporting credentials. This is a separate provider path,
 not automatic failover or evidence of OAuth refresh. It supports bounded catalog
 search, current cart observations, delivery-address reads and bounded displayed
-order history. Cart changes, delivery selection, exact order details, checkout
-and cancellation are unavailable in this mode. Local recipes and menu planning
+order history and exact displayed order details. Cart changes, delivery selection,
+checkout and cancellation are unavailable in this mode. Local recipes and menu planning
 remain available.
 
 Inspect the original execution, workers, locks and pending custody before changing
@@ -98,12 +98,23 @@ all partial-page facts:
 {"operation":"cart","action":"get","response_view":"full"}
 {"operation":"delivery","action":"addresses","response_view":"full"}
 {"operation":"orders","action":"list","limit":10,"response_view":"agent"}
+{"operation":"orders","action":"get","order_id":"EXACT_OBSERVED_REFERENCE","response_view":"agent"}
 ```
 
 The startup account probe and subsequent reads publish `provider_read` requests
 through the existing canonical browser broker. Each payload contains `tool` and
 `arguments`; only `product_search`, `get_cart`, `get_delivery_addresses` and
-`get_orders` are accepted. Order history uses a bounded page-1 rendered prefix.
+`get_orders`, `get_order` and `order_tracking` are accepted. Order history uses a
+bounded page-1 rendered prefix. An exact order read performs two independently
+validated detail observations under one shared browser lease. Each must match the
+requested route and independently visible reference, with the same account
+evidence. These are separate page observations, not an atomic merchant snapshot.
+Displayed payment badges remain literal page facts; backend payment completion
+and cancellation eligibility are unverified. Missing tracking stays unknown.
+Goods are returned only when the complete section is independently verified; a
+partial rendered list or header count does not establish completeness. Missing
+product links leave product IDs unknown, and refund quantities are preserved
+without deriving quantities from package sizes.
 Serve them through the existing native producer claim/respond/end protocol.
 Serve the startup account request while the runner starts, before
 waiting for its socket or calling health: startup waits for that observation.
@@ -136,8 +147,9 @@ rendered prefix, requested page/size and observed `hasMore`; `rendered_row_count
 counts those captured cards. A load-more control or additional rendered cards
 means more history exists. Neither an exhausted rendered page nor a displayed
 fulfillment status verifies backend freshness, payment or tracking. Missing card
-fields remain unknown. Both native modes support only `orders.list`; exact detail
-reads and every order mutation remain unavailable.
+fields remain unknown. Both native modes support `orders.list` and `orders.get`;
+exact detail observations remain browser-rendered evidence. Every order mutation
+remains unavailable.
 
 The producer must verify the original task/profile lineage and absence of
 conflicting browser work. All Muse browser tasks share one leased profile;
@@ -214,8 +226,8 @@ bounded page-1 search and product-plan continuation budgets apply. Missing
 prices, package facts and dietary evidence remain unknown; a preparation
 result grants no cart authority. Whole-menu apply arguments are omitted.
 This mode does not implement whole-menu `products.apply`, delivery selection,
-checkout, exact order details or cancellation. Bounded displayed order history
-uses the same read-only observations without enabling cart policy.
+checkout or cancellation. Bounded displayed order history and exact displayed
+order details use the same read-only observations without enabling cart policy.
 
 Writes start disabled. In the ordinary CLI, inspect
 `{"operation":"native_cart_policy","action":"show"}` and explicitly set

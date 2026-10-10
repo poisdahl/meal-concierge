@@ -18,7 +18,7 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 
 
 READ_SECONDS = 90.0
-TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders"}
+TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
     "Use fresh observed facts from the original continuous profile, never cached or invented values. "
@@ -27,7 +27,39 @@ FACTS_COMMON = (
     "of ALL actual absolute https://oda.com/no/account/delivery/edit/<positive-integer>/ links. "
     "Establish sign-in explicitly on that account page in the same flow. "
 )
+ORDER_IDENTITY_FACTS = (
+    "url must be the actual https://oda.com/no/account/orders/<requested-order_number>/ route. "
+    "reference is the independently visible order reference on that detail page, not an echoed "
+    "request or a reference inferred only from the URL. It must equal requested order_number. "
+    "Observe only ordinary read-only detail sections; never edit, cancel, reorder, pay, download "
+    "a receipt or open an external tracking/payment page. Missing fields remain null. "
+)
 FACTS_CONTRACTS = {
+    "get_order": FACTS_COMMON + ORDER_IDENTITY_FACTS + (
+        "Root keys: url,signed_in,complete,account,reference,status,delivery_text,payment_status,"
+        "amount_rows,goods_complete,items. status is the nullable literal detail heading; "
+        "delivery_text is nullable literal delivery text. payment_status is the nullable literal "
+        "explicit payment badge (such as Betalt), never inferred from delivery or payment method. "
+        "amount_rows contains objects with exactly label,value, both literal strings. "
+        "complete means the requested detail metadata was observed; it does not prove goods "
+        "completeness. goods_complete is a boolean requiring independent verification that ALL "
+        "goods rows were observed, including substitutions/refunds; a header item count alone "
+        "or visible partial rows do not prove this. If goods completeness is unproved or the "
+        "section is unavailable, goods_complete=false and items=null, never []. Otherwise items "
+        "is the complete array of objects with exactly url,name,quantity,price,labels: actual "
+        "product URL or null when no link exists, required literal name, separately observed "
+        "signed integer quantity or null, nullable literal price, and an array of literal status "
+        "pill labels. Refund quantities can be negative; package sizes never establish quantity. "
+        "A verified empty section may use goods_complete=true,items=[]. Never infer payment "
+        "completion, cancellation eligibility or backend freshness."
+    ),
+    "order_tracking": FACTS_COMMON + ORDER_IDENTITY_FACTS + (
+        "Root keys: url,signed_in,complete,account,reference,tracking_status,delivery_text. "
+        "tracking_status is a nullable literal EXPLICIT tracking indicator. The order heading "
+        "or delivery-location button does not establish tracking: without a separate explicit "
+        "tracking indicator return null. delivery_text is nullable literal delivery text. "
+        "Do not infer paid, modifiable, cancelled or backend freshness from delivery status."
+    ),
     "get_cart": FACTS_COMMON + (
         "Root keys: url,signed_in,complete,account,empty,items,amount_rows,delivery_text,address,warnings. "
         "url must be the actual https://oda.com/no/cart/ route. empty is a boolean consistent with items. "
@@ -149,6 +181,11 @@ class MuseNativeReadProvider:
             if (type(arguments["page"]) is not int or arguments["page"] != 1
                     or type(arguments["size"]) is not int or not 1 <= arguments["size"] <= 100):
                 raise HouseholdError("Muse native order history requires one bounded page-1 prefix")
+        elif tool in {"get_order", "order_tracking"}:
+            fields(arguments, {"order_number"})
+            if (not isinstance(arguments["order_number"], str)
+                    or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", arguments["order_number"]) is None):
+                raise HouseholdError("Muse native order read requires a bounded detail-route reference")
         elif arguments:
             raise HouseholdError("Muse native account/cart read takes no arguments")
         if deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
@@ -198,6 +235,8 @@ class MuseNativeReadProvider:
             return cls._cart(facts)
         if tool == "get_orders":
             return cls._orders(facts, arguments)
+        if tool in {"get_order", "order_tracking"}:
+            return cls._order_detail(facts, arguments, tracking=tool == "order_tracking")
         if tool == "product_search":
             return cls._catalog(facts, arguments, response, receipt)
         raise HouseholdError("Muse native read tool is unavailable")
@@ -299,6 +338,55 @@ class MuseNativeReadProvider:
                 "rendered_row_count": len(rows), "evidence_kind": "browser_rendered",
                 "backend_freshness": "unverified", "source_origin": "https://oda.com",
                 "source_path": "/no/account/orders/", "source_query_keys": []}
+
+    @staticmethod
+    def _order_detail(facts, arguments, *, tracking):
+        common = {"url", "signed_in", "complete", "account", "reference", "delivery_text"}
+        fields(facts, common | ({"tracking_status"} if tracking else
+               {"status", "payment_status", "amount_rows", "goods_complete", "items"}))
+        reference = arguments.get("order_number")
+        if (not isinstance(reference, str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", reference) is None
+                or facts["reference"] != reference
+                or facts["url"] != f"https://oda.com/no/account/orders/{reference}/"):
+            raise HouseholdError("Muse native order detail identity changed")
+        result = {"order_id" if tracking else "orderNumber": reference,
+                  "evidence_kind": "browser_rendered", "backend_freshness": "unverified",
+                  "source_origin": "https://oda.com", "source_path": f"/no/account/orders/{reference}/",
+                  "source_query_keys": [],
+                  "delivery_display": None if facts["delivery_text"] is None else text(facts["delivery_text"])}
+        if tracking:
+            return {**result, "status": None if facts["tracking_status"] is None else text(facts["tracking_status"])}
+        result.update(status=None if facts["status"] is None else text(facts["status"]),
+                      payment_status=None if facts["payment_status"] is None else text(facts["payment_status"]))
+        rows = facts["amount_rows"]
+        if not isinstance(rows, list) or len(rows) > 500:
+            raise HouseholdError("Muse native order amount rows are invalid")
+        result["amount_displays"] = []
+        for row in rows:
+            fields(row, {"label", "value"})
+            result["amount_displays"].append({"label": text(row["label"]), "value": text(row["value"])})
+        complete, items = facts["goods_complete"], facts["items"]
+        if type(complete) is not bool or (not complete and items is not None):
+            raise HouseholdError("Muse native order goods completeness is unavailable")
+        result["goods_complete"] = complete
+        if not complete:
+            return result
+        if not isinstance(items, list) or len(items) > 1000:
+            raise HouseholdError("Muse native order goods are invalid")
+        result["products"] = []
+        for row in items:
+            fields(row, {"url", "name", "quantity", "price", "labels"})
+            name = text(row["name"])
+            quantity, labels = row["quantity"], row["labels"]
+            if (not name or quantity is not None and (type(quantity) is not int or abs(quantity) > 1_000_000)
+                    or not isinstance(labels, list) or len(labels) > 20):
+                raise HouseholdError("Muse native order goods row is invalid")
+            result["products"].append({"id": None if row["url"] is None else product_id(row["url"]),
+                "name": name, "quantity": quantity,
+                "price": None if row["price"] is None else text(row["price"]),
+                "status_labels": [text(label) for label in labels]})
+        return result
 
     @staticmethod
     def _catalog(facts, arguments, response, receipt):

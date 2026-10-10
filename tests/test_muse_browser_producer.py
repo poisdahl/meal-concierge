@@ -132,6 +132,26 @@ class ProducerCLITests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stderr), {"error": {"stage": stage, "category": category}})
 
+    def test_wrong_exact_order_is_rejected_before_response_publication(self):
+        payload = {"tool": "get_order", "arguments": {"order_number": "SYNTHETIC-A1"},
+                   "facts_contract": FACTS_CONTRACTS["get_order"]}
+        self.request("provider_read", payload)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        facts = {"url": "https://oda.com/no/account/orders/SYNTHETIC-OTHER/",
+            "signed_in": True, "complete": True, "account": FACTS["account"],
+            "reference": "SYNTHETIC-OTHER", "status": "Levert", "delivery_text": None,
+            "payment_status": None, "amount_rows": [], "goods_complete": False, "items": None}
+        self.assert_failure(self.run_cli("respond", json.dumps(facts).encode()),
+                            "publish", "invalid_native_read")
+        self.assertTrue(self.marker.exists())
+        self.assertEqual(list((self.broker / "responses").glob("*.json")), [])
+        self.assert_failure(self.run_cli("respond", json.dumps(facts).encode()),
+                            "publish", "invocation_consumed")
+        self.assertEqual(self.run_cli("end", json.dumps(facts).encode()).returncode, 0)
+        self.worker.join(WAITER_SECONDS + 2)
+        self.assertEqual(self.results, [])
+        self.assertEqual(len(self.errors), 1)
+
     def test_real_cli_delivers_large_literal_unicode_payload_and_blocks_duplicate(self):
         self.request()
         self.assertEqual(self.run_cli("claim").returncode, 0)
