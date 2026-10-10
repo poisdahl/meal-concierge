@@ -18,7 +18,7 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 
 
 READ_SECONDS = 90.0
-TOOLS = {"product_search", "get_cart", "get_delivery_addresses"}
+TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
     "Use fresh observed facts from the original continuous profile, never cached or invented values. "
@@ -53,6 +53,18 @@ FACTS_CONTRACTS = {
         "is the bounded array of objects with exactly url,name,description,price,unitPrice,unitName,"
         "availability: actual product URL, required literal name, nullable literal strings for the "
         "other text fields, and availability as an observed boolean or null."
+    ),
+    "get_orders": FACTS_COMMON + (
+        "Root keys: url,signed_in,complete,account,page,size,hasMore,orders. "
+        "url is the actual https://oda.com/no/account/orders/ route. Echo requested page and size. "
+        "Return the first at most size currently rendered order cards in their displayed order; "
+        "complete describes that observed prefix, never the entire historical account. "
+        "hasMore is an observed boolean: true when additional rendered cards or a history load-more "
+        "control remain beyond this prefix. orders is an array of objects with exactly "
+        "url,reference,status,delivery_text,total_text: actual absolute order-detail link, its "
+        "literal route reference, and nullable literal displayed status, delivery and total strings. "
+        "References may be alphanumeric. Missing card fields stay null. Do not visit order edit or "
+        "cancellation controls, infer payment or tracking, or claim backend freshness."
     ),
 }
 
@@ -132,6 +144,11 @@ class MuseNativeReadProvider:
                     or arguments["page"] != 1 or type(arguments["size"]) is not int
                     or not 1 <= arguments["size"] <= MAX_PRODUCTS):
                 raise HouseholdError("Muse native catalog requires one bounded page-1 query")
+        elif tool == "get_orders":
+            fields(arguments, {"page", "size"})
+            if (type(arguments["page"]) is not int or arguments["page"] != 1
+                    or type(arguments["size"]) is not int or not 1 <= arguments["size"] <= 100):
+                raise HouseholdError("Muse native order history requires one bounded page-1 prefix")
         elif arguments:
             raise HouseholdError("Muse native account/cart read takes no arguments")
         if deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
@@ -168,6 +185,8 @@ class MuseNativeReadProvider:
                 result = self._addresses(facts)
             elif tool == "get_cart":
                 result = self._cart(facts)
+            elif tool == "get_orders":
+                result = self._orders(facts, arguments)
             else:
                 result = self._catalog(facts, arguments, response, receipt)
             self._account_ids = references
@@ -239,6 +258,37 @@ class MuseNativeReadProvider:
                              "slot_id": None, "address": None if facts["address"] is None else text(facts["address"])},
                 "deliveryAddress": None if facts["address"] is None else text(facts["address"]),
                 "warnings": [text(value) for value in warnings]}
+
+    @staticmethod
+    def _orders(facts, arguments):
+        fields(facts, {"url", "signed_in", "complete", "account", "page", "size", "hasMore", "orders"})
+        if (facts["url"] != "https://oda.com/no/account/orders/"
+                or type(facts["page"]) is not int or facts["page"] != arguments["page"]
+                or type(facts["size"]) is not int or facts["size"] != arguments["size"]
+                or type(facts["hasMore"]) is not bool):
+            raise HouseholdError("Muse native order history page changed")
+        cards = facts["orders"]
+        if (not isinstance(cards, list) or len(cards) > arguments["size"]
+                or not cards and facts["hasMore"]):
+            raise HouseholdError("Muse native order history prefix is unavailable")
+        rows, seen = [], set()
+        for card in cards:
+            fields(card, {"url", "reference", "status", "delivery_text", "total_text"})
+            match = (re.fullmatch(r"https://oda\.com/no/account/orders/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/",
+                                 card["url"]) if isinstance(card["url"], str) else None)
+            if match is None or card["reference"] != match[1] or match[1] in seen:
+                raise HouseholdError("Muse native order history identity is invalid or repeated")
+            seen.add(match[1])
+            rows.append({"orderNumber": match[1], "url": card["url"],
+                         "status": None if card["status"] is None else text(card["status"]),
+                         "delivery_display": None if card["delivery_text"] is None else text(card["delivery_text"]),
+                         "sum_display": None if card["total_text"] is None else text(card["total_text"])})
+        return {"orders": rows, "page": facts["page"], "size": facts["size"], "hasMore": facts["hasMore"],
+                "history_scope": {"kind": "rendered_prefix", "page": facts["page"],
+                                  "size": facts["size"], "hasMore": facts["hasMore"]},
+                "rendered_row_count": len(rows), "evidence_kind": "browser_rendered",
+                "backend_freshness": "unverified", "source_origin": "https://oda.com",
+                "source_path": "/no/account/orders/", "source_query_keys": []}
 
     @staticmethod
     def _catalog(facts, arguments, response, receipt):
