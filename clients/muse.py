@@ -57,14 +57,16 @@ NATIVE_BROWSER_GUIDANCE = ("Muse's protected Oda connection and opted-in native 
     "Order edits, payment retry/switching, weekly checkout, email and scheduling are unavailable.")
 NATIVE_READ_GUIDANCE = ("Muse native browser read mode supports current catalog, cart, address and bounded order-history observations "
     "from the existing cloud profile, plus local recipes and menu planning. Missing page facts remain unknown. "
-    "Cart changes, delivery selection, checkout, exact order details, order changes, email and scheduling are unavailable.")
+    "Exact displayed order details are readable; unverified goods and payment/tracking facts remain unknown. "
+    "Cart changes, delivery selection, checkout, order changes, email and scheduling are unavailable.")
 NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
-                      "cart": {None, "get"}, "delivery": {"addresses"}, "orders": {None, "list"}}
+                      "cart": {None, "get"}, "delivery": {"addresses"}, "orders": {None, "list", "get"}}
 NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
     "after a fresh complete cart read and an enabled original-context policy, plus bounded product "
     "preparation and saved-plan reads with include_recurring=false. Reconcile uncertain changes "
     "without repeating them. Bounded displayed order history is readable; whole-menu product apply, "
-    "delivery selection, checkout, exact order details and order changes remain unavailable.")
+    "delivery selection, checkout and order changes remain unavailable. Exact displayed order details "
+    "are readable; unverified goods and payment/tracking facts remain unknown.")
 
 
 def _owned_checkout(state, order_id):
@@ -458,9 +460,20 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
             self._observe_terminal_failure()
         result["client_guidance"] = NATIVE_READ_GUIDANCE
         if operation == "orders":
-            result["next"] = ("These are displayed order cards only. Exact order details, payment, tracking "
-                              "and order changes remain unavailable in this mode.")
+            result["next"] = ("These are displayed order facts; backend freshness and payment completion "
+                              "remain unverified. Missing goods and tracking remain unknown. "
+                              "Checkout, cancellation and order changes are unavailable in this mode.")
         return result
+
+    def _orders(self, request):
+        if request.get("action") != "get":
+            return Application._orders(self, request)
+        # Keep both exact observations and their identity checks under the same
+        # existing lease; they still represent two separate page observations.
+        with self.provider_client.operation():
+            result = Application._orders(self, request)
+            return {**result, **{key: result["order"][key] for key in
+                ("evidence_kind", "backend_freshness", "source_origin", "source_path", "source_query_keys")}}
 
     def _cart(self, request):
         # Do not reconstruct a saved plan or writable cart digest from a partial

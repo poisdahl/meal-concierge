@@ -874,6 +874,9 @@ def _order_items(order: Any, offset: int, limit: int) -> dict[str, Any]:
         rows.append({"index": index, "product_id": product_id,
                      "name": _display_text(name, 500), "quantity": item.get("quantity"),
                      "price": item.get("totalGrossAmount", item.get("total", item.get("price", product.get("price"))))})
+        if isinstance(item.get("status_labels"), list):
+            rows[-1]["status_labels"] = [_display_text(label, 100)
+                                        for label in item["status_labels"][:20] if isinstance(label, str)]
     return {"available": True, "source": source, **_fields(order, ORDER_EVIDENCE_FIELDS),
             **_page(rows, offset, limit, "items")}
 
