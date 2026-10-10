@@ -289,24 +289,38 @@ class PageBoundaryTests(unittest.TestCase):
     def test_terminal_status_preserves_unavailable_without_reprobing(self):
         class Provider:
             terminal_failure = None
+            initial_timeout = False
+            fail_on_probe = False
 
             def probe(self):
                 if self.terminal_failure:
                     raise AssertionError("terminal native provider must not be reprobed")
+                if self.fail_on_probe:
+                    self.terminal_failure = "Oda native browser login is required; preserve the existing profile."
+                    raise HouseholdError(self.terminal_failure)
+                if self.initial_timeout:
+                    self.initial_timeout = False
+                    raise HouseholdError("Synthetic native observation expired")
                 return {}
 
-        with tempfile.TemporaryDirectory(prefix="nt-") as root:
-            home, ops = Path(root) / "h", Path(root) / "ops"
-            ops.mkdir(mode=0o700)
-            muse.initialize(home, "oda", "Synthetic household", credential_name="custom.synthetic",
-                            operation_directory=ops)
-            provider = Provider()
-            app = muse.NativeReadMuseApplication(StateStore(home / "state", muse.load_home(home)),
-                                                 provider, None, external_recipe_sources={})
-            provider.terminal_failure = "Oda native browser login is required; preserve the existing profile."
-            status = app.handle({"operation": "status"})
-            self.assertEqual(status["integration"], app.integration)
-            self.assertEqual(status["integration"]["status"], "unavailable")
+        for discovered_by_status in (False, True):
+            with self.subTest(discovered_by_status=discovered_by_status), tempfile.TemporaryDirectory(prefix="nt-") as root:
+                home, ops = Path(root) / "h", Path(root) / "ops"
+                ops.mkdir(mode=0o700)
+                muse.initialize(home, "oda", "Synthetic household", credential_name="custom.synthetic",
+                                operation_directory=ops)
+                provider = Provider()
+                provider.initial_timeout = discovered_by_status
+                app = muse.NativeReadMuseApplication(StateStore(home / "state", muse.load_home(home)),
+                                                     provider, None, external_recipe_sources={})
+                if discovered_by_status:
+                    provider.fail_on_probe = True
+                else:
+                    provider.terminal_failure = "Oda native browser login is required; preserve the existing profile."
+                for _ in range(2):
+                    status = app.handle({"operation": "status"})
+                    self.assertEqual(status["integration"], app.integration)
+                    self.assertEqual(status["integration"]["status"], "unavailable")
 
     def test_catalog_normalizes_observed_price_without_losing_literal_display(self):
         arguments = {"queries": ["squash"], "page": 1, "size": 1}
