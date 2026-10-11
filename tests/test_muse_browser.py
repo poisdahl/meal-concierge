@@ -52,6 +52,44 @@ class NativeAmountTests(unittest.TestCase):
         self.assertEqual(result["other_fees"], {"Tillegg for mindre bestilling": 15.0})
         self.assertEqual(result["delivery_price"], 29.0)
 
+    def test_observed_weight_reservation_belongs_to_payable_and_fees(self):
+        for value, minor in (("25,50 kr", 2550), ("0,00 kr", 0)):
+            with self.subTest(value=value):
+                rows = deepcopy(ROWS)
+                rows.append({"label": "Vektreservasjon", "value": value})
+                rows[4]["value"] = "1 304,10 kr" if minor else "1 278,60 kr"
+                result = checkout_amounts(rows, 34, 127860 + minor)
+                self.assertEqual(result["other_fees"], {"Vektreservasjon": minor / 100})
+                self.assertEqual(result["provider_total"], (127860 + minor) / 100)
+
+    def test_all_named_fees_and_one_unlabeled_zero_are_preserved(self):
+        rows = deepcopy(ROWS)
+        rows.extend([{"label": "Levering", "value": "29,00 kr"},
+                     {"label": "Tillegg for mindre bestilling", "value": "15,00 kr"},
+                     {"label": "Vektreservasjon", "value": "25,50 kr"},
+                     {"label": "", "value": "0,00 kr"}])
+        rows[4]["value"] = "1 348,10 kr"
+        result = checkout_amounts(rows, 34, 134810)
+        self.assertEqual(result["other_fees"], {"Tillegg for mindre bestilling": 15.0,
+                                              "Vektreservasjon": 25.5})
+        self.assertEqual(result["delivery_price"], 29.0)
+        for invalid in ({"label": "Vektreservasjon", "value": "25,50 kr"},
+                        {"label": "Unknown charge", "value": "0,00 kr"},
+                        {"label": None, "value": "0,00 kr"}):
+            with self.subTest(invalid=invalid), self.assertRaises(HouseholdError):
+                checkout_amounts(rows + [invalid], 34, 134810)
+
+    def test_weight_reservation_cannot_be_ignored_duplicated_or_negative(self):
+        reservation = {"label": "Vektreservasjon", "value": "25,50 kr"}
+        for extra in ([reservation], [reservation, reservation],
+                      [{"label": "Vektreservasjon", "value": "−25,50 kr"}]):
+            with self.subTest(extra=extra), self.assertRaises(HouseholdError):
+                checkout_amounts(deepcopy(ROWS) + extra, 34, 127860)
+        rows = deepcopy(ROWS) + [reservation]
+        rows[4]["value"] = "1 304,10 kr"
+        with self.assertRaises(HouseholdError):
+            checkout_amounts(rows, 34, 127860)
+
     def test_native_compact_currency_and_one_unlabeled_zero_preserve_fee_unknown(self):
         rows = [{"label": "34 varer", "value": "1309,10kr"},
                 {"label": "Du sparer", "value": "−29,90kr"},
@@ -591,6 +629,32 @@ class NativeCoreRpcTests(NativeFixture):
         finally:
             client.close()
             thread.join(5)
+
+    def test_compensated_named_fee_drift_cannot_delegate_payment(self):
+        self.browser.action_mode = "native_approval"
+        self.shop.cart["total"] = 40.0
+        self.final_label = "Bekreft og betal 40,00kr"
+        self.checkout_amount_rows = [
+            {"label": "1 vare", "value": "35,00kr"},
+            {"label": "Delsum", "value": "35,00kr"},
+            {"label": "Tillegg for mindre bestilling", "value": "2,00kr"},
+            {"label": "Vektreservasjon", "value": "3,00kr"},
+            {"label": "Total inkl. MVA", "value": "40,00kr"},
+        ]
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        pending = self.store.read()["pending_checkout"]
+        self.assertEqual(pending["browser_review"]["amounts"]["other_fees"],
+                         {"Tillegg for mindre bestilling": 2.0, "Vektreservasjon": 3.0})
+        self.checkout_amount_rows[2]["value"] = "3,00kr"
+        self.checkout_amount_rows[3]["value"] = "2,00kr"
+        result = self.rpc({"operation": "checkout", "action": "confirm",
+                           "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertIn("Muse checkout changed before dispatch", result["error"])
+        self.assertFalse(any(read_json(p)["operation"] in ACTION_OPERATIONS
+                             for p in (self.directory / "requests").glob("*.json")))
+        self.assertEqual(list((self.directory / "consumed").glob("*.json")), [])
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.shop.orders, [])
 
     def test_real_rpc_new_order_and_cancellation_dispatch_once(self):
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})
