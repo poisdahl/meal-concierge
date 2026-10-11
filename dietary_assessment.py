@@ -168,6 +168,10 @@ def assess(profile, item, *, recipe=False):
                    'white rice': ['white rice', 'hvit ris', 'vit ris'],
                    'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'dry chickpeas', 'dried lentils', 'dry lentils', 'dried peas', 'dry peas', 'tørre bønner', 'tørkede bønner', 'tørkede kikerter', 'tørre kikerter', 'tørkede linser', 'tørre linser', 'tørkede erter', 'tørre erter']}
         terms = aliases.get(text(term), [term])
+        # This packaging category appears in retail names without the rule's
+        # optional category noun. Keep matching and negation checks literal.
+        if re.fullmatch(r'boil[- ]in[- ]bag(?: produkter| products)?', text(term)):
+            terms = [term, 'boil-in-bag', 'boil in bag', 'boil in-bag', 'boil-in bag']
         # Culinary form exclusions can be stated in the retail name even when
         # the ingredient label just says 'lentils'. Names are not allergen proof.
         # A title cannot prove allergen absence, but a literal positive match is
