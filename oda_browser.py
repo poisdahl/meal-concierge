@@ -135,6 +135,7 @@ ODA_CHECKOUT_AMOUNT_LABELS = {
     "bags": "Leveringsemballasje",
     "delivery_price": "Levering",
     "other_fee": "Tillegg for mindre bestilling",
+    "weight_reservation": "Vektreservasjon",
     "provider_total": "Total inkl. MVA",
 }
 MATHEM_CHECKOUT_AMOUNT_LABELS = {
@@ -224,16 +225,18 @@ def _oda_checkout_amounts_minor(value: Any, *, provider: str = "oda") -> dict[st
             if amount is None:
                 result[key] = None
                 continue
-            expected_name = labels["other_fee"]
-            if not isinstance(amount, Mapping) or set(amount) != {expected_name}:
+            expected_names = {labels[key] for key in ("other_fee", "weight_reservation") if key in labels}
+            if not isinstance(amount, Mapping) or not amount or not set(amount) <= expected_names:
                 raise HouseholdError("Oda checkout amounts changed")
-            amount = amount[expected_name]
-            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-                raise HouseholdError("Oda checkout amounts changed")
-            minor = round(float(amount) * 100)
-            if not math.isfinite(float(amount)) or not math.isclose(float(amount) * 100, minor, abs_tol=1e-7) or minor < 0:
-                raise HouseholdError("Oda checkout amounts changed")
-            result[key] = {expected_name: minor}
+            fees = {}
+            for name, fee in amount.items():
+                if isinstance(fee, bool) or not isinstance(fee, (int, float)) or not math.isfinite(float(fee)):
+                    raise HouseholdError("Oda checkout amounts changed")
+                minor = round(float(fee) * 100)
+                if not math.isclose(float(fee) * 100, minor, abs_tol=1e-7) or minor < 0:
+                    raise HouseholdError("Oda checkout amounts changed")
+                fees[name] = minor
+            result[key] = fees
             continue
         if amount is None:
             result[key] = None
@@ -321,6 +324,7 @@ def _oda_checkout_amount_script(
    discounted_subtotal:rowState(amountLabels.discounted_subtotal),
    bags:rowState(amountLabels.bags),
    other_fee:rowState(amountLabels.other_fee),
+   weight_reservation:rowState(amountLabels.weight_reservation),
    provider_total:rowState(amountLabels.provider_total),
  };
  // The current Mathem new-order overview can omit a free delivery row.
@@ -355,18 +359,21 @@ def _oda_checkout_amount_script(
  const itemizedDiscount=itemizedDiscountRows.length?itemizedCandidateTotal:null;
  const productDiscount=states.discounts.state==='value'?states.discounts.value:itemizedDiscount;
  const discountsAgree=states.discounts.state!=='value'||itemizedDiscount===null||states.discounts.value===itemizedDiscount;
+ const feeRows=['other_fee','weight_reservation'].filter(key=>states[key].state==='value');
+ const otherFees=feeRows.length?Object.fromEntries(feeRows.map(key=>[amountLabels[key],states[key].value])):null;
+ const feeTotal=feeRows.reduce((sum,key)=>sum+states[key].value,0);
  const amounts={
    product_subtotal:states.product_subtotal.value,
    delivery_price:states.delivery_price.value,
    discounts:productDiscount===null&&states.delivery_discount.state==='absent'?null:(productDiscount||0)+(states.delivery_discount.value||0),
    deposits:null,
    bags:states.bags.value,
-   other_fees:states.other_fee.state==='absent'?null:{[amountLabels.other_fee]:states.other_fee.value},
+   other_fees:otherFees,
    provider_total:states.provider_total.value,
    ...(MATHEM_BREAKDOWN?{discount_breakdown:{product_discount:states.discounts.value,delivery_discount:states.delivery_discount.value}}:{}),
  };
- const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
- const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
+ const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state!=='invalid');
+ const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
  const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(productDiscount||0);
  // On addition retry the overview gross total and the payment calculation are
@@ -374,8 +381,8 @@ def _oda_checkout_amount_script(
  const totalValid=discountsAgree&&(ADDITION_RETRY
    ? (ODA_ADDITION_RETRY
       ? amounts.product_subtotal===ADDITION_GOODS&&Number.isSafeInteger(amounts.provider_total)&&amounts.provider_total>0
-      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
-   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0));
+      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
+   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+feeTotal);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&itemizedRowsValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
    ...Object.entries(states).filter(([,row])=>row.state==='invalid').map(([key])=>'ambiguous_'+key),
@@ -1115,6 +1122,23 @@ class OdaBrowser:
         self.session = f"oda-household-{instance}"
         self._checkout_deadline: float | None = None
         self._cancellation_deadline: float | None = None
+
+    def cart_delivery_restrictions(self, *, deadline=None):
+        """Read visible cart availability notices without changing goods or delivery."""
+        with self._checkout_operation(deadline, preserve_session=True):
+            self._open(CART_URL)
+            result = self._eval(r"""(() => {
+                const norm=v=>(v||'').replace(/\s+/g,' ').trim();
+                const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
+                const notice=x=>{const t=norm(x.innerText);return t.length<=1000&&/^Noen av varene i handlekurven\b/.test(t)&&t.includes('ikke tilgjengelige før')};
+                const warnings=[...document.querySelectorAll('*')].filter(visible).filter(notice)
+                    .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText));
+                return JSON.stringify({warnings:[...new Set(warnings)].slice(0,5)});
+            })()""")
+        warnings = result.get("warnings")
+        if not isinstance(warnings, list) or len(warnings) > 5 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in warnings):
+            raise HouseholdError("Oda cart restrictions are unavailable")
+        return warnings
 
     def _account_reference(self, expected_address: str) -> int:
         value = self._binding_client().call("get_delivery_addresses", {}, deadline=self._checkout_deadline)
@@ -1926,7 +1950,7 @@ class OdaBrowser:
             "unrecognized_amount_row", "original_total_changed",
             *("ambiguous_" + key for key in (
                 "product_subtotal", "delivery_price", "discounts", "delivery_discount",
-                "discounted_subtotal", "bags", "other_fee", "provider_total",
+                "discounted_subtotal", "bags", "other_fee", "weight_reservation", "provider_total",
             )),
         }
         for attempt in range(3):
