@@ -174,6 +174,7 @@ class NativeReadTests(unittest.TestCase):
 sys.path.insert(0, str(__import__('pathlib').Path(sys.argv[1]).resolve().parents[1]))
 import muse_native_provider
 muse_native_provider.READ_SECONDS = READ_SECONDS_TEST_VALUE
+muse_native_provider.ORDER_READ_SECONDS = READ_SECONDS_TEST_VALUE
 sys.argv = sys.argv[1:]
 """.replace("READ_SECONDS_TEST_VALUE", repr(read_seconds)))
         self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", runner,
@@ -296,6 +297,53 @@ sys.argv = sys.argv[1:]
         for request in listed:
             self.assertIn("never the entire historical account", request["payload"]["facts_contract"])
             self.assertFalse((self.broker / "consumed" / (request["request_id"] + ".json")).exists())
+
+    def test_real_native_requests_keep_default_and_order_windows_distinct(self):
+        self.finite_producer = True
+        self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"})
+        self.rpc({"operation": "orders", "action": "list", "limit": 1})
+        self.rpc({"operation": "cart", "action": "get"})
+        requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                    if path not in self.history]
+        self.assertEqual({r["payload"]["tool"] for r in requests},
+                         {"get_delivery_addresses", "get_order", "order_tracking", "get_orders", "get_cart"})
+        for record in requests:
+            seconds = (datetime.fromisoformat(record["expires_at"])
+                       - datetime.fromisoformat(record["issued_at"])).total_seconds()
+            expected = 180 if record["payload"]["tool"] in {"get_order", "order_tracking"} else 110
+            self.assertGreater(seconds, expected - 1)
+            self.assertLessEqual(seconds, expected)
+
+    def test_shorter_caller_deadline_preserves_expired_order_custody(self):
+        self.finite_producer = True
+        provider = MuseNativeReadProvider(self.ops, "synthetic-original-task")
+        producer = [sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py")]
+        for tool in ("get_order", "order_tracking"):
+            with self.subTest(tool=tool):
+                self.defer_tool, self.deferred_record = tool, None
+                with self.assertRaisesRegex(HouseholdError, "result is unknown"):
+                    provider.call(tool, {"order_number": "SYNTHETIC-A1"}, deadline=time.monotonic() + 3)
+                self.assertIsNotNone(self.deferred_record)
+                record, facts = self.deferred_record
+                seconds = (datetime.fromisoformat(record["expires_at"])
+                           - datetime.fromisoformat(record["issued_at"])).total_seconds()
+                self.assertGreater(seconds, 0)
+                self.assertLessEqual(seconds, 3)
+                name = record["request_id"] + ".json"
+                originals = {self.broker / area / name: (self.broker / area / name).read_bytes()
+                             for area in ("requests", "claims", "closed")}
+                args = ["--directory", str(self.broker), "--request-id", record["request_id"],
+                        "--task-id", record["task_id"], "--observed-at", datetime.now(timezone.utc).isoformat(),
+                        "--ending-state", "completed"]
+                late = subprocess.run([*producer, "respond", *args], input=json.dumps(facts).encode(),
+                                      capture_output=True, timeout=5)
+                self.assertNotEqual(late.returncode, 0)
+                self.assertFalse((self.broker / "responses" / name).exists())
+                for path, original in originals.items():
+                    self.assertEqual(path.read_bytes(), original)
+                ending = subprocess.run([*producer, "end", *args], input=json.dumps(facts).encode(),
+                                        capture_output=True, timeout=5)
+                self.assertEqual(ending.returncode, 0, ending.stderr)
 
     def test_exact_order_cli_uses_finite_producer_and_preserves_unknowns(self):
         self.finite_producer = True

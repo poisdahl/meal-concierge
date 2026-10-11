@@ -53,6 +53,8 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
         return 660
     if operation == "cart" and arguments.get("action") == "change":
         return 420
+    if operation == "orders" and arguments.get("action") == "get":
+        return 420
     return 300 if order_operation or cart_change or delivery_operation or operation == "products" else 120
 
 
