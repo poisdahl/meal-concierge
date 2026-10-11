@@ -380,7 +380,7 @@ def checkout_amounts(rows, product_count, expected_total):
     """
     if (type(product_count) is not int or not 0 < product_count <= 1_000_000
             or type(expected_total) is not int or expected_total < 0
-            or not isinstance(rows, list) or not 3 <= len(rows) <= 8):
+            or not isinstance(rows, list) or not 3 <= len(rows) <= 9):
         raise HouseholdError("Muse checkout amount section is unavailable")
     product_label = "1 vare" if product_count == 1 else f"{product_count} varer"
     labels = {product_label: "product_subtotal",
@@ -405,17 +405,17 @@ def checkout_amounts(rows, product_count, expected_total):
     if not {"product_subtotal", "discounted_subtotal", "provider_total"} <= observed.keys():
         raise HouseholdError("Muse checkout required amount row is missing")
     subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
+    fee_keys = ("other_fee", "weight_reservation")
     payable = (subtotal + observed.get("delivery_price", 0)
-               + observed.get("bags", 0) + observed.get("other_fee", 0))
+               + observed.get("bags", 0) + sum(observed.get(key, 0) for key in fee_keys))
     if (observed["discounted_subtotal"] != subtotal
             or observed["provider_total"] != payable
             or payable != expected_total):
         raise HouseholdError("Muse checkout amount arithmetic or cart total changed")
     amounts = {key: observed[key] / 100 if key in observed else None
                for key in ODA_CHECKOUT_AMOUNT_KEYS}
-    if "other_fee" in observed:
-        amounts["other_fees"] = {ODA_CHECKOUT_AMOUNT_LABELS["other_fee"]:
-                                 observed["other_fee"] / 100}
+    amounts["other_fees"] = {ODA_CHECKOUT_AMOUNT_LABELS[key]: observed[key] / 100
+                             for key in fee_keys if key in observed} or None
     _oda_checkout_amounts_minor(amounts)
     return amounts
 
