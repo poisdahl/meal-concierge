@@ -1517,6 +1517,45 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertIsNone(plan["comparison_claim"])
         self.assertEqual(plan["unresolved_requirements"][0]["reason"], "candidate_price_or_eligibility_unresolved")
 
+    def test_never_buy_boil_in_bag_category_blocks_practical_package_choice(self):
+        menu_value = menu({"item": "fullkornsris", "quantity": 225, "unit": "g"})
+        requirement = menu_requirements(menu_value)[0][0]
+        profile = {"diet": {"rules": [{"kind": "never_buy", "term": "boil-in-bag produkter"}]}}
+        for name, blocked in (
+            ("R Fullkornsris Boil-in-bag 8x125g", True),
+            ("Fullkornsris Boil in bag", True),
+            ("Fullkornsris uten boil-in-bag", False),
+            ("Naturris fullkorn", False),
+        ):
+            with self.subTest(name=name):
+                candidate = product("10", name, 1000, "g", [option(3290)])
+                plan = build_product_plan(
+                    provider="oda", binding={"kind": "saved_menu", "menu_ref": {
+                        "menu_id": "menu_fixture", "revision": 1, "digest": "a" * 64,
+                    }}, menu=menu_value,
+                    observations={requirement["requirement_id"]: observation("fullkornsris", [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                        "package_count": 1, "quantity_basis": "Observed 1 kg pack covers 225 g.",
+                    }], dietary_profile=profile,
+                )
+                self.assertEqual(plan["status"], "needs_input" if blocked else "prepared")
+                finding = plan["requirements"][0]["dietary_assessments"][0]
+                self.assertEqual(finding["blocked"], blocked)
+                self.assertEqual(finding["condition"], "conflict" if blocked else "unknown")
+                if blocked:
+                    self.assertEqual(plan["unresolved_requirements"][0]["reason"],
+                                     "dietary_conflict_no_compatible_candidate")
+
+    def test_boil_in_bag_aliases_preserve_literal_mixed_separator_rules(self):
+        from dietary_assessment import assess
+        for term in ("boil in-bag", "boil-in bag", "boil in-bag produkter", "boil-in bag products"):
+            with self.subTest(term=term):
+                profile = {"diet": {"rules": [{"kind": "never_buy", "term": term}]}}
+                for name in (term, "Fullkornsris Boil in-bag", "Fullkornsris Boil-in bag"):
+                    self.assertTrue(assess(profile, {"name": name})[0]["blocked"])
+                self.assertEqual(assess(profile, {"name": "Ris uten boil in-bag"})[0]["condition"], "unknown")
+
     def test_hard_household_product_constraints_need_authoritative_evidence(self):
         menu_value = menu({"item": "Mel", "quantity": 500, "unit": "g"})
         candidate = product("10", "Mel", 500, "g", [option(1000)])
