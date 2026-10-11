@@ -968,11 +968,23 @@ def _slot_reasons(
     return reasons
 
 
+def _eating_candidates(selected, recurring):
+    """Expand scheduled servings, excluding any unallocated prepared surplus."""
+    if not recurring:
+        return selected
+    return tuple(
+        candidate
+        for candidate, allocation in zip(selected, recurring["sources"][:len(selected)], strict=True)
+        for _ in allocation["eating_dates"]
+    )
+
+
 def _plan_reasons(
-    selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any]
+    selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, Any], recurring=None,
 ) -> list[dict[str, Any]]:
     reasons: list[dict[str, Any]] = []
-    leafy = _leafy_week(selected, profile)
+    dinners = _eating_candidates(selected, recurring)
+    leafy = _leafy_week(dinners, profile)
     if leafy:
         distance = max(0, leafy["target_range"][0] - leafy["counted_dinners"],
                        leafy["counted_dinners"] - leafy["target_range"][1])
@@ -981,7 +993,7 @@ def _plan_reasons(
                                leafy))
     fish_range = (profile.get("diet") or {}).get("fish_grams_per_person")
     if isinstance(fish_range, list) and len(fish_range) == 2:
-        mass = [candidate["facts"].get("listed_fish_mass", {"grams_per_serving": None, "unknown": ["not_loaded"]}) for candidate in selected]
+        mass = [candidate["facts"].get("listed_fish_mass", {"grams_per_serving": None, "unknown": ["not_loaded"]}) for candidate in dinners]
         known = sum(item["grams_per_serving"] or 0 for item in mass)
         incomplete = any(item["grams_per_serving"] is None or item["unknown"] for item in mass)
         met = fish_range[0] <= known <= fish_range[1]
@@ -1016,7 +1028,7 @@ def _plan_reasons(
     if monotony:
         reasons.append(_reason("ingredients:monotony", -monotony, dict(reusable)))
 
-    dietary = [candidate["facts"]["dietary_facets"] for candidate in selected]
+    dietary = [candidate["facts"]["dietary_facets"] for candidate in dinners]
     for target, facet in (
         ("minimum_fish_portions", "fish"),
         ("minimum_legume_dinners", "legume"),
@@ -1064,7 +1076,7 @@ def _selection(
             "reason_contributions": reasons,
             "score": sum(reason["weight"] for reason in reasons),
         })
-    plan_reasons = _plan_reasons(selected, profile)
+    plan_reasons = _plan_reasons(selected, profile, recurring)
     relaxations = {
         item
         for candidate in selected
@@ -1084,7 +1096,7 @@ def _selection(
             value = any(value.values())
         if value:
             relaxations.add("unsupported:diet." + field)
-    leafy = _leafy_week(selected, profile)
+    leafy = _leafy_week(_eating_candidates(selected, recurring), profile)
     if leafy and leafy["unknown_dinners"]:
         relaxations.add("leafy_green_quantity_unknown")
     if any(cuisine.get(field) for field in ("base_style", "quality")):
@@ -1440,51 +1452,16 @@ def plan_week(
         for candidate, index, day in scored_positions
     }
 
-    def strict_prefix_signature(
-        selected: tuple[Mapping[str, Any], ...],
-    ) -> tuple[Any, ...]:
-        """Partition equal candidate sets by order-sensitive batch contributions."""
+    def batch_prefix_signature(selected):
+        # The candidate set already accounts for one serving per source. Preserve
+        # extra-serving assignments so weekly targets remain exact when pruning.
         if not layout:
             return tuple()
-        evaluated = tuple(
-            candidate
-            for candidate, allocation in zip(
-                selected, layout["sources"][:len(selected)], strict=True,
-            )
-            for _ in allocation["eating_dates"]
-        )
-        signature: list[Any] = []
-        for target in checked["strict_targets"]:
-            if target == "active_minutes":
-                low, high, _maximum = _active_window(profile)
-                values = [
-                    candidate["facts"]["active_minutes"]["value"]
-                    for candidate in evaluated
-                ]
-                signature.append((
-                    target,
-                    any(value is None for value in values),
-                    any(value is not None and not low <= value <= high for value in values),
-                ))
-            elif target == "leafy_green_days":
-                leafy = _leafy_week(evaluated, profile)
-                signature.append((target, leafy["counted_dinners"], leafy["unknown_dinners"]))
-            elif target == "minimum_vegetable_types":
-                # Duplicate batch servings do not change a set of vegetable types.
-                continue
-            else:
-                facet = {
-                    "minimum_fish_portions": "fish",
-                    "minimum_legume_dinners": "legume",
-                    "minimum_wholegrain_or_potato_dinners": "wholegrain_or_potato",
-                }[target]
-                wanted = _positive_int(profile, target, 0)
-                observed = sum(
-                    facet in candidate["facts"]["dietary_facets"]["values"]
-                    for candidate in evaluated
-                )
-                signature.append((target, min(wanted, observed)))
-        return tuple(signature)
+        return tuple(sorted(
+            (candidate["reference_key"], len(allocation["eating_dates"]))
+            for candidate, allocation in zip(selected, layout["sources"][:len(selected)], strict=True)
+            if len(allocation["eating_dates"]) != 1
+        ))
 
     if agent_mode:
         explored_states = 1
@@ -1495,9 +1472,9 @@ def plan_week(
         candidate_sequences = permutations(eligible, count)
         search_strategy = "exhaustive"
     else:
-        # Slot scores depend on order, while plan reasons and strict targets
-        # depend only on the selected candidate set. Keep the best requested
-        # number of orderings for every exact set instead of globally pruning
+        # Keep the best requested orderings for each candidate set and batch
+        # serving assignment. Weekly targets depend on eating occurrences, while
+        # slot scores depend on order. This avoids globally pruning
         # low-scoring prefixes: this remains bounded for 12 candidates and
         # cannot discard the only set that satisfies a strict weekly target.
         frontier: list[tuple[Mapping[str, Any], ...]] = [tuple()]
@@ -1524,7 +1501,7 @@ def plan_week(
                         and candidate.get("supplied_facts", {}).get("batch_guidance", {}).get("suitability") == "unsuitable"
                     ):
                         continue
-                    score = sum(reason["weight"] for reason in _plan_reasons(selected, profile)) + sum(
+                    score = sum(reason["weight"] for reason in _plan_reasons(selected, profile, layout)) + sum(
                         slot_scores[(item["reference_key"], slot_index)]
                         for slot_index, item in enumerate(selected)
                     )
@@ -1535,7 +1512,7 @@ def plan_week(
                     )
                     state_key = (
                         tuple(sorted(ranked_prefix[1])),
-                        strict_prefix_signature(selected),
+                        batch_prefix_signature(selected),
                     )
                     retained = by_candidate_set.setdefault(state_key, [])
                     retained.append(ranked_prefix)
@@ -1563,7 +1540,7 @@ def plan_week(
             continue
         if layout and any(s['batch'] and c.get('supplied_facts', {}).get('batch_guidance', {}).get('suitability') == 'unsuitable' for c, s in zip(selected, layout['sources'])):
             continue
-        evaluated = tuple(c for c, allocation in zip(selected, layout['sources']) for _ in allocation['eating_dates']) if layout else selected
+        evaluated = _eating_candidates(selected, layout)
         strict = _strict_evaluation(evaluated, checked["strict_targets"], profile)
         if strict["status"] == "unknown":
             for item in strict["results"]:
@@ -1578,7 +1555,7 @@ def plan_week(
             "selected": selected,
             "strict": strict,
             "total_score": sum(
-                reason["weight"] for reason in _plan_reasons(selected, profile)
+                reason["weight"] for reason in _plan_reasons(selected, profile, layout)
             ) + sum(
                 slot_scores[(item["reference_key"], index)]
                 for index, item in enumerate(selected)
