@@ -4627,6 +4627,7 @@ class PlanningOperations:
         requirement_names: Mapping[str, str],
         start_as_extra: set[str],
         previous: Mapping[str, Any] | None = None,
+        fresh_empty_start: bool = False,
     ) -> dict[str, Any]:
         retained_added = {}
         supplements = {}
@@ -4649,7 +4650,7 @@ class PlanningOperations:
                         baseline.pop(product_id)
             # Replacing a menu is not external cart drift. Only the quantities
             # attributable to our previous sync may be removed automatically.
-            status = "active" if previous.get("status") == "active" and previous.get("last_synced_digest") == self._cart_digest(live) else "needs_input"
+            status = "active" if (fresh_empty_start and not live) or (previous.get("status") == "active" and previous.get("last_synced_digest") == self._cart_digest(live)) else "needs_input"
         digest = self._cart_digest(live)
         return {
             "provider": self.provider,
@@ -4675,8 +4676,9 @@ class PlanningOperations:
             "default_suggestion": "keep_current",
             "cart_plan": self._cart_plan_view(plan, summary),
             "next": (
-                "Ask one combined question for this exact cart digest. Suggest keeping the current cart, "
-                "but require an explicit answer. The owner may name exact exclusions, restore missing menu products, "
+                "Use the owner's current explicit instruction if it already resolves this exact cart difference; "
+                "otherwise ask one combined question for this cart digest. Suggest keeping the current cart. "
+                "The owner may name exact exclusions, restore missing menu products, "
                 "or explicitly accept the current missing quantities."
             ),
         }
@@ -4761,9 +4763,17 @@ class PlanningOperations:
                     or self._cart_digest(first_live) != restore_digest):
                 raise HouseholdError("restore_missing requires the unchanged current keep_current cart decision")
             if not same_plan:
+                prior_id = (current.get("menu_ref") or {}).get("menu_id") if isinstance(current, Mapping) else None
+                prior_week = (state.get("recipe_usage", {}).get(prior_id) or {}).get("week")
+                current_week = (state.get("menu") or {}).get("week")
+                # A new week's explicitly requested shop may start in an empty
+                # cart; edits within a shopping week retain manual-removal fences.
+                fresh_empty_start = (not first_live and bool(prior_id) and prior_id != menu_ref["menu_id"]
+                                     and bool(prior_week) and bool(current_week) and prior_week != current_week)
                 current = self._new_cart_plan(
                     menu_ref, first_live, first_names, requirements, requirement_names,
                     start_as_extra, previous=current if isinstance(current, Mapping) else None,
+                    fresh_empty_start=fresh_empty_start,
                 )
                 state["cart_plan"] = deepcopy(current)
             else:
@@ -4976,8 +4986,22 @@ class PlanningOperations:
         first_live, first_names = self._cart_lines(first_summary)
         first_digest = self._cart_digest(first_live)
         with self.store.locked() as state:
-            plan = deepcopy(state.get("cart_plan"))
-        if not isinstance(plan, dict) or canonical(plan.get("menu_ref")) != canonical(expected_menu_ref) or plan.get("status") != "needs_input" or plan.get("pending_cart_digest") != supplied_digest:
+            current = state.get("cart_plan")
+            if (isinstance(current, dict) and current.get("provider") == self.provider
+                    and canonical(current.get("menu_ref")) == canonical(expected_menu_ref)
+                    and canonical(self._cart_menu_ref(state.get("menu"))) == canonical(expected_menu_ref)
+                    and current.get("status") == "active"
+                    and first_digest == supplied_digest
+                    and first_digest != current.get("last_synced_digest")
+                    and not state.get("pending_cart_change")
+                    and not state.get("pending_checkout")
+                    and not state.get("pending_cancellation")
+                    and not state.get("order_change")):
+                # A fresh cart read plus an exact owner decision needs no
+                # intervening checkout attempt to establish the drift question.
+                self._set_cart_needs_input(current, first_live, first_names)
+            plan = deepcopy(current)
+        if not isinstance(plan, dict) or plan.get("provider") != self.provider or canonical(plan.get("menu_ref")) != canonical(expected_menu_ref) or plan.get("status") != "needs_input" or plan.get("pending_cart_digest") != supplied_digest:
             raise HouseholdError("cart reconciliation is not bound to the pending cart")
         if first_digest != supplied_digest:
             with self.store.locked() as state:

@@ -229,6 +229,9 @@ def normalize_retail_delivery_slots(value: Any, *, provider: str = "oda") -> dic
     return {
         "provider": provider,
         "delivery_date": delivery_date.isoformat(),
+        "availability": {"date": delivery_date.isoformat(), "total": len(raw_slots), "selectable": len(references),
+                         "full": sum(row["isFull"] for row in raw_slots),
+                         "unavailable": sum(row["isUnavailable"] for row in raw_slots)},
         "slots": list(references.values()),
     }
 

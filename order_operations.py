@@ -585,6 +585,7 @@ class OrderOperations:
         address_id: Any = None,
         allow_recovery: bool = False,
         display_metadata: dict[str, str] | None = None,
+        availability: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         calls = dates or [None]
         slots: list[dict[str, Any]] = []
@@ -602,6 +603,8 @@ class OrderOperations:
             if not isinstance(raw_slots, list):
                 raise HouseholdError(f"{self.provider.upper()} delivery slots are not normalized")
             normalized_call = [validate_delivery_slot(slot) for slot in raw_slots]
+            if availability is not None and isinstance(result.get("availability"), Mapping):
+                availability.append(deepcopy(result["availability"]))
             if display_metadata is not None:
                 raw_display = result.get("display") if isinstance(result, Mapping) else None
                 if self.provider == "meny" and (
@@ -1219,16 +1222,36 @@ class OrderOperations:
                     except ValueError as exc:
                         raise HouseholdError("delivery dates must be one to seven ISO dates") from exc
             display: dict[str, str] = {}
+            availability: list[dict[str, Any]] = []
             slots = self._normalized_provider_slots(
                 dates,
                 deadline=request.get("_deadline"),
                 address_id=request.get("address_id"),
                 allow_recovery=request.get("_allow_browser_recovery") is True,
                 display_metadata=display,
+                availability=availability,
             )
+            diagnostics = {"availability": availability} if availability else {}
+            if not slots or any(row.get("selectable") == 0 for row in availability):
+                diagnostics.update({ "restriction_status": "unknown",
+                    "next": "Some checked dates have no selectable slots. This does not establish that delivery is full. Report observed cart restrictions before proposing a later menu; preserve the cart and use existing owner instructions."})
+                inspect = getattr(self.browser, "cart_delivery_restrictions", None)
+                if self.provider == "oda" and callable(inspect):
+                    deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 20)
+                    try:
+                        with self._browser_operation(deadline):
+                            state = self.store.read()
+                            if not any(state.get(key) for key in ("pending_checkout", "pending_cart_change", "pending_cancellation", "order_change")):
+                                warnings = inspect(deadline=deadline)
+                                diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
+                                diagnostics["cart_restrictions"] = warnings
+                    except HouseholdError:
+                        # This optional explanation must not break provider slot reads.
+                        pass
             return {
                 "provider": self.provider,
                 "slots": slots,
+                **diagnostics,
                 "price_display": {
                     slot["slot_ref"]: delivery_price_display(slot)
                     for slot in slots

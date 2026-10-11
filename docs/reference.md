@@ -2216,3 +2216,23 @@ apply. Clear retains the menu, invalidates old product-plan digests (including
 stale apply arguments), and removes cart completion after verified empty readback.
 `change` uses typed `{product_id,quantity}` signed package deltas; the historical
 `productId` spelling remains accepted. `{op:"clear"}` is not an operation.
+
+### Cart and Oda delivery review
+
+A fresh cart read's exact digest can be used directly to accept a manual removal
+from the current menu with `cart.reconcile` and `keep_current`; no failed checkout
+attempt is needed first. Changes after that read still require a fresh review.
+A requested new weekly shop can start with an empty cart when the retained cart
+plan belongs to another recorded week. Same-week edits retain removal decisions.
+
+Delivery list retains per-date full/unavailable/selectable counts. If any checked
+date has no selectable slots, Oda may read visible cart availability restrictions
+under the browser lock, only without pending cart, checkout, cancellation or order
+changes. This optional read can navigate to the cart but cannot select delivery,
+change goods or pay. An unavailable diagnosis preserves the slot response and an
+unknown cause. Dates outside the requested range remain unverified.
+
+Oda's displayed `Vektreservasjon` is retained as its own entry in `other_fees`.
+The temporary weight reservation contributes to the amount being authorized;
+it is not a promise of the final settled charge. Its presence and exact value
+are frozen with every other checkout amount and checked again before submission.
