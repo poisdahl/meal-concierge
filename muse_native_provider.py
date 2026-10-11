@@ -17,7 +17,7 @@ from muse_browser import (NativeBridge, account_links, digest, native_amount_min
 from muse_mcp import oda_operation_lock, private_operation_directory
 
 
-READ_SECONDS = 90.0
+READ_SECONDS = 110.0
 TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "

@@ -124,10 +124,12 @@ the supported background executor and serve its broker request concurrently.
 Health remains local. Actual signed-out or changed-account failures remain
 latched, and unresolved native task custody must be reconciled before another
 read. Protected MCP status still does not retry rejected authentication.
-No action permit is consumed. Each operation has a 90-second bound,
-within the ordinary CLI wait, and requires a genuine completed task with fresh
-automatic JSON delivery. Preserve late endings and unknown custody after a
-timeout; never dispatch another task to replace uncertain work.
+No action permit is consumed. Each read has a 110-second bound including
+browser-task execution and automatic completion delivery; shorter caller
+deadlines still apply. This leaves headroom under the ordinary 120-second CLI
+wait and the 300-second wait for two order-detail reads. Publication still
+requires a genuine completed task and facts no more than 30 seconds old. Preserve
+late endings and unknown custody after a timeout; never dispatch another task to replace uncertain work.
 For CLI reads, use the host's supported background execution and retain its
 session handle immediately. Claim and serve the emitted browser request while
 the CLI waits, then collect the CLI's actual result and exit. Waiting for the
