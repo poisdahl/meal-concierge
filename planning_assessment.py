@@ -1,5 +1,7 @@
 """Read-only menu coverage and household workflow, derived from existing state."""
 from collections.abc import Mapping
+import menu_planning as mp
+from planner import request_days
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -32,15 +34,15 @@ def assess_menu(state):
     meals = profile["meals"]
     selection = menu.get("planner_selection") or {}
     requested = menu.get("planning_scope") or selection.get("request") or {}
-    expected_days = len(requested["dates"]) if "dates" in requested else meals["dinner_days"]
+    expected_days = len(request_days(requested)) if "dates" in requested or "days" in requested else meals["dinner_days"]
     expected_portions = requested.get("portions") or meals["portions"]
     dishes = menu.get("dishes", [])
     recipes = [*dishes, *menu.get("salads", [])]
     slots = menu.get("slots") or []
-    covered_days = len({slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}) if slots else None
+    covered_days = len({mp.slot_day(slot) for slot in slots if slot.get("meal_type") == "dinner"}) if slots else None
     issues = []
-    actual_dates = {slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}
-    if slots and (covered_days != expected_days or ("dates" in requested and actual_dates != set(requested["dates"]))):
+    actual_dates = {mp.slot_day(slot) for slot in slots if slot.get("meal_type") == "dinner"}
+    if slots and (covered_days != expected_days or (("dates" in requested or "days" in requested) and actual_dates != set(request_days(requested)))):
         issues.append({"code": "dinner_day_coverage", "expected": expected_days, "actual": covered_days})
     if not slots and len(dishes) != meals["dishes"]:
         issues.append({"code": "dish_coverage", "expected": meals["dishes"], "actual": len(dishes)})

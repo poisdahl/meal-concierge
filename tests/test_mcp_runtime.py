@@ -273,7 +273,10 @@ async def sdk_checks(root, process):
         assert product_schema["properties"]["menu_ref"]["anyOf"][0]["$ref"].endswith("/MenuRef")
         planner_input = menu_schema["$defs"]["PlannerInput"]["properties"]
         assert {"week", "dates", "planning_mode", "period", "candidates", "cooldown_overrides"} <= set(planner_input)
-        assert planner_input["planning_mode"]["enum"] == ["ad_hoc", "weekly"]
+        assert set(planner_input["planning_mode"]["enum"]) == {"ad_hoc", "weekly", "relative"}
+        assert planner_input["days"]["items"] == {"maximum": 31, "minimum": 1, "type": "integer"}
+        assert "remaining_days" in menu_properties
+        assert "first_meal_date" in schemas["meal_concierge_checkout"]["properties"]
         assert menu_schema["$defs"]["PlanningPeriod"]["required"] == ["start_date", "end_date"]
         assert planner_input["dates"]["maxItems"] == 7
         assert planner_input["candidates"]["maxItems"] == 12

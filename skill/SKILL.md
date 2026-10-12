@@ -156,13 +156,18 @@ before offering actions; a historical order date alone is not an active order.
    Exact user URLs need no global search-setting change. Prefer sourced recipes; generate a recipe only when the user wants
    that or the available real recipes cannot reasonably meet the request.
 3. Choose the menu yourself. Call menu `plan` with
-   `planner_input.selection_mode="agent"`, chronological `dates`, and ordered
+   `planner_input.selection_mode="agent"`, chronological `days` (or explicitly requested calendar `dates`), and ordered
    exact `candidates` (`recipe_ref={id,revision}` or `discovery_ref`). Supply one
    candidate per cooking date; accepted batch settings derive leftover dates.
    This path validates your order without ranking it again. `ranked` remains
    available when you actually want the service to suggest an ordering.
-   For ordinary ad-hoc requests, use `planning_mode="ad_hoc"` with the requested
-   dates or `period={start_date,end_date}` (up to seven eating dates per plan).
+   Without explicit calendar intent, use `planning_mode="relative"` (the default)
+   and ordinal `days`, for example `[1,2,3,4,5,6]`. Show “Dag 1–6”/“Day 1–6”,
+   including batch cooking days, sides and storage intervals. Never infer menu
+   dates from today. Use `day` in additions/edits and `remaining_days` in replans;
+   retain intentional gaps. `as_of_date` assesses history, not when meals happen.
+   For explicitly dated ad-hoc requests, use `planning_mode="ad_hoc"` with the
+   requested dates or `period={start_date,end_date}` (up to seven eating dates).
    Use weekly mode for an actual calendar-week request or weekly automation.
    Describe the result as a meal plan (Norwegian: "måltidsplan"), and recurring
    groceries as "faste varer". Use "ukemeny" only for a genuinely weekly plan.
@@ -498,6 +503,22 @@ A delayed recurring item may constrain the whole cart; ask whether to omit it fo
 this shop or wait, unless the current request already resolves that choice. Keep
 the recurring agreement unchanged. `unknown` or `not_observed` does not prove
 there are no cart restrictions. Never remove products merely to find slots.
+
+When delivery is selected for a relative menu, use `menu_start` to discuss the
+first meal naturally in the same step. Reuse an already stated start date or
+explicit authority to choose. Morning delivery often supports cooking that day;
+late delivery often supports starting the next day. Consider known meal times,
+cooking plans and recipe preparation, without inventing missing time estimates.
+There is no universal hour cutoff and no automatic calendar-Monday anchor.
+When intent is ambiguous, ask briefly whether to start on delivery day, the next
+day, or later. In text-only chat, name the actual dates; native dialogs may offer
+the same choices. This scheduling answer is not purchase authorization.
+Pass the resolved ISO `first_meal_date` to `checkout prepare`. Show the returned
+`summary.menu_schedule` dates with the usual order summary. A delivery/menu change
+needs a fresh preview. Only verified purchase binds the calendar; uncertain
+payment keeps the relative menu and the frozen review. Reconciliation must not
+shift dates based on today, and later delivery changes must not rewrite sent
+recipes or silently send them again.
 
 A cart update is not a purchase. Use the service's selected delivery window,
 account/address, payment choice and current confirmation policy. A clear purchase

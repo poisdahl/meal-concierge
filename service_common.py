@@ -148,6 +148,9 @@ def meny_login_lost(error: BaseException) -> bool:
     return False
 
 def menu_email_period(menu: Mapping[str, Any]) -> str:
+    import menu_planning as mp
+    if mp.relative(menu):
+        return "relative"
     try:
         return validate_week(menu.get("week"))
     except RecipeError as exc:
@@ -277,6 +280,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
     escape = lambda value: html.escape(str(value or ""))
 
     def display_date(value: Any) -> str:
+        if type(value) is int:
+            return f"{tr('Dag', 'Day')} {value}"
         try:
             parsed = date.fromisoformat(str(value))
         except (ValueError, TypeError):
@@ -437,8 +442,8 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
     if slots:
         parts.append(tr('<h2>Ukeplan</h2>', '<h2>Weekly schedule</h2>'))
         days = {}
-        for slot in sorted(slots, key=lambda item: item.get("date", "")):
-            days.setdefault(slot.get("date", ""), []).append(slot)
+        for slot in sorted(slots, key=mp.slot_day):
+            days.setdefault(mp.slot_day(slot), []).append(slot)
         for day, day_slots in days.items():
             parts.append(f'<div style="border-left:3px solid #8aab95;padding:4px 16px;margin:16px 0"><p style="margin:0"><strong>{escape(display_date(day))}</strong></p><ul style="margin:6px 0;padding-left:20px">')
             for slot in day_slots:
@@ -488,7 +493,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
     cooking_batches = {}
     for batch in sources(menu):
         source_slot = next((slot for slot in menu.get('slots', []) if slot['slot_id'] == batch['source_slot_id']), {})
-        cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, source_slot.get('date', '')))
+        cooking_batches.setdefault(source_slot.get('slot_id'), []).append((batch, mp.slot_day(source_slot)))
     for heading, recipes in ((tr('Middager', 'Main dishes'), menu.get("dishes")), (tr('Salater', 'Salads'), menu.get("salads"))):
         if not isinstance(recipes, list) or not recipes:
             continue

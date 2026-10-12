@@ -179,6 +179,9 @@ def _compact_batch(batch: Any) -> dict[str, Any]:
         )
         if key in batch
     }
+    if type(compact.get("source_date")) is int:
+        compact["source_day"] = compact.pop("source_date")
+        compact["eating_days"] = compact.pop("eating_dates", [])
     guidance_value = batch.get("guidance")
     if isinstance(guidance_value, dict):
         compact["guidance"] = {
@@ -197,11 +200,14 @@ def _compact_plan_slot(
     compact = {
         key: slot[key]
         for key in (
-            "date", "reference", "recipe_key", "name", "portions", "source_date",
+            "day", "date", "reference", "recipe_key", "name", "portions", "source_date",
             "kind", "new_shopping_requirements",
         )
         if key in slot
     }
+    for source, target in (("date", "day"), ("source_date", "source_day")):
+        if type(compact.get(source)) is int:
+            compact[target] = compact.pop(source)
     if reasons:
         compact_reasons = _compact_plan_reasons(
             slot.get("reason_contributions", []), details=reason_details
@@ -462,12 +468,12 @@ def _menu_successor_summary(successor: Any) -> dict[str, Any]:
     import menu_planning as mp
     slots = [{
         **{key: slot[key] for key in (
-            "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
+            "day", "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
         ) if key in slot},
         **(_menu_recipe_presentation(mp.recipe_for_slot(successor, slot, allow_stale=True))
            if successor.get("dishes") else {}),
     } for slot in successor.get("slots", []) if isinstance(slot, dict)]
-    return {"week": successor.get("week"), "slots": slots}
+    return {**({"planning_mode": "relative"} if mp.relative(successor) else {"week": successor.get("week")}), "slots": slots}
 
 
 def _nonprepared_replan_projection(
@@ -692,6 +698,10 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
         view["menu_ref"] = _fields(menu, ("menu_id", "revision", "digest"))
         view.update(_fields(menu, ("week", "phase", "weekly_plan_complete", "order_id", "supersedes", "planning_scope")))
         view["menu"] = {**view["menu_ref"], **_fields(menu, ("week", "phase"))}
+        if (menu.get("planning_scope") or {}).get("planning_mode") == "relative":
+            view.pop("week", None)
+            view["menu"].pop("week", None)
+            view["menu"]["planning_mode"] = "relative"
         if menu.get("output_language"):
             view["output_language"] = menu["output_language"]
             view["recipe_languages"] = _page([
