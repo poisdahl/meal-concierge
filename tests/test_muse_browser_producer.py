@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
-from muse_browser import NativeBridge, claim_request, read_json
+from muse_browser import NativeBridge, claim_request, read_json, native_authorization, durable_publish
 from muse_browser_producer import ProducerError, parse_json, publish, validate_native_read
 from muse_native_provider import FACTS_CONTRACTS
 
@@ -133,17 +133,49 @@ class ProducerCLITests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("real source waiter did not issue a request")
 
-    def run_cli(self, command, data=b"", *, request_id=None, extra=()):
+    def run_cli(self, command, data=b"", *, request_id=None, extra=(), observed_at=None):
         args = [sys.executable, "-I", "-B", str(PRODUCER), command,
                 "--directory", str(self.broker), "--request-id", request_id or self.key,
                 "--task-id", self.bridge.task_id]
         if command in {"respond", "end"}:
-            args += ["--observed-at", datetime.now(timezone.utc).isoformat(), "--ending-state", "completed"]
+            args += ["--observed-at", observed_at or datetime.now(timezone.utc).isoformat(), "--ending-state", "completed"]
         return subprocess.run(args + list(extra), input=data, capture_output=True, timeout=5)
 
     def assert_failure(self, result, stage, category):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stderr), {"error": {"stage": stage, "category": category}})
+
+    def test_delegation_cli_requires_original_child_and_preserves_failed_publication_for_ending(self):
+        payload = {"authorization": native_authorization(True),
+                   "journal_binding": {"confirmation_id": "synthetic-original-confirmation",
+                                       "journal_digest": "a" * 64}}
+        self.request("checkout_delegate", payload)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        self.assertEqual(self.run_cli("consume").returncode, 0)
+        self.assertEqual(self.run_cli("bind", b'{"ok":true,"status":"accepted","browser_task_id":"synthetic-child:original"}').returncode, 0)
+        observed = datetime.now(timezone.utc).isoformat()
+        metadata = self.broker / "synthetic-completion.json"
+        durable_publish(metadata, {"browser_task_id": "synthetic-child:wrong", "outcome": "completed",
+                                   "completed_at_utc": observed})
+        extra = ("--native-metadata", str(metadata))
+        self.assert_failure(self.run_cli("respond", b'{"dispatch":"clicked_once"}',
+                                        extra=extra, observed_at=observed), "request", "claim_rejected")
+        self.assertTrue(self.marker.exists())
+        original = self.broker / "synthetic-original-completion.json"
+        durable_publish(original, {"browser_task_id": "synthetic-child:original", "outcome": "completed",
+                                   "completed_at_utc": observed})
+        self.assert_failure(self.run_cli("respond", b'{"dispatch":"clicked_once"}',
+                          extra=("--native-metadata", str(original)), observed_at=observed),
+                          "publish", "invocation_consumed")
+        result = self.run_cli("end", b'{"dispatch":"clicked_once"}',
+                             extra=("--native-metadata", str(original)), observed_at=observed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(3)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [])
+        self.assertEqual(len(self.errors), 1)
+        ending = read_json(self.broker / "endings" / (self.key + ".json"))
+        self.assertEqual(ending["native_completion"], read_json(original))
 
     def test_wrong_exact_order_is_rejected_before_response_publication(self):
         payload = {"tool": "get_order", "arguments": {"order_number": "SYNTHETIC-A1"},

@@ -110,6 +110,14 @@ file does not authenticate the browser or change its account. Do not replace it
 with newly observed foreign links to make a failed check pass. Omitting this
 option retains the existing process-local account continuity behavior.
 
+The composed financial adapter also compares the complete account set on its
+checkout, receipt and cancellation observations. A complete different set
+latches the native provider; an incomplete observation is rejected without
+claiming an account change. The original accepted account accompanies those
+requests and their frozen financial review. Protected MCP keeps its existing
+selected-address checks. This foundation does not enable checkout in
+`browser_readonly` or `browser_cart`.
+
 The startup account probe and subsequent reads publish `provider_read` requests
 through the existing canonical browser broker. Each payload contains `tool` and
 `arguments`; only `product_search`, `get_cart`, `get_delivery_addresses` and
@@ -411,7 +419,10 @@ exclusively published and fsynced. The producer must:
    emits `checkout_click` or `cancellation_click`. Native approval mode emits
    `checkout_delegate` or `cancellation_delegate` and additionally carries
    `authorization={mode:native_approval, expiry_role:admission,
-   purchase_approval_required:true/false}`. Checkout requires fresh purchase
+   purchase_approval_required:true/false, task_binding:accepted_child_v1}`.
+   Historical delegations without `task_binding` retain their existing evidence
+   contract; do not invent bindings for already completed records.
+   Checkout requires fresh purchase
    approval; cancellation uses the reviewed exact-order authorization and every
    platform approval required for that action.
    Opted-in native Muse checkout has a 600-second total core budget, within the
@@ -461,8 +472,24 @@ exclusively published and fsynced. The producer must:
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
 5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
-   review/journal, then run `consume` once **before one sole steer**
-   of the original task chain. Consumption records delegation, not dispatch or
+   review/journal, then run `consume` once **before one initial
+   `browser.spawn_task`** in the existing shared profile. Only a fresh successful
+   consume acknowledgement permits that one spawn. Finding a previously consumed
+   record on resume grants no dispatch authority. A completed read-only review
+   is not the financial task and must not be relabelled as one.
+   Retain the original native success receipt, then run `bind` once with its
+   literal JSON on closed stdin. The observed host success receipt contains
+   `ok:true`, `status:"accepted"` and the actual `browser_task_id`; these are
+   required, while the entire original metadata is retained. Its
+   `execution_state:"not_reported"` is not a running-state attestation and no
+   acceptance timestamp was supplied. A parent-made `{task_id,dispatched_child_id,accepted}`
+   mapping is not the original acceptance. The command derives the request
+   digest, logical anchor and journal binding and durably binds one child. A
+   financial child cannot be reused for another delegation. Do not relay final
+   effect authority before binding is acknowledged. Every subsequent
+   information or approval continuation uses `browser.steer_task` on that same
+   waiting child, with no second consume or spawn.
+   Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
    one final action. `purchase_approval_required:true` requires fresh explicit
@@ -488,6 +515,27 @@ use `end` for late or unresolved custody, without making old review facts fresh.
 If a valid completed response already exists, preserve it rather than appending
 another ending. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
+
+For new bound delegations, `respond` and `end` additionally require
+`--native-metadata /absolute/private/original-completion.json`. Retain the entire
+original host metadata, including `browser_task_id`, `outcome:"completed"` and
+`completed_at_utc`; use that same actual time for `--observed-at`. Both the
+producer and broker check the child against its immutable acceptance binding,
+including during later custody and cancellation reconciliation. The logical
+anchor is not the child ID. These remain trusted host observations, not
+cryptographically authenticated platform receipts.
+Whole-second host completion reports compare issuance and consumption lower
+bounds at that reported precision; the original timestamp is never restamped.
+Fractional reports and other observation contracts retain strict comparisons.
+
+Genuine acceptance arriving after expiry or owner loss can still be retained
+with `bind`; it neither renews admission nor allows another task. Missing
+acceptance, an uncertain consume acknowledgement, failed binding durability or
+an undocumented spawn failure preserves the original consumed attempt and
+custody. The installed host contract does not define a definitive no-child
+failure receipt; do not invent a completed BrowserTask or `not_dispatched`
+ending after consumption. Gather the original execution evidence and reconcile
+without replay.
 
 A documented information reply may resume the **same** admitted task when its
 actual retained action history establishes that no final effect occurred. The
@@ -522,7 +570,7 @@ consumed or possibly dispatched action cannot use this refusal outcome.
 ### Native producer commands
 
 The installed source includes `muse_browser_producer.py`: thin `claim`,
-`consume`, `respond` and `end` commands using the existing broker functions.
+`consume`, `bind`, `respond` and `end` commands using the existing broker functions.
 No session-specific scripts, handcrafted records or compact all-match packets
 are required. The producer takes literal JSON from the supported browser's
 **automatic result delivery**. A task acceptance receipt is not a completion;
@@ -544,6 +592,16 @@ actual stdout, stderr, exit and native job receipt:
 "$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" claim \
   --directory "$MUSE_BROWSER_DIRECTORY" \
   --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN"
+```
+
+After one freshly consumed financial delegation and its actual initial spawn,
+retain the original success receipt and bind it before any effect continuation:
+
+```sh
+"$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" bind \
+  --directory "$MUSE_BROWSER_DIRECTORY" \
+  --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN" \
+  < "$ORIGINAL_NATIVE_ACCEPTANCE_JSON"
 ```
 
 Claim once before steering. For each prepare or confirm, obtain the fresh

@@ -60,6 +60,62 @@ class NativeCompositionTests(unittest.TestCase):
         with self.assertRaisesRegex(HouseholdError, "original accepted account"), browser._custody():
             self.fail("unbound native provider admitted financial custody")
 
+    def test_financial_observation_compares_entire_account_and_latches_before_another_request(self):
+        accepted = deepcopy(ACCOUNT)
+        accepted["edit_urls"].append("https://oda.com/no/account/delivery/edit/202/")
+        for operation in ("checkout_review", "order_binding", "cancellation_review", "cancelled_checkout_binding"):
+            for links, complete in ((ACCOUNT["edit_urls"], True),
+                    (accepted["edit_urls"] + ["https://oda.com/no/account/delivery/edit/303/"], True),
+                    (list(reversed(accepted["edit_urls"])), True), (ACCOUNT["edit_urls"], False)):
+                with self.subTest(operation=operation, links=links, complete=complete):
+                    provider = MuseNativeReadProvider(self.ops, "synthetic-original-task", accepted_account=accepted)
+                    browser = MuseBrowser(self.broker, "synthetic-original-task", provider)
+                    before = set((self.broker / "requests").glob("*.json"))
+                    sections = (["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]
+                                if operation == "checkout_review" else ["receipt", "account"])
+                    receipt = {"account": {**ACCOUNT, "edit_urls": links},
+                               "complete_sections": sections if complete else []}
+                    facts = {"receipt": receipt} if operation in {"cancellation_review", "cancelled_checkout_binding"} else receipt
+                    errors = []
+
+                    def produce():
+                        try:
+                            path = wait_for(lambda: next(iter(set((self.broker / "requests").glob("*.json")) - before), None))
+                            record = read_json(path)
+                            self.assertEqual(record["payload"]["accepted_account"], accepted)
+                            claim_request(self.broker, record["request_id"], record["task_id"])
+                            respond_request(self.broker, record["request_id"], record["task_id"], {
+                                "request_id": record["request_id"], "request_digest": digest(record),
+                                "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
+                                "task_state": "completed", "facts": facts})
+                        except Exception as error:
+                            errors.append(error)
+
+                    identity = (nullcontext() if sys.platform.startswith("linux") else
+                                mock.patch("muse_browser.process_start", return_value="12345"))
+                    with identity:
+                        worker = threading.Thread(target=produce)
+                        worker.start()
+                        try:
+                            with browser._custody():
+                                if complete and set(links) == set(accepted["edit_urls"]):
+                                    self.assertEqual(browser._observe(operation, {}, None), facts)
+                                else:
+                                    with self.assertRaises(HouseholdError):
+                                        browser._observe(operation, {}, None)
+                        finally:
+                            worker.join(6)
+                    self.assertFalse(worker.is_alive())
+                    self.assertEqual(errors, [])
+                    latched = complete and set(links) != set(accepted["edit_urls"])
+                    self.assertEqual(bool(provider.terminal_failure), latched)
+                    if latched:
+                        count = len(list((self.broker / "requests").glob("*.json")))
+                        with self.assertRaisesRegex(HouseholdError, "account evidence changed"), browser._custody():
+                            self.fail("financial custody continued after an observed account change")
+                        self.assertEqual(len(list((self.broker / "requests").glob("*.json"))), count)
+                    self.assertEqual(provider._accepted_account, accepted)
+
     def test_invalid_accepted_file_cannot_fall_back_to_first_observation(self):
         home = self.ops.parent / "h"
         muse.initialize(home, "oda", "Synthetic household", credential_name="custom.synthetic",

@@ -157,6 +157,16 @@ class MuseNativeReadProvider:
     def terminal_failure(self):
         return self._terminal_failure
 
+    def validate_account(self, account):
+        """Check a complete observed account, including financial observations."""
+        if self.terminal_failure:
+            raise HouseholdError(self.terminal_failure)
+        references = account_links(account)
+        if self._account_ids is not None and references != self._account_ids:
+            self._terminal_failure = "Oda native browser account evidence changed; reconcile the original profile."
+            raise HouseholdError(self.terminal_failure)
+        return references
+
     def probe(self):
         self.call("get_delivery_addresses", {})
         return {"server": {"name": "Muse native browser read observations"},
@@ -215,10 +225,7 @@ class MuseNativeReadProvider:
             if not facts["signed_in"]:
                 self._terminal_failure = "Oda native browser login is required; preserve the existing profile and task records."
                 raise HouseholdError(self.terminal_failure)
-            references = account_links(facts.get("account"))
-            if self._account_ids is not None and references != self._account_ids:
-                self._terminal_failure = "Oda native browser account evidence changed; reconcile the original profile."
-                raise HouseholdError(self.terminal_failure)
+            references = self.validate_account(facts.get("account"))
             if facts.get("complete") is not True:
                 raise HouseholdError("Muse native provider needs the complete requested page section")
             source = {"kind": "host_attested", "url": facts.get("url"),
