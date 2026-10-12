@@ -187,6 +187,9 @@ def workflow_status(state, *, now=None):
         next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation.", "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id")}
     elif change:
         next_action = {"operation": "orders", "action": "get", "reason": "Review the exact order being changed before continuing.", "order_id": change.get("order_id")}
+    elif menu.get("phase") == "ordered" and menu.get("calendar_status"):
+        next_action = {"operation": "menu", "action": "get",
+                       "reason": "The purchase is confirmed, but the meal calendar needs review. Read the saved menu and ask how to schedule the remaining meals. Preserve the confirmed order and recorded meal history; do not purchase again or schedule/send recipes to repair the calendar."}
     elif menu.get("phase") == "ordered" and any(
             j.get("trigger") == "after_purchase"
             and j.get("status") in {"pending", "claimed", "sending", "uncertain"} for j in jobs):

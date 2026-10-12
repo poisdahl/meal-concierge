@@ -5,7 +5,7 @@ from datetime import date
 from unittest import mock
 import test_meal_concierge_planner as fixture
 import menu_planning as mp
-from planning_assessment import assess_menu
+from planning_assessment import assess_menu, workflow_status
 from service_common import menu_email_html
 
 
@@ -238,6 +238,22 @@ class RelativePlanningTests(unittest.TestCase):
         self.assertEqual(state['menu_planning']['locks'][mp.lock_key(snapshot)],[menu['slots'][0]['slot_id']])
         self.assertEqual(snapshot['slots'],menu['slots'])
         self.assertFalse(any(j.get('order_id')=='already-dispatched' for j in state.get('email_jobs',[])))
+        # A later conversation must retain the same unresolved calendar instead
+        # of offering cooking feedback or scheduling undated order recipes.
+        state['pending_checkout'] = None
+        state['email_recipient'] = 'household@example.test'
+        for timing in ('on_request', 'after_purchase', 'delivery_day'):
+            with self.subTest(timing=timing):
+                state['recipe_delivery']['sender_binding'] = {'timing': timing}
+                result = workflow_status(state)
+                self.assertTrue(result['settled']['order_confirmed'])
+                self.assertEqual(result['next_action']['operation'], 'menu')
+                self.assertEqual(result['next_action']['arguments'], {'action': 'get'})
+                self.assertIn('purchase is confirmed', result['next_action']['reason'])
+                self.assertIn('do not purchase again', result['next_action']['reason'])
+        state['pending_cancellation'] = {'status': 'uncertain',
+            'confirmation_id': 'cancel-original', 'order_id': 'already-dispatched'}
+        self.assertEqual(workflow_status(state)['next_action']['action'], 'cancel_reconcile')
 
     def test_first_meal_date_anchors_first_retained_day(self):
         menu=self.saved()
