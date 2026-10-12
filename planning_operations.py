@@ -4328,7 +4328,8 @@ class PlanningOperations:
                         "product_plan_digest": supplied["product_plan_digest"],
                         **cart_result,
                     }
-                summary = cart_summary(cart_result["cart"])
+                summarize = getattr(self.provider_client, "managed_cart_summary", cart_summary)
+                summary = summarize(cart_result["cart"])
                 live, names = self._cart_lines(summary)
                 if live:
                     with self.store.locked() as state:
@@ -4724,6 +4725,7 @@ class PlanningOperations:
 
     def _cart_sync(self, request: Mapping[str, Any], deadline: float | None) -> dict[str, Any]:
         expected_menu_ref = self._require_cart_menu(request)
+        summarize = getattr(self.provider_client, "managed_cart_summary", cart_summary)
         with self.store.locked() as state:
             state.pop("product_plan_completion", None)
         requirements, requirement_names = self._cart_requirements(request.get("requirements"), allow_empty=request.get("_allow_empty_requirements") is True)
@@ -4745,7 +4747,7 @@ class PlanningOperations:
             raise HouseholdError("start_as_extra_product_ids must be a list")
         start_as_extra = {self._product_id(value) for value in extra_values}
         first_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
-        first_summary = cart_summary(first_cart)
+        first_summary = summarize(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         if request.get("start_as_extra_product_ids") is not None and not start_as_extra.issubset(first_live):
             raise HouseholdError("starting quantities can be extra only for exact products already in the cart")
@@ -4863,7 +4865,7 @@ class PlanningOperations:
         acknowledged_live = dict(first_live)
         if operations:
             prewrite_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
-            prewrite_summary = cart_summary(prewrite_cart)
+            prewrite_summary = summarize(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != self._cart_digest(first_live):
                 with self.store.locked() as state:
@@ -4921,7 +4923,7 @@ class PlanningOperations:
                     ),
                 }
             raise
-        verified_summary = cart_summary(verified_cart)
+        verified_summary = summarize(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         expected = dict(first_live)
         for operation in operations:
@@ -4975,6 +4977,7 @@ class PlanningOperations:
 
     def _cart_reconcile(self, request: Mapping[str, Any], deadline: float | None) -> dict[str, Any]:
         expected_menu_ref = self._require_cart_menu(request)
+        summarize = getattr(self.provider_client, "managed_cart_summary", cart_summary)
         with self.store.locked() as state:
             state.pop("product_plan_completion", None)
         decision = request.get("decision")
@@ -4990,7 +4993,7 @@ class PlanningOperations:
         excluded = {self._product_id(value) for value in excluded_values}
         accepted_missing = {self._product_id(value) for value in accepted_missing_values}
         first_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
-        first_summary = cart_summary(first_cart)
+        first_summary = summarize(first_cart)
         first_live, first_names = self._cart_lines(first_summary)
         first_digest = self._cart_digest(first_live)
         with self.store.locked() as state:
@@ -5046,7 +5049,7 @@ class PlanningOperations:
         acknowledged_live = dict(first_live)
         if operations:
             prewrite_cart = self._cart_provider_call("get_cart", {}, deadline=deadline)
-            prewrite_summary = cart_summary(prewrite_cart)
+            prewrite_summary = summarize(prewrite_cart)
             prewrite_live, prewrite_names = self._cart_lines(prewrite_summary)
             if self._cart_digest(prewrite_live) != supplied_digest:
                 with self.store.locked() as state:
@@ -5073,7 +5076,7 @@ class PlanningOperations:
                     plan["approved_cart_digest"] = None
                     plan["pending_cart_digest"] = None
             raise
-        verified_summary = cart_summary(verified_cart)
+        verified_summary = summarize(verified_cart)
         verified_live, verified_names = self._cart_lines(verified_summary)
         if mutation_error is not None or verified_live != target:
             with self.store.locked() as state:
@@ -5285,6 +5288,60 @@ class PlanningOperations:
                 "reconcile its pending menu cart question first when required"
             )
 
+    def _native_managed_intent(self, command_id, request, before, operations):
+        """Persist the next native batch under its original product-plan apply."""
+        if request.get("operation") != "products" or request.get("action") != "apply":
+            return False
+        expected = dict(before)
+        for item in operations:
+            product = str(item["productId"])
+            quantity = expected.get(product, 0) + item["quantity"]
+            if quantity < 0:
+                raise HouseholdError("managed batch exceeds observed cart quantities")
+            if quantity:
+                expected[product] = quantity
+            else:
+                expected.pop(product, None)
+        with self.store.locked() as state:
+            pending = state.get("pending_cart_change")
+            if pending:
+                managed = pending.get("native_managed")
+                if (not managed or managed["command_id"] != command_id
+                        or managed["verified"] != before or pending["expected"] != before):
+                    raise HouseholdError("reconcile the original native managed batch before dispatch")
+                managed = deepcopy(managed)
+            else:
+                plan = state.get("cart_plan")
+                digest = request.get("product_plan_digest")
+                if (not isinstance(plan, dict) or not state.get("managed_product_apply_fence")
+                        or plan.get("provider") != self.provider or state.get("order_change")
+                        or re.fullmatch(r"[a-f0-9]{64}", digest or "") is None):
+                    raise HouseholdError("original managed menu/product-plan intent is required")
+                managed = {"command_id": command_id, "request": deepcopy(request),
+                           "menu_ref": deepcopy(plan["menu_ref"]), "product_plan_digest": digest,
+                           "context_digest": self._product_current_context(state),
+                           "initial_plan": deepcopy(plan), "initial": before, "verified": before}
+            state["pending_cart_change"] = {
+                "provider": self.provider, "order_change": None, "operations": deepcopy(operations),
+                "before": before, "expected": expected, "native_managed": managed}
+        return True
+
+    def _verify_native_managed_batch(self, command_id, live):
+        with self.store.locked() as state:
+            pending = state["pending_cart_change"]
+            if (pending["native_managed"]["command_id"] != command_id
+                    or live != pending["expected"]):
+                raise HouseholdError("managed native batch readback changed; reconcile without resend")
+            pending["native_managed"]["verified"] = live
+
+    def _finalize_native_managed_apply(self, command_id):
+        with self.store.locked() as state:
+            pending = state.get("pending_cart_change")
+            if (pending and pending.get("native_managed")
+                    and pending["native_managed"]["command_id"] == command_id
+                    and self._native_managed_finalized(state, pending)):
+                state.pop("pending_cart_change")
+
     @staticmethod
     def _native_managed_allocations(managed, verified, live):
         original = managed["initial_plan"]
@@ -5362,11 +5419,12 @@ class PlanningOperations:
             if validate(pending, self.store) == "not_dispatched":
                 if quantities != pending["before"]:
                     raise HouseholdError("cart changed after native refusal; preserve its original journal")
-                with self.store.locked() as state:
-                    if canonical(state.get("pending_cart_change")) != canonical(pending):
-                        raise HouseholdError("original native cart intent changed during refusal reconciliation")
-                    state.pop("pending_cart_change")
-                return
+                if not pending.get("native_managed"):
+                    with self.store.locked() as state:
+                        if canonical(state.get("pending_cart_change")) != canonical(pending):
+                            raise HouseholdError("original native cart intent changed during refusal reconciliation")
+                        state.pop("pending_cart_change")
+                    return
         if pending.get("native_managed"):
             self._complete_native_managed_write(pending, quantities, names)
             return

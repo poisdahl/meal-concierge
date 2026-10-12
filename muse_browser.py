@@ -400,38 +400,44 @@ class NativeBridge:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise HouseholdError("Muse browser has an active owner") from None
-            # A timed-out claimed native task may still be working. Its actual
-            # ending must be returned to the original request before replacement.
-            for claim_path in (self.directory / "claims").glob("*.json"):
-                reply = self.directory / "responses" / claim_path.name
-                original = required_json(self.directory / "requests" / claim_path.name)
-                if not isinstance(original, Mapping):
-                    raise HouseholdError("Muse browser custody record is invalid")
-                _, record = request_record(self.directory, claim_path.stem,
-                                           original.get("task_id"), active=False)
-                try:
-                    ending = read_json(self.directory / "endings" / claim_path.name)
-                except FileNotFoundError:
-                    pass
-                else:
-                    validate_response(record, ending, fresh=False)
-                    if ending["task_state"] != "completed":
-                        raise HouseholdError("Muse browser has no actual task ending")
-                    validate_claim(self.directory, record, response=ending)
-                    continue
-                response = required_json(reply)
-                validate_response(record, response, fresh=False)
-                validate_claim(self.directory, record, response=response)
-                if response["task_state"] != "completed":
-                    if (record["operation"] in ACTION_OPERATIONS | {"provider_read"}
-                            or record["task_id"] != self.task_id
-                            or process_start(record["owner_pid"]) != record["owner_start"]):
-                        raise HouseholdError("Finish the original waiting Muse task before replacement")
+            self.check_task_endings()
             yield
         finally:
             os.close(fd)
 
+    def check_task_endings(self):
+        # A timed-out claimed native task may still be working. Its actual
+        # ending must be returned to the original request before replacement.
+        for claim_path in (self.directory / "claims").glob("*.json"):
+            reply = self.directory / "responses" / claim_path.name
+            original = required_json(self.directory / "requests" / claim_path.name)
+            if not isinstance(original, Mapping):
+                raise HouseholdError("Muse browser custody record is invalid")
+            _, record = request_record(self.directory, claim_path.stem,
+                                       original.get("task_id"), active=False)
+            try:
+                ending = read_json(self.directory / "endings" / claim_path.name)
+            except FileNotFoundError:
+                pass
+            else:
+                validate_response(record, ending, fresh=False)
+                if ending["task_state"] != "completed":
+                    raise HouseholdError("Muse browser has no actual task ending")
+                validate_claim(self.directory, record, response=ending)
+                continue
+            response = required_json(reply)
+            validate_response(record, response, fresh=False)
+            validate_claim(self.directory, record, response=response)
+            if response["task_state"] != "completed":
+                if (record["operation"] in ACTION_OPERATIONS | {"provider_read"}
+                        or record["task_id"] != self.task_id
+                        or process_start(record["owner_pid"]) != record["owner_start"]):
+                    raise HouseholdError("Finish the original waiting Muse task before replacement")
+
     def request(self, operation, payload, *, deadline=None, expires_at=None, include_response=False):
+        # Nested reads borrow the held lease, but cannot replace an unresolved
+        # native task. Recheck before every publication, including readback.
+        self.check_task_endings()
         seconds = operation_timeout(operation)
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):

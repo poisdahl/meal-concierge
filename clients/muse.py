@@ -63,9 +63,11 @@ NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
                       "cart": {None, "get"}, "delivery": {"addresses"}, "orders": {None, "list", "get"}}
 NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
     "after a fresh complete cart read and an enabled original-context policy, plus bounded product "
-    "preparation and saved-plan reads with include_recurring=false. Reconcile uncertain changes "
-    "without repeating them. Bounded displayed order history is readable; whole-menu product apply, "
-    "delivery selection, checkout and order changes remain unavailable. Exact displayed order details "
+    "preparation, saved-plan reads and complete reviewed product-plan applies with include_recurring=false. "
+    "Managed applies preserve existing goods and verify each bounded unit; reconcile uncertain changes "
+    "without repeating them. Estimated payable amounts remain unknown until checkout review. "
+    "Bounded displayed order history is readable; delivery selection, checkout and order changes "
+    "remain unavailable. Exact displayed order details "
     "are readable; unverified goods and payment/tracking facts remain unknown.")
 
 
@@ -512,7 +514,6 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         try:
             with self.product_plan_lock:
                 result = Application.handle(self, {**request, "_deadline": time.monotonic() + 240})
-                result.pop("apply_arguments", None)
                 result.pop("partial_apply_arguments", None)
                 continuation = result.get("continue_arguments")
                 if isinstance(continuation, dict):
@@ -522,7 +523,39 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
                     else:
                         result.pop("continue_arguments")
                 result["client_guidance"] = NATIVE_CART_GUIDANCE
-                result["next"] = "Review this local plan or continue prepare with include_recurring=false. Whole-menu cart apply is unavailable in this mode."
+                result["next"] = "Review this plan or continue prepare with include_recurring=false; apply only its complete reviewed product-plan reference with the original enabled cart policy."
+                return result
+        finally:
+            self._observe_terminal_failure()
+
+    def _apply_products(self, request):
+        if any(str(key).startswith("_") for key in request) or request.get("partial_apply"):
+            raise HouseholdError("Muse managed apply requires one complete public product-plan request")
+        native_request = dict(request)
+        reference = request.get("product_plan_ref")
+        if reference is not None:
+            record = self._product_plan_record(self.store.read(), reference)
+            if record.get("include_recurring") is not False or request.get("include_recurring", False) is not False:
+                raise HouseholdError("Muse apply requires an original recurring-disabled product plan")
+            arguments = record.get("apply_arguments") or {}
+            native_request.setdefault("product_plan_digest", arguments.get("product_plan_digest"))
+        else:
+            plan = request.get("product_plan")
+            recurring = (plan.get("binding", {}).get("include_recurring")
+                         if isinstance(plan, Mapping) else request.get("include_recurring"))
+            if recurring is not False:
+                raise HouseholdError("Muse apply requires include_recurring=false")
+        self._observe_terminal_failure()
+        command_id = str(uuid.uuid4())
+        try:
+            with self.product_plan_lock, self.provider_client.operation():
+                binding = self.provider_client.binding(self.store)
+                if self.store.read().get("muse_native_cart_policy") != {"enabled": True, "binding_digest": binding}:
+                    raise HouseholdError("Muse native cart writes are disabled for this original context")
+                with self.provider_client.managed_apply(self, native_request, command_id):
+                    result = Application.handle(self, request)
+                    self._finalize_native_managed_apply(command_id)
+                result["client_guidance"] = NATIVE_CART_GUIDANCE
                 return result
         finally:
             self._observe_terminal_failure()
@@ -563,18 +596,26 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         if request.get("operation") == "native_cart_policy":
             return self._policy(request)
         action = request.get("action")
-        if request.get("operation") == "products" and isinstance(action, str) and action in {"prepare", "get"}:
-            return self._prepare_or_read_products(request)
+        if request.get("operation") == "products" and isinstance(action, str):
+            if action in {"prepare", "get"}:
+                return self._prepare_or_read_products(request)
+            if action == "apply":
+                return self._apply_products(request)
         if request.get("operation") != "cart":
             result = super().handle(request)
             result["client_guidance"] = NATIVE_CART_GUIDANCE
             return result
         action = request.get("action", "get")
         if (action is not None and not isinstance(action, str)
-                or action not in {None, "get", "change", "reconcile_change"}):
-            raise HouseholdError("Muse browser cart mode supports get, one-unit change and read-only reconcile_change")
+                or action not in {None, "get", "change", "reconcile_change", "reconcile"}):
+            raise HouseholdError("Muse browser cart mode supports get, one-unit change and read-only reconciliation")
         if request.get("response_view", "full") != "full" or any(str(key).startswith("_") for key in request):
             raise HouseholdError("Muse browser cart requests require full observations and public arguments")
+        if action == "reconcile":
+            if (request.get("decision") != "keep_current"
+                    or request.get("exclude_product_ids") or request.get("accept_missing_product_ids")
+                    or set(request) - {"operation", "action", "decision", "menu_ref", "cart_digest", "response_view", "contract"}):
+                raise HouseholdError("Muse cart reconciliation supports only the exact read-only keep_current decision; restore through a fresh complete products.apply")
         if action == "change":
             if (set(request) - {"operation", "action", "operations", "cart_digest", "response_view", "contract"}
                     or not isinstance(request.get("cart_digest"), str)
@@ -627,7 +668,7 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
 
     def _store_readiness(self, checkout_payment=None):
         return {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
-                "browser_check": {"status": "configured", "scope": "one_unit_cart"}, "note": NATIVE_CART_GUIDANCE}
+                "browser_check": {"status": "configured", "scope": "managed_products_and_unit_cart"}, "note": NATIVE_CART_GUIDANCE}
 
     def _user_guide(self):
         return {**MuseApplication._user_guide(), "after_setup": NATIVE_CART_GUIDANCE}
@@ -735,7 +776,8 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
         store = StateStore(home / "state", settings)
         if browser is not None:
             browser.state_store = store
-        app = cls(store, shop, browser, external_recipe_sources={})
+        options = {"products_apply_budget_seconds": 600} if provider_transport == "browser_cart" else {}
+        app = cls(store, shop, browser, external_recipe_sources={}, **options)
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 
