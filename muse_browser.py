@@ -303,6 +303,104 @@ def end_request(directory, request_id, task_id, response):
         durable_publish(directory / "endings" / (request_id + ".json"), response)
 
 
+
+DISCARDED_READ_ENDING = "read_discarded_custody_closed_v1"
+
+
+def corrupt_read_bytes(path, *, optional=False):
+    """Read corrupt evidence without accepting it as a broker observation."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise HouseholdError("Muse corrupt read evidence is missing") from None
+    except OSError:
+        raise HouseholdError("Muse corrupt read evidence is unsafe") from None
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o007):
+            raise HouseholdError("Muse corrupt read evidence is unsafe")
+        data = stream.read(65_537)
+    if len(data) > 65_536:
+        raise HouseholdError("Muse corrupt read evidence exceeds the byte limit")
+    return data
+
+
+def corrupt_read_ending_fields(directory, record, native_task):
+    from muse_native_provider import TOOLS
+    now = datetime.now(timezone.utc)
+    name = record["request_id"] + ".json"
+    if (record["operation"] != "provider_read" or not isinstance(record["payload"].get("tool"), str)
+            or record["payload"]["tool"] not in TOOLS
+            or any(key in record["payload"] for key in ("authorization", "journal_binding"))
+            or now < timestamp(record["expires_at"])
+            or any((directory / kind / name).exists() or (directory / kind / name).is_symlink()
+                   for kind in ("consumed", "native-tasks"))):
+        raise HouseholdError("Muse corrupt custody closure requires an expired ordinary read")
+    closed = required_json(directory / "closed" / name)
+    if (not isinstance(closed, Mapping) or set(closed) != {"request_digest", "task_id", "closed_at"}
+            or closed["request_digest"] != digest(record) or closed["task_id"] != record["task_id"]
+            or not timestamp(record["issued_at"]) <= timestamp(closed["closed_at"]) <= now):
+        raise HouseholdError("Muse corrupt read waiter has not ended")
+    raw_claim = corrupt_read_bytes(directory / "claims" / name)
+    try:
+        pairs = json.loads(raw_claim, object_pairs_hook=lambda value: value)
+        if (not isinstance(pairs, list) or len(pairs) != 2
+                or any(not isinstance(pair, tuple) or len(pair) != 2 for pair in pairs)
+                or {pair[0] for pair in pairs} != {"request_digest", "task_id"}):
+            raise ValueError("claim shape")
+        claim = dict(pairs)
+    except (ValueError, TypeError, UnicodeError):
+        raise HouseholdError("Muse corrupt read claim shape is unsupported") from None
+    if (not isinstance(native_task, Mapping) or set(native_task) != {"acceptance", "completion"}
+            or not isinstance(native_task["completion"], Mapping)):
+        raise HouseholdError("Muse corrupt read requires its actual completed native task")
+    child = native_acceptance_child(native_task["acceptance"])
+    completion = native_task["completion"]
+    completed = completion.get("completed_at_utc")
+    if (claim != {"request_digest": digest(record), "task_id": child}
+            or child == record["task_id"] or completion.get("browser_task_id") != child
+            or completion.get("outcome") != "completed"
+            or not native_time_lower_bound(completed, record["issued_at"]) <= timestamp(completed) <= now):
+        raise HouseholdError("Muse corrupt read child and actual ending do not match")
+    response = corrupt_read_bytes(directory / "responses" / name, optional=True)
+    return {"kind": DISCARDED_READ_ENDING, "request_id": record["request_id"],
+            "request_digest": digest(record), "task_id": record["task_id"],
+            "claim_sha256": hashlib.sha256(raw_claim).hexdigest(),
+            "response_sha256": hashlib.sha256(response).hexdigest() if response is not None else None,
+            "closed_sha256": hashlib.sha256(corrupt_read_bytes(directory / "closed" / name)).hexdigest(), "native_task": deepcopy(dict(native_task))}
+
+
+def validate_corrupt_read_ending(directory, record, ending):
+    if not isinstance(ending, Mapping) or set(ending) != {
+            "kind", "request_id", "request_digest", "task_id", "claim_sha256",
+            "response_sha256", "closed_sha256", "native_task", "closed_at"}:
+        raise HouseholdError("Muse discarded read ending is invalid")
+    expected = corrupt_read_ending_fields(directory, record, ending["native_task"])
+    if ({key: value for key, value in ending.items() if key != "closed_at"} != expected
+            or not max(timestamp(record["expires_at"]),
+                       timestamp(ending["native_task"]["completion"]["completed_at_utc"]))
+                <= timestamp(ending["closed_at"]) <= datetime.now(timezone.utc)):
+        raise HouseholdError("Muse discarded read evidence changed")
+
+
+def close_corrupt_read(directory, request_id, task_id, native_task):
+    """Discard an ended read whose manual claim substituted its child ID.
+
+    Preserve all original bytes. This attests custody closure, never successful
+    publication, historical claim validity, fresh catalog facts or action authority.
+    """
+    directory = broker_paths(directory)
+    with transition_lock(directory):
+        directory, record = request_record(directory, request_id, task_id, active=False)
+        ending = {**corrupt_read_ending_fields(directory, record, native_task),
+                  "closed_at": datetime.now(timezone.utc).isoformat()}
+        validate_corrupt_read_ending(directory, record, ending)
+        durable_publish(directory / "endings" / (request_id + ".json"), ending)
+
+
 def validate_claim(directory, record, *, response):
     claim = {"request_digest": digest(record), "task_id": record["task_id"]}
     name = record["request_id"] + ".json"
@@ -420,6 +518,9 @@ class NativeBridge:
             except FileNotFoundError:
                 pass
             else:
+                if isinstance(ending, Mapping) and ending.get("kind") == DISCARDED_READ_ENDING:
+                    validate_corrupt_read_ending(self.directory, record, ending)
+                    continue
                 validate_response(record, ending, fresh=False)
                 if ending["task_state"] != "completed":
                     raise HouseholdError("Muse browser has no actual task ending")

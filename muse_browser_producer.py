@@ -19,7 +19,7 @@ from core import HouseholdError
 from muse_browser import (bind_native_task, claim_request, consume_request, digest,
                           durable_publish, end_request, request_record,
                           respond_request, validate_claim, validate_response,
-                          native_task_binding_required, read_json)
+                          native_task_binding_required, read_json, close_corrupt_read)
 from service_common import strict_json_loads, validate_request_value
 
 
@@ -116,7 +116,7 @@ class Parser(argparse.ArgumentParser):
 def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
-    for name in ("claim", "consume", "bind", "respond", "end"):
+    for name in ("claim", "consume", "bind", "respond", "end", "close-corrupt-read"):
         command = commands.add_parser(name)
         command.add_argument("--directory", required=True)
         command.add_argument("--request-id", required=True)
@@ -138,7 +138,10 @@ def main():
         data = sys.stdin.buffer.read(MAX_RESPONSE + 1)
         if not data or len(data) > MAX_RESPONSE:
             raise ProducerError("input", "bounded_closed_stdin_required")
-        if args.command == "bind":
+        if args.command == "close-corrupt-read":
+            checked("request", "corrupt_read_rejected", close_corrupt_read, *common, parse_json(data))
+            result = {"read_discarded_custody_closed": True}
+        elif args.command == "bind":
             checked("binding", "native_acceptance_rejected", bind_native_task, *common, parse_json(data))
             result = {"bound": True}
         else:
