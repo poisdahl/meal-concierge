@@ -96,6 +96,35 @@ class DeliveryStockTests(unittest.TestCase):
             self.assertEqual(result['result']['ready'], expected)
             self.assertEqual(result['clicks'], [])
 
+    def test_large_delivery_page_does_not_measure_unrelated_card_visibility(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node required')
+        instrumented = PAYMENT_DOM.replace(
+            "global.getComputedStyle=e=>({display:e.hidden?'none':'block',visibility:'visible'});",
+            """if(c.hideNotice)outside.at(-1).hidden=true;
+let styleReads=0;
+global.getComputedStyle=e=>{
+ if(e.innerText.startsWith('Unrelated card'))throw Error('unrelated card layout read');
+ styleReads++;return {display:e.hidden?'none':'block',visibility:'visible'};
+};""").replace('clicks,selected:', 'clicks,styleReads,selected:')
+        cards = [[f'Unrelated card {i}', 'Normal product information'] for i in range(1000)]
+        for present, hidden in ((True, False), (True, True), (False, False)):
+            with self.subTest(present=present, hidden=hidden):
+                # Split markup remains matched from rendered innerText, while
+                # nested duplicate containers and hidden ancestors stay excluded.
+                rows = cards + ([['Noen av varene i handlekurven, f.eks.',
+                                  'Håndsåpe refill, er ikke tilgjengelige før 18. oktober 2026.']] if present else [])
+                run = subprocess.run([node, '-e', instrumented],
+                    input=json.dumps({'script': _oda_delivery_restrictions_script(),
+                        'c': {'url': DELIVERY_URL, 'outsideRows': rows, 'hideNotice': hidden}}),
+                    text=True, capture_output=True, check=True, timeout=10)
+                value = json.loads(run.stdout)
+                self.assertEqual(value['result'], {'ready': present and not hidden,
+                    'warnings': [WARNING] if present and not hidden else []})
+                self.assertLess(value['styleReads'], 20)
+                self.assertEqual(value['clicks'], [])
+
     def app(self, directory, *, changed=None, selectable=False):
         store, provider, browser, app, _ = fixtures.CartPlanTests.app(directory, 'oda')
         original = provider.call

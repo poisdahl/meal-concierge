@@ -1094,7 +1094,8 @@ def _oda_delivery_restrictions_script():
         const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
         const page=location.href===DELIVERY_URL&&!document.querySelector('form[action*="login"],input[type="password"]');
         const notice=x=>{const t=norm(x.innerText);return t.length<=1000&&/^Noen av varene i handlekurven\b/.test(t)&&t.includes('ikke tilgjengelige før')};
-        const warnings=page?[...document.querySelectorAll('*')].filter(visible).filter(notice)
+        // Check the rendered sentence before walking ancestor styles/layout.
+        const warnings=page?[...document.querySelectorAll('*')].filter(notice).filter(visible)
             .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText)):[];
         // A positive visible banner is ready evidence. No match alone cannot
         // distinguish hydration, unsupported markup or an unrestricted cart.
