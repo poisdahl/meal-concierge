@@ -416,6 +416,7 @@ class NativeReceiptDateTests(unittest.TestCase):
         slot = slots[0]
         self.assertTrue(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, i dag", "2027-01-01T08:00:00Z"))
         self.assertFalse(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, i morgen", "2027-01-01T08:00:00Z"))
+        self.assertFalse(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, i dag", "2028-01-01T08:00:00Z"))
         self.assertTrue(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, 1. januar", "2027-01-02T08:00:00Z"))
         self.assertFalse(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, 1. januar 2026", "2027-01-02T08:00:00Z"))
         self.assertFalse(native_receipt_delivery_matches(slot, "Hjemlevering 16-21, 2. januar", "2027-01-02T08:00:00Z"))

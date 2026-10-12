@@ -555,6 +555,11 @@ def native_receipt_delivery_matches(slot, display, observed_at):
     years = re.findall(r"\b[12][0-9]{3}\b", display)
     if years and years != [str(start.year)]:
         return False
+    relative = re.findall(r"\bi (dag|morgen)\b", display.casefold())
+    if relative:
+        observed_date = timestamp(observed_at).astimezone(ZoneInfo("Europe/Oslo")).date()
+        if len(relative) != 1 or observed_date + timedelta(days=relative[0] == "morgen") != start.date():
+            return False
     months = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")
     expected = f"{start:%H:%M}-{end:%H:%M}, {start.day}. {months[start.month - 1]}"
     return checkout_delivery_matches(expected, [display],
