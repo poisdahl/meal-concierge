@@ -396,17 +396,18 @@ class NativeBrokerTests(NativeFixture):
         claim_request(self.directory, record["request_id"], "original-task")
         respond_request(self.directory, record["request_id"], "original-task", self.response(record))
         for operation, seconds in [("checkout_review", 541),
-                                   *[(op, 151 if op == "cart_change" else 31) for op in ACTION_OPERATIONS]]:
+                                   *[(op, 151 if op in {"cart_change", "delivery_select"} else 31) for op in ACTION_OPERATIONS]]:
             with self.subTest(operation=operation):
                 now = datetime.now(timezone.utc)
                 record = self.record(operation, issued_at=now.isoformat(),
                     expires_at=(now + timedelta(seconds=seconds)).isoformat())
                 with self.assertRaises(HouseholdError):
                     claim_request(self.directory, record["request_id"], "original-task")
-        now = datetime.now(timezone.utc)
-        record = self.record("cart_change", issued_at=now.isoformat(),
-            expires_at=(now + timedelta(seconds=150)).isoformat())
-        claim_request(self.directory, record["request_id"], "original-task")
+        for operation in ("cart_change", "delivery_select"):
+            now = datetime.now(timezone.utc)
+            record = self.record(operation, issued_at=now.isoformat(),
+                expires_at=(now + timedelta(seconds=150)).isoformat())
+            claim_request(self.directory, record["request_id"], "original-task")
 
     def test_cart_consume_refuses_an_expired_shorter_window(self):
         now = datetime.now(timezone.utc)
