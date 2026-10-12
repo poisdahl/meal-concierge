@@ -4711,12 +4711,28 @@ class OrderOperations:
             return None
         job = next((j for j in state["email_jobs"] if j.get("provider") == self.provider
                     and j.get("order_id") == order_id and j.get("trigger") == "after_purchase"), None)
+        from delivery_operations import legacy_held
+        email = None
+        guidance = ["No further checkout is needed."]
+        if job:
+            status = job["status"]
+            if status in {"claimed", "sending", "uncertain"}:
+                email = {"action": "reconcile_order", "status": status}
+                guidance.append("Use email_sender reconcile_order for the original recipe email attempt; never resend an uncertain delivery. If its executor receipt is missing, inspect email status rather than start another send.")
+            elif status == "pending" and not legacy_held(state, job):
+                email = {"action": "send_order", "status": status}
+                guidance.append("Use email_sender send_order to complete this existing authorized recipe email job, preserving the original order and sender binding.")
+            else:
+                email = {"action": "status", "status": status, "held": legacy_held(state, job)}
+                guidance.append("Recipe email is already settled or held. Report its actual status; do not send again or release held work without an explicit instruction.")
+        else:
+            guidance.append("No after-purchase email job is queued. Do not infer a send request from channel availability; offer recipes only when useful to the conversation.")
+        guidance.append("For explicitly requested native chat or PDF delivery, use recipe_delivery with this provider/order, stable request_id, actual authorized destination and verified capabilities. Enabled chat alone is not a sending request.")
         return {"provider": self.provider, "order_id": order_id,
-                "menu_ref": self._cart_menu_ref(snapshot),
-                "email": ({"action": "send_order", "status": job["status"]} if job else None),
+                "menu_ref": self._cart_menu_ref(snapshot), "email": email,
                 "chat_enabled": state["recipe_delivery"]["preferences"]["chat"]["enabled"],
                 "request_id": "purchase-" + hashlib.sha256(f"{self.provider}:{order_id}".encode()).hexdigest()[:24],
-                "next": "Deliver this purchased menu through its authorized channels. Use email_sender send_order for the queued email; preserve original receipts on recovery. For requested native chat or PDF fallback, request recipe_delivery with this provider/order and stable request_id, actual authorized destination and verified capabilities. No further checkout is needed."}
+                "next": " ".join(guidance)}
 
     def _record_order_snapshot(self, state: dict[str, Any], pending: Mapping[str, Any], order_id: str) -> None:
         order_id = safe_order_id(order_id)

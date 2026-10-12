@@ -10,7 +10,7 @@ MCP_MENU_WIRE_BUDGET = 45_000
 MENU_PRESENTATION_GUIDANCE = {
     "when": "In the first message presenting this proposed, saved or revised meal plan, not only after shopping. State whether it is saved.",
     "include": "Give dish names, short descriptions, dates/portions and known active/total times. Credit each actual recipe publisher/author and available source link beside the dish; label adaptations. An internal collection is storage, not necessarily the author. If attribution is missing, say so; never invent it.",
-    "offer": "Would you like the full meal plan with all ingredients and cooking steps? You can swap any dish, ask for particular meals, or tell me what you already have and want to use up.",
+    "offer": "At a genuine handoff, ask one short question with relevant choices: prepare the shopping list and check food at home, change a dish, or show full ingredients and cooking steps. Put choices in ordinary text even without dialog controls. If shopping is already requested, continue it instead of asking again. Honor plan-only, stop and declined steps; routine reads need no offer.",
     "language": "Use the user's language. Say meal plan (måltidsplan in Norwegian); use ukemeny only for a genuinely weekly plan. Keep the offer short and do not repeat it on routine status reads.",
 }
 
@@ -769,7 +769,11 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
                                               "email_status", "next_action", "settled", "resume"))
         view["workflow"]["menu"] = _assessment_view(workflow.get("menu"), offset, limit, section)
     if isinstance(result.get("store_readiness"), dict):
-        view["store_readiness"] = _fields(result["store_readiness"], ("status", "payment", "reason", "next"))
+        readiness = result["store_readiness"]
+        view["store_readiness"] = _fields(readiness, ("provider", "store_url", "local_recipes_available", "note"))
+        for check in ("connection_check", "browser_check", "delivery_check", "payment_check"):
+            if isinstance(readiness.get(check), dict):
+                view["store_readiness"][check] = _fields(readiness[check], ("status", "scope", "next_action"))
     return view
 
 

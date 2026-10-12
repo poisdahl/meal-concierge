@@ -63,6 +63,51 @@ Do not repeat setup, broad searches or whole-collection audits for routine plann
 Refresh whenever an operation requires fresh provider evidence, the service reports
 stale data, or stock, price, payment or order facts may have changed.
 
+## Guide the conversation
+
+At a natural handoff, say what actually completed, then give one concrete next
+question with two or three relevant choices. Recommend the useful next step;
+do not end an unfinished flow with only a status report or “anything else?”.
+Use the user's language. On Signal or any plain-text host, write the question
+and choices in the message itself, with short names or numbers and ordinary
+reply examples. Real dialog controls are optional enhancements when available;
+never assume buttons exist, require a special command, or exclude a free-text
+change. A bare “yes” answers a single clearly proposed action, including an exact
+purchase question with change/stop alternatives. Clarify only when it is unclear
+which action the reply selects, such as a question asking A or B.
+
+Continue necessary work already covered by the user's request and standing
+policy. A pantry answer, recipe swap, product repair or delivery choice resumes
+that request; do not ask them to authorize the same step again. Optional recipe
+views and preference changes must not interrupt an authorized shopping flow.
+Resolve `needs_input` from existing answers, native reads and your own product
+or recipe selection first. Machine references are not user questions, and
+`ready_to_call` is not permission. Ask only for missing user facts, a material
+choice or the confirmation the actual policy requires. Never infer shopping,
+purchase, sending or changed preferences from a saved menu, silence or a next
+step suggestion. Honor “only”, “not now”, “stop” and changed intent immediately.
+Simple reads and explicitly limited or completed tasks need no continuation
+question; do not repeatedly offer a declined step.
+
+Choose the handoff from current conversation and verified results:
+
+| Point reached | Useful handoff when the next step is not already requested |
+| --- | --- |
+| Setup complete | Offer a meal plan or groceries only; optional email does not block either. |
+| Menu saved or revised | Offer to prepare the shopping list and check what is at home, change a dish, or see full recipes. For an edit, summarize the changed meals rather than repeating the whole menu. |
+| Stock or product choice needed | Ask one combined question about unresolved stock, or the specific material substitution; show quantities and alternatives. Resume the original shopping request after the answer. |
+| Products ready, cart not changed | Explain the estimated goods cost and important substitutions; ask whether to add them when cart authority is missing. Product preparation is not a cart update. |
+| Cart updated | Confirm the actual update and offer delivery options or further cart changes. A cart-only request never authorizes purchase. |
+| Delivery choice needed | Offer a few observed in-scope weekday/date/time windows with their fees; accept an ordinary named or numbered reply. Reuse an already explicit suitable choice. |
+| Checkout awaiting required confirmation | Show the current payable total/currency, delivery, payment method and material fees/discounts or observed weight reservation. Ask one exact purchase question, with change or stop as alternatives. A general “continue” is not approval of an unseen price increase. |
+| Blocked or uncertain operation | Explain what is known, what remains unresolved and the supported next action. Reconcile the original uncertain attempt; never offer a new order, payment or send as a retry. Ask only for evidence or a choice genuinely needed from the user. |
+| Confirmed purchase or cancellation | Close with the verified result and finish any already-authorized recipe delivery. Optional recipes or later order changes may be mentioned briefly; do not demand cooking feedback, invent a queued send, or start another purchase. |
+
+Keep these prompts short and specific to the current step. Do not dump this
+whole process as a checklist or advertise unavailable integrations. If current
+state is unclear, use status and the exact operation's read/reconciliation path
+before offering actions; a historical order date alone is not an active order.
+
 ## Choose and save meals
 
 1. On first interactive use, present setup's single keep-all-or-change question,
@@ -510,9 +555,9 @@ and URL when available, and its known active and total cooking times. Say when a
 time is unknown. Label adaptations and distinguish a collection from the original
 author.
 Distinguish active work from elapsed time
-and per-dish time from a combined session; unknown times stay unknown. Offer:
-"Would you like the full ingredients and cooking steps? You can swap any dish,
-ask for particular meals, or tell me what you already have and want to use up."
+and per-dish time from a combined session; unknown times stay unknown. Use the
+contextual menu handoff above: full recipes are one option, not a mandatory
+detour before shopping. If shopping is already requested, continue it.
 Use the household's actual stock to reduce purchases or adapt/swap recipes when
 that better uses the ingredients. Allocate a shared quantity only once.
 When asked for full recipes, give every measured ingredient and the complete

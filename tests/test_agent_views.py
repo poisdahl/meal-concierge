@@ -10,6 +10,21 @@ from agent_views import project_agent_result, _menu_recipe_presentation
 
 
 class AgentViewTests(unittest.TestCase):
+    def test_status_preserves_actionable_readiness_without_private_configuration(self):
+        readiness = {"provider":"oda", "store_url":"https://oda.com/no/",
+                     "local_recipes_available":True,
+                     "connection_check":{"status":"needs_user_action", "next_action":"Connect the intended account.", "scope":"Last connection only."},
+                     "browser_check":{"status":"not_configured", "next_action":"Configure the dedicated browser."},
+                     "payment_check":{"status":"unknown", "next_action":"Check the chosen payment method."},
+                     "delivery_check":{"status":"unknown", "scope":"Check during shopping."},
+                     "private_configuration":"not for presentation"}
+        result = project_agent_result("status", None, {"store_readiness":readiness})['store_readiness']
+        for check in ('connection_check','browser_check','payment_check','delivery_check'):
+            self.assertEqual(result[check],readiness[check])
+        self.assertTrue(result['local_recipes_available'])
+        self.assertEqual(result['provider'],'oda')
+        self.assertNotIn('private_configuration',result)
+
     def test_original_only_attribution_and_missing_times_are_honest(self):
         view = _menu_recipe_presentation({'name': 'Canonical',
             'presentation': {'name': 'Translated'},

@@ -111,6 +111,57 @@ class AfterPurchaseTests(unittest.TestCase):
             self.send()
         self.assertEqual([], self.mailbox.messages)
 
+    def test_workflow_continues_queued_purchase_email_and_stops_after_send(self):
+        self.purchase()
+        with self.app.store.locked() as state:
+            state['menu']['phase'] = 'ordered'
+            state['menu']['order_id'] = 'order-1'
+        action = self.rpc('status', response_view='agent')['workflow']['next_action']
+        self.assertEqual(action['operation'], 'email_sender')
+        self.assertTrue(self.runner.execute(action['arguments'])['sent'])
+        self.assertEqual(len(self.mailbox.messages), 1)
+        later = self.rpc('status', response_view='agent')['workflow']['next_action']
+        self.assertNotEqual(later['operation'], 'email_sender')
+        self.assertEqual(self.purchase()['email']['action'], 'status')
+
+    def test_real_pause_disable_and_retained_job_hold_do_not_suggest_send(self):
+        self.purchase()
+        with self.app.store.locked() as state:
+            state['menu']['phase'] = 'ordered'
+            state['menu']['order_id'] = 'order-1'
+        self.rpc('recipe_delivery', action='pause')
+        def held():
+            action = self.rpc('status', response_view='agent')['workflow']['next_action']
+            self.assertEqual((action['operation'],action['action']), ('email','status'))
+            offered = self.purchase()
+            self.assertEqual(offered['email']['action'], 'status')
+            self.assertTrue(offered['email']['held'])
+            self.assertEqual(self.mailbox.messages, [])
+        held()
+        # Enabling future delivery does not release this already-held job.
+        self.runner.execute({'action':'configure','recipient':'recipient@example.test','timing':'after_purchase'})
+        with self.app.store.locked() as state:
+            state['recipe_delivery']['paused'] = False
+        held()
+        self.rpc('recipe_delivery', action='disable', channel='email')
+        held()
+
+    def test_purchase_guidance_does_not_invent_send_or_retry_uncertain_delivery(self):
+        self.runner.execute({'action':'configure','recipient':'recipient@example.test','timing':'on_request'})
+        offered = self.purchase()
+        self.assertIsNone(offered['email'])
+        self.assertNotIn('Use email_sender send_order', offered['next'])
+        self.runner.execute({'action':'configure','recipient':'recipient@example.test','timing':'after_purchase'})
+        self.purchase('order-2')
+        with self.app.store.locked() as state:
+            job = next(j for j in state['email_jobs'] if j['order_id'] == 'order-2')
+            job['status'] = 'uncertain'
+            job['delivery_hold'] = True
+        offered = self.purchase('order-2')
+        self.assertEqual(offered['email']['action'], 'reconcile_order')
+        self.assertNotIn('Use email_sender send_order', offered['next'])
+        self.assertEqual(self.mailbox.messages, [])
+
     def test_future_delivery_sends_now_once_without_scheduler_or_duplicate_pdf(self):
         offered = self.purchase()
         self.assertEqual('send_order', offered['email']['action'])
