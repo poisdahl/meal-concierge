@@ -16,9 +16,10 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clients.muse import MAX_RESPONSE, private_directory
 from core import HouseholdError
-from muse_browser import (claim_request, consume_request, digest,
+from muse_browser import (bind_native_task, claim_request, consume_request, digest,
                           durable_publish, end_request, request_record,
-                          respond_request, validate_claim, validate_response)
+                          respond_request, validate_claim, validate_response,
+                          native_task_binding_required, read_json)
 from service_common import strict_json_loads, validate_request_value
 
 
@@ -85,7 +86,8 @@ def validate_native_read(record, response):
         payload["tool"], payload["arguments"], facts, response, record)
 
 
-def publish(directory, request_id, task_id, data, observed_at, ending_state, *, ending=False):
+def publish(directory, request_id, task_id, data, observed_at, ending_state, *, ending=False,
+            native_metadata=None):
     directory, record = checked("request", "custody_rejected", request_record,
                                 directory, request_id, task_id, active=not ending)
     if not ending:
@@ -93,6 +95,10 @@ def publish(directory, request_id, task_id, data, observed_at, ending_state, *, 
     facts = parse_json(data)
     response = {"request_id": request_id, "request_digest": digest(record), "task_id": task_id,
                 "observed_at": observed_at, "task_state": ending_state, "facts": facts}
+    if native_task_binding_required(record) and facts != {"dispatch": "not_dispatched"}:
+        response["native_completion"] = native_metadata
+    elif native_metadata is not None:
+        raise ProducerError("input", "unexpected_native_metadata")
     checked("request", "claim_rejected", validate_claim, directory, record, response=response)
     checked("publish", "invalid_handoff", validate_response, record, response, fresh=not ending)
     if not ending:
@@ -110,7 +116,7 @@ class Parser(argparse.ArgumentParser):
 def main():
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
-    for name in ("claim", "consume", "respond", "end"):
+    for name in ("claim", "consume", "bind", "respond", "end"):
         command = commands.add_parser(name)
         command.add_argument("--directory", required=True)
         command.add_argument("--request-id", required=True)
@@ -118,6 +124,7 @@ def main():
         if name in {"respond", "end"}:
             command.add_argument("--observed-at", required=True)
             command.add_argument("--ending-state", required=True, choices=["completed"])
+            command.add_argument("--native-metadata")
     args = parser.parse_args()
     if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", args.request_id) is None:
         raise ProducerError("input", "request_identity")
@@ -131,7 +138,14 @@ def main():
         data = sys.stdin.buffer.read(MAX_RESPONSE + 1)
         if not data or len(data) > MAX_RESPONSE:
             raise ProducerError("input", "bounded_closed_stdin_required")
-        result = publish(*common, data, args.observed_at, args.ending_state, ending=args.command == "end")
+        if args.command == "bind":
+            checked("binding", "native_acceptance_rejected", bind_native_task, *common, parse_json(data))
+            result = {"bound": True}
+        else:
+            metadata = (checked("input", "private_native_metadata_required", read_json, Path(args.native_metadata))
+                        if args.native_metadata else None)
+            result = publish(*common, data, args.observed_at, args.ending_state,
+                             ending=args.command == "end", native_metadata=metadata)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
