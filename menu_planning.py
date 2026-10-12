@@ -74,7 +74,10 @@ def bind_calendar(menu, first_meal_date, delivery, *, timezone_name="Europe/Oslo
         slot["date"] = (start + timedelta(days=day - first_day)).isoformat()
     for slot in result["slots"]:
         bind_slot(slot)
-    for batch in result.get("batches", []) or ([result["batch"]] if result.get("batch") else []):
+    batches = list(result.get("batches", []))
+    if result.get("batch") and not any(result["batch"] is batch for batch in batches):
+        batches.append(result["batch"])
+    for batch in batches:
         for slot in batch["leftovers"]:
             bind_slot(slot)
         batch["relative_spec_digest"] = batch["spec_digest"]

@@ -42,6 +42,38 @@ class RelativePlanningTests(unittest.TestCase):
         self.assertIn('porsjoner Dag 1',menu_email_html(menu))
         self.assertTrue(assess_menu(self.store.read())['ready'])
 
+    def test_explicit_batch_calendar_binds_both_persisted_representations(self):
+        import batch_planning as bp
+        import json
+        from service_common import menu_digest
+        menu = self.saved()
+        source, target = menu['slots']
+        portions = mp.recipe_for_slot(menu, source)['portions']
+        prepared = self.app.handle({'operation':'menu','action':'batch_prepare',
+            'menu_ref':mp.menu_ref(menu), 'batch_spec':{
+                'source_slot_id':source['slot_id'], 'source_snapshot_digest':source['snapshot_digest'],
+                'prepared_portions':str(portions * 2), 'consumed_at_source':str(portions),
+                'suitability':{'source':'current_user','value':'suitable'},
+                'storage':{'source':'current_user','method':'refrigerated','max_interval_days':1},
+                'leftovers':[{'slot_id':target['slot_id'],'portions':str(portions)}]}})['batch_plan']
+        self.assertEqual(prepared['status'], 'prepared', prepared)
+        confirmation = {'batch_digest':prepared['batch_digest'],'statement':bp.CONFIRMATION_STATEMENT}
+        self.app.handle({'operation':'menu','action':'batch_apply',
+            'batch_plan':prepared, 'batch_confirmation':confirmation})
+        menu = self.store.read()['menu']
+        self.assertIsNot(menu['batch'], menu['batches'][-1])
+        delivery = {'slot':{'start_at':'2026-10-20T07:00:00+02:00','end_at':'2026-10-20T13:00:00+02:00'}}
+        bound = mp.bind_calendar(menu, '2026-10-20', delivery)
+        for batch in (bound['batch'], bound['batches'][-1]):
+            self.assertEqual(batch['leftovers'][0]['date'], '2026-10-21')
+            self.assertNotIn('day', batch['leftovers'][0])
+            self.assertEqual(batch['confirmation'], confirmation)
+            self.assertEqual(batch['relative_spec_digest'], menu['batch']['spec_digest'])
+            self.assertEqual(batch['spec_digest'], mp.digest({k:v for k,v in batch.items() if k != 'spec_digest'}))
+        self.assertEqual(bound['batch'], bound['batches'][-1])
+        self.assertEqual(bound['digest'], menu_digest(bound))
+        self.assertEqual(mp.menu_ref(bound), mp.menu_ref(json.loads(json.dumps(bound))))
+
     def test_checkout_binds_only_after_confirmation_and_replay_is_stable(self):
         import test_meal_concierge as retail
         from service import Application
