@@ -682,13 +682,21 @@ def load_home(home: Path):
 
 
 def serve(home: Path, *, browser_directory=None, browser_task_id=None,
-          browser_action_mode="timed", provider_transport="mcp") -> None:
+          browser_action_mode="timed", provider_transport="mcp", accepted_account=None) -> None:
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
     if provider_transport not in {"mcp", "browser_readonly", "browser_cart"}:
         raise HouseholdError("Muse provider transport is unsupported")
     native_read = provider_transport in {"browser_readonly", "browser_cart"}
+    if accepted_account is not None and not native_read:
+        raise HouseholdError("An accepted account applies only to native browser provider modes")
+    if accepted_account is not None and not accepted_account.is_absolute():
+        raise HouseholdError("Muse accepted account file must be absolute")
+    accepted = read_json(accepted_account) if accepted_account is not None else None
+    if accepted_account is not None:
+        from muse_browser import account_links
+        account_links(accepted)
     if native_read and (not protected or browser_directory is None or browser_task_id is None
                         or browser_action_mode != "timed"):
         raise HouseholdError("Muse browser read mode requires the existing protected home and browser options, without an action mode")
@@ -705,9 +713,11 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
             from muse_native_provider import MuseNativeReadProvider
             if provider_transport == "browser_cart":
                 from muse_native_provider import MuseNativeCartProvider
-                shop = MuseNativeCartProvider(marker["operation_directory"], browser_task_id)
+                shop = MuseNativeCartProvider(marker["operation_directory"], browser_task_id,
+                                              accepted_account=accepted)
             else:
-                shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id)
+                shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id,
+                                              accepted_account=accepted)
         else:
             shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
         if browser_directory is not None:
@@ -763,12 +773,15 @@ def main() -> int:
                         help="final-action authority: timed permit or one-shot native approval delegation; run only")
     parser.add_argument("--provider-transport", choices=("mcp", "browser_readonly", "browser_cart"),
                         help="explicit protected MCP or native browser reads; run only")
+    parser.add_argument("--accepted-account", type=Path,
+                        help="existing private original account-link JSON; native provider run only")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
             raise HouseholdError("Muse home must be absolute")
         if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None
-                                     or args.browser_action_mode is not None or args.provider_transport is not None):
+                                     or args.browser_action_mode is not None or args.provider_transport is not None
+                                     or args.accepted_account is not None):
             raise HouseholdError("Muse native browser options apply only to run")
         if args.action == "init":
             if not args.provider or not args.household:
@@ -778,7 +791,7 @@ def main() -> int:
         elif args.action == "run":
             serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id,
                   browser_action_mode=args.browser_action_mode or "timed",
-                  provider_transport=args.provider_transport or "mcp")
+                  provider_transport=args.provider_transport or "mcp", accepted_account=args.accepted_account)
         else:
             if not args.request_id:
                 raise HouseholdError("respond requires --request-id")

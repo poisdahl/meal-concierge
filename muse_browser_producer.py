@@ -77,6 +77,10 @@ def validate_native_read(record, response):
         return
     from muse_native_provider import MuseNativeReadProvider
     payload = record["payload"]
+    if payload.get("accepted_account") is not None:
+        from muse_browser import account_links
+        if account_links(facts.get("account")) != account_links(payload["accepted_account"]):
+            raise HouseholdError("Muse native observation belongs to another account")
     MuseNativeReadProvider.validate_read_facts(
         payload["tool"], payload["arguments"], facts, response, record)
 
