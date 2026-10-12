@@ -2,7 +2,8 @@
 from collections.abc import Mapping
 from copy import deepcopy
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import math
 import re
 import threading
@@ -11,7 +12,8 @@ import uuid
 from urllib.parse import parse_qs, urlsplit
 
 from clients.muse import MAX_PRODUCTS, validate_response as catalog_response
-from core import HouseholdError, cart_contents
+from core import HouseholdError, cart_contents, oslo_local_timestamp, validate_delivery_slot
+from retail_mcp import ODA_MONTHS, oda_cart_delivery_window
 from muse_browser import (NativeBridge, account_links, digest, native_amount_minor, text,
                           read_json, required_json, request_record, timestamp, transition_lock,
                           validate_claim, validate_response)
@@ -20,7 +22,7 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 
 READ_SECONDS = 110.0
 ORDER_READ_SECONDS = 180.0
-TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking"}
+TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking", "get_delivery_slots"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
     "Use fresh observed facts from the original continuous profile, never cached or invented values. "
@@ -37,6 +39,20 @@ ORDER_IDENTITY_FACTS = (
     "a receipt or open an external tracking/payment page. Missing fields remain null. "
 )
 FACTS_CONTRACTS = {
+    "get_delivery_slots": FACTS_COMMON + (
+        "Root keys: url,signed_in,complete,account,heading,held_delivery_text,cells,dismissed. "
+        "Inspect only the ordinary upcoming-delivery picker from Home/cart; open and dismiss it "
+        "without selecting. heading is its literal heading; held_delivery_text is the nullable "
+        "literal current cart held-delivery window, not a date derived from the request. "
+        "cells is the complete displayed picker section, each with exactly date_text,window_text,"
+        "button,unavailable_text,expanded. date_text is the literal date-column label including "
+        "weekday; window_text is the literal time-window row label. button is null or an object "
+        "with exactly label,enabled: the literal price-button name and actual boolean enabled "
+        "state. unavailable_text is null or literal Ikke tilgjengelig. expanded is the actual "
+        "boolean AX expanded state or null; it is only a hint, never selection proof. dismissed "
+        "is true only after the picker closed without changing selection. No merchant slot IDs, "
+        "computed years/timezones or selected booleans may be invented."
+    ),
     "get_order": FACTS_COMMON + ORDER_IDENTITY_FACTS + (
         "Root keys: url,signed_in,complete,account,reference,status,delivery_text,payment_status,"
         "amount_rows,goods_complete,items. status is the nullable literal detail heading; "
@@ -130,6 +146,39 @@ def native_price(value):
     return match[1] + "." + match[2]
 
 
+def native_upcoming_date(label, today):
+    match = re.fullmatch(r"([a-zæøå]+)\.?\s+(\d{1,2})\.?\s+([a-zæøå]+)\.?", text(label).casefold())
+    weekdays = {"man": 0, "mandag": 0, "tir": 1, "tirsdag": 1, "ons": 2, "onsdag": 2,
+                "tor": 3, "torsdag": 3, "fre": 4, "fredag": 4, "lør": 5, "lørdag": 5,
+                "søn": 6, "søndag": 6}
+    if match is None or match[1] not in weekdays or match[3][:3] not in ODA_MONTHS:
+        raise HouseholdError("Muse native calendar needs its literal weekday, day and month")
+    month, day = ODA_MONTHS[match[3][:3]], int(match[2])
+    year = today.year + ((month, day) < (today.month, today.day))
+    try:
+        result = date(year, month, day)
+    except ValueError:
+        raise HouseholdError("Muse native calendar date is invalid") from None
+    if result.weekday() != weekdays[match[1]]:
+        raise HouseholdError("Muse native calendar weekday contradicts the inferred upcoming date")
+    return result
+
+
+def native_delivery_times(label):
+    match = re.fullmatch(r"(?:kl\.?\s*)?([01]?\d|2[0-3])(?::([0-5]\d))?\s*[-–]\s*"
+                         r"([01]?\d|2[0-3])(?::([0-5]\d))?", text(label).casefold())
+    if match is None:
+        raise HouseholdError("Muse native delivery time row is unavailable")
+    return f"{int(match[1]):02d}:{match[2] or '00'}", f"{int(match[3]):02d}:{match[4] or '00'}"
+
+
+def native_delivery_price(label):
+    match = re.fullmatch(r"(?:kr\s*)?(0|[1-9]\d{0,6})(?:,([0-9]{2}))?(?:\s*(?:kr|NOK))?", text(label), re.I)
+    if match is None:
+        raise HouseholdError("Muse native delivery button lacks an exact price")
+    return int(match[1]) * 100 + int(match[2] or '00')
+
+
 class MuseNativeReadProvider:
     provider, label = "oda", "Oda"
 
@@ -189,6 +238,16 @@ class MuseNativeReadProvider:
                     or arguments["page"] != 1 or type(arguments["size"]) is not int
                     or not 1 <= arguments["size"] <= MAX_PRODUCTS):
                 raise HouseholdError("Muse native catalog requires one bounded page-1 query")
+        elif tool == "get_delivery_slots":
+            if set(arguments) - {"delivery_date"}:
+                raise HouseholdError("Muse native delivery reads preserve the original address")
+            requested = arguments.get("delivery_date")
+            if requested is not None:
+                try:
+                    if date.fromisoformat(requested).isoformat() != requested:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    raise HouseholdError("Muse native delivery date must be a canonical ISO date") from None
         elif tool == "get_orders":
             fields(arguments, {"page", "size"})
             if (type(arguments["page"]) is not int or arguments["page"] != 1
@@ -233,6 +292,8 @@ class MuseNativeReadProvider:
                       "request_id": response["request_id"], "observed_at": response["observed_at"]}
             result = self.validate_read_facts(tool, arguments, facts, response, receipt)
             self._account_ids = references
+            if tool == "get_cart":
+                self._operation.cart_delivery_observation = (deepcopy(result["delivery"]), response["observed_at"])
             return {**result, "source": source, "observation_scope": "browser_read_only"}
 
     @classmethod
@@ -246,6 +307,8 @@ class MuseNativeReadProvider:
             return cls._addresses(facts)
         if tool == "get_cart":
             return cls._cart(facts)
+        if tool == "get_delivery_slots":
+            return cls._delivery_slots(facts, arguments, response, receipt)
         if tool == "get_orders":
             return cls._orders(facts, arguments)
         if tool in {"get_order", "order_tracking"}:
@@ -253,6 +316,74 @@ class MuseNativeReadProvider:
         if tool == "product_search":
             return cls._catalog(facts, arguments, response, receipt)
         raise HouseholdError("Muse native read tool is unavailable")
+
+    @staticmethod
+    def _delivery_slots(facts, arguments, response, receipt):
+        fields(facts, {"url", "signed_in", "complete", "account", "heading", "held_delivery_text", "cells", "dismissed"})
+        url = urlsplit(facts["url"]) if isinstance(facts["url"], str) else None
+        if (url is None or url.scheme != "https" or url.netloc != "oda.com"
+                or url.path not in {"/no/", "/no/cart/"} or url.fragment
+                or text(facts["heading"]) != "Velg leveringstid" or facts["dismissed"] is not True):
+            raise HouseholdError("Muse native upcoming delivery picker was not observed and dismissed")
+        observed = timestamp(response["observed_at"]).astimezone(ZoneInfo("Europe/Oslo"))
+        issued = timestamp(receipt["issued_at"]).astimezone(ZoneInfo("Europe/Oslo"))
+        if observed.date() != issued.date():
+            raise HouseholdError("Muse delivery observation crossed midnight; read fresh calendar context")
+        held = None
+        if facts["held_delivery_text"] is not None:
+            held = oda_cart_delivery_window({"slot_id": None, "display": text(facts["held_delivery_text"])},
+                today=observed.date(), allow_unknown_slot_id=True)
+        cells = facts["cells"]
+        if not isinstance(cells, list) or not cells or len(cells) > 500:
+            raise HouseholdError("Muse native picker needs one complete nonempty displayed section")
+        slots, displays, provenance, unavailable, seen = [], {}, {}, [], set()
+        for cell in cells:
+            fields(cell, {"date_text", "window_text", "button", "unavailable_text", "expanded"})
+            day_label, window = text(cell["date_text"]), text(cell["window_text"])
+            if cell["expanded"] is not None and type(cell["expanded"]) is not bool:
+                raise HouseholdError("Muse native expanded hint must be observed or unknown")
+            button = cell["button"]
+            if cell["unavailable_text"] is not None:
+                if text(cell["unavailable_text"]) != "Ikke tilgjengelig" or button is not None:
+                    raise HouseholdError("Muse native unavailable cell evidence conflicts")
+                unavailable.append(deepcopy(cell))
+                continue
+            fields(button, {"label", "enabled"})
+            if type(button["enabled"]) is not bool:
+                raise HouseholdError("Muse native delivery button enabled state is unknown")
+            if not button["enabled"]:
+                unavailable.append(deepcopy(cell))
+                continue
+            day = native_upcoming_date(day_label, observed.date())
+            start, end = native_delivery_times(window)
+            start_at, end_at = oslo_local_timestamp(day, start), oslo_local_timestamp(day, end)
+            if timestamp(end_at) <= observed:
+                unavailable.append(deepcopy(cell))
+                continue
+            reference = f"oda-native:{day.isoformat()}:{start}-{end}"
+            if reference in seen:
+                raise HouseholdError("Muse native delivery cell identity is ambiguous")
+            seen.add(reference)
+            price = native_delivery_price(text(button["label"]))
+            selected = bool(held and held["date"] == day.isoformat()
+                            and held["start"] == start and held["end"] == end)
+            slot = validate_delivery_slot({"slot_ref": reference, "provider_slot_id": None,
+                "start_at": start_at, "end_at": end_at, "price_ore": price,
+                "price_kind": "exact", "selected": selected})
+            slots.append(slot)
+            displays[reference] = f"{day_label} {window} {text(button['label'])}"
+            provenance[reference] = {"raw": deepcopy(cell), "observed_at": response["observed_at"],
+                "year_basis": "next_nonpast_date", "timezone_basis": "provider_policy",
+                "currency_basis": "provider_policy", "selection_basis": "fresh_cart_window" if selected else None}
+        if held and sum(slot["selected"] for slot in slots) != 1:
+            raise HouseholdError("Muse held cart delivery has no unique enabled picker cell")
+        requested = arguments.get("delivery_date")
+        visible_slots = [slot for slot in slots if requested is None
+                         or datetime.fromisoformat(slot["start_at"]).date().isoformat() == requested]
+        return {"slots": visible_slots, "display": {s["slot_ref"]: displays[s["slot_ref"]] for s in visible_slots},
+                "native_slot_observations": {s["slot_ref"]: provenance[s["slot_ref"]] for s in visible_slots},
+                "unavailable_cells": unavailable,
+                "availability": {"date": requested, "selectable": len(visible_slots), "scope": "rendered_picker_section"}}
 
     @staticmethod
     def _addresses(facts):
@@ -481,6 +612,89 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
                        "operation_directory": str(self.operation_directory),
                        "task_id": self.bridge.task_id, "account_links": sorted(self._account_ids)})
 
+    @staticmethod
+    def delivery_cart_summary(cart):
+        # Slot/quantity verification is nonfinancial; keep absent amounts unknown.
+        return {**cart_contents(cart), "total": cart.get("total"), "delivery": deepcopy(cart.get("delivery"))}
+
+    def cart_delivery_window(self, delivery, *, today=None):
+        observation = getattr(self._operation, "cart_delivery_observation", None)
+        if (not observation or not isinstance(delivery, Mapping)
+                or delivery.get("slot_id") is not None
+                or delivery.get("display") != observation[0].get("display")):
+            raise HouseholdError("Muse native delivery comparison needs the original fresh cart observation")
+        observed_day = timestamp(observation[1]).astimezone(ZoneInfo("Europe/Oslo")).date()
+        if today is not None and today != observed_day:
+            raise HouseholdError("Muse cart calendar context crossed midnight; read fresh")
+        return oda_cart_delivery_window(delivery, today=observed_day, allow_unknown_slot_id=True)
+
+    def cart_delivery_matches_slot(self, delivery, value, *, today=None):
+        slot = validate_delivery_slot(value)
+        start, end = [timestamp(slot[key]).astimezone(ZoneInfo("Europe/Oslo")) for key in ("start_at", "end_at")]
+        if (slot["provider_slot_id"] is not None or start.date() != end.date()
+                or slot["slot_ref"] != f"oda-native:{start.date().isoformat()}:{start:%H:%M}-{end:%H:%M}"):
+            return False
+        window = self.cart_delivery_window(delivery, today=today)
+        return (window["date"] == start.date().isoformat()
+                and window["start"] == start.strftime("%H:%M") and window["end"] == end.strftime("%H:%M"))
+
+    @staticmethod
+    def delivery_selection_arguments(slot):
+        normalized = validate_delivery_slot(slot)
+        if normalized["provider_slot_id"] is not None or not normalized["slot_ref"].startswith("oda-native:"):
+            raise HouseholdError("Muse delivery requires its exact local native slot reference")
+        return {"delivery_slot_ref": normalized["slot_ref"]}
+
+    @contextmanager
+    def delivery_selection(self, app, request):
+        with self.operation():
+            self._operation.delivery = {"app": app, "request": deepcopy(request)}
+            try:
+                yield
+            finally:
+                del self._operation.delivery
+
+    def _select_delivery(self, arguments, *, deadline):
+        fields(arguments, {"delivery_slot_ref"})
+        context = getattr(self._operation, "delivery", None)
+        if (context is None or not getattr(self._operation, "held", False)
+                or arguments["delivery_slot_ref"] != context["request"].get("slot_ref")):
+            raise HouseholdError("Muse delivery selection requires its exact original public request")
+        app = context["app"]
+        state = app.store.read()
+        if any(state.get(key) for key in ("pending_checkout", "pending_cart_change", "pending_cancellation", "order_change")):
+            raise HouseholdError("finish the original pending operation before selecting delivery")
+        observation = getattr(self._operation, "slot_observation", None)
+        reference = arguments["delivery_slot_ref"]
+        slot = next((row for row in observation["slots"] if row["slot_ref"] == reference), None) if observation else None
+        if slot is None or (datetime.now(timezone.utc) - timestamp(observation["source"]["observed_at"])).total_seconds() > 30:
+            raise HouseholdError("Muse delivery target requires its freshly observed original cell")
+        original = observation["native_slot_observations"][reference]
+        cart = self.call("get_cart", {}, deadline=deadline)
+        before = app._cart_lines(cart_contents(cart))[0]
+        if slot["selected"] and self.cart_delivery_matches_slot(cart["delivery"], slot):
+            return {"selected": True, "idempotent": True}
+        payload = {"binding_digest": self.binding(app.store), "slot": deepcopy(slot),
+            "target": deepcopy(original["raw"]), "observed_at": original["observed_at"],
+            "before_quantities": before, "account": deepcopy(self._accepted_account) if self._accepted_account else {
+                "url": "https://oda.com/no/account/delivery/", "edit_urls": [
+                    f"https://oda.com/no/account/delivery/edit/{key}/" for key in sorted(self._account_ids)]},
+            "effect": "one_delivery_cell_selection", "preconditions": [
+                "fresh original sign-in and ENTIRE account set; complete ordinary cart equals before_quantities",
+                "same one unique enabled visible date-column/time-row/price-button target, price unchanged",
+                "calendar interpretation still belongs to the observation's current local day",
+                "consume original unexpired permit immediately before one cell click; never repeat",
+                "preserve every cart quantity; retain actual task ending; independently read selected delivery"]}
+        result = self.bridge.request("delivery_select", payload, deadline=deadline)
+        if result == {"dispatch": "not_dispatched"}:
+            raise HouseholdError("Muse delivery was not selected; inspect the current picker before a new request")
+        if result != {"dispatch": "selected_once"}:
+            raise HouseholdError("Muse delivery selection is uncertain; reconcile the original native task without replay")
+        after = self.call("get_cart", {}, deadline=deadline)
+        if app._cart_lines(cart_contents(after))[0] != before:
+            raise HouseholdError("Cart drifted during delivery selection; preserve the observed goods without repair")
+        return {"selected": True}
+
     def validate_cart_reconciliation(self, pending, store):
         marker = pending.get("native_cart_binding")
         if (not getattr(self._operation, "held", False) or not isinstance(marker, Mapping)
@@ -543,9 +757,13 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
                               "never repeat a click; retain the actual task ending"]}
 
     def call(self, tool, arguments, *, deadline=None):
+        if tool == "select_delivery_slot":
+            return self._select_delivery(arguments, deadline=deadline)
         change = getattr(self._operation, "change", None)
         if tool != "manipulate_cart":
             result = super().call(tool, arguments, deadline=deadline)
+            if tool == "get_delivery_slots":
+                self._operation.slot_observation = deepcopy(result)
             if tool == "get_cart" and change is not None:
                 if "managed_request" in change:
                     change["last_cart"] = result
