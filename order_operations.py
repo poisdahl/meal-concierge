@@ -52,6 +52,9 @@ from service_common import (
 )
 
 
+DELIVERY_SNAPSHOT_TIMEOUT = 15.0
+
+
 ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
     "oda_checkout_pay_response",
     "oda_reconciled_exact_order",
@@ -1282,9 +1285,9 @@ class OrderOperations:
             remaining = (request.get("_deadline") or float("inf")) - time.monotonic()
             if self.provider == "oda" and callable(inspect) and remaining > 10 and not any(self.store.read().get(key) for key in pending_keys):
                 try:
-                    # Optional binding gets at most three seconds and reserves
+                    # Two fresh provider sessions need a bounded network budget; reserve
                     # at least ten for the requested provider slot reads.
-                    before_deadline = min(time.monotonic() + 3, (request.get("_deadline") or float("inf")) - 10)
+                    before_deadline = min(time.monotonic() + DELIVERY_SNAPSHOT_TIMEOUT, (request.get("_deadline") or float("inf")) - 10)
                     snapshot = self._delivery_restriction_snapshot({**request, "_deadline": before_deadline})
                     if request.get("address_id") is not None and request["address_id"] != snapshot["address"]["id"]:
                         snapshot = None
@@ -1303,8 +1306,11 @@ class OrderOperations:
                 diagnostics.update({"restriction_status": "unknown",
                     "restriction_reason": "inspection_unavailable",
                     "next": "Some checked dates have no selectable slots. Unavailable is not the same as full, and a purchasable product is not a delivery-date promise. Report current observed cart restrictions before offering a later window. If an item is cited, offer an authorized replacement, omission for this shop, or waiting; example items are not an exhaustive blocker list. Preserve recipe coverage and recurring settings. Re-list delivery after an authorized cart change; never remove goods just to test a cause. Unknown does not mean no restriction; do not blame a historical item."})
-                if self.provider == "oda" and callable(inspect) and snapshot is not None:
-                    deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 30)
+                if (self.provider == "oda" and callable(inspect) and snapshot is not None
+                        and (request.get("_deadline") or float("inf")) - time.monotonic() > DELIVERY_SNAPSHOT_TIMEOUT):
+                    # Keep a final snapshot budget after the browser stage, even
+                    # when the caller supplied a shorter overall deadline.
+                    deadline = min((request.get("_deadline") or float("inf")) - DELIVERY_SNAPSHOT_TIMEOUT, time.monotonic() + 30)
                     try:
                         with self._browser_operation(deadline):
                             state = self.store.read()
@@ -1322,7 +1328,7 @@ class OrderOperations:
                                     # A changed cart can itself make inspection fail.
                                     # Compare even on that path; an unreadable check
                                     # cannot establish either a cause or a change.
-                                    after_deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 3)
+                                    after_deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + DELIVERY_SNAPSHOT_TIMEOUT)
                                     try:
                                         after = self._delivery_restriction_snapshot({**request, "_deadline": after_deadline})
                                     except HouseholdError:
