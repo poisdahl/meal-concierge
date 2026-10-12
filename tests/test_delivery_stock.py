@@ -1,0 +1,191 @@
+"""Delivery-page stock explanation, distinct from catalog purchasability."""
+from contextlib import contextmanager
+from copy import deepcopy
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import test_meal_concierge as fixtures
+from test_payment_setup import PAYMENT_DOM
+from core import HouseholdError
+from oda_browser import OdaBrowser, CART_URL, DELIVERY_URL, _oda_delivery_restrictions_script
+
+WARNING = 'Noen av varene i handlekurven, f.eks. Håndsåpe refill, er ikke tilgjengelige før 18. oktober 2026.'
+SNAPSHOT = {'items': [('10', 1)], 'address': {'id': 1, 'address': 'Eksempelveien 1'}}
+
+
+class DeliveryStockTests(unittest.TestCase):
+    def test_real_browser_reader_waits_on_delivery_page_and_restores_original_tab(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node executes the real browser scripts')
+        browser = object.__new__(OdaBrowser)
+        browser._verify_checkout_account = mock.Mock(return_value=hashlib.sha256(b'1').hexdigest())
+        browser._settle = mock.Mock()
+        events = []
+        @contextmanager
+        def inspection():
+            events.append('inspection')
+            try:
+                yield
+            finally:
+                events.append('original restored')
+        browser._inspection_tab = inspection
+        current = None
+        reads = 0
+        def opened(url):
+            nonlocal current
+            current = url
+            events.append(url)
+        browser._open = opened
+        def evaluate(script):
+            nonlocal reads
+            if current == DELIVERY_URL:
+                reads += 1
+            # Cart has no banner; the correct page hydrates after one empty read.
+            case = {'url': current, 'nativeRow': True, 'outsideRows': [[WARNING]] if current == DELIVERY_URL and reads > 1 else []}
+            run = subprocess.run([node, '-e', PAYMENT_DOM], input=json.dumps({'script': script, 'c': case}), text=True, capture_output=True, check=True, timeout=10)
+            value = json.loads(run.stdout)
+            self.assertEqual(value['clicks'], [])
+            return value['result']
+        browser._eval = evaluate
+        self.assertEqual(browser.cart_delivery_restrictions(SNAPSHOT), [WARNING])
+        self.assertEqual(events, ['inspection', CART_URL, DELIVERY_URL, 'original restored'])
+        self.assertEqual(reads, 2)
+        browser._settle.assert_called_once_with(0.25)
+
+    def test_unready_or_wrong_cart_never_becomes_no_restrictions(self):
+        for case in ('loading', 'wrong_cart', 'wrong_account'):
+            with self.subTest(case=case):
+                browser = object.__new__(OdaBrowser)
+                browser._verify_checkout_account = mock.Mock(return_value=hashlib.sha256(b'2' if case == 'wrong_account' else b'1').hexdigest())
+                browser._settle = mock.Mock()
+                restored = []
+                @contextmanager
+                def tab():
+                    try:
+                        yield
+                    finally:
+                        restored.append(True)
+                browser._inspection_tab = tab
+                browser._open = mock.Mock()
+                browser._eval = mock.Mock(side_effect=lambda script: {'url': CART_URL, 'authenticated': True, 'items': [{'product_id': '11' if case == 'wrong_cart' else '10', 'quantity': 1}]} if 'ROW_IDENTITY' not in script and 'total_matches' in script else {'ready': False, 'warnings': []})
+                with self.assertRaises(HouseholdError):
+                    browser.cart_delivery_restrictions(SNAPSHOT)
+                self.assertEqual(restored, [True])
+                self.assertLessEqual(browser._eval.call_count, 21)
+                if case == 'wrong_account':
+                    browser._open.assert_not_called()
+
+    def test_banner_requires_exact_page_and_visible_current_evidence(self):
+        node = shutil.which('node')
+        if not node:
+            self.skipTest('Node required')
+        for page, text, expected in [(DELIVERY_URL, WARNING, True), (CART_URL, WARNING, False),
+                                     (DELIVERY_URL, '', False), (DELIVERY_URL, 'Tidligere historikk: '+WARNING, False)]:
+            run = subprocess.run([node, '-e', PAYMENT_DOM], input=json.dumps({'script': _oda_delivery_restrictions_script(), 'c': {'url': page, 'outsideRows': [[text]]}}), text=True, capture_output=True, check=True, timeout=10)
+            result = json.loads(run.stdout)
+            self.assertEqual(result['result']['ready'], expected)
+            self.assertEqual(result['clicks'], [])
+
+    def app(self, directory, *, changed=None):
+        store, provider, browser, app, _ = fixtures.CartPlanTests.app(directory, 'oda')
+        original = provider.call
+        count = 0
+        def call(tool, args, **kwargs):
+            nonlocal count
+            if tool == 'get_delivery_addresses':
+                return {'result': [{'id': 1, 'address': 'Eksempelveien 1', 'isSelected': True}]}
+            if tool == 'get_cart':
+                count += 1
+                result = original(tool, args, **kwargs)
+                if changed == 'cart' and count >= 2:
+                    result['items'][0]['quantity'] += 1
+                return result
+            if tool == 'get_delivery_slots':
+                provider.calls.append((tool, args))
+                return {'slots': [], 'availability': {'date': '2026-10-13', 'total': 20, 'selectable': 0, 'unavailable': 20, 'full': 0}}
+            return original(tool, args, **kwargs)
+        provider.call = call
+        browser.cart_delivery_restrictions = mock.Mock(return_value=[WARNING])
+        return store, provider, browser, app
+
+    def test_current_restriction_is_reported_before_selection_without_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            store, provider, browser, app = self.app(d)
+            before = store.read()
+            result = app.handle({'operation': 'delivery', 'action': 'list', 'dates': ['2026-10-13']})
+            self.assertEqual(result['restriction_status'], 'observed')
+            self.assertEqual(result['cart_restrictions'], [WARNING])
+            self.assertEqual(result['availability'][0]['full'], 0)
+            self.assertEqual(store.read(), before)
+            self.assertFalse(any(t in ('manipulate_cart', 'select_delivery_slot') for t, _ in provider.calls))
+
+    def test_different_address_or_changed_cart_cannot_borrow_warning(self):
+        for case in ('address', 'cart'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                _, _, browser, app = self.app(d, changed=case)
+                result = app.handle({'operation': 'delivery', 'action': 'list', 'dates': ['2026-10-13'], **({'address_id': 2} if case == 'address' else {})})
+                self.assertEqual(result['restriction_status'], 'unknown')
+                self.assertNotIn('cart_restrictions', result)
+                browser.cart_delivery_restrictions.assert_not_called()
+                if case == 'cart':
+                    self.assertTrue(result['availability_stale'])
+
+    def test_compact_product_review_keeps_observed_stock_reason(self):
+        from planning_operations import PlanningOperations
+        result = PlanningOperations._product_review_snapshot({'requirements': [{'item': 'soap', 'observation': {'products': [{'product_ref': 10, 'name': 'Soap', 'availability': 'unavailable', 'display': {'availability': 'Utsolgt fra leverandør'}}]}}]})
+        self.assertEqual(result['requirements'][0]['candidates'][0]['availability_description'], 'Utsolgt fra leverandør')
+
+    def test_optional_snapshot_has_own_budget_and_cannot_spend_slot_deadline(self):
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            _, provider, browser, app = self.app(d)
+            original = provider.call
+            limit = time.monotonic() + 60
+            seen = []
+            def call(tool, args, **kwargs):
+                seen.append((tool, kwargs.get('deadline')))
+                if tool == 'get_cart':
+                    self.assertLessEqual(kwargs['deadline'], time.monotonic() + 3)
+                    self.assertGreaterEqual(limit-kwargs['deadline'], 10)
+                    raise HouseholdError('optional snapshot timed out')
+                return original(tool, args, **kwargs)
+            provider.call = call
+            result = app._delivery({'action': 'list', 'dates': ['2026-10-13'], '_deadline': limit})
+            self.assertEqual(result['restriction_status'], 'unknown')
+            self.assertIn(('get_delivery_slots', limit), seen)
+            browser.cart_delivery_restrictions.assert_not_called()
+
+    def test_failed_inspection_still_invalidates_changed_cart_or_address(self):
+        for case in ('cart', 'address'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                _, provider, browser, app = self.app(d)
+                original = provider.call
+                changed = False
+                def call(tool, args, **kwargs):
+                    result = original(tool, args, **kwargs)
+                    if tool == 'get_delivery_slots':
+                        result['slots'] = deepcopy(provider.delivery_slots['slots'])
+                    if changed and tool == 'get_cart' and case == 'cart':
+                        result['items'][0]['quantity'] += 1
+                    if changed and tool == 'get_delivery_addresses' and case == 'address':
+                        result['result'][0]['id'] = 2
+                    return result
+                provider.call = call
+                def inspect(*args, **kwargs):
+                    nonlocal changed
+                    changed = True
+                    raise HouseholdError('browser no longer matches')
+                browser.cart_delivery_restrictions.side_effect = inspect
+                result = app._delivery({'action': 'list', 'dates': ['2026-10-13'], 'address_id': 1})
+                self.assertEqual(result['restriction_status'], 'unknown')
+                self.assertEqual(result['slots'], [])
+                self.assertTrue(result['availability_stale'])
+                self.assertNotIn('cart_restrictions', result)
