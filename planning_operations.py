@@ -3043,6 +3043,9 @@ class PlanningOperations:
             description = (value.get("display") or {}).get("package")
             if description:
                 result["package_description"] = description
+            availability = (value.get("display") or {}).get("availability")
+            if availability:
+                result["availability_description"] = availability
             if "purchase_options" in value:
                 result["purchase_options"] = [{key: deepcopy(option[key]) for key in (
                     "option_index", "package_count", "price_kind", "eligibility", "offer_kind",

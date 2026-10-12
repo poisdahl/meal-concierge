@@ -21,7 +21,7 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError,
                          _oda_checkout_amounts_minor,
                          delivery_signature as oda_delivery_signature,
                          require_order_binding)
-from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
+from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_contents, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
 from planning_assessment import assess_menu
@@ -1240,6 +1240,22 @@ class OrderOperations:
             context["delivery_time_status"] = "unknown"
         return context
 
+    def _delivery_restriction_snapshot(self, request):
+        """Bind optional browser evidence to the same cart and selected address."""
+        deadline = request.get("_deadline")
+        cart = cart_contents(self.provider_client.call("get_cart", {}, deadline=deadline))
+        addresses = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
+        rows = addresses.get("result") if isinstance(addresses, Mapping) else None
+        if not isinstance(rows, list):
+            raise HouseholdError("delivery diagnostic address unavailable")
+        selected = [row for row in rows if isinstance(row, Mapping) and row.get("isSelected") is True]
+        if len(selected) != 1 or not isinstance(selected[0].get("address"), str):
+            raise HouseholdError("delivery diagnostic selected address unavailable")
+        address = {key: selected[0].get(key) for key in ("id", "address")}
+        # Prices and row order can change without changing the goods being diagnosed.
+        items = sorted((row["product_id"], row["quantity"]) for row in cart["items"])
+        return {"items": items, "address": address}
+
     def _delivery(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
         if action == "list":
@@ -1260,6 +1276,20 @@ class OrderOperations:
                         raise HouseholdError("delivery dates must be one to seven ISO dates") from exc
             display: dict[str, str] = {}
             availability: list[dict[str, Any]] = []
+            inspect = getattr(self.browser, "cart_delivery_restrictions", None)
+            snapshot = None
+            pending_keys = ("pending_checkout", "pending_cart_change", "pending_cancellation", "order_change")
+            remaining = (request.get("_deadline") or float("inf")) - time.monotonic()
+            if self.provider == "oda" and callable(inspect) and remaining > 10 and not any(self.store.read().get(key) for key in pending_keys):
+                try:
+                    # Optional binding gets at most three seconds and reserves
+                    # at least ten for the requested provider slot reads.
+                    before_deadline = min(time.monotonic() + 3, (request.get("_deadline") or float("inf")) - 10)
+                    snapshot = self._delivery_restriction_snapshot({**request, "_deadline": before_deadline})
+                    if request.get("address_id") is not None and request["address_id"] != snapshot["address"]["id"]:
+                        snapshot = None
+                except HouseholdError:
+                    pass  # Optional diagnosis must not block the provider's slot list.
             slots = self._normalized_provider_slots(
                 dates,
                 deadline=request.get("_deadline"),
@@ -1270,21 +1300,43 @@ class OrderOperations:
             )
             diagnostics = {"availability": availability} if availability else {}
             if not slots or any(row.get("selectable") == 0 for row in availability):
-                diagnostics.update({ "restriction_status": "unknown",
-                    "next": "Some checked dates have no selectable slots. This does not establish that delivery is full. Report observed cart restrictions before proposing a later menu; preserve the cart and use existing owner instructions."})
-                inspect = getattr(self.browser, "cart_delivery_restrictions", None)
-                if self.provider == "oda" and callable(inspect):
-                    deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 20)
+                diagnostics.update({"restriction_status": "unknown",
+                    "restriction_reason": "inspection_unavailable",
+                    "next": "Some checked dates have no selectable slots. Unavailable is not the same as full, and a purchasable product is not a delivery-date promise. Report current observed cart restrictions before offering a later window. If an item is cited, offer an authorized replacement, omission for this shop, or waiting; example items are not an exhaustive blocker list. Preserve recipe coverage and recurring settings. Re-list delivery after an authorized cart change; never remove goods just to test a cause. Unknown does not mean no restriction; do not blame a historical item."})
+                if self.provider == "oda" and callable(inspect) and snapshot is not None:
+                    deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 30)
                     try:
                         with self._browser_operation(deadline):
                             state = self.store.read()
-                            if not any(state.get(key) for key in ("pending_checkout", "pending_cart_change", "pending_cancellation", "order_change")):
-                                warnings = inspect(deadline=deadline)
-                                diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
-                                diagnostics["cart_restrictions"] = warnings
+                            if any(state.get(key) for key in pending_keys):
+                                diagnostics["restriction_reason"] = "protected_operation_pending"
+                            elif self._delivery_restriction_snapshot({**request, "_deadline": deadline}) != snapshot:
+                                diagnostics["restriction_reason"] = "cart_or_address_changed"
+                            else:
+                                try:
+                                    warnings = inspect(snapshot, deadline=deadline)
+                                    diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
+                                    diagnostics["restriction_reason"] = "current_delivery_page"
+                                    diagnostics["cart_restrictions"] = warnings
+                                finally:
+                                    # A changed cart can itself make inspection fail.
+                                    # Compare even on that path; an unreadable check
+                                    # cannot establish either a cause or a change.
+                                    after_deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + 3)
+                                    try:
+                                        after = self._delivery_restriction_snapshot({**request, "_deadline": after_deadline})
+                                    except HouseholdError:
+                                        after = None
+                                    if after != snapshot:
+                                        diagnostics["restriction_status"] = "unknown"
+                                        diagnostics.pop("cart_restrictions", None)
+                                        diagnostics["restriction_reason"] = "cart_or_address_changed" if after is not None else "inspection_unavailable"
                     except HouseholdError:
-                        # This optional explanation must not break provider slot reads.
                         pass
+                if diagnostics.get("restriction_reason") == "cart_or_address_changed":
+                    diagnostics["next"] = "The cart or address changed while delivery was being inspected. Re-list the requested dates for the current cart before offering or selecting a window. No restriction has been attributed to these stale observations."
+                    slots = []
+                    diagnostics["availability_stale"] = True
             return {
                 "provider": self.provider,
                 "slots": slots,

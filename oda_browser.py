@@ -107,6 +107,7 @@ class OdaBrowserPageMismatchError(HouseholdError):
 
 STORE_URL = "https://oda.com/no/"
 CART_URL = "https://oda.com/no/cart/"
+DELIVERY_URL = "https://oda.com/no/checkout/delivery/"
 CHECKOUT_ENTRY_URL = "https://oda.com/no/checkout/"
 CHECKOUT_MODIFY_URL = "https://oda.com/no/checkout/modify/"
 RECOMMENDATIONS_URL = "https://oda.com/no/checkout/recommendations/"
@@ -1086,6 +1087,21 @@ process.exit(process.exitCode||0);
 """
 
 
+def _oda_delivery_restrictions_script():
+    """Only the observed merchant banner establishes a stock-delay explanation."""
+    return r"""(() => {
+        const norm=v=>(v||'').replace(/\s+/g,' ').trim();
+        const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
+        const page=location.href===DELIVERY_URL&&!document.querySelector('form[action*="login"],input[type="password"]');
+        const notice=x=>{const t=norm(x.innerText);return t.length<=1000&&/^Noen av varene i handlekurven\b/.test(t)&&t.includes('ikke tilgjengelige før')};
+        const warnings=page?[...document.querySelectorAll('*')].filter(visible).filter(notice)
+            .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText)):[];
+        // A positive visible banner is ready evidence. No match alone cannot
+        // distinguish hydration, unsupported markup or an unrestricted cart.
+        return JSON.stringify({ready:page&&warnings.length>0,warnings:[...new Set(warnings)].slice(0,5)});
+    })()""".replace("DELIVERY_URL", json.dumps(DELIVERY_URL))
+
+
 class OdaBrowser:
     checkout_provider = "oda"
     checkout_url = CHECKOUT_URL
@@ -1123,22 +1139,40 @@ class OdaBrowser:
         self._checkout_deadline: float | None = None
         self._cancellation_deadline: float | None = None
 
-    def cart_delivery_restrictions(self, *, deadline=None):
-        """Read visible cart availability notices without changing goods or delivery."""
-        with self._checkout_operation(deadline, preserve_session=True):
+    def cart_delivery_restrictions(self, snapshot, *, deadline=None):
+        """Inspect the delivery page without choosing a slot or changing goods."""
+        with self._checkout_operation(deadline, preserve_session=True), self._inspection_tab():
+            address = snapshot["address"]
+            account = self._verify_checkout_account(address["address"])
+            if account != hashlib.sha256(str(address["id"]).encode()).hexdigest():
+                raise HouseholdError("delivery diagnostic account changed")
+            expected = sorted(tuple(row) for row in snapshot["items"])
+            if not expected:
+                raise HouseholdError("delivery diagnostic has no current cart items")
             self._open(CART_URL)
-            result = self._eval(r"""(() => {
-                const norm=v=>(v||'').replace(/\s+/g,' ').trim();
-                const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
-                const notice=x=>{const t=norm(x.innerText);return t.length<=1000&&/^Noen av varene i handlekurven\b/.test(t)&&t.includes('ikke tilgjengelige før')};
-                const warnings=[...document.querySelectorAll('*')].filter(visible).filter(notice)
-                    .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText));
-                return JSON.stringify({warnings:[...new Set(warnings)].slice(0,5)});
-            })()""")
-        warnings = result.get("warnings")
-        if not isinstance(warnings, list) or len(warnings) > 5 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in warnings):
-            raise HouseholdError("Oda cart restrictions are unavailable")
-        return warnings
+            # Reuse the observed ProductRow reader, requiring exact SKU/quantity
+            # evidence here rather than a model's cosmetic identity approval.
+            script = _oda_checkout_surface_script({"total_minor": 0, "delivery_address": address["address"]})
+            for _ in range(20):
+                cart = self._eval(script)
+                items = cart.get("items", [])
+                actual = sorted((str(row.get("product_id", "")), row.get("quantity", 0)) for row in items)
+                if cart.get("url") == CART_URL and cart.get("authenticated") is True and actual == expected and not any(row.get("identity_conflict") for row in items):
+                    break
+                self._settle(0.25)
+            else:
+                raise HouseholdError("delivery diagnostic browser cart is not verified")
+            # The observed stock-delay banner lives on delivery, not on cart.
+            self._open(DELIVERY_URL)
+            for _ in range(20):
+                result = self._eval(_oda_delivery_restrictions_script())
+                warnings = result.get("warnings")
+                if not isinstance(warnings, list) or len(warnings) > 5 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in warnings):
+                    raise HouseholdError("Oda delivery restrictions are unavailable")
+                if result.get("ready") is True:
+                    return warnings
+                self._settle(0.25)
+        raise HouseholdError("Oda delivery restriction inspection did not finish rendering")
 
     def _account_reference(self, expected_address: str) -> int:
         value = self._binding_client().call("get_delivery_addresses", {}, deadline=self._checkout_deadline)

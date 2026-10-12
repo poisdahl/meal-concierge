@@ -87,6 +87,8 @@ class OrderFlowTests(unittest.TestCase):
             original = provider.call
             raw = json.loads((Path(__file__).parent / 'fixtures/delivery/oda_slots.json').read_text())['response']
             def slots(tool, args, **kwargs):
+                if tool == 'get_delivery_addresses':
+                    return {'result': [{'id': 1, 'address': 'Eksempelveien 1', 'isSelected': True}]}
                 if tool != 'get_delivery_slots':
                     return original(tool, args, **kwargs)
                 data = deepcopy(raw)
@@ -133,18 +135,6 @@ class WeightReservationTests(unittest.TestCase):
         output = subprocess.run([self.node, '-e', PAYMENT_DOM], input=json.dumps({'script': script, 'c': case}),
                                 text=True, capture_output=True, check=True, timeout=10)
         return json.loads(output.stdout)
-
-    def test_visible_cart_restriction_read_is_bounded_and_has_no_clicks(self):
-        warning = 'Noen av varene i handlekurven, f.eks. Såpe, er ikke tilgjengelige før 9. september 2026.'
-        browser = object.__new__(OdaBrowser)
-        browser._open = mock.Mock()
-        def evaluate(script):
-            result = self.evaluate(script, outsideRows=[[warning], ['Unrelated text']])
-            self.assertEqual(result['clicks'], [])
-            return result['result']
-        browser._eval = evaluate
-        self.assertEqual(browser.cart_delivery_restrictions(), [warning])
-        browser._open.assert_called_once_with('https://oda.com/no/cart/')
 
     def test_weight_reservation_is_bound_in_read_and_final_click(self):
         rows = [['1 vare', '100,00 kr'], ['Delsum', '100,00 kr'],

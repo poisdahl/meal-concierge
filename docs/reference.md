@@ -2266,11 +2266,22 @@ A requested new weekly shop can start with an empty cart when the retained cart
 plan belongs to another recorded week. Same-week edits retain removal decisions.
 
 Delivery list retains per-date full/unavailable/selectable counts. If any checked
-date has no selectable slots, Oda may read visible cart availability restrictions
-under the browser lock, only without pending cart, checkout, cancellation or order
-changes. This optional read can navigate to the cart but cannot select delivery,
-change goods or pay. An unavailable diagnosis preserves the slot response and an
-unknown cause. Dates outside the requested range remain unverified.
+date has no selectable slots, Oda inspects `/no/checkout/delivery/` in a separate
+inspection tab under the browser lock, only without pending cart, checkout,
+cancellation or order changes. The browser account and exact cart must match the
+provider, including an explicitly requested address. The reader waits for the
+observed visible stock-delay banner; absent/loading/unrecognized evidence stays
+`restriction_status=unknown`, never proof of unrestricted delivery. This optional
+read cannot choose delivery, change goods or pay. Failure preserves the slot
+response; a changed cart/address instead marks `availability_stale=true` and
+requires a fresh list. Dates outside the requested range remain unverified.
+
+Product review retains the retailer's `availability_description`. Product
+purchasability and successful cart insertion are not delivery-date guarantees.
+Explain observed delayed items before selecting a window, offer replacement,
+omission for this shop or waiting, and re-list after authorized changes. Banner
+examples may be incomplete; preserve required ingredient coverage and standing
+recurring preferences. Final checkout revalidation remains in place.
 
 Oda's displayed `Vektreservasjon` is retained as its own entry in `other_fees`.
 The temporary weight reservation contributes to the amount being authorized;
