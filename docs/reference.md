@@ -1353,8 +1353,15 @@ state and SQLite database together in backups; neither belongs in Git.
 
 Menus carry a server-owned `menu_id`, revision and content digest. Bank recipes
 are materialized from an exact recipe ID/revision and optional portion count.
-Updating or clearing a menu requires its current returned `menu_id` and
-`expected_revision`, so a stale request cannot replace newer work.
+Replacing or clearing a menu requires the exact current `menu_ref` from `menu get`,
+so a stale request cannot replace newer work. Saving a distinct whole menu
+archives the outgoing snapshot and allocates a new identity when it has order,
+cancellation, cooking, override or successor history, even in the same week.
+A plain mutable draft instead advances its revision. The new menu becomes current;
+existing order snapshots and historical recipe usage remain unchanged. A confirmed
+or cancelled order alone does not block a new menu. Unresolved linked financial
+operations retain their existing protections. Use remaining-week replanning or
+exact slot edits to carry previous meals into the active menu.
 The default six-week repeat history includes planned, ordered and explicitly
 marked-cooked use. Ranked planning requires an exact override reason for a
 blocked candidate; agent selections and exact menu edits may repeat it while

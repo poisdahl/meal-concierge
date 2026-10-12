@@ -4723,26 +4723,28 @@ class RecipeFlowTests(unittest.TestCase):
             state["menu"]["order_id"] = "order-old"
             state["recipe_usage"][first["menu_id"]]["status"] = "ordered"
             state["recipe_usage"][first["menu_id"]]["order_id"] = "order-old"
-        with self.assertRaisesRegex(HouseholdError, "ordered menu is immutable"):
-            self.app.handle({
-                "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
-                "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
-            })
-        replacement = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W41", full_recipe("Ny")), "menu_ref": self.app._cart_menu_ref(first)})["menu"]
+        before = deepcopy(self.store.read())
+        replacement = self.app.handle({
+            "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
+            "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
+        })['menu']
         state = self.store.read()
         self.assertNotEqual(replacement["menu_id"], first["menu_id"])
-        self.assertEqual(state["recipe_usage"][first["menu_id"]]["status"], "ordered")
+        self.assertEqual(state['recipe_usage'][first['menu_id']], before['recipe_usage'][first['menu_id']])
+        self.assertEqual(state['menu_planning']['history'][f"{first['menu_id']}:{first['revision']}"], before['menu'])
 
     def test_menu_with_explicit_cooking_history_cannot_be_revised_in_place(self):
         first = self.app.handle({"operation": "menu", "action": "save", "menu": menu("2026-W40")})["menu"]
         key = first["dishes"][0]["recipe_key"]
         self.app.handle({"operation": "recipes", "action": "mark_cooked", "menu_id": first["menu_id"], "recipe_key": key, "week": "2026-W40"})
-        with self.assertRaisesRegex(HouseholdError, "usage history is immutable"):
-            self.app.handle({
-                "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
-                "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
-            })
-        self.assertIn(key, self.store.read()["recipe_usage"][first["menu_id"]]["cooked_keys"])
+        before = deepcopy(self.store.read())
+        replacement = self.app.handle({
+            "operation": "menu", "action": "save", "menu": menu("2026-W40", full_recipe("Endret")),
+            "menu_ref": {key: first[key] for key in ("menu_id", "revision", "digest")},
+        })['menu']
+        self.assertNotEqual(replacement['menu_id'], first['menu_id'])
+        self.assertEqual(self.store.read()['recipe_usage'][first['menu_id']], before['recipe_usage'][first['menu_id']])
+        self.assertEqual(self.store.read()['menu_planning']['history'][f"{first['menu_id']}:{first['revision']}"], before['menu'])
 
     def test_replacing_menu_does_not_bypass_explicit_cooked_cooldown(self):
         saved = self.save_bank_recipe()

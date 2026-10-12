@@ -1987,24 +1987,24 @@ class PlanningOperations:
                         "complete weekly menu does not satisfy saved dietary minimums: "
                         + canonical(minimums)
                     )
+                current_usage = state.get("recipe_usage", {}).get(current.get("menu_id")) if isinstance(current, Mapping) else None
+                usage = current_usage if isinstance(current_usage, Mapping) else {}
+                immutable_current = isinstance(current, Mapping) and bool(
+                    current.get("supersedes") or current.get("phase") == "ordered" or current.get("order_id")
+                    or usage.get("status") in {"ordered", "cancelled"}
+                    or usage.get("previous_status") == "ordered" or usage.get("cancelled_order_id")
+                    or any(usage.get(key) for key in ("cooked_keys", "not_cooked_keys", "cooldown_overrides",
+                                                     "cooked_slot_ids", "not_cooked_slot_ids"))
+                    or any(isinstance(snapshot, Mapping) and snapshot.get("menu_id") == current.get("menu_id")
+                           for snapshot in state.get("order_snapshots", {}).values())
+                )
                 if supplied_menu_id:
                     if not isinstance(current, Mapping) or canonical(supplied_ref) != canonical(mp.menu_ref(current)):
                         raise HouseholdError("menu_ref does not match the current menu; call menu get and retry with its exact menu_ref")
-                    if pending_payment or current.get("week") != menu.get("week"):
+                    if pending_payment or immutable_current or current.get("week") != menu.get("week"):
                         menu_id = f"menu_{secrets.token_hex(12)}"
                         revision = 1
                     else:
-                        if current.get("supersedes"):
-                            raise HouseholdError("a successor preserves immutable lineage; use menu replan_prepare then replan_apply to replace future meals while retaining past meals")
-                        current_usage = state.setdefault("recipe_usage", {}).get(supplied_menu_id)
-                        if current.get("phase") == "ordered" or (isinstance(current_usage, Mapping) and current_usage.get("status") == "ordered"):
-                            raise HouseholdError("an ordered menu is immutable; save a new menu instead")
-                        if isinstance(current_usage, Mapping) and (
-                            current_usage.get("cooked_keys")
-                            or current_usage.get("not_cooked_keys")
-                            or current_usage.get("cooldown_overrides")
-                        ):
-                            raise HouseholdError("a menu with explicit usage history is immutable; save a new menu instead")
                         menu_id = supplied_menu_id
                         revision = expected_revision + 1
                 else:
@@ -2038,10 +2038,18 @@ class PlanningOperations:
                 if blocked:
                     raise HouseholdError(f"recipe cooldown blocks this menu: {canonical(blocked)}")
                 if isinstance(current, Mapping):
+                    if current.get("menu_id") != menu_id:
+                        history = state["menu_planning"]["history"]
+                        key = mp.lock_key(current)
+                        if key in history and canonical(history[key]) != canonical(current):
+                            raise HouseholdError("retained menu snapshot already exists with different content")
+                        if key not in history and len(history) >= mp.MAX_PLANNING_MENUS:
+                            raise HouseholdError("planning history limit reached")
+                        history[key] = deepcopy(current)
                     if current.get("menu_id") != menu_id and current.get("menu_id") not in protected_menu_ids:
                         mp.retire_planned_slots(state, current)
                     old_usage = state.setdefault("recipe_usage", {}).get(current.get("menu_id"))
-                    if (isinstance(old_usage, dict) and old_usage.get("status") == "planned"
+                    if (not immutable_current and isinstance(old_usage, dict) and old_usage.get("status") == "planned"
                             and current.get("menu_id") not in {menu_id, *protected_menu_ids}):
                         old_usage["status"] = "cancelled"
                 menu.update({"menu_id": menu_id, "revision": revision, "digest": digest, "phase": "draft"})
