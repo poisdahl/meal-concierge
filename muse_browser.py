@@ -33,7 +33,7 @@ from service_common import money_cents
 
 CLICK_OPERATIONS = {"checkout_click", "cancellation_click"}
 DELEGATION_OPERATIONS = {"checkout_delegate", "cancellation_delegate"}
-ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS | {"cart_change"}
+ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS | {"cart_change", "delivery_select"}
 NATIVE_TASK_BINDING = "accepted_child_v1"
 READ_OPERATION_TIMEOUT = 540.0
 ACTION_OPERATION_TIMEOUT = 30.0
@@ -41,7 +41,7 @@ CART_ACTION_TIMEOUT = 150.0
 
 
 def operation_timeout(operation):
-    return CART_ACTION_TIMEOUT if operation == "cart_change" else (
+    return CART_ACTION_TIMEOUT if operation in {"cart_change", "delivery_select"} else (
         ACTION_OPERATION_TIMEOUT if operation in ACTION_OPERATIONS else READ_OPERATION_TIMEOUT)
 
 

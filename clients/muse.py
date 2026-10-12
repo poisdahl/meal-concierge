@@ -66,7 +66,7 @@ NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit u
     "preparation, saved-plan reads and complete reviewed product-plan applies with include_recurring=false. "
     "Managed applies preserve existing goods and verify each bounded unit; reconcile uncertain changes "
     "without repeating them. Estimated payable amounts remain unknown until checkout review. "
-    "Bounded displayed order history is readable; delivery selection, checkout and order changes "
+    "Bounded displayed order history and the upcoming delivery picker are readable; explicit native delivery selection preserves all goods. Checkout and order changes "
     "remain unavailable. Exact displayed order details "
     "are readable; unverified goods and payment/tracking facts remain unknown.")
 
@@ -601,6 +601,15 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
                 return self._prepare_or_read_products(request)
             if action == "apply":
                 return self._apply_products(request)
+        if request.get("operation") == "delivery" and action in {None, "list", "select"}:
+            if (set(request) - {"operation", "action", "dates", "slot_ref", "contract"}
+                    or (action == "select" and request.get("dates") is not None)):
+                raise HouseholdError("Muse native delivery preserves the original address and unattended preference")
+            bounded = {**request, "_deadline": time.monotonic() + (360 if action == "select" else 240)}
+            with self.provider_client.delivery_selection(self, bounded):
+                result = Application.handle(self, bounded)
+            result["client_guidance"] = NATIVE_CART_GUIDANCE
+            return result
         if request.get("operation") != "cart":
             result = super().handle(request)
             result["client_guidance"] = NATIVE_CART_GUIDANCE
@@ -666,9 +675,14 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
             request = {**request, "_native_cart_binding": marker}
         return Application._cart(self, request)
 
+    def _delivery(self, request):
+        if request.get("action") == "addresses":
+            return NativeReadMuseApplication._delivery(self, request)
+        return Application._delivery(self, request)
+
     def _store_readiness(self, checkout_payment=None):
         return {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
-                "browser_check": {"status": "configured", "scope": "managed_products_and_unit_cart"}, "note": NATIVE_CART_GUIDANCE}
+                "browser_check": {"status": "configured", "scope": "managed_products_unit_cart_and_delivery"}, "note": NATIVE_CART_GUIDANCE}
 
     def _user_guide(self):
         return {**MuseApplication._user_guide(), "after_setup": NATIVE_CART_GUIDANCE}

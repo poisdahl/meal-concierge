@@ -555,15 +555,28 @@ class OrderOperations:
         if self.provider in {"oda", "mathem"}:
             if cart is None:
                 return False
-            cart_delivery = cart_summary(cart).get("delivery")
+            cart_delivery = self._delivery_cart_summary(cart).get("delivery")
             observed_slot = observation.get("slot")
             if cart_delivery is None or observed_slot is None:
                 return False
-            if not retail_cart_delivery_matches_slot(
+            if not self._cart_delivery_matches_slot(
                 cart_delivery, observed_slot, provider=self.provider,
             ):
                 return False
         return True
+
+    def _delivery_cart_summary(self, cart):
+        native = getattr(self.provider_client, "delivery_cart_summary", None)
+        return native(cart) if callable(native) else cart_summary(cart)
+
+    def _cart_delivery_window(self, delivery, *, today=None):
+        native = getattr(self.provider_client, "cart_delivery_window", None)
+        return native(delivery, today=today) if callable(native) else oda_cart_delivery_window(delivery, today=today)
+
+    def _cart_delivery_matches_slot(self, delivery, slot, *, provider=None, today=None):
+        native = getattr(self.provider_client, "cart_delivery_matches_slot", None)
+        return (native(delivery, slot, today=today) if callable(native)
+                else retail_cart_delivery_matches_slot(delivery, slot, provider=provider or self.provider, today=today))
 
     @staticmethod
     def _same_delivery_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -665,13 +678,13 @@ class OrderOperations:
         applicable = self._delivery_observation_applies(
             observation, state, cart=scope_cart, occurrence=occurrence,
         )
-        cart_delivery = cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
+        cart_delivery = self._delivery_cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
         current_dates = None
         if applicable and isinstance(observation.get("slot"), Mapping):
             current_dates = [self._delivery_slot_date(observation["slot"])]
         elif self.provider == "oda" and isinstance(cart_delivery, Mapping):
             oda_today = self._now().astimezone(ZoneInfo("Europe/Oslo")).date()
-            current_dates = [oda_cart_delivery_window(cart_delivery, today=oda_today)["date"]]
+            current_dates = [self._cart_delivery_window(cart_delivery, today=oda_today)["date"]]
         current_slots = self._normalized_provider_slots(current_dates, deadline=deadline)
         selected = [slot for slot in current_slots if slot["selected"]]
         if len(selected) > 1:
@@ -681,7 +694,7 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     selected_slot is None
-                    or not retail_cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
+                    or not self._cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
                 ):
                     raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected_slot is not None:
@@ -831,7 +844,7 @@ class OrderOperations:
             cart_delivery = cart_summary(fresh_scope_cart).get("delivery")
             if (
                 not isinstance(cart_delivery, Mapping)
-                or not retail_cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
+                or not self._cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
             ):
                 raise HouseholdError(
                     "automatic delivery selection is uncertain; provider cart and slots disagree"
@@ -880,11 +893,11 @@ class OrderOperations:
         target = expected_slot
         if target is None and applicable and isinstance(observation.get("slot"), Mapping):
             target = observation["slot"]
-        cart_delivery = cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
+        cart_delivery = self._delivery_cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
         dates = [self._delivery_slot_date(target)] if isinstance(target, Mapping) else None
         if dates is None and self.provider == "oda" and isinstance(cart_delivery, Mapping):
             oda_today = self._now().astimezone(ZoneInfo("Europe/Oslo")).date()
-            dates = [oda_cart_delivery_window(cart_delivery, today=oda_today)["date"]]
+            dates = [self._cart_delivery_window(cart_delivery, today=oda_today)["date"]]
         selected = [
             slot for slot in self._normalized_provider_slots(
                 dates, deadline=deadline, allow_recovery=allow_recovery,
@@ -895,7 +908,7 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     len(selected) != 1
-                    or not retail_cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
+                    or not self._cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
                 ):
                     raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected:
@@ -1297,8 +1310,12 @@ class OrderOperations:
                     candidate = candidates[0]
                     provider_slot_id = candidate["provider_slot_id"]
                     if provider_slot_id is None:
-                        raise HouseholdError("the requested provider delivery slot has no provider id")
-                    arguments["delivery_slot_id"] = provider_slot_id
+                        native_arguments = getattr(self.provider_client, "delivery_selection_arguments", None)
+                        if not callable(native_arguments) or set(arguments) != {"delivery_slot_id"}:
+                            raise HouseholdError("the requested provider delivery slot has no provider id")
+                        arguments = native_arguments(candidate)
+                    else:
+                        arguments["delivery_slot_id"] = provider_slot_id
                     self._scheduled_select(request, arguments, deadline)
                     selected_date = self._delivery_slot_date(candidate)
                     fresh = [
@@ -1314,11 +1331,11 @@ class OrderOperations:
                     normalized = fresh[0]
                     self._record_scheduled_effect(request.get("_scheduler_context"), "resolved", normalized)
                     raw_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-                    cart = cart_summary(raw_cart)
+                    cart = self._delivery_cart_summary(raw_cart)
                     delivery = cart.get("delivery")
                     if (
                         not isinstance(delivery, Mapping)
-                        or not retail_cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
+                        or not self._cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
                     ):
                         raise HouseholdError(f"{self.provider.upper()} delivery selection is uncertain; inspect the provider selection")
                     if change:
@@ -2906,7 +2923,7 @@ class OrderOperations:
                     if self.provider == "oda" and observed_window is None:
                         # Oda's cart uses "Hjemlevering mellom kl 13 og 18, i morgen".
                         # Its existing exact parser binds relative labels to Oslo's date.
-                        window = oda_cart_delivery_window(after_delivery, today=self._now().astimezone(ZoneInfo("Europe/Oslo")).date())
+                        window = self._cart_delivery_window(after_delivery, today=self._now().astimezone(ZoneInfo("Europe/Oslo")).date())
                         if window["date"] == order_change["before"]["order"].get("deliveryDate"):
                             observed_date = date.fromisoformat(window["date"])
                             months = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")

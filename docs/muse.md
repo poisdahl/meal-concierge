@@ -268,9 +268,28 @@ retains that original bounded authority.
 `price_mode:"estimate"` can supply observed package counts and merchandise cost
 for nonfinancial cart sync. Deposit and total payable remain unknown; no missing
 cart total is filled with zero. Actual payable terms need a separate complete
-checkout observation and approval. This mode does not implement delivery selection,
-checkout or cancellation. Bounded displayed order history and exact displayed
+checkout observation and approval. This mode does not implement checkout or
+cancellation. Bounded displayed order history and exact displayed
 order details use the same read-only observations without enabling cart policy.
+
+`delivery.list` observes the ordinary upcoming-delivery picker, including actual
+available/enabled price buttons, and dismisses it unchanged. Each native slot has
+`provider_slot_id:null` and a local `oda-native:<date>:<start>-<end>` reference.
+Raw column/row/button labels and observation time remain in native provenance.
+The year uses the next nonpast date at that observation time; Europe/Oslo and NOK
+are provider policy, not displayed year/timezone/currency assertions. An observed
+weekday must agree. Unavailable cells remain diagnostics, and an AX expanded hint
+alone never proves selection: one enabled cell must match the fresh held cart
+window. These date rules apply only to upcoming delivery, never historical receipts.
+
+`delivery.select` accepts that exact freshly returned reference, preserves the
+original address and unattended preference, and grants one original native permit
+for one unique enabled cell at the observed price. Independent picker/cart
+readback verifies the selection and every cart quantity. A waiting or unknown
+native task blocks further requests until its actual original ending; inspect
+that ending and list the current selection before any new request. Selecting an
+already selected and freshly correlated slot is idempotent. Delivery selection
+never adds or removes goods and does not grant purchase authority.
 
 Writes start disabled. In the ordinary CLI, inspect
 `{"operation":"native_cart_policy","action":"show"}` and explicitly set

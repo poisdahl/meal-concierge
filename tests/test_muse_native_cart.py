@@ -84,6 +84,9 @@ sys.argv = sys.argv[1:]
         return {**({"29829": self.quantity} if self.quantity else {}),
                 **{key: value for key, value in self.extra_quantities.items() if value}}
 
+    def observation(self, tool, arguments):
+        return read_fixture.observation(tool, arguments)
+
     def produce(self):
         served = {path.name for path in self.history if path.parent.name == "requests"}
         while not self.stop.wait(0.01):
@@ -98,7 +101,9 @@ sys.argv = sys.argv[1:]
                         self.seen.append("cart_change")
                         continue
                     claim_request(self.broker, record["request_id"], record["task_id"])
-                    if record["operation"] == "cart_change":
+                    if record["operation"] == "delivery_select":
+                        facts, task_state = self.delivery_effect(record)
+                    elif record["operation"] == "cart_change":
                         pending = read_json(self.home / "state/state.json")["pending_cart_change"]
                         self.assertEqual(record["payload"]["intent_digest"], digest(pending))
                         self.assertEqual(pending["before"], self.quantities())
@@ -126,7 +131,7 @@ sys.argv = sys.argv[1:]
                         self.assertEqual(record["operation"], "provider_read")
                         tool = record["payload"]["tool"]
                         self.seen.append(tool)
-                        facts = read_fixture.observation(tool, record["payload"]["arguments"])
+                        facts = self.observation(tool, record["payload"]["arguments"])
                         if tool == "get_cart" and self.quantities():
                             rows = []
                             for key, quantity in self.quantities().items():
