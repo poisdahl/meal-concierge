@@ -79,8 +79,9 @@ class CategoryMealTests(unittest.TestCase):
         self.assertEqual(amounts["oats"], 200)
         self.assertEqual(amounts["gulrot"], 200)
         rendered = render_menu(menu, self.app.recipes.assets, images=False)["text"]
-        self.assertIn("2026-09-10 · Dessert · Synthetic berry dessert · 2 porsjoner", rendered)
-        self.assertIn("2026-09-13 · Brunsj · Synthetic brunch · 4 porsjoner", rendered)
+        self.assertIn("Torsdag 10. september 2026", rendered)
+        self.assertIn("Dessert: Synthetic berry dessert · 2 porsjoner", rendered.split("Søndag 13. september 2026")[0])
+        self.assertIn("Brunsj: Synthetic brunch · 4 porsjoner", rendered.split("Søndag 13. september 2026")[1])
         self.assertTrue(self.app.handle({"operation": "menu", "action": "assess"})["assessment"]["ready"])
         reopened = Application(self.store, self.fixture.provider, object())
         self.assertEqual(reopened.handle({"operation": "menu", "action": "get"})["menu"], menu)
@@ -277,7 +278,8 @@ class CategoryMealTests(unittest.TestCase):
         self.assertEqual(read_quantity(needs[0]["quantity"], legacy_float=True), 6100)
         rendered = render_menu(menu, self.app.recipes.assets, images=False)["text"]
         for category, name, portions in cases:
-            self.assertIn(f"2026-09-10 · {labels[category]} · {name} · {portions} porsjoner", rendered)
+            self.assertIn("Torsdag 10. september 2026", rendered)
+            self.assertIn(f"{labels[category]}: {name} · {portions} porsjoner", rendered)
         extras = [s for s in menu["slots"] if s["meal_type"] != "dinner"]
         candidates = self.fixture.save_candidates(1)
         prepared = self.app.handle({"operation": "menu", "action": "replan_prepare", "menu_ref": mp.menu_ref(menu),

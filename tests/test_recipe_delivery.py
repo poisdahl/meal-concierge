@@ -181,7 +181,7 @@ class DeliveryTests(unittest.TestCase):
         job = self.request()
         parts = self.parts(job)
         text = "\n".join(self.call("read", job_id="one", part_id=p["id"])["text"] for p in parts if p["kind"] == "text")
-        for wanted in ("600 g gulrot", "3 l vann", "6 porsjoner", "Syntetisk testkjøkken", "Bilde:", "2026-09-07"):
+        for wanted in ("600 g gulrot", "3 l vann", "6 porsjoner", "Syntetisk testkjøkken", "Bilde:", "Mandag 7. september 2026"):
             self.assertIn(wanted, text)
         pdf = next(p for p in parts if p["kind"] == "pdf")
         def rpc(operation, **kw):

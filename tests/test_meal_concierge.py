@@ -10689,7 +10689,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(duplicate_due, {"send": False, "reason": "email is already claimed before dispatch"})
         payload = self.app.handle({"operation": "email", "action": "begin_send", "order_id": "old", "claim_token": due["claim_token"]})
         self.assertIn("Meny og oppskrifter", payload["subject"])
-        self.assertIn("<h2>A</h2>", payload["html"])
+        self.assertRegex(payload["html"], r"<h2[^>]*>A</h2>")
         self.assertEqual(payload["automation_environment"], {"HERMES_WORKSPACE_AUTOMATION_PROFILE": "test-email"})
         self.app.handle({"operation": "email", "action": "release", "order_id": "old", "claim_token": due["claim_token"]})
         moved = (datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=1)).isoformat()

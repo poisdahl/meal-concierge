@@ -180,9 +180,57 @@ class ReplanningTests(unittest.TestCase):
         self.assertEqual(second['slots'][:2], successor['slots'][:2])
         self.assertEqual(len(self.app._usage_summary(self.store.read(), cooked, self.menu['week'])['blocked_by']), 1)
         self.assertEqual(len(mp.shopping_menu(second)['dishes']), 2)
-        with self.assertRaisesRegex(HouseholdError, 'lineage'):
-            self.app.handle({'operation':'menu','action':'save','menu_ref':mp.menu_ref(second),
-                'menu':{'week':second['week'],'dishes':[{'recipe_ref':self.candidates[1]['recipe_ref']} ]}})
+        before_usage = deepcopy(self.store.read()['recipe_usage'])
+        fresh = self.app.handle({'operation':'menu','action':'save','menu_ref':mp.menu_ref(second),
+            'menu':{'week':second['week'],'dishes':[deepcopy(self.menu['slots'][1]['reference'])]}})['menu']
+        self.assertNotEqual(fresh['menu_id'], second['menu_id'])
+        self.assertEqual(fresh['revision'], 1)
+        self.assertEqual(self.store.read()['menu_planning']['history'][mp.lock_key(second)], second)
+        for owner, usage in before_usage.items():
+            self.assertEqual(self.store.read()['recipe_usage'][owner], usage)
+        self.assertEqual(len(self.app._usage_summary(self.store.read(), cooked, self.menu['week'])['blocked_by']), 1)
+
+    def test_new_save_preserves_ordered_cancelled_and_cooked_history(self):
+        baseline = deepcopy(self.store.read())
+        for variant in ('ordered', 'cancelled', 'cooked'):
+            with self.subTest(variant=variant):
+                with self.store.locked() as state:
+                    state.clear()
+                    state.update(deepcopy(baseline))
+                    usage = state['recipe_usage'][self.menu['menu_id']]
+                    if variant == 'ordered':
+                        state['menu']['phase'] = 'ordered'
+                        usage['status'] = 'ordered'
+                        state['order_snapshots']['fixture'] = deepcopy(state['menu'])
+                    elif variant == 'cancelled':
+                        usage.update(previous_status='ordered', cancelled_order_id='fixture')
+                    else:
+                        usage['cooked_keys'] = [self.menu['slots'][0]['recipe_key']]
+                before = self.store.read()
+                request = {'operation': 'menu', 'action': 'save', 'menu_ref': mp.menu_ref(before['menu']),
+                           'menu': {'week': self.menu['week'], 'dishes': [self.candidates[3]]}}
+                result = self.app.handle(request)
+                after = self.store.read()
+                self.assertNotEqual(result['menu']['menu_id'], self.menu['menu_id'])
+                self.assertEqual(after['menu_planning']['history'][mp.lock_key(before['menu'])], before['menu'])
+                self.assertEqual(after['recipe_usage'][self.menu['menu_id']], before['recipe_usage'][self.menu['menu_id']])
+                self.assertEqual(after['order_snapshots'], before['order_snapshots'])
+                self.assertTrue(self.app.handle(request)['idempotent'])
+                self.assertEqual(after, self.store.read())
+        self.assertEqual(self.fixture.provider.calls, [])
+
+    def test_new_save_history_collision_and_limit_leave_state_unchanged(self):
+        for full in (False, True):
+            with self.subTest(full=full):
+                with self.store.locked() as state:
+                    state['menu']['phase'] = 'ordered'
+                    state['menu_planning']['history'] = ({str(i): {} for i in range(mp.MAX_PLANNING_MENUS)}
+                        if full else {mp.lock_key(state['menu']): {'different': True}})
+                before = self.store.path.read_bytes()
+                with self.assertRaises(HouseholdError):
+                    self.app.handle({'operation': 'menu', 'action': 'save', 'menu_ref': mp.menu_ref(self.store.read()['menu']),
+                                     'menu': {'week': self.menu['week'], 'dishes': [self.candidates[3]]}})
+                self.assertEqual(before, self.store.path.read_bytes())
 
     def test_clear_and_new_save_retire_carried_planned_owners(self):
         prepared = self.prepare(remaining_dates=['2026-09-09'], planner_input={'candidates':self.candidates[3:]})

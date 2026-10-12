@@ -17,7 +17,12 @@ use replanning when choosing a new set of remaining dinners. A menu-only draft o
 change can proceed while an unrelated purchase or order change waits, when the
 service verifies that its slots do not belong to that order. Use `plan` and
 `save` for a requested distinct whole menu; use `edit_slots` for ordinary
-changes to the existing independent menu. Leave the old
+changes to the existing independent menu. Saving a distinct whole menu with the
+current exact `menu_ref` automatically gives it a new identity when the old
+menu has order, cancellation, cooking or successor history, including within
+the same week. The old menu and orders remain preserved; an active or cancelled
+order alone does not require another confirmation to save the requested menu.
+Leave the old
 checkout, cart and payment untouched. If the service reports linked or
 unidentified protected work, follow that operation's status and recovery path;
 do not confirm payment merely to unlock planning. Reading back the saved menu
