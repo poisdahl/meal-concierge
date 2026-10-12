@@ -1302,11 +1302,15 @@ class OrderOperations:
                 availability=availability,
             )
             diagnostics = {"availability": availability} if availability else {}
-            if not slots or any(row.get("selectable") == 0 for row in availability):
+            # Available windows do not establish that the assembled goods are
+            # still in stock. Inspect a bound cart even when all dates have slots.
+            if (self.provider == "oda" and callable(inspect)) or not slots or any(row.get("selectable") == 0 for row in availability):
+                guidance = "Report observed current-cart stock notices before offering delivery. If checked dates have no selectable slots, unavailable is not the same as full; a purchasable product is not a delivery-date promise. Offer an authorized replacement or omission for this shop for stock notices; waiting is also an option for an observed delivery-delay restriction. Preserve recipe coverage and recurring settings. Re-list after an authorized cart change. Unknown does not mean no restriction; do not blame a historical item or infer that a stock notice caused an unavailable date."
                 diagnostics.update({"restriction_status": "unknown",
                     "restriction_reason": "inspection_unavailable",
-                    "next": "Some checked dates have no selectable slots. Unavailable is not the same as full, and a purchasable product is not a delivery-date promise. Report current observed cart restrictions before offering a later window. If an item is cited, offer an authorized replacement, omission for this shop, or waiting; example items are not an exhaustive blocker list. Preserve recipe coverage and recurring settings. Re-list delivery after an authorized cart change; never remove goods just to test a cause. Unknown does not mean no restriction; do not blame a historical item."})
-                if (self.provider == "oda" and callable(inspect) and snapshot is not None
+                    "cart_stock_status": "unknown",
+                    "next": guidance})
+                if (self.provider == "oda" and callable(inspect) and snapshot is not None and snapshot["items"]
                         and (request.get("_deadline") or float("inf")) - time.monotonic() > DELIVERY_SNAPSHOT_TIMEOUT):
                     # Keep a final snapshot budget after the browser stage, even
                     # when the caller supplied a shorter overall deadline.
@@ -1320,10 +1324,18 @@ class OrderOperations:
                                 diagnostics["restriction_reason"] = "cart_or_address_changed"
                             else:
                                 try:
-                                    warnings = inspect(snapshot, deadline=deadline)
-                                    diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
-                                    diagnostics["restriction_reason"] = "current_delivery_page"
-                                    diagnostics["cart_restrictions"] = warnings
+                                    observed = inspect(snapshot, deadline=deadline)
+                                    if observed.get("cart_stock_notices"):
+                                        diagnostics["cart_stock_status"] = "observed"
+                                        diagnostics["cart_stock_notices"] = observed["cart_stock_notices"]
+                                        diagnostics["cart_stock_source"] = "current_cart_page"
+                                        diagnostics["restriction_reason"] = "stock_notice_is_not_delivery_cause"
+                                        diagnostics["next"] = "The current cart has an observed stock/availability notice, even if delivery windows are selectable. Offer a suitable replacement or omission for this shop, preserving recipe coverage and recurring settings. Resolve it before selecting delivery, then re-list the windows. Do not claim this notice caused a full or unavailable date. Checkout still rechecks stock and the final total."
+                                    elif "cart_restrictions" in observed:
+                                        warnings = observed["cart_restrictions"]
+                                        diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
+                                        diagnostics["restriction_reason"] = "current_delivery_page"
+                                        diagnostics["cart_restrictions"] = warnings
                                 finally:
                                     # A changed cart can itself make inspection fail.
                                     # Compare even on that path; an unreadable check
@@ -1336,6 +1348,10 @@ class OrderOperations:
                                     if after != snapshot:
                                         diagnostics["restriction_status"] = "unknown"
                                         diagnostics.pop("cart_restrictions", None)
+                                        diagnostics["cart_stock_status"] = "unknown"
+                                        diagnostics.pop("cart_stock_notices", None)
+                                        diagnostics.pop("cart_stock_source", None)
+                                        diagnostics["next"] = guidance
                                         diagnostics["restriction_reason"] = "cart_or_address_changed" if after is not None else "inspection_unavailable"
                     except HouseholdError:
                         pass

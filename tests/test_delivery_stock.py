@@ -28,6 +28,7 @@ class DeliveryStockTests(unittest.TestCase):
         browser = object.__new__(OdaBrowser)
         browser._verify_checkout_account = mock.Mock(return_value=hashlib.sha256(b'1').hexdigest())
         browser._settle = mock.Mock()
+        browser._cart_surface = mock.Mock(return_value={"action": "continue"})
         events = []
         @contextmanager
         def inspection():
@@ -55,7 +56,7 @@ class DeliveryStockTests(unittest.TestCase):
             self.assertEqual(value['clicks'], [])
             return value['result']
         browser._eval = evaluate
-        self.assertEqual(browser.cart_delivery_restrictions(SNAPSHOT), [WARNING])
+        self.assertEqual(browser.cart_delivery_restrictions(SNAPSHOT), {"cart_restrictions": [WARNING]})
         self.assertEqual(events, ['inspection', CART_URL, DELIVERY_URL, 'original restored'])
         self.assertEqual(reads, 2)
         browser._settle.assert_called_once_with(0.25)
@@ -66,6 +67,7 @@ class DeliveryStockTests(unittest.TestCase):
                 browser = object.__new__(OdaBrowser)
                 browser._verify_checkout_account = mock.Mock(return_value=hashlib.sha256(b'2' if case == 'wrong_account' else b'1').hexdigest())
                 browser._settle = mock.Mock()
+                browser._cart_surface = mock.Mock(return_value={"action": "continue"})
                 restored = []
                 @contextmanager
                 def tab():
@@ -94,7 +96,7 @@ class DeliveryStockTests(unittest.TestCase):
             self.assertEqual(result['result']['ready'], expected)
             self.assertEqual(result['clicks'], [])
 
-    def app(self, directory, *, changed=None):
+    def app(self, directory, *, changed=None, selectable=False):
         store, provider, browser, app, _ = fixtures.CartPlanTests.app(directory, 'oda')
         original = provider.call
         count = 0
@@ -109,12 +111,68 @@ class DeliveryStockTests(unittest.TestCase):
                     result['items'][0]['quantity'] += 1
                 return result
             if tool == 'get_delivery_slots':
+                if selectable:
+                    return original(tool, args, **kwargs)
                 provider.calls.append((tool, args))
                 return {'slots': [], 'availability': {'date': '2026-10-13', 'total': 20, 'selectable': 0, 'unavailable': 20, 'full': 0}}
             return original(tool, args, **kwargs)
         provider.call = call
-        browser.cart_delivery_restrictions = mock.Mock(return_value=[WARNING])
+        browser.cart_delivery_restrictions = mock.Mock(return_value={"cart_restrictions": [WARNING]})
         return store, provider, browser, app
+
+    def test_selectable_windows_do_not_hide_current_cart_stock_notice(self):
+        with tempfile.TemporaryDirectory() as d:
+            store, provider, browser, app = self.app(d, selectable=True)
+            before = store.read()
+            notice = 'Laksefilet uten skinn er dessverre utsolgt'
+            browser.cart_delivery_restrictions.return_value = {'cart_stock_notices': [notice]}
+            result = app.handle({'operation': 'delivery', 'action': 'list'})
+            self.assertTrue(result['slots'])
+            self.assertEqual(result['cart_stock_status'], 'observed')
+            self.assertEqual(result['cart_stock_notices'], [notice])
+            self.assertEqual(result['cart_stock_source'], 'current_cart_page')
+            self.assertEqual(result['restriction_status'], 'unknown')
+            self.assertNotIn('cart_restrictions', result)
+            self.assertIn('before selecting delivery', result['next'])
+            self.assertIn('Do not claim', result['next'])
+            browser.cart_delivery_restrictions.assert_called_once()
+            self.assertEqual(store.read(), before)
+            self.assertFalse(any(t in ('manipulate_cart', 'select_delivery_slot') for t, _ in provider.calls))
+
+    def test_current_stock_notice_is_discarded_if_cart_changes_after_inspection(self):
+        with tempfile.TemporaryDirectory() as d:
+            _, provider, browser, app = self.app(d, selectable=True)
+            def inspect(*args, **kwargs):
+                provider._mutate_cart({'operations': [{'productId': '10', 'quantity': 1}]})
+                return {'cart_stock_notices': ['Current product er dessverre utsolgt']}
+            browser.cart_delivery_restrictions.side_effect = inspect
+            result = app.handle({'operation': 'delivery', 'action': 'list'})
+            self.assertEqual(result['cart_stock_status'], 'unknown')
+            self.assertNotIn('cart_stock_notices', result)
+            self.assertNotIn('cart_stock_source', result)
+            self.assertEqual(result['slots'], [])
+            self.assertTrue(result['availability_stale'])
+
+    def test_bound_cart_stock_notice_returns_before_delivery_navigation(self):
+        browser = object.__new__(OdaBrowser)
+        browser._verify_checkout_account = mock.Mock(return_value=hashlib.sha256(b'1').hexdigest())
+        browser._settle = mock.Mock()
+        restored = []
+        @contextmanager
+        def tab():
+            try:
+                yield
+            finally:
+                restored.append(True)
+        browser._inspection_tab = tab
+        browser._open = mock.Mock()
+        browser._eval = mock.Mock(return_value={'url': CART_URL, 'authenticated': True,
+            'items': [{'product_id': '10', 'quantity': 1}]})
+        notice = 'Laksefilet uten skinn er dessverre utsolgt'
+        browser._cart_surface = mock.Mock(return_value={'action': 'blocked', 'unavailable_message': notice})
+        self.assertEqual(browser.cart_delivery_restrictions(SNAPSHOT), {'cart_stock_notices': [notice]})
+        browser._open.assert_called_once_with(CART_URL)
+        self.assertEqual(restored, [True])
 
     def test_current_restriction_is_reported_before_selection_without_writes(self):
         with tempfile.TemporaryDirectory() as d:
@@ -210,7 +268,7 @@ class DeliveryStockTests(unittest.TestCase):
                     # Use the entire admitted browser window. The final two
                     # provider reads must still have their own reserved time.
                     clock[0] = kwargs['deadline']
-                    return [WARNING]
+                    return {"cart_restrictions": [WARNING]}
                 browser.cart_delivery_restrictions.side_effect = inspect
                 with mock.patch('order_operations.time.monotonic', side_effect=lambda: clock[0]):
                     result = app._delivery({'action': 'list', 'dates': ['2026-10-13'], '_deadline': limit})

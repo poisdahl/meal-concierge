@@ -99,7 +99,7 @@ class OrderFlowTests(unittest.TestCase):
                 return normalize_retail_delivery_slots(data)
             provider.call = slots
             warning = 'Noen av varene i handlekurven, f.eks. Såpe, er ikke tilgjengelige før 9. september 2026.'
-            browser.cart_delivery_restrictions = mock.Mock(return_value=[warning])
+            browser.cart_delivery_restrictions = mock.Mock(return_value={"cart_restrictions": [warning]})
             result = app.handle({'operation': 'delivery', 'action': 'list', 'dates': ['2026-09-08', '2026-09-09']})
             self.assertTrue(result['slots'])
             self.assertEqual(result['availability'][0]['unavailable'], 20)
@@ -115,7 +115,7 @@ class OrderFlowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store, provider, browser, app, _ = fixtures.CartPlanTests.app(directory, 'oda')
             provider.call = mock.Mock(return_value={'slots': []})
-            browser.cart_delivery_restrictions = mock.Mock(return_value=['notice'])
+            browser.cart_delivery_restrictions = mock.Mock(return_value={'cart_restrictions': ['notice']})
             for key in ('pending_checkout', 'pending_cart_change', 'pending_cancellation', 'order_change'):
                 with self.subTest(key=key), mock.patch.object(store, 'read', return_value={**store.read(), key: {'status': 'uncertain'}}):
                     result = app._delivery({'action': 'list', 'dates': ['2026-09-08']})
