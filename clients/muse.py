@@ -596,6 +596,9 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         if request.get("operation") == "native_cart_policy":
             return self._policy(request)
         action = request.get("action")
+        if (self.browser is not None and (request.get("operation") == "checkout"
+                or request.get("operation") == "orders" and action in {"cancel_prepare", "cancel_confirm", "cancel_reconcile"})):
+            return ProtectedMuseApplication.handle(self, request)
         if request.get("operation") == "products" and isinstance(action, str):
             if action in {"prepare", "get"}:
                 return self._prepare_or_read_products(request)
@@ -681,11 +684,19 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         return Application._delivery(self, request)
 
     def _store_readiness(self, checkout_payment=None):
-        return {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
-                "browser_check": {"status": "configured", "scope": "managed_products_unit_cart_and_delivery"}, "note": NATIVE_CART_GUIDANCE}
+        result = {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
+                  "browser_check": {"status": "configured", "scope": "managed_products_unit_cart_and_delivery"},
+                  "note": NATIVE_CART_GUIDANCE}
+        if self.browser is not None:
+            result["browser_check"].update(action_mode=self.browser.action_mode,
+                scope="managed_cart_delivery_and_original_native_purchase_approval")
+            result["payment_check"] = {"status": "unknown"}
+            result["note"] = NATIVE_BROWSER_GUIDANCE
+        return result
 
     def _user_guide(self):
-        return {**MuseApplication._user_guide(), "after_setup": NATIVE_CART_GUIDANCE}
+        return {**MuseApplication._user_guide(),
+                "after_setup": NATIVE_BROWSER_GUIDANCE if self.browser is not None else NATIVE_CART_GUIDANCE}
 
 
 def initialize(home: Path, provider: str, household: str, *, credential_name=None, operation_directory=None) -> None:
@@ -752,9 +763,12 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
     if accepted_account is not None:
         from muse_browser import account_links
         account_links(accepted)
+    native_financial = provider_transport == "browser_cart" and browser_action_mode == "native_approval"
     if native_read and (not protected or browser_directory is None or browser_task_id is None
-                        or browser_action_mode != "timed"):
+                        or browser_action_mode != "timed" and not native_financial):
         raise HouseholdError("Muse browser read mode requires the existing protected home and browser options, without an action mode")
+    if native_financial and accepted is None:
+        raise HouseholdError("Muse native purchase approval requires the existing accepted entire account set")
     if (browser_directory is None) != (browser_task_id is None):
         raise HouseholdError("Muse native browser requires both directory and original task identity")
     if browser_action_mode != "timed" and browser_directory is None:
@@ -778,7 +792,7 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
         if browser_directory is not None:
             if Path(browser_directory) != shop.operation_directory / "browser":
                 raise HouseholdError("Muse browser must use the canonical shared provider browser directory")
-            if not native_read:
+            if not native_read or native_financial:
                 from muse_browser import MuseBrowser
                 browser = MuseBrowser(browser_directory, browser_task_id, shop,
                                       action_mode=browser_action_mode)

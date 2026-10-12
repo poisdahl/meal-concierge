@@ -1787,6 +1787,16 @@ class OrderOperations:
             return self._cancel(action, cancellation_deadline, confirmation_id=str(request.get("confirmation_id") or ""))
         raise HouseholdError("unknown order action")
 
+    def _cancellation_order_unchanged(self, current, before):
+        native = getattr(self.browser, "cancellation_order_unchanged", None)
+        return native(current, before) if callable(native) else canonical(current) == canonical(before)
+
+    def _cancellation_completed(self, order_id, current):
+        native = getattr(self.browser, "native_cancellation_completed", None)
+        if getattr(self.browser, "native_receipt_reconciliation", False) and callable(native):
+            return native(order_id, current)
+        return str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}
+
     def _cancel(
         self,
         action: str,
@@ -1809,7 +1819,7 @@ class OrderOperations:
         if self._now() >= datetime.fromisoformat(pending["expires_at"]):
             raise HouseholdError("cancellation confirmation expired")
         current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
-        if pending["status"] != "awaiting_confirmation" or canonical(current) != canonical(pending["before"]):
+        if pending["status"] != "awaiting_confirmation" or not self._cancellation_order_unchanged(current, pending["before"]):
             raise HouseholdError("the order changed; ask for a new cancellation confirmation")
         if self.provider in {"oda", "mathem"}:
             require_order_binding(pending["browser"].get("binding"))
@@ -1851,12 +1861,16 @@ class OrderOperations:
                     before_click,
                     deadline=deadline,
                 )
-                tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
-                require_provider_identity(tracking, order_id, tracking=True)
+                if getattr(self.browser, "native_receipt_reconciliation", False):
+                    current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
+                    tracking = current["tracking"]
+                else:
+                    tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
+                    require_provider_identity(tracking, order_id, tracking=True)
+                    current = {"order": current["order"], "tracking": tracking}
                 if self.provider in {"oda", "mathem"}:
                     self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                     expected_binding=require_order_binding(pending["browser"].get("binding")))
-                current = {"order": current["order"], "tracking": tracking}
             except CancellationPreconditionError:
                 with self.store.locked() as state:
                     current_pending = state.get("pending_cancellation")
@@ -1869,7 +1883,7 @@ class OrderOperations:
                     if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
                         state["pending_cancellation"]["status"] = "uncertain"
                 raise
-            cancelled = str(tracking.get("status") or "").casefold() in {"cancelled", "canceled"}
+            cancelled = self._cancellation_completed(order_id, current)
             with self.store.locked() as state:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
                     raise HouseholdError("cancellation state changed while reconciling the order")
@@ -1883,7 +1897,9 @@ class OrderOperations:
                         self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
-                        "tracking_status": str(tracking.get("status") or "").casefold(),
+                        "tracking_status": None if getattr(self.browser, "native_receipt_reconciliation", False) else str(tracking.get("status") or "").casefold(),
+                        **({"merchant_evidence": {"status": current["order"]["status"], "source": current["order"]["source"]}}
+                           if getattr(self.browser, "native_receipt_reconciliation", False) else {}),
                         "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     }
@@ -1995,7 +2011,7 @@ class OrderOperations:
                 raise HouseholdError("cancellation has not reached reconciliation")
             order_id = pending["order_id"]
             current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
-            cancelled = str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}
+            cancelled = self._cancellation_completed(order_id, current)
             if self.provider in {"oda", "mathem"}:
                 self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                 expected_binding=require_order_binding(pending["browser"].get("binding")))
@@ -2012,7 +2028,9 @@ class OrderOperations:
                         self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
-                        "tracking_status": str((current.get("tracking") or {}).get("status") or "").casefold(),
+                        "tracking_status": None if getattr(self.browser, "native_receipt_reconciliation", False) else str((current.get("tracking") or {}).get("status") or "").casefold(),
+                        **({"merchant_evidence": {"status": current["order"]["status"], "source": current["order"]["source"]}}
+                           if getattr(self.browser, "native_receipt_reconciliation", False) else {}),
                         "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     }
@@ -4923,6 +4941,35 @@ class OrderOperations:
             return {**self._checkout_reconcile_unlocked(deadline, confirmation_id),
                     "bank_app_method_chosen": choice.get("chosen") is True}
 
+    def _finalize_confirmed_checkout(self, state, pending, order_id, tracking_status, *,
+                                     recovery_dispatched=False, owner_payment_completed=False,
+                                     merchant_evidence=None):
+        """Commit shared attribution and terminal journals after transport proof."""
+        state["pending_checkout"] = None
+        self._record_order_snapshot(state, pending, order_id)
+        terminal = {
+            "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
+            "recipe_delivery": self._purchase_delivery(state, order_id),
+            "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
+            **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
+            "payment": self._payment_evidence(tracking_status),
+            **({"owner_payment_completed": True} if owner_payment_completed else {}),
+            "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
+            "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
+                pending.get("menu"), pending.get("cart_plan")),
+            **({"menu_coverage": pending["summary"]["menu_coverage"]} if "menu_coverage" in pending["summary"] else {}),
+        }
+        if merchant_evidence is not None:
+            terminal["merchant_evidence"] = deepcopy(merchant_evidence)
+            terminal["payment"] = {**terminal["payment"], "source": "native_order_detail",
+                                   "provider_status": merchant_evidence["payment_status"]}
+        self._store_protected_result(state, pending["confirmation_id"], "checkout", terminal,
+            target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+        if pending.get("recovery"):
+            self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
+                target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+        return terminal
+
     def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "", *,
                             vipps_approval_completed: bool = False,
                             vipps_request_not_received: bool = False,
@@ -5193,6 +5240,19 @@ class OrderOperations:
         nondispatch_reader = getattr(self.browser, "checkout_nondispatch_evidence", None)
         nondispatch_evidence = (nondispatch_reader(pending, deadline=deadline)
                                if self.provider == "oda" and callable(nondispatch_reader) else None)
+        if getattr(self.browser, "native_receipt_reconciliation", False) and not nondispatch_evidence:
+            if vipps_approval_completed or vipps_request_not_received or owner_payment_completed:
+                raise HouseholdError("Muse native merchant receipt does not accept payment reports as proof")
+            evidence = self.browser.native_checkout_receipt(pending, deadline=deadline)
+            if evidence is None:
+                return {"confirmed": False, "confirmation_id": pending["confirmation_id"],
+                        "retry_allowed": False,
+                        "next": "Preserve the original native task. A click acknowledgement alone does not identify an accepted order; never submit again."}
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("checkout state changed while reconciling the native receipt")
+                return self._finalize_confirmed_checkout(state, pending, evidence["order_id"], None,
+                                                         merchant_evidence=evidence)
         confirmation_order_id = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
@@ -5617,27 +5677,8 @@ class OrderOperations:
                 raise HouseholdError("checkout state changed while reconciling the order")
             if confirmed:
                 order_id = str(order.get("orderNumber") or order.get("order_number") or order.get("id"))
-                state["pending_checkout"] = None
-                self._record_order_snapshot(state, pending, order_id)
-                terminal = {
-                    "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
-                    "recipe_delivery": self._purchase_delivery(state, order_id),
-                    "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
-                    **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
-                    "payment": self._payment_evidence(tracking_status),
-                    **({"owner_payment_completed": True} if owner_payment_completed else {}),
-                    "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
-                    "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
-                        pending.get("menu"), pending.get("cart_plan")),
-                    **({"menu_coverage": pending["summary"]["menu_coverage"]} if "menu_coverage" in pending["summary"] else {}),
-                }
-                self._store_protected_result(
-                    state, pending["confirmation_id"], "checkout", terminal,
-                    target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]),
-                )
-                if pending.get("recovery"):
-                    self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
-                        target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+                terminal = self._finalize_confirmed_checkout(state, pending, order_id, tracking_status,
+                    recovery_dispatched=recovery_dispatched, owner_payment_completed=owner_payment_completed)
             elif expired_unpaid or undispatched_retryable:
                 self._release_detached_checkout_usage(state, pending)
                 state["pending_checkout"] = None
