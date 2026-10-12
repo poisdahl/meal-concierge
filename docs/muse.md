@@ -706,6 +706,23 @@ using the same arguments as `respond`. It records unresolved native custody,
 including late financial endings, without refreshing old facts or authorizing
 replay. Do not call it while a task is still waiting or already has a completed
 response. Reconcile any financial outcome with the original confirmation.
+If a manual `provider_read` claim accidentally substituted the actual native child
+ID for the original service anchor, preserve it and every response byte. After the
+original request expires and its core `closed` record proves the waiter ended,
+`close-corrupt-read` can append a custody-only discarded-read ending. Its closed
+stdin must contain exactly `{"acceptance": <actual acceptance receipt>,
+"completion": <actual completed native metadata>}`. The accepted/completed child
+must match that corrupt claim; retain the genuine historical completion UTC.
+The command uses the same directory, request ID and original anchor arguments as
+`claim`. It returns `read_discarded_custody_closed:true`, never published facts.
+It supports only this demonstrated child-ID substitution on an ordinary read,
+and rejects valid claims, active waiters, actions, consumed permits and financial
+bindings. Original files remain unchanged and their hashes are checked on every
+later custody check. No old observation becomes usable; any further search needs
+a fresh ordinary request served by the installed producer. This is a trusted
+host attestation of the real child's ending, not authentication of the corrupt
+historical claim. Other claim corruption remains unresolved.
+
 Errors contain fixed `error.stage` and `error.category` values on stderr and a
 nonzero exit, without echoing private paths or observation values.
 
