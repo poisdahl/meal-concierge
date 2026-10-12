@@ -10,7 +10,7 @@ MCP_MENU_WIRE_BUDGET = 45_000
 MENU_PRESENTATION_GUIDANCE = {
     "when": "In the first message presenting this proposed, saved or revised meal plan, not only after shopping. State whether it is saved.",
     "include": "Give dish names, short descriptions, dates/portions and known active/total times. Credit each actual recipe publisher/author and available source link beside the dish; label adaptations. An internal collection is storage, not necessarily the author. If attribution is missing, say so; never invent it.",
-    "offer": "At a genuine handoff, ask one short question with relevant choices: prepare the shopping list and check food at home, change a dish, or show full ingredients and steps. Put choices in ordinary text even without dialog controls. If shopping is already requested, continue it instead of asking again. Honor plan-only, stop and declined steps; routine reads need no offer.",
+    "offer": "At a genuine handoff, ask one short question with relevant choices: prepare the shopping list and check food at home, change a dish, or show full ingredients and cooking steps. Put choices in ordinary text even without dialog controls. If shopping is already requested, continue it instead of asking again. Honor plan-only, stop and declined steps; routine reads need no offer.",
     "language": "Use the user's language. Say meal plan (måltidsplan in Norwegian); use ukemeny only for a genuinely weekly plan. Keep the offer short and do not repeat it on routine status reads.",
 }
 
