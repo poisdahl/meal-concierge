@@ -1162,6 +1162,12 @@ class OdaBrowser:
                 self._settle(0.25)
             else:
                 raise HouseholdError("delivery diagnostic browser cart is not verified")
+            # Reuse the cart blocker read used before checkout. It only reads
+            # and labels controls; no continuation or merchant action is taken.
+            # A stock notice is not evidence that a delivery date is blocked.
+            stock = self._cart_surface().get("unavailable_message")
+            if stock:
+                return {"cart_stock_notices": [stock]}
             # The observed stock-delay banner lives on delivery, not on cart.
             self._open(DELIVERY_URL)
             for _ in range(20):
@@ -1170,7 +1176,7 @@ class OdaBrowser:
                 if not isinstance(warnings, list) or len(warnings) > 5 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in warnings):
                     raise HouseholdError("Oda delivery restrictions are unavailable")
                 if result.get("ready") is True:
-                    return warnings
+                    return {"cart_restrictions": warnings}
                 self._settle(0.25)
         raise HouseholdError("Oda delivery restriction inspection did not finish rendering")
 
