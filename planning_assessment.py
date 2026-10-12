@@ -185,6 +185,21 @@ def workflow_status(state, *, now=None):
         next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation.", "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id")}
     elif change:
         next_action = {"operation": "orders", "action": "get", "reason": "Review the exact order being changed before continuing.", "order_id": change.get("order_id")}
+    elif menu.get("phase") == "ordered" and any(
+            j.get("trigger") == "after_purchase"
+            and j.get("status") in {"pending", "claimed", "sending", "uncertain"} for j in jobs):
+        job = next(j for j in jobs if j.get("trigger") == "after_purchase"
+                   and j.get("status") in {"pending", "claimed", "sending", "uncertain"})
+        from delivery_operations import legacy_held
+        reconcile = job.get("status") != "pending"
+        if not reconcile and legacy_held(state, job):
+            next_action = {"operation": "email", "action": "status",
+                           "reason": "Recipe email is paused, disabled or held. Keep it stopped; do not send or release it without an explicit new instruction."}
+        else:
+            next_action = {"operation": "email_sender", "action": "reconcile_order" if reconcile else "send_order",
+                           "provider": state["provider"], "order_id": order_id,
+                           "reason": ("Reconcile the original recipe email attempt; never resend an uncertain delivery. If no original executor receipt is available, inspect status rather than starting another send."
+                                      if reconcile else "Complete the existing authorized after-purchase recipe email through its managed sender. No further checkout is needed.")}
     elif (menu.get("phase") == "ordered" and not jobs and state.get("email_recipient")
           and ((state.get("recipe_delivery") or {}).get("sender_binding") or {}).get("timing") not in {"on_request", "after_purchase"}):
         next_action = {"operation": "email", "action": "schedule", "reason": "Schedule recipes for the exact confirmed order and delivery date."}
@@ -221,7 +236,7 @@ def _continuation(action, state, menu, cart):
     """Add executable argument shape without inventing input or authorization."""
     operation, name = action['operation'], action['action']
     arguments = {'action': name}
-    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment'):
+    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment', 'provider'):
         if action.get(key) is not None:
             arguments[key] = deepcopy(action[key])
     needs = []
