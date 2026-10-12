@@ -1,5 +1,7 @@
 """Exact stable meal slots and structural shopping comparisons (no providers)."""
 from copy import deepcopy
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 from typing import Any, Mapping
@@ -8,6 +10,103 @@ from core import HouseholdError
 from product_planner import menu_requirements
 
 MAX_PLANNING_MENUS = 2000
+
+
+def relative(menu):
+    return (menu.get("planning_scope") or {}).get("planning_mode") == "relative"
+
+
+def slot_day(slot):
+    return slot.get("day", slot.get("date"))
+
+
+def day_fields(day):
+    return {"day" if type(day) is int else "date": day}
+
+
+def past(slot, today):
+    value = slot_day(slot)
+    return isinstance(value, str) and value < today
+
+
+def checked_day(value, *, relative=False):
+    if relative:
+        if type(value) is not int or not 1 <= value <= 31:
+            raise HouseholdError("relative day must be an integer from one to 31")
+    else:
+        try:
+            if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise HouseholdError("meal date must be a canonical ISO date") from None
+    return value
+
+
+def day_number(value):
+    return value if type(value) is int else date.fromisoformat(value).toordinal()
+
+
+def within_storage(source, target, storage):
+    start, end = slot_day(source), slot_day(target)
+    gap = day_number(end) - day_number(start)
+    if gap <= 0 or gap > (storage.get("max_interval_days") if storage.get("max_interval_days") is not None else 3650000):
+        return False
+    if storage.get("use_by_date") is not None:
+        if type(start) is int:
+            raise HouseholdError("absolute use-by dates require a dated menu; use a verified storage interval for relative days")
+        return end <= storage["use_by_date"]
+    return True
+
+
+def bind_calendar(menu, first_meal_date, delivery, *, timezone_name="Europe/Oslo"):
+    """Derive a new revision; the original relative selection remains provenance."""
+    from service_common import menu_digest
+    if not relative(menu):
+        raise HouseholdError("calendar binding requires an unbound relative menu")
+    start = date.fromisoformat(checked_day(first_meal_date))
+    result = deepcopy(menu)
+    if menu.get("historical_slot_ids"):
+        raise HouseholdError("historical meals cannot be rebound to a new calendar")
+    first_day = min(checked_day(slot_day(s), relative=True) for s in result["slots"])
+    def bind_slot(slot):
+        day = checked_day(slot_day(slot), relative=True)
+        slot.pop("day", None)
+        slot["date"] = (start + timedelta(days=day - first_day)).isoformat()
+    for slot in result["slots"]:
+        bind_slot(slot)
+    for batch in result.get("batches", []) or ([result["batch"]] if result.get("batch") else []):
+        for slot in batch["leftovers"]:
+            bind_slot(slot)
+        batch["relative_spec_digest"] = batch["spec_digest"]
+        batch["spec_digest"] = digest({k: v for k, v in batch.items() if k != "spec_digest"})
+    scope = result["planning_scope"]
+    scope["relative_days"] = scope.pop("days")
+    scope["dates"] = sorted({s["date"] for s in result["slots"] if s["meal_type"] == "dinner"})
+    scope["planning_mode"] = "ad_hoc"
+    scope["relative_origin"] = True
+    result["week"] = min(s["date"] for s in result["slots"])
+    result["week"] = date.fromisoformat(result["week"]).strftime("%G-W%V")
+    result["schedule"] = schedule(result)
+    result["delivery_date"] = datetime.fromisoformat(delivery["slot"]["start_at"].replace("Z", "+00:00")).astimezone(ZoneInfo(timezone_name)).date().isoformat()
+    result["calendar_binding"] = {"source_menu_ref": menu_ref(menu), "timezone": timezone_name,
+        "first_meal_date": first_meal_date, "delivery": deepcopy(delivery)}
+    result["revision"] += 1
+    result["digest"] = menu_digest(result)
+    return result
+
+
+def require_calendar_eligible(state, menu):
+    """A pending purchase may not move recorded cooking or mixed history."""
+    if not relative(menu):
+        return
+    if menu.get("historical_slot_ids") or any(slot_outcome(state, menu, s) is not None for s in menu["slots"]):
+        raise HouseholdError("recorded relative meals require a new menu before calendar binding")
+    owners = {menu.get("slot_owners", {}).get(s["slot_id"], menu["menu_id"]) for s in menu["slots"]}
+    for owner in owners:
+        usage = state.get("recipe_usage", {}).get(owner, {})
+        if (usage.get("order_id") or usage.get("cooked_keys") or usage.get("not_cooked_keys")
+                or any(slot_outcome(state, {**menu, "menu_id": owner}, s) is not None for s in usage.get("slots", []))):
+            raise HouseholdError("mixed_history_owner: start a distinct menu to preserve recorded meal history")
 
 
 def canonical(value):
@@ -20,7 +119,7 @@ def digest(value):
 
 def slot_order(slot):
     from recipes import RECIPE_CATEGORIES
-    return slot["date"], RECIPE_CATEGORIES.index(slot["meal_type"]), slot["slot_id"]
+    return slot_day(slot), RECIPE_CATEGORIES.index(slot["meal_type"]), slot["slot_id"]
 
 
 def source_slot(menu, slot):
@@ -63,7 +162,7 @@ def bind_preparations(menu):
 
 
 def schedule(menu):
-    return [{"day": s["date"], "meal": recipe_for_slot(menu, s)["name"] + (" (rester)" if s.get("kind") == "leftover" else ""), "meal_type": s["meal_type"],
+    return [{"day": slot_day(s), "meal": recipe_for_slot(menu, s)["name"] + (" (rester)" if s.get("kind") == "leftover" else ""), "meal_type": s["meal_type"],
              "portions": deepcopy(s.get("portions", recipe_for_slot(menu, s).get("portions"))),
              "recipe_key": s["recipe_key"], "slot_id": s["slot_id"]} for s in menu["slots"]]
 

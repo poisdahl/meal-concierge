@@ -1083,14 +1083,37 @@ ID and revision even after cleanup or a later explicit recipe update.
 ## Deterministic weekly-menu planning
 
 `meal_concierge_menu(action="plan")` validates and materializes exact menus.
+
+Undated requests default to `planning_mode="relative"` and bounded distinct
+integer `days` (one to seven entries, indices 1–31). Calendar `week`, `dates` and
+`period` are mutually exclusive with relative days. Canonical relative slots
+carry `day`, never provisional ISO dates. The legacy menu `week` is only the
+history assessment week until binding; it is hidden from relative presentation.
+Add/edit slots with `day`, and replan with `remaining_days`. Gaps and preparation
+identities remain stable; elapsed calendar time does not make unbound days past.
+Absolute use-by evidence requires a dated plan; relative storage intervals retain
+their actual day gaps.
+
+Delivery selection returns `menu_start` context. The host uses existing intent or
+asks a concise first-meal choice alongside delivery; no universal hour cutoff is
+applied. `checkout prepare(first_meal_date="YYYY-MM-DD")` freezes a date preview
+in `summary.menu_schedule` for relative menu purchases. The date anchors the
+earliest retained meal day, preserving gaps between subsequent days. Missing intent returns
+`needs_input` before checkout staging. Existing dated plans remain unchanged.
+Successful merchant confirmation creates a dated revision preserving serving and
+preparation IDs and original planner provenance. Retries retain the first order
+snapshot and email job. Later delivery changes do not silently rewrite history
+or resend recipes.
+
 For the ordinary model-led path, use `planner_input.selection_mode="agent"`,
-chronological dates, and exactly one ordered candidate per cooking date. Accepted
-batch layouts determine leftover dates. The service preserves that order without
+chronological days (or explicit dates), and exactly one ordered candidate per
+cooking day. Accepted batch layouts determine leftover days. The service preserves that order without
 permutation ranking; exact references, readiness, configured hard restrictions
 and explicit strict targets still apply. Cooldown remains visible variety
 guidance in agent mode. Automatic discovery requires
 `selection_mode="ranked"` (also the omitted-field legacy behavior).
-The request contains a week and optional exact dates and portions.
+Explicit dated requests contain a week or exact dates/period; relative requests
+contain days. Both support explicit portions.
 Omit `candidates` for automatic discovery through the enabled local bank (including
 installed user/imported/bundled/collection entries) and selected enabled retailer. The server
 returns per-source statuses and bounded work counts in `plan.discovery`, loads
@@ -1099,9 +1122,8 @@ native detail/pagination contracts, shortfalls and unknowns never enable AI
 fallback. Installed packs do not require upstream API switches or sessions.
 A supplied bounded `candidates` list retains explicit-scope behavior. Each candidate must contain exactly one built-in
 `recipe_ref: {id, revision}` or one still-valid frozen `discovery_ref`; names,
-URLs, ordinals, copied recipe documents and “latest” are rejected. Dates omitted
-by the caller are derived once from the saved dinner/eat-day profile and then
-returned as exact ISO dates in the canonical request. The service derives one
+URLs, ordinals, copied recipe documents and “latest” are rejected. An undated request derives relative days from the saved dinner/eat-day profile.
+Only an explicitly weekly or dated request derives canonical ISO dates. The service derives one
 `as_of_date` in the saved household timezone. A supplied date must equal that
 current household date for the initial plan. That exact date is frozen in the
 handoff; ranking and save do not compare it with a later wall clock.

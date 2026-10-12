@@ -13,6 +13,7 @@ from typing import Any, Mapping
 import unicodedata
 
 from core import HouseholdError
+import menu_planning as mp
 from product_planner import normalize_available_ingredients, available_ingredient_matches
 from recipe_selection import candidate_groups, merge_family_usage
 from recipes import RecipeError, scale_recipe
@@ -767,7 +768,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
     scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
     request = scope if isinstance(scope, Mapping) else planner_request
-    if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" and len(request.get("dates", [])) < 7:
+    if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" and not request.get("relative_origin") and len(request_days(request)) < 7:
         explicit = set(request.get("strict_targets", []))
         targets = [target for target in targets if target in explicit]
     agent_mode = isinstance(request, Mapping) and request.get("selection_mode") == "agent"
@@ -800,14 +801,14 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         slot for slot in menu.get("slots", [])
         if isinstance(slot, Mapping) and slot.get("meal_type") == "dinner"
     ] if has_explicit_slots else []
-    dinner_by_date = {slot.get("date") if isinstance(slot.get("date"), str) else f"__undated_{index}": slot
+    dinner_by_date = {mp.slot_day(slot) if isinstance(mp.slot_day(slot), (str, int)) else f"__undated_{index}": slot
                       for index, slot in enumerate(reversed(dinner_slots))}
     selected_slots = [dinner_by_date[day] for day in sorted(dinner_by_date)] if has_explicit_slots else None
     selected_recipes = ([mp.recipe_for_slot(menu, slot, allow_stale=True) if slot.get("slot_id")
                          else recipes.get(slot.get("recipe_key")) for slot in selected_slots]
                         if has_explicit_slots else list(recipes.values()))
     selected_slots = selected_slots if has_explicit_slots else [None] * len(selected_recipes)
-    expected = len(request["dates"]) if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" else meals.get("dinner_days") if isinstance(meals, Mapping) else None
+    expected = len(request_days(request)) if isinstance(request, Mapping) and request.get("planning_mode") in {"ad_hoc", "relative"} else meals.get("dinner_days") if isinstance(meals, Mapping) else None
     if type(expected) is not int or len(selected_recipes) != expected or any(recipe is None for recipe in selected_recipes):
         return with_policy({"status": "unknown", "complete_menu": False, "results": [{
             "target": target, "status": "unknown",
@@ -830,7 +831,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 if not isinstance(selected_slot, Mapping):
                     continue
                 if planner_selection.get("planner_version") == PLANNER_VERSION:
-                    new_assessment_slots.add((selected_slot.get("date"), selected_slot.get("recipe_key")))
+                    new_assessment_slots.add((mp.slot_day(selected_slot), selected_slot.get("recipe_key")))
                 facets = selected_slot.get("dietary_facets")
                 if not (isinstance(facets, Mapping) and isinstance(facets.get("values"), list)
                         and isinstance(facets.get("vegetable_types"), list)
@@ -839,7 +840,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
                 key = selected_slot.get("recipe_key")
                 if isinstance(key, str):
                     planned_by_key[key] = deepcopy(dict(facets))
-                    if isinstance(selected_slot.get("date"), str) and isinstance(selected_slot.get("reference"), Mapping):
+                    if isinstance(mp.slot_day(selected_slot), (str, int)) and isinstance(selected_slot.get("reference"), Mapping):
                         planned_by_occurrence[(selected_slot["date"], key,
                                                mp.canonical(selected_slot["reference"]))] = deepcopy(dict(facets))
     def candidate_for(slot, recipe):
@@ -849,15 +850,15 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             if "dietary_facets" in slot:
                 if isinstance(slot["dietary_facets"], Mapping) and exact_snapshot:
                     facets = slot["dietary_facets"]
-            elif exact_snapshot and isinstance(slot.get("reference"), Mapping) and isinstance(slot.get("date"), str):
-                facets = planned_by_occurrence.get((slot["date"], slot.get("recipe_key"),
+            elif exact_snapshot and isinstance(slot.get("reference"), Mapping) and isinstance(mp.slot_day(slot), (str, int)):
+                facets = planned_by_occurrence.get((mp.slot_day(slot), slot.get("recipe_key"),
                                                     mp.canonical(slot["reference"])))
             elif slot.get("reference") is None and sum(
                     dinner.get("recipe_key") == slot.get("recipe_key") for dinner in dinner_slots) == 1:
                 facets = planned_by_key.get(slot.get("recipe_key"))
         elif not has_explicit_slots:
             facets = planned_by_key.get(recipe.get("recipe_key"))
-        return {"recipe": recipe, "date": slot.get("date") if isinstance(slot, Mapping) else None, "facts": {
+        return {"recipe": recipe, "date": mp.slot_day(slot) if isinstance(slot, Mapping) else None, "facts": {
         "dietary_facets": deepcopy(facets) if facets is not None else _derived_dietary(recipe),
         "leafy_green": (
             deepcopy(slot["leafy_green"])
@@ -867,7 +868,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             if isinstance(slot, Mapping) and "leafy_green" not in slot
             and slot.get("snapshot_digest") == mp.recipe_snapshot_digest(recipe)
             and slot.get("meal_type") == "dinner"
-            and (slot.get("date"), slot.get("recipe_key")) not in new_assessment_slots
+            and (mp.slot_day(slot), slot.get("recipe_key")) not in new_assessment_slots
             else {"source": "unavailable"} if has_explicit_slots else {"source": "heuristic"}
         ),
     }}
@@ -876,7 +877,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
         candidate = candidate_for(slot, recipe)
         if isinstance(slot, Mapping):
             sides = [side for side in menu["slots"] if isinstance(side, Mapping)
-                     and side.get("date") == slot.get("date") and side.get("meal_type") == "side"
+                     and mp.slot_day(side) == mp.slot_day(slot) and side.get("meal_type") == "side"
                      and side.get("served_with") == "dinner"]
             components = [candidate]
             for side in sides:
@@ -912,7 +913,7 @@ def _slot_reasons(
     active = candidate["facts"]["active_minutes"]
     low, high, maximum = _active_window(profile)
     value = active["value"]
-    weekday = date.fromisoformat(day).weekday() < 5
+    weekday = date.fromisoformat(day).weekday() < 5 if isinstance(day, str) else None
     if value is None:
         reasons.append(_reason("active_minutes:unknown", 0, "not scored"))
     elif low <= value <= high:
@@ -923,7 +924,7 @@ def _slot_reasons(
     elif value <= maximum:
         reasons.append(_reason(
             "active_minutes:weekday_outside_target" if weekday else "active_minutes:weekend_capacity",
-            -2 if weekday else 2,
+            -2 if weekday else 2 if weekday is False else 0,
             {"value": value, "range": [low, high], "weekday": weekday},
         ))
     else:
@@ -954,7 +955,7 @@ def _slot_reasons(
             recorded_weeks.append((monday, recorded_week))
         latest = max(recorded_weeks, default=None)
         last_week = latest[1] if latest is not None else None
-        if latest is not None:
+        if latest is not None and isinstance(day, str):
             last_monday = latest[0]
             weeks_since = max(0, (date.fromisoformat(day) - last_monday).days // 7)
         cooldown = usage.get("cooldown_weeks")
@@ -1133,11 +1134,34 @@ def _selection(
     return payload
 
 
+def request_days(request):
+    return request.get("days", request.get("dates", []))
+
+
+def request_week(request):
+    return request.get("week") or date.fromisoformat(request["as_of_date"]).strftime("%G-W%V")
+
+
 def planning_dates(value, today, default_count):
     """Resolve explicit dates or a bounded period; week remains a legacy anchor."""
-    mode = value.get("planning_mode", "weekly" if value.get("week") else "ad_hoc")
-    if not isinstance(mode, str) or mode not in {"weekly", "ad_hoc"}:
-        raise PlannerError("planning_mode must be weekly or ad_hoc")
+    mode = value.get("planning_mode", "weekly" if value.get("week") else "ad_hoc" if value.get("dates") is not None or value.get("period") is not None else "relative")
+    if not isinstance(mode, str) or mode not in {"weekly", "ad_hoc", "relative"}:
+        raise PlannerError("planning_mode must be weekly, ad_hoc or relative")
+    if mode == "relative":
+        if any(value.get(k) is not None for k in ("week", "dates", "period")):
+            raise PlannerError("relative planning uses days, not calendar week/dates/period")
+        days = value.get("days", list(range(1, default_count + 1)))
+        if (not isinstance(days, list) or not 1 <= len(days) <= MAX_DAYS
+                or any(type(d) is not int or not 1 <= d <= 31 for d in days)
+                or len(set(days)) != len(days)):
+            raise PlannerError("relative days must be one to seven distinct integers from one to 31")
+        try:
+            assessment_week = date.fromisoformat(today).strftime("%G-W%V")
+        except (TypeError, ValueError):
+            raise PlannerError("relative planning needs an ISO assessment date") from None
+        return mode, assessment_week, deepcopy(days)
+    if value.get("days") is not None:
+        raise PlannerError("days requires relative planning")
     dates = deepcopy(value.get("dates"))
     period = value.get("period")
     if period is not None:
@@ -1172,7 +1196,7 @@ def planning_dates(value, today, default_count):
 
 def period_profile(profile, request):
     """A short ad-hoc plan cannot certify a household's full-week quotas."""
-    if request.get("planning_mode") != "ad_hoc" or len(request["dates"]) >= 7:
+    if request.get("planning_mode") != "ad_hoc" or len(request_days(request)) >= 7:
         return profile
     result = deepcopy(profile)
     explicit = set(request.get("strict_targets", []))
@@ -1187,7 +1211,7 @@ def period_profile(profile, request):
 
 def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value).difference({
-        "week", "dates", "planning_mode", "period", "portions", "candidates", "strict_targets",
+        "week", "dates", "days", "planning_mode", "period", "portions", "candidates", "strict_targets",
         "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode", "selection_mode",
     }):
         raise PlannerError("planner input has unknown fields")
@@ -1209,6 +1233,9 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError(f"planner dates must contain one to {MAX_DAYS} dates")
     dates = []
     for raw in raw_dates:
+        if mode == "relative":
+            dates.append(raw)
+            continue
         if not isinstance(raw, str):
             raise PlannerError("planner dates must be ISO dates")
         try:
@@ -1262,14 +1289,13 @@ def _validate_request(value: Any, *, allow_discovery: bool = False) -> dict[str,
         raise PlannerError("as_of_date must be an ISO date") from exc
     return {
         "planner_version": PLANNER_VERSION,
-        **({"planning_mode": "ad_hoc"} if mode == "ad_hoc" else {}),
+        **({"planning_mode": mode} if mode in {"ad_hoc", "relative"} else {}),
         **({"selection_mode": selection_mode} if "selection_mode" in value else {}),
         **({"recurring_batch": deepcopy(value["recurring_batch"])} if value.get("recurring_batch") else {}),
         **({"prepared_portion_range": deepcopy(value["prepared_portion_range"])} if value.get("prepared_portion_range") is not None else {}),
         **({"meal_mode": value['meal_mode']} if value.get('meal_mode') is not None else {}),
         **({"available_ingredients": available} if available else {}),
-        "week": week,
-        "dates": dates,
+        **({"days": dates} if mode == "relative" else {"week": week, "dates": dates}),
         "portions": portions,
         "candidates": deepcopy(candidates),
         "strict_targets": strict,
@@ -1290,7 +1316,7 @@ def plan_week(
     dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     diet = profile.get("diet") if isinstance(profile, Mapping) else None
     agent_mode = checked.get("selection_mode") == "agent"
-    if not agent_mode and type(dinner_days) is int and len(checked["dates"]) == dinner_days and isinstance(diet, Mapping):
+    if not agent_mode and type(dinner_days) is int and len(request_days(checked)) == dinner_days and isinstance(diet, Mapping):
         saved_minima = {
             target for target in SAVED_MINIMUM_TARGETS
             if type(diet.get(target)) is int and diet[target] > 0
@@ -1413,7 +1439,7 @@ def plan_week(
     layout = checked.get('recurring_batch')
     if layout and layout['shortages']:
         return {**base_result, 'status': 'needs_input', 'issues': [{'code': 'batch_portion_shortfall', **layout}], 'selections': []}
-    source_dates = [s['source_date'] for s in layout['sources']] if layout else checked['dates']
+    source_dates = [s['source_date'] for s in layout['sources']] if layout else request_days(checked)
     count = len(source_dates)
     if agent_mode and source_dates != sorted(source_dates):
         raise PlannerError("agent selection cooking dates must be chronological")

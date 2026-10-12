@@ -49,7 +49,7 @@ def normalize(state, menu, value, today):
         raise HouseholdError('batch source meal type is invalid')
     if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
         raise HouseholdError('batch source must be one exact fresh recipe snapshot')
-    if source['date'] < today or mp.slot_outcome(state,menu,source) is not None:
+    if mp.past(source, today) or mp.slot_outcome(state,menu,source) is not None:
         raise HouseholdError('batch source must be an unrecorded current/future meal')
     recipe=mp.recipe_for_slot(menu, source)
     prepared=fraction(value['prepared_portions']); consumed=fraction(value['consumed_at_source'])
@@ -73,18 +73,12 @@ def normalize(state, menu, value, today):
     days=storage.get('max_interval_days'); use_by=storage.get('use_by_date')
     if days is None and use_by is None:
         raise HouseholdError('an explicit maximum interval or use-by date is required')
-    last=date.max
-    if days is not None:
-        if type(days) is not int or not 1 <= days <= 365:
-            raise HouseholdError('maximum interval must be an explicit bounded day count')
-        last=date.fromisoformat(source['date'])+timedelta(days=days)
+    if days is not None and (type(days) is not int or not 1 <= days <= 365):
+        raise HouseholdError('maximum interval must be an explicit bounded day count')
     if use_by is not None:
-        try:
-            parsed=date.fromisoformat(use_by)
-            if parsed.isoformat()!=use_by: raise ValueError()
-        except (ValueError,TypeError):
-            raise HouseholdError('use-by must be an exact ISO date') from None
-        last=min(last,parsed)
+        mp.checked_day(use_by)
+        if mp.relative(menu):
+            raise HouseholdError('absolute use-by dates require a dated menu')
     raw=value['leftovers']
     if not isinstance(raw,list) or not 1 <= len(raw) <= 6:
         raise HouseholdError('batch needs one to six exact dependent slots')
@@ -98,19 +92,19 @@ def normalize(state, menu, value, today):
         if target['slot_id'] in seen or target['slot_id']==source['slot_id']:
             raise HouseholdError('leftover target is duplicated or equals its source')
         seen.add(target['slot_id'])
-        if not source['date'] < target['date'] <= last.isoformat() or mp.slot_outcome(state,menu,target) is not None:
+        if not mp.within_storage(source, target, storage) or mp.slot_outcome(state,menu,target) is not None:
             raise HouseholdError('leftovers must be after their source, within the exact interval, and unrecorded')
         portions=fraction(item['portions']); available-=portions
         if available < 0:
             raise HouseholdError('leftover portions exceed exact source remainder')
-        dependents.append({'replaces_slot_id':target['slot_id'],'date':target['date'],'meal_type':target['meal_type'],'portions':rational(portions)})
+        dependents.append({'replaces_slot_id':target['slot_id'],**mp.day_fields(mp.slot_day(target)),'meal_type':target['meal_type'],'portions':rational(portions)})
     locks=set(state['menu_planning']['locks'].get(mp.lock_key(menu),[]))
     if locks & (seen|{source['slot_id']}):
         raise HouseholdError('batch component intersects explicit locks; unlock the component first')
     spec={'source_slot_id':source['slot_id'],'source_snapshot_digest':source['snapshot_digest'],
           'prepared_portions':rational(prepared),'consumed_at_source':rational(consumed),
           'unallocated_portions':rational(available),'suitability':deepcopy(suitability),'storage':deepcopy(storage),
-          'leftovers':sorted(dependents,key=lambda d:(d['date'],d['replaces_slot_id']))}
+          'leftovers':sorted(dependents,key=lambda d:(mp.slot_day(d),d['replaces_slot_id']))}
     spec['spec_digest']=mp.digest({'menu_ref':mp.menu_ref(menu),'spec':spec})
     for dependent in spec['leftovers']:
         dependent['slot_id']='slot_'+mp.digest({'spec':spec['spec_digest'],'target':dependent})[:32]
@@ -242,14 +236,14 @@ def recurring_layout(profile, eating_dates, *, relative=False):
         raise HouseholdError('Batch count must fit cooking days; batch mode requires every dish to be a batch.')
     low, _high = meals['prepared_portion_range']
     portions = meals['portions']
-    intervals = {day: [d for d in eating_dates if day < d < (cooking[i + 1] if i + 1 < len(cooking) else '9999-12-31')] for i, day in enumerate(cooking)}
+    intervals = {day: [d for d in eating_dates if day < d < (cooking[i + 1] if i + 1 < len(cooking) else (32 if type(day) is int else '9999-12-31'))] for i, day in enumerate(cooking)}
     # Repeated eating dates determine which cooking sessions need batches.
     batch_days = {day for day in cooking if intervals[day]}
     if not relative and len(batch_days) != count:
         raise HouseholdError('batch_dishes must match cooking sessions with dependent eating days; adjust cooking days or batch count explicitly')
     result = []
     for index, day in enumerate(cooking):
-        next_day = cooking[index + 1] if index + 1 < len(cooking) else '9999-12-31'
+        next_day = cooking[index + 1] if index + 1 < len(cooking) else (32 if type(day) is int else '9999-12-31')
         dependents = [d for d in eating_dates if day < d < next_day]
         is_batch = day in batch_days
         needed = portions * (1 + len(dependents))
@@ -263,7 +257,7 @@ def recurring_layout(profile, eating_dates, *, relative=False):
 
 def attach_recurring(menu, layout, resolved):
     original = deepcopy(menu['slots'])
-    by_day = {s['date']: s for s in original}
+    by_day = {mp.slot_day(s): s for s in original}
     candidates = {c['recipe_key']: c for c in resolved}
     batches = []
     for allocation in layout['sources']:
@@ -284,15 +278,15 @@ def attach_recurring(menu, layout, resolved):
                 'storage': {**guidance, 'source': guidance_source}, 'leftovers': [],
                 'recurring_settings': deepcopy(layout['accepted_settings'])}
         for day in allocation['eating_dates'][1:]:
-            slot = {**deepcopy(source), 'date': day, 'kind': 'leftover', 'source_slot_id': source['slot_id'],
+            slot = {**deepcopy(source), **mp.day_fields(day), 'kind': 'leftover', 'source_slot_id': source['slot_id'],
                     'portions': rational(Fraction(allocation['consumed_at_source']))}
             slot['slot_id'] = 'slot_' + mp.digest({'source': source['slot_id'], 'date': day})[:32]
             menu['slots'].append(slot)
-            spec['leftovers'].append({'slot_id': slot['slot_id'], 'date': day, 'portions': slot['portions'], 'meal_type': 'dinner'})
+            spec['leftovers'].append({'slot_id': slot['slot_id'], **mp.day_fields(day), 'portions': slot['portions'], 'meal_type': 'dinner'})
         spec['spec_digest'] = mp.digest(spec)
         batches.append(spec)
     menu['batches'] = batches
-    menu['slots'].sort(key=lambda s: s['date'])
+    menu['slots'].sort(key=lambda s: mp.slot_day(s))
     menu['planning_scope'] = {**menu.get('planning_scope', {}),
-        'dates': [s['date'] for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
+        ('days' if mp.relative(menu) else 'dates'): [mp.slot_day(s) for s in menu['slots']], 'portions': layout['accepted_settings']['portions']}
     menu['schedule'] = mp.schedule(menu)

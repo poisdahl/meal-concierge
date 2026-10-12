@@ -4,6 +4,8 @@ Application owns shared state and locks; these methods run on that same instance
 """
 from __future__ import annotations
 
+from planner import request_week as planner_request_week, request_days as planner_request_days
+
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import date, datetime, timedelta
@@ -176,7 +178,7 @@ class PlanningOperations:
             former = self._feedback_slot(snapshot, request.get("from_target"), allow_predecessor=True)
             latter = self._feedback_slot(snapshot, request.get("to_target"))
             current = snapshot["menu"]
-            if canonical(request["from_target"]["menu_ref"]) != canonical(current.get("supersedes")) or former["slot_id"] == latter["slot_id"] or former["recipe_key"] == latter["recipe_key"] or (former["date"], former["meal_type"]) != (latter["date"], latter["meal_type"]):
+            if canonical(request["from_target"]["menu_ref"]) != canonical(current.get("supersedes")) or former["slot_id"] == latter["slot_id"] or former["recipe_key"] == latter["recipe_key"] or (mp.slot_day(former), former["meal_type"]) != (mp.slot_day(latter), latter["meal_type"]):
                 raise HouseholdError("swap feedback requires one exact replaced predecessor slot and its successor on the same date/type")
             binding = {"from_target":deepcopy(request["from_target"]), "to_target":deepcopy(request["to_target"])}
             contributions = [{"recipe_key":former["recipe_key"], "direction":-1}, {"recipe_key":latter["recipe_key"], "direction":1}]
@@ -421,12 +423,14 @@ class PlanningOperations:
         today = self._household_today(state).isoformat()
         if request.get("as_of_date") not in {None, today}:
             raise HouseholdError("replan as_of_date changed; prepare again")
-        dates = request.get("remaining_dates")
-        if not isinstance(dates, list) or not 1 <= len(dates) <= 7 or any(not isinstance(day, str) for day in dates) or len(set(dates)) != len(dates):
+        if request.get("remaining_days") is not None and request.get("remaining_dates") is not None:
+            raise HouseholdError("use either remaining_days or remaining_dates, not both")
+        dates = request.get("remaining_days") if request.get("remaining_days") is not None else request.get("remaining_dates")
+        if not isinstance(dates, list) or not 1 <= len(dates) <= 7 or any(type(day) is not int if mp.relative(current) else not isinstance(day, str) for day in dates) or len(set(dates)) != len(dates):
             raise HouseholdError("remaining_dates must be one to seven exact distinct slot dates")
         dinners = [s for s in slots if s["meal_type"] == "dinner"]
-        by_date = {s["date"]: s for s in dinners}
-        if len(by_date) != len(dinners) or any(day not in by_date or day < today for day in dates):
+        by_date = {mp.slot_day(s): s for s in dinners}
+        if len(by_date) != len(dinners) or any(day not in by_date or mp.past(by_date[day], today) for day in dates):
             raise HouseholdError("remaining_dates must name exact current dinner slots on or after as_of_date")
         stored_locks = state["menu_planning"]["locks"].get(mp.lock_key(current), [])
         explicit = request.get("locked_slot_ids")
@@ -437,8 +441,8 @@ class PlanningOperations:
         for value in explicit:
             mp.slot_by_id(current, value)
         locks = sorted(set(stored_locks) | set(explicit))
-        historical = {s["slot_id"] for s in slots if s["date"] < today or mp.slot_outcome(state, current, s) == "cooked"}
-        replacing = [s for s in dinners if s["date"] in dates and s["slot_id"] not in historical and s["slot_id"] not in locks]
+        historical = {s["slot_id"] for s in slots if mp.past(s, today) or mp.slot_outcome(state, current, s) == "cooked"}
+        replacing = [s for s in dinners if mp.slot_day(s) in dates and s["slot_id"] not in historical and s["slot_id"] not in locks]
         if not replacing:
             return {"status": "needs_input", "reason": "no requested unlocked future slots"}
         carried = [s for s in slots if s not in replacing]
@@ -469,10 +473,15 @@ class PlanningOperations:
         planner_input = deepcopy(dict(planner_input))
         if planner_input.get("week", current["week"]) != current["week"]:
             raise HouseholdError("replan must remain in the exact source week")
-        replacement_dates = sorted(s["date"] for s in replacing)
+        replacement_dates = sorted(mp.slot_day(s) for s in replacing)
         if planner_input.get("dates", replacement_dates) != replacement_dates:
             raise HouseholdError("planner dates must exactly match the unlocked remaining dates")
-        planner_input.update({"week": current["week"], "dates": replacement_dates, "as_of_date": today, "alternatives": 1})
+        if mp.relative(current):
+            if planner_input.get("days", replacement_dates) != replacement_dates or any(k in planner_input for k in ("dates", "week", "period")):
+                raise HouseholdError("relative replan days must match the remaining slots")
+            planner_input.update({"planning_mode": "relative", "days": replacement_dates, "as_of_date": today, "alternatives": 1})
+        else:
+            planner_input.update({"week": current["week"], "dates": replacement_dates, "as_of_date": today, "alternatives": 1})
         if (current.get("planning_scope") or {}).get("planning_mode") == "ad_hoc":
             planner_input["planning_mode"] = "ad_hoc"
         # Replacements inherit complete frozen batch components, not the full
@@ -493,8 +502,8 @@ class PlanningOperations:
                     if any(a.denominator != 1 for a in amounts) or any(a != amounts[1] for a in dependents):
                         return {'status': 'needs_input', 'reason': 'This batch has fractional or unequal eating portions; retain it or explicitly request fresh replacements.',
                                 'prepared_portions': batch['prepared_portions'], 'consumed_at_source': batch['consumed_at_source']}
-                days = sorted([slot['date']] + [s['date'] for s in replacing if s.get('source_slot_id') == slot['slot_id']])
-                allocations.append({'source_date': slot['date'], 'eating_dates': days, 'batch': bool(batch),
+                days = sorted([mp.slot_day(slot)] + [mp.slot_day(s) for s in replacing if s.get('source_slot_id') == slot['slot_id']])
+                allocations.append({'source_date': mp.slot_day(slot), 'eating_dates': days, 'batch': bool(batch),
                     'prepared_portions': int(bp.fraction(batch['prepared_portions'])) if batch else slot['portions'],
                     'consumed_at_source': int(bp.fraction(batch['consumed_at_source'])) if batch else slot['portions']})
             covered = {d for a in allocations for d in a['eating_dates']}
@@ -533,7 +542,7 @@ class PlanningOperations:
                      "slots": sorted(deepcopy(carried) + replacement["slots"], key=mp.slot_order),
                      "historical_slot_ids": sorted(historical), "supersedes": mp.menu_ref(current),
                      "replan_selection": deepcopy(result["save_handoff"]),
-                     "planning_scope": deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({s["date"] for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})}
+                     "planning_scope": deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({mp.slot_day(s) for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})}
         if not carried and not historical:
             successor["planning_scope"] = deepcopy(effective)
         if replacement.get("available_ingredients"):
@@ -678,7 +687,7 @@ class PlanningOperations:
                 handoff = current.get(field)
                 selection = handoff.get("selection") if isinstance(handoff, Mapping) else None
                 for selected in selection.get("slots", []) if isinstance(selection, Mapping) else []:
-                    if (isinstance(selected, Mapping) and selected.get("date") == source["date"]
+                    if (isinstance(selected, Mapping) and selected.get("date") == mp.slot_day(source)
                             and selected.get("recipe_key") == source["recipe_key"]
                             and canonical(selected.get("reference")) == canonical(source["reference"])
                             and isinstance(selected.get("dietary_facets"), Mapping)):
@@ -688,7 +697,7 @@ class PlanningOperations:
                     break
         replaced = {d["replaces_slot_id"] for d in spec["leftovers"]}
         carried = [deepcopy(s) for s in current["slots"] if s["slot_id"] not in replaced]
-        leftover_slots = [{"slot_id":d["slot_id"], "date":d["date"], "meal_type":d["meal_type"], "kind":"leftover",
+        leftover_slots = [{"slot_id":d["slot_id"], **mp.day_fields(mp.slot_day(d)), "meal_type":d["meal_type"], "kind":"leftover",
             "source_slot_id":source["slot_id"], "portions":deepcopy(d["portions"]), "recipe_key":source["recipe_key"],
             "reference":deepcopy(source["reference"]), "snapshot_digest":source["snapshot_digest"],
             **({"leafy_green": deepcopy(source["leafy_green"])} if "leafy_green" in source else {}),
@@ -698,9 +707,9 @@ class PlanningOperations:
         successor = {"week":current["week"], "slots":sorted(carried+leftover_slots,key=mp.slot_order),
             "dishes":[], "salads":[], "batch":spec, "batches":deepcopy(bp.sources(current))+[spec], "supersedes":mp.menu_ref(current),
             "planner_selection":deepcopy(current.get("planner_selection")),
-            "historical_slot_ids":[s["slot_id"] for s in carried if s["date"]<today or mp.slot_outcome(state,current,s)=="cooked"],
+            "historical_slot_ids":[s["slot_id"] for s in carried if mp.past(s, today) or mp.slot_outcome(state,current,s)=="cooked"],
             "slot_owners":{s["slot_id"]:current.get("slot_owners",{}).get(s["slot_id"],current["menu_id"]) for s in carried}}
-        successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({s["date"] for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})
+        successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {"dates": sorted({mp.slot_day(s) for s in current["slots"]}), "portions": state["profile"]["meals"]["portions"]})
         if current.get("replan_selection"):
             successor["replan_selection"] = deepcopy(current["replan_selection"])
         successor["dishes"] = [deepcopy(mp.recipe_for_slot(current, slot)) for slot in mp.preparation_slots(current)
@@ -796,14 +805,10 @@ class PlanningOperations:
     def _add_slot(self, request):
         """Append one explicitly requested meal, retaining the exact current plan."""
         raw = request.get("slot_input")
-        if not isinstance(raw, Mapping) or set(raw) != {"date", "meal_type", "portions", "reference"}:
+        if not isinstance(raw, Mapping) or set(raw) not in ({"date", "meal_type", "portions", "reference"}, {"day", "meal_type", "portions", "reference"}):
             raise HouseholdError("add_slot needs slot_input={date,meal_type,portions,reference}")
-        try:
-            day = date.fromisoformat(raw["date"])
-            if day.isoformat() != raw["date"]:
-                raise ValueError()
-        except (ValueError, TypeError):
-            raise HouseholdError("slot date must be a canonical ISO date") from None
+        relative = "day" in raw
+        day_value = mp.checked_day(raw.get("day", raw.get("date")), relative=relative)
         if not isinstance(raw["meal_type"], str) or raw["meal_type"] not in RECIPE_CATEGORIES:
             raise HouseholdError("meal_type must be one of: " + ", ".join(RECIPE_CATEGORIES))
         portions = raw["portions"]
@@ -827,16 +832,22 @@ class PlanningOperations:
         elif request.get("menu_ref") is not None:
             raise HouseholdError("there is no current menu matching menu_ref")
         today = self._household_today(snapshot).isoformat()
-        if raw["date"] < today:
-            raise HouseholdError("new meals must be dated today or later")
-        year, week_number, _ = day.isocalendar()
-        week = f"{year}-W{week_number:02d}"
-        if current and current["week"] != week and (current.get("planning_scope") or {}).get("planning_mode") != "ad_hoc":
-            raise HouseholdError("the added meal must belong to the current menu week")
+        if relative:
+            if current is None or not mp.relative(current):
+                raise HouseholdError("ordinal additions require an existing relative menu")
+            week = current["week"]
+        else:
+            if mp.relative(current or {}):
+                raise HouseholdError("relative menus require day, not a calendar date")
+            if day_value < today:
+                raise HouseholdError("new meals must be dated today or later")
+            week = date.fromisoformat(day_value).strftime("%G-W%V")
+            if current and current["week"] != week and (current.get("planning_scope") or {}).get("planning_mode") != "ad_hoc":
+                raise HouseholdError("the added meal must belong to the current menu week")
         if current and len(current["slots"]) >= 31:
             raise HouseholdError("a menu supports at most 31 meal slots")
         if current and raw["meal_type"] == "dinner" and any(
-            slot["date"] == raw["date"] and slot["meal_type"] == "dinner" for slot in current["slots"]
+            mp.slot_day(slot) == day_value and slot["meal_type"] == "dinner" for slot in current["slots"]
         ):
             raise HouseholdError("that date already has a dinner; use replan to replace it, or add a side or another course")
         candidate = self._resolve_planner_candidates(
@@ -849,7 +860,7 @@ class PlanningOperations:
             raise HouseholdError("household ingredient rules block this addition: " + canonical(conflicts))
         recipe = self._materialize_menu({"week": week, "dishes": [{**reference, "portions": portions}]})["dishes"][0]
         slot = {"slot_id": "slot_" + mp.digest({"addition": signature, "key": key})[:32],
-                "date": raw["date"], "meal_type": raw["meal_type"], "portions": portions,
+                **mp.day_fields(day_value), "meal_type": raw["meal_type"], "portions": portions,
                 "recipe_key": recipe["recipe_key"], "reference": reference, "snapshot_digest": mp.digest(recipe)}
         recipe["preparation_slot_id"] = slot["slot_id"]
         successor = {"week": week, "dishes": [*deepcopy(current["dishes"] if current else []), recipe],
@@ -861,17 +872,17 @@ class PlanningOperations:
             successor["slot_owners"] = {s["slot_id"]: current.get("slot_owners", {}).get(s["slot_id"], current["menu_id"])
                                         for s in current["slots"]}
             successor["historical_slot_ids"] = sorted(s["slot_id"] for s in current["slots"]
-                if s["date"] < today or mp.slot_outcome(snapshot, current, s) == "cooked")
+                if mp.past(s, today) or mp.slot_outcome(snapshot, current, s) == "cooked")
             for field in ("batches", "batch", "available_ingredients", "notes"):
                 if field in current:
                     successor[field] = deepcopy(current[field])
             if handoff := current.get("planner_selection") or current.get("replan_selection"):
                 successor["replan_selection"] = deepcopy(handoff)
         scope = (current.get("planning_scope") or (current.get("planner_selection") or {}).get("request")) if current else None
-        dinner_dates = sorted({s["date"] for s in successor["slots"] if s["meal_type"] == "dinner"})
+        dinner_dates = sorted({mp.slot_day(s) for s in successor["slots"] if s["meal_type"] == "dinner"})
         successor["planning_scope"] = deepcopy(scope) if scope is not None else {"planning_mode": "ad_hoc", "dates": dinner_dates, "portions": portions}
         if raw["meal_type"] == "dinner":
-            successor["planning_scope"]["dates"] = sorted(set(successor["planning_scope"].get("dates", [])) | {raw["date"]})
+            successor["planning_scope"]["days" if relative else "dates"] = sorted(set(planner_request_days(successor["planning_scope"])) | {day_value})
         successor["schedule"] = mp.schedule(successor)
         before = deepcopy(current) if current else {"week": week, "dishes": [], "salads": []}
         before["historical_slot_ids"] = successor["historical_slot_ids"]
@@ -927,13 +938,15 @@ class PlanningOperations:
         successor.pop("order_id", None)
         successor["supersedes"] = mp.menu_ref(current)
         slots = successor["slots"]
-        historical = {s["slot_id"] for s in current["slots"] if s["date"] < today or mp.slot_outcome(snapshot, current, s) == "cooked"}
+        historical = {s["slot_id"] for s in current["slots"] if mp.past(s, today) or mp.slot_outcome(snapshot, current, s) == "cooked"}
         locks = set(snapshot["menu_planning"]["locks"].get(mp.lock_key(current), []))
         created = {}
         changed = set()
         added = []
 
         def checked_day(value):
+            if mp.relative(current):
+                return mp.checked_day(value, relative=True)
             try:
                 parsed = date.fromisoformat(value)
                 if parsed.isoformat() != value or value < today or ((current.get("planning_scope") or {}).get("planning_mode") != "ad_hoc" and parsed.isocalendar()[:2] != date.fromisoformat(current["slots"][0]["date"]).isocalendar()[:2]):
@@ -980,7 +993,7 @@ class PlanningOperations:
                     continue
                 for rows in (selection.get("slots"), selection.get("source_slots")):
                     for selected in rows if isinstance(rows, list) else []:
-                        if (isinstance(selected, Mapping) and selected.get("date") == slot["date"]
+                        if (isinstance(selected, Mapping) and selected.get("date") == mp.slot_day(slot)
                                 and selected.get("recipe_key") == slot["recipe_key"]
                                 and isinstance(selected.get("reference"), Mapping)
                                 and canonical(selected.get("reference")) == canonical(slot.get("reference"))
@@ -989,7 +1002,7 @@ class PlanningOperations:
             return None
 
         def fresh_slot(edit, index, *, old=None, frozen_recipe=None):
-            day = checked_day(edit.get("date", old["date"] if old else None))
+            day = checked_day(edit.get("day", edit.get("date", mp.slot_day(old) if old else None)))
             meal_type = checked_type(edit.get("meal_type", old["meal_type"] if old else None))
             portions = checked_portions(edit.get("portions", old["portions"] if old else None))
             if frozen_recipe is None:
@@ -1005,7 +1018,7 @@ class PlanningOperations:
                 if conflicts := [finding for finding in assess(snapshot["profile"], recipe, recipe=True) if finding["blocked"]]:
                     raise HouseholdError("household ingredient rules block this meal: " + canonical(conflicts))
             slot_id = "slot_" + mp.digest({"edit": signature, "index": index})[:32]
-            slot = {"slot_id": slot_id, "date": day, "meal_type": meal_type, "portions": portions,
+            slot = {"slot_id": slot_id, **mp.day_fields(day), "meal_type": meal_type, "portions": portions,
                     "recipe_key": recipe["recipe_key"], "reference": reference, "snapshot_digest": mp.digest(recipe)}
             served_with = checked_served_with(edit.get("served_with", old.get("served_with") if old else None), meal_type)
             if served_with is not None:
@@ -1036,16 +1049,18 @@ class PlanningOperations:
             slots.remove(slot)
 
         for index, edit in enumerate(edits):
+            if ("date" in edit and mp.relative(current)) or ("day" in edit and not mp.relative(current)):
+                raise HouseholdError("use day for relative menus and date for dated menus")
             action = edit.get("action")
             if not isinstance(action, str):
                 raise HouseholdError("edit action must be add, replace, remove or move")
             if action == "add":
                 if "reference" in edit:
-                    if set(edit).difference({"action", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"}):
+                    if set(edit).difference({"action", "day", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"}):
                         raise HouseholdError("fresh add has unknown fields")
                     fresh_slot(edit, index)
                 else:
-                    if set(edit).difference({"action", "date", "meal_type", "portions", "source_slot_id", "source_edit_index", "served_with"}):
+                    if set(edit).difference({"action", "day", "date", "meal_type", "portions", "source_slot_id", "source_edit_index", "served_with"}):
                         raise HouseholdError("linked add has unknown fields")
                     source_id = edit.get("source_slot_id")
                     if "source_edit_index" in edit:
@@ -1060,13 +1075,13 @@ class PlanningOperations:
                     if (source.get("kind") == "leftover" or source_id in historical
                             or is_current_source and mp.slot_outcome(snapshot, current, source) is not None):
                         raise HouseholdError("linked source must be an unrecorded future preparation")
-                    day = checked_day(edit.get("date"))
+                    day = checked_day(edit.get("day", edit.get("date")))
                     meal_type = checked_type(edit.get("meal_type", source["meal_type"]))
                     portions = checked_portions(edit.get("portions"))
-                    if day <= source["date"] or meal_type != source["meal_type"]:
+                    if day <= mp.slot_day(source) or meal_type != source["meal_type"]:
                         raise HouseholdError("linked serving must follow its preparation and have the same meal type")
                     slot = {"slot_id": "slot_" + mp.digest({"edit": signature, "index": index})[:32],
-                            "date": day, "meal_type": meal_type, "portions": portions,
+                            **mp.day_fields(day), "meal_type": meal_type, "portions": portions,
                             "kind": "leftover", "source_slot_id": source_id,
                             "recipe_key": source["recipe_key"], "reference": deepcopy(source["reference"]),
                             "snapshot_digest": source["snapshot_digest"]}
@@ -1081,12 +1096,12 @@ class PlanningOperations:
                     added.append(slot)
             elif action in {"remove", "replace", "move"}:
                 allowed = {"action", "slot_id"} if action == "remove" else (
-                    {"action", "slot_id", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"} if action == "replace" else
-                    {"action", "slot_id", "date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with"})
+                    {"action", "slot_id", "day", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"} if action == "replace" else
+                    {"action", "slot_id", "day", "date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with"})
                 if set(edit).difference(allowed):
                     raise HouseholdError("slot edit has unknown fields")
                 slot = mp.slot_by_id(successor, edit.get("slot_id"))
-                if slot["slot_id"] in historical or slot["slot_id"] in locks or slot["date"] < today:
+                if slot["slot_id"] in historical or slot["slot_id"] in locks or mp.past(slot, today):
                     raise HouseholdError("historical or locked meal slots are immutable")
                 if slot["slot_id"] in changed:
                     raise HouseholdError("one edit may change each existing slot only once")
@@ -1094,7 +1109,7 @@ class PlanningOperations:
                 if action in {"replace", "move"} and slot.get("kind") == "leftover":
                     raise HouseholdError("replace or move a linked serving by removing it and adding an exact new serving")
                 old = deepcopy(slot)
-                if action == "move" and not any(field in edit for field in ("date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with")):
+                if action == "move" and not any(field in edit for field in ("day", "date", "meal_type", "portions", "leafy_green", "dietary_facets", "served_with")):
                     raise HouseholdError("move needs a changed date, type, portions or assessment")
                 frozen_recipe = deepcopy(mp.recipe_for_slot(successor, slot)) if action == "move" else None
                 if inherited := legacy_facets(slot):
@@ -1111,10 +1126,10 @@ class PlanningOperations:
 
         if not slots or len(slots) > 31:
             raise HouseholdError("edited menu needs one to 31 meal slots")
-        dinner_dates = [s["date"] for s in slots if s["meal_type"] == "dinner"]
+        dinner_dates = [mp.slot_day(s) for s in slots if s["meal_type"] == "dinner"]
         if len(dinner_dates) != len(set(dinner_dates)):
             raise HouseholdError("a date already has a dinner; add a side or another course")
-        if any(s.get("served_with") == "dinner" and s["date"] not in dinner_dates for s in slots):
+        if any(s.get("served_with") == "dinner" and mp.slot_day(s) not in dinner_dates for s in slots):
             raise HouseholdError("a dinner side needs a dinner on the same date")
         slot_ids = {s["slot_id"] for s in slots}
         if any(s.get("source_slot_id") not in slot_ids for s in slots if s.get("kind") == "leftover"):
@@ -1156,13 +1171,8 @@ class PlanningOperations:
                 continue
             if not dependents:
                 continue
-            last = date.max
             prior_storage = deepcopy(old_batch["storage"]) if old_batch else {"basis": "unknown"}
-            if prior_storage.get("max_interval_days") is not None:
-                last = date.fromisoformat(source["date"]) + timedelta(days=prior_storage["max_interval_days"])
-            if prior_storage.get("use_by_date") is not None:
-                last = min(last, date.fromisoformat(prior_storage["use_by_date"]))
-            if any(s["date"] <= source["date"] or s["date"] > last.isoformat() for s in dependents):
+            if any(not mp.within_storage(source, s, prior_storage) for s in dependents):
                 raise HouseholdError("linked serving dates exceed their preparation or recorded storage interval")
             total = bp.fraction(source["portions"]) + sum((bp.fraction(s["portions"]) for s in dependents), Fraction())
             batch = {"source_slot_id": source["slot_id"], "source_snapshot_digest": source["snapshot_digest"],
@@ -1170,7 +1180,7 @@ class PlanningOperations:
                      "unallocated_portions": bp.rational(Fraction()),
                      "suitability": {"source": "unassessed", "value": "unknown"},
                      "storage": {"basis": "unknown"},
-                     "leftovers": [{"replaces_slot_id": s["slot_id"], "date": s["date"], "meal_type": s["meal_type"],
+                     "leftovers": [{"replaces_slot_id": s["slot_id"], **mp.day_fields(mp.slot_day(s)), "meal_type": s["meal_type"],
                                     "portions": bp.rational(bp.fraction(s["portions"])), "slot_id": s["slot_id"]} for s in dependents]}
             batch["spec_digest"] = mp.digest(batch)
             successors.append(batch)
@@ -1182,7 +1192,7 @@ class PlanningOperations:
                                     for s in slots if s["slot_id"] in {v["slot_id"] for v in current["slots"]}}
         successor["schedule"] = mp.schedule(successor)
         successor["planning_scope"] = deepcopy(current.get("planning_scope") or (current.get("planner_selection") or {}).get("request") or {})
-        successor["planning_scope"]["dates"] = sorted(set(dinner_dates))
+        successor["planning_scope"]["days" if mp.relative(successor) else "dates"] = sorted(set(dinner_dates))
         expected = (snapshot.get("profile") or {}).get("meals", {}).get("dinner_days")
         successor["weekly_plan_complete"] = successor["planning_scope"].get("planning_mode") != "ad_hoc" and type(expected) is int and expected > 0 and len(dinner_dates) == expected
         if len(canonical(successor).encode()) > MAX_MENU_BYTES or len(menu_email_html(successor).encode()) > MAX_EMAIL_HTML_BYTES:
@@ -1330,7 +1340,7 @@ class PlanningOperations:
         self, value: Any, state: Mapping[str, Any], *, anchor_current_date: bool
     ) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value).difference({
-            "week", "dates", "planning_mode", "period", "portions", "candidates", "strict_targets",
+            "week", "dates", "days", "planning_mode", "period", "portions", "candidates", "strict_targets",
             "cooldown_overrides", "alternatives", "as_of_date", "available_ingredients", "recurring_batch", "prepared_portion_range", "meal_mode", "selection_mode",
         }):
             raise PlannerError("planner input has unknown fields")
@@ -1360,7 +1370,7 @@ class PlanningOperations:
         week = validate_week(week)
         if dates is None:
             dates = self._default_planner_dates(week, profile)
-        if not isinstance(dates, list) or not all(isinstance(d, str) for d in dates):
+        if not isinstance(dates, list) or not all(type(d) is int if planning_mode == "relative" else isinstance(d, str) for d in dates):
             raise PlannerError('planner dates must be ISO dates')
         selection_mode = value.get("selection_mode", "ranked")
         if not isinstance(selection_mode, str) or selection_mode not in {"agent", "ranked"}:
@@ -1384,20 +1394,19 @@ class PlanningOperations:
                 raise PlannerError('prepared_portion_range must be two ordered positive portion counts')
             profile = deepcopy(profile)
             profile['meals']['prepared_portion_range'] = override
-        layout = bp.recurring_layout(profile, dates, relative=planning_mode == "ad_hoc")
+        layout = bp.recurring_layout(profile, dates, relative=planning_mode in {"ad_hoc", "relative"})
         if layout and value.get('portions', meals['portions']) != meals['portions']:
             raise PlannerError('recurring batch consumption must match accepted profile portions; update that explicit setting or use fresh dates')
         if value.get('recurring_batch') is not None and canonical(layout) != canonical(value['recurring_batch']):
             raise PlannerError('recurring batch settings changed; plan again')
         return {
-            **({'planning_mode': 'ad_hoc'} if planning_mode == 'ad_hoc' else {}),
+            **({'planning_mode': planning_mode} if planning_mode in {'ad_hoc', 'relative'} else {}),
             **({'recurring_batch': layout} if layout else {}),
             **({'prepared_portion_range': deepcopy(override)} if override is not None else {}),
             **({'meal_mode': mode} if mode is not None else {}),
             **({"selection_mode": selection_mode} if "selection_mode" in value else {}),
             **({"available_ingredients": available} if available else {}),
-            "week": week,
-            "dates": dates,
+            **({"days": dates} if planning_mode == "relative" else {"week": week, "dates": dates}),
             "portions": value.get("portions", meals.get("portions")),
             "candidates": deepcopy(value.get("candidates")),
             "strict_targets": deepcopy(value.get("strict_targets", [])),
@@ -1509,12 +1518,12 @@ class PlanningOperations:
                 "recipe_key": key,
                 "dedupe_key": recipe_key(recipe),
                 "content_digest": hashlib.sha256(canonical(recipe).encode()).hexdigest(),
-                "usage": self._usage_summary(state, key, request["week"]),
+                "usage": self._usage_summary(state, key, planner_request_week(request)),
                 "facts": supplied_facts,
                 "supplied_facts": supplied_facts,
                 "materialization_error": materialization_error,
             })
-            resolved[-1]["usage"] = self._planner_family_usage(resolved[-1], state, request["week"], history_index)
+            resolved[-1]["usage"] = self._planner_family_usage(resolved[-1], state, planner_request_week(request), history_index)
         return resolved
 
     @staticmethod
@@ -1542,7 +1551,7 @@ class PlanningOperations:
         index = self._planner_history_index(state)
         for candidate in resolved:
             item = deepcopy(dict(candidate))
-            item["usage"] = self._planner_family_usage(item, state, request["week"], index)
+            item["usage"] = self._planner_family_usage(item, state, planner_request_week(request), index)
             self._planner_feedback(item, state, request["as_of_date"], feedback)
             refreshed.append(item)
         profile = state.get("profile")
@@ -1689,20 +1698,22 @@ class PlanningOperations:
                 "reference": deepcopy(slot.get("reference")),
             })
         menu = self._materialize_menu({
-            "week": handoff["request"]["week"],
+            "week": planner_request_week(handoff["request"]),
             "dishes": dishes,
             "salads": [],
             "schedule": schedule,
         }, trusted_snapshots=True)
         menu["slots"] = [{
-            "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": slot["date"]})[:32],
-            "date": slot["date"], "meal_type": "dinner", "portions": slot["portions"], "recipe_key": slot["recipe_key"],
+            "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": mp.slot_day(slot)})[:32],
+            **mp.day_fields(mp.slot_day(slot)), "meal_type": "dinner", "portions": slot["portions"], "recipe_key": slot["recipe_key"],
             "reference": deepcopy(slot["reference"]), "snapshot_digest": mp.digest(recipe),
             "dietary_facets": deepcopy(slot["dietary_facets"]),
             "leafy_green": deepcopy(slot["leafy_green"]),
         } for slot, recipe in zip(slots, menu["dishes"], strict=True)]
-        if handoff["request"].get("planning_mode") == "ad_hoc":
-            menu["planning_scope"] = {k: deepcopy(handoff["request"][k]) for k in ("planning_mode", "dates", "portions", "strict_targets")}
+        if handoff["request"].get("planning_mode") in {"ad_hoc", "relative"}:
+            menu["planning_scope"] = {k: deepcopy(handoff["request"][k]) for k in ("planning_mode", "dates", "days", "portions", "strict_targets") if k in handoff["request"]}
+            if mp.relative(menu):
+                menu["planning_scope"]["assessment_week"] = menu["week"]
             menu["planning_scope"]["selection_mode"] = handoff["request"].get("selection_mode", "ranked")
         if handoff['request'].get('recurring_batch'):
             menu["planning_scope"] = {
@@ -4779,7 +4790,8 @@ class PlanningOperations:
                 # A new week's explicitly requested shop may start in an empty
                 # cart; edits within a shopping week retain manual-removal fences.
                 fresh_empty_start = (not first_live and bool(prior_id) and prior_id != menu_ref["menu_id"]
-                                     and bool(prior_week) and bool(current_week) and prior_week != current_week)
+                                     and ((mp.relative(state.get("menu") or {}) and not state["menu"].get("supersedes"))
+                                          or (not mp.relative(state.get("menu") or {}) and bool(prior_week) and bool(current_week) and prior_week != current_week)))
                 current = self._new_cart_plan(
                     menu_ref, first_live, first_names, requirements, requirement_names,
                     start_as_extra, previous=current if isinstance(current, Mapping) else None,
