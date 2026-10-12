@@ -453,9 +453,11 @@ class ProducerCLITests(unittest.TestCase):
     def test_another_unresolved_read_still_blocks_after_corrupt_read_closure(self):
         self.corrupt_read()
         self.assertEqual(self.close_corrupt().returncode, 0)
-        self.request("provider_read", READ_PAYLOAD, seconds=0.5)
-        self.assertEqual(self.run_cli("claim").returncode, 0)
-        self.worker.join(2)
+        # A real producer subprocess must start before the read expires.
+        self.request("provider_read", READ_PAYLOAD, seconds=5)
+        claimed = self.run_cli("claim")
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.worker.join(7)
         with self.assertRaises(HouseholdError):
             with self.bridge.custody():
                 pass
