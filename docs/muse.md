@@ -1041,3 +1041,57 @@ the runner and any waiting CLI are gone before releasing that home or removing
 its stale socket. Keep the household data and first request/response/output
 evidence. A missing native output or vanished parent does not establish that the
 foreground service stopped; reconcile the original execution before restarting.
+
+
+## Native cart with purchase approval
+
+The existing `browser_cart` runner can explicitly compose its original native
+provider with the financial adapter using `--browser-action-mode native_approval`
+and `--accepted-account /absolute/original-account-set.json`. Read-only mode and
+the default timed cart runner remain nonfinancial. Keep the same home, shared
+operation directory and task anchor; first reconcile existing custody and stop
+only the original owned runner when a restart is necessary.
+
+Use the ordinary manual `checkout.prepare`, `checkout.confirm` and
+`checkout.reconcile` JSON requests. The shared fresh checkout journal binds the
+complete cart, delivery, amounts, account, actual checkout address and saved
+card. Native account rows need no invented selected-address marker: the actual
+final checkout address must match exactly one row in the complete account set.
+The delegated original native child must receive genuine purchase approval.
+A clicked acknowledgement alone cannot attribute an order or authorize replay.
+For the actual completed purchase task, retain literal facts with exactly
+`dispatch: "clicked_once"`, `reference` (the independently visible new order
+reference), and `order_url` (its actual ordinary order-detail href). Preserve its
+raw acceptance and same-child completion metadata through the existing producer.
+Missing reference or an uncertain original task remains pending.
+
+Reconciliation independently reads that exact order and requires complete goods,
+separately observed package quantities, the literal `Betalt` payment badge, a
+complete empty payment-warning section, matching observed total/delivery, and a
+fresh receipt/account/address binding. The original absolute slot remains frozen;
+fresh relative labels use their actual host observation date, and explicit year
+contradictions are rejected. Yearless receipt text remains yearless evidence.
+Combined receipt names retain every
+variant, package and brand field; the matcher does not invent title/subtitle
+splits or accept a generic name. Tracking and bank authorization/capture remain
+unknown. Shared snapshots, menu attribution and protected results record the
+merchant proof and make repeated reconciliation idempotent.
+
+Cancellation uses the normal Home confirmed-order menu and proven nonfinal
+preview. For native `cancellation_review`, add `entry` with exactly `url`,
+`order_url`, `reference`, `menu_control`, and `preview_control`. Home must be
+`https://oda.com/no/`; at least one actually observed link/reference must identify
+the same order, and any supplied value must agree. Controls contain their literal
+`label` and boolean `enabled`; preview is `Kanseller bestillingen`, distinct from
+final `Kanseller bestillingen min`. Preserve the existing independently bound
+receipt and fully reviewed/dismissed dialog. Receipt identity plus an unassociated
+Home banner is insufficient. The original cancellation delegation rechecks this
+same target and consequence. A final click acknowledgement remains uncertain
+until an independent exact detail read explicitly says `Kansellert`; shared
+cancellation journals retain the result and bank refund/release stay unknown.
+Only source request IDs and observation times are omitted from semantic reread
+comparison; complete provenance remains in persisted observations.
+
+These contracts and synthetic tests do not establish live purchase approval or
+cancellation availability. Actual native tasks must supply observed fields;
+missing terms stay unknown and cannot be copied from expected values.

@@ -192,6 +192,50 @@ def checkout_line_mismatch(expected: Any, actual: Any) -> str | None:
     return None
 
 
+def combined_checkout_lines_match(expected: Any, actual: Any) -> bool:
+    """Match a literal complete name without inventing a title/subtitle split.
+
+    The same ordered, complete product fields and unique assignment are required
+    as for checkout rows. Package, variant and brand words cannot be dropped.
+    """
+    if not isinstance(actual, list):
+        return False
+    checked = []
+    for row in actual:
+        if (not isinstance(row, Mapping)
+                or set(row) - {"combined_name", "quantity", "product_id", "identity_conflict"}
+                or not isinstance(row.get("combined_name"), str)
+                or not row["combined_name"].strip()):
+            return False
+        checked.append({**{key: value for key, value in row.items() if key != "combined_name"},
+                        "title": row["combined_name"], "subtitle": ""})
+    if not _valid_rows(expected, checked):
+        return False
+    for rows in (expected, actual):
+        ids = [row.get("product_id") for row in rows if row.get("product_id")]
+        if len(ids) != len(set(ids)):
+            return False
+    candidates = []
+    for line in expected:
+        names = {title + (separator + subtitle if subtitle else "")
+                 for title in _title_candidates(line["name"], line["description"], line["brand"])
+                 for subtitle in _subtitle_candidates(line["description"], line["brand"])
+                 for separator in (" ", ", ")}
+        matches = []
+        for index, row in enumerate(actual):
+            if row["quantity"] != line["quantity"]:
+                continue
+            left, right = line.get("product_id"), row.get("product_id")
+            if left and right:
+                if left == right:
+                    matches.append(index)
+            elif _display(row["combined_name"]) in names:
+                matches.append(index)
+        candidates.append(matches)
+    assigned = _assignment(candidates)
+    return assigned is not None and not _ambiguous(candidates, assigned)
+
+
 def checkout_lines_match(expected: Any, actual: Any) -> bool:
     return checkout_line_mismatch(expected, actual) is None
 

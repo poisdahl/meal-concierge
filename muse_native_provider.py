@@ -55,7 +55,9 @@ FACTS_CONTRACTS = {
     ),
     "get_order": FACTS_COMMON + ORDER_IDENTITY_FACTS + (
         "Root keys: url,signed_in,complete,account,reference,status,delivery_text,payment_status,"
-        "amount_rows,goods_complete,items. status is the nullable literal detail heading; "
+        "amount_rows,goods_complete,items,payment_warnings. payment_warnings is the complete array "
+        "of literal payment-required, failed-payment or draft warnings; [] only for verified absence. "
+        "status is the nullable literal detail heading; "
         "delivery_text is nullable literal delivery text. payment_status is the nullable literal "
         "explicit payment badge (such as Betalt), never inferred from delivery or payment method. "
         "amount_rows contains objects with exactly label,value, both literal strings. "
@@ -487,7 +489,8 @@ class MuseNativeReadProvider:
     def _order_detail(facts, arguments, *, tracking):
         common = {"url", "signed_in", "complete", "account", "reference", "delivery_text"}
         fields(facts, common | ({"tracking_status"} if tracking else
-               {"status", "payment_status", "amount_rows", "goods_complete", "items"}))
+               {"status", "payment_status", "amount_rows", "goods_complete", "items"}
+               | ({"payment_warnings"} if "payment_warnings" in facts else set())))
         reference = arguments.get("order_number")
         if (not isinstance(reference, str)
                 or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", reference) is None
@@ -503,6 +506,11 @@ class MuseNativeReadProvider:
             return {**result, "status": None if facts["tracking_status"] is None else text(facts["tracking_status"])}
         result.update(status=None if facts["status"] is None else text(facts["status"]),
                       payment_status=None if facts["payment_status"] is None else text(facts["payment_status"]))
+        if "payment_warnings" in facts:
+            warnings = facts["payment_warnings"]
+            if not isinstance(warnings, list) or len(warnings) > 200:
+                raise HouseholdError("Muse native order payment warnings are unavailable")
+            result["payment_warnings"] = [text(value) for value in warnings]
         rows = facts["amount_rows"]
         if not isinstance(rows, list) or len(rows) > 500:
             raise HouseholdError("Muse native order amount rows are invalid")
