@@ -397,7 +397,7 @@ class WeeklyFlowTests(unittest.TestCase):
         document = pypdfium2.PdfDocument(render_pdf(rendered))
         self.addCleanup(document.close)
         text = '\n'.join(page.get_textpage().get_text_range() for page in document)
-        self.assertIn('Tilberedning:', text)
+        self.assertIn('Mandag 7. september 2026', text)
         self.assertIn('Ingredienser', text)
         self.assertIn('Fremgangsmåte', text)
         self.assertIn('600 g gulrot', text)
@@ -406,7 +406,7 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertIn('Tilbered 8 porsjoner', text)
         self.assertNotIn('200 g gulrot', text)
         self.assertNotIn("'basis':", text)
-        self.assertNotIn('Ukeplan', text)
+        self.assertIn('Ukeplan', text)
         self.assertIn('(rester)', text)
         for recipe in menu['dishes']:
             self.assertIn(recipe['name'], text)
