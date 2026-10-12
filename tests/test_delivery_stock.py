@@ -153,7 +153,7 @@ class DeliveryStockTests(unittest.TestCase):
             def call(tool, args, **kwargs):
                 seen.append((tool, kwargs.get('deadline')))
                 if tool == 'get_cart':
-                    self.assertLessEqual(kwargs['deadline'], time.monotonic() + 3)
+                    self.assertLessEqual(kwargs['deadline'], time.monotonic() + 15)
                     self.assertGreaterEqual(limit-kwargs['deadline'], 10)
                     raise HouseholdError('optional snapshot timed out')
                 return original(tool, args, **kwargs)
@@ -189,3 +189,32 @@ class DeliveryStockTests(unittest.TestCase):
                 self.assertEqual(result['slots'], [])
                 self.assertTrue(result['availability_stale'])
                 self.assertNotIn('cart_restrictions', result)
+
+    def test_realistic_provider_latency_preserves_warning_and_final_check_budget(self):
+        for limit in (160.0, 135.0):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as d:
+                _, provider, browser, app = self.app(d)
+                clock = [100.0]
+                original = provider.call
+                reads = []
+                def call(tool, args, **kwargs):
+                    if tool in ('get_cart', 'get_delivery_addresses'):
+                        clock[0] += 2.5
+                        if clock[0] > kwargs['deadline']:
+                            raise HouseholdError('provider read deadline')
+                        reads.append(tool)
+                    return original(tool, args, **kwargs)
+                provider.call = call
+                def inspect(*args, **kwargs):
+                    self.assertGreaterEqual(limit - kwargs['deadline'], 15)
+                    # Use the entire admitted browser window. The final two
+                    # provider reads must still have their own reserved time.
+                    clock[0] = kwargs['deadline']
+                    return [WARNING]
+                browser.cart_delivery_restrictions.side_effect = inspect
+                with mock.patch('order_operations.time.monotonic', side_effect=lambda: clock[0]):
+                    result = app._delivery({'action': 'list', 'dates': ['2026-10-13'], '_deadline': limit})
+                self.assertEqual(result['restriction_status'], 'observed')
+                self.assertEqual(result['cart_restrictions'], [WARNING])
+                self.assertEqual(reads, ['get_cart', 'get_delivery_addresses'] * 3)
+                self.assertLess(clock[0], limit)
