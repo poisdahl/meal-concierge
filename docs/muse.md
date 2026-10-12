@@ -101,6 +101,15 @@ all partial-page facts:
 {"operation":"orders","action":"get","order_id":"EXACT_OBSERVED_REFERENCE","response_view":"agent"}
 ```
 
+When recovering an established account, pass `--accepted-account` with the
+absolute path of its existing private, owned account-link JSON. It has exactly
+`url` and `edit_urls`, using the delivery-account route and its complete original
+edit-link set. The provider enforces that set from its first startup observation;
+positive observations for another account are rejected before publication. The
+file does not authenticate the browser or change its account. Do not replace it
+with newly observed foreign links to make a failed check pass. Omitting this
+option retains the existing process-local account continuity behavior.
+
 The startup account probe and subsequent reads publish `provider_read` requests
 through the existing canonical browser broker. Each payload contains `tool` and
 `arguments`; only `product_search`, `get_cart`, `get_delivery_addresses` and

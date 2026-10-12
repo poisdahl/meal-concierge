@@ -502,6 +502,21 @@ class MuseBrowser:
         self.action_mode = action_mode
         self.last_review_at = None
 
+    @contextmanager
+    def _custody(self):
+        provider_bridge = getattr(self.provider_client, "bridge", None)
+        if isinstance(provider_bridge, NativeBridge):
+            if (provider_bridge.directory != self.bridge.directory
+                    or provider_bridge.task_id != self.bridge.task_id):
+                raise HouseholdError("Muse native provider and financial browser binding differ")
+            if getattr(self.provider_client, "_accepted_account", None) is None:
+                raise HouseholdError("Muse native financial custody requires the original accepted account")
+            with self.provider_client.operation():
+                yield
+        else:
+            with self.bridge.custody():
+                yield
+
     def _addresses(self, deadline):
         value = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
         rows = value.get("result") if isinstance(value, Mapping) else None
@@ -519,7 +534,7 @@ class MuseBrowser:
         return selected[0]["id"]
 
     def review_checkout(self, cart, *, payment=None, identity_review=None, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             return self._review_checkout(cart, payment=payment, identity_review=identity_review, deadline=deadline)
 
     def _review_checkout(self, cart, *, payment, identity_review=None, deadline=None):
@@ -598,7 +613,7 @@ class MuseBrowser:
                    "expires_at": pending["expires_at"],
                    "journal_digest": digest({**pending, "status": "clicking"})}
         matches = []
-        with self.bridge.custody(), transition_lock(self.bridge.directory):
+        with self._custody(), transition_lock(self.bridge.directory):
             for path in (self.bridge.directory / "requests").glob("*.json"):
                 raw = required_json(path)
                 payload = raw.get("payload") if isinstance(raw, Mapping) else None
@@ -630,7 +645,7 @@ class MuseBrowser:
         return matches[0] if len(matches) == 1 else None
 
     def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             try:
                 current = self._review_checkout(cart, payment=review["payment_choice"],
                     identity_review=review.get("identity_review"), deadline=deadline)
@@ -699,7 +714,7 @@ class MuseBrowser:
         if expected_binding is not None:
             require_order_binding(expected_binding)
         OdaBrowser._order_url(order_id)
-        with self.bridge.custody():
+        with self._custody():
             facts = self.bridge.request("order_binding", {"order_id": order_id,
                        "preserve_payment_page": True}, deadline=deadline)
             return self._order_binding(order_id, order, facts, expected_binding, deadline)
@@ -716,7 +731,7 @@ class MuseBrowser:
         binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
                    "journal_digest": digest({**pending, "status": "clicking"})}
         originals = []
-        with self.bridge.custody():
+        with self._custody():
             with transition_lock(self.bridge.directory):
                 for path in (self.bridge.directory / "requests").glob("*.json"):
                     raw = required_json(path)
@@ -754,7 +769,7 @@ class MuseBrowser:
 
     def order_payment_state(self, order_id, *, deadline=None):
         OdaBrowser._order_url(order_id)
-        with self.bridge.custody():
+        with self._custody():
             facts = self.bridge.request("payment_state", {"order_id": order_id,
                         "preserve_payment_page": True}, deadline=deadline)
             # Retry/payment resumption are outside this manual saved-card path.
@@ -764,7 +779,7 @@ class MuseBrowser:
             return facts
 
     def review_cancellation(self, order_id, order, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             return self._review_cancellation(order_id, order, deadline=deadline)
 
     def _review_cancellation(self, order_id, order, *, deadline=None, expected_binding=None):
@@ -787,7 +802,7 @@ class MuseBrowser:
                 "surface": {"evidence_kind": "native_host_observation", **facts}}
 
     def submit_cancellation(self, order_id, order, review, before_click=None, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             try:
                 current = self._review_cancellation(order_id, order, deadline=deadline,
                                                    expected_binding=review["binding"])

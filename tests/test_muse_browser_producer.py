@@ -85,6 +85,19 @@ class InputBoundaryTests(unittest.TestCase):
                                  {"facts": facts})
             self.assertEqual(facts, before)
 
+    def test_positive_native_read_requires_complete_accepted_account_set(self):
+        accepted = deepcopy(FACTS["account"])
+        accepted["edit_urls"].append("https://oda.com/no/account/delivery/edit/2/")
+        record = {"operation": "provider_read", "payload": {**READ_PAYLOAD, "accepted_account": accepted}}
+        for links in ([accepted["edit_urls"][0]], accepted["edit_urls"] +
+                      ["https://oda.com/no/account/delivery/edit/3/"]):
+            facts = {**READ_FACTS, "account": {**accepted, "edit_urls": links}}
+            with self.subTest(links=links), self.assertRaises(HouseholdError):
+                validate_native_read(record, {"facts": facts})
+        facts = {**READ_FACTS, "account": {**accepted, "edit_urls": list(reversed(accepted["edit_urls"]))}}
+        validate_native_read(record, {"facts": facts})
+        self.assertEqual(record["payload"]["accepted_account"], accepted)
+
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Muse cloud owner identity is Linux")
 class ProducerCLITests(unittest.TestCase):

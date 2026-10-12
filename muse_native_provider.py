@@ -132,11 +132,12 @@ def native_price(value):
 class MuseNativeReadProvider:
     provider, label = "oda", "Oda"
 
-    def __init__(self, operation_directory, task_id):
+    def __init__(self, operation_directory, task_id, *, accepted_account=None):
         self.operation_directory = private_operation_directory(operation_directory)
         self.bridge = NativeBridge(self.operation_directory / "browser", task_id)
         self._terminal_failure = None
-        self._account_ids = None
+        self._accepted_account = deepcopy(accepted_account)
+        self._account_ids = account_links(accepted_account) if accepted_account is not None else None
         self._operation = threading.local()
 
     @contextmanager
@@ -195,13 +196,15 @@ class MuseNativeReadProvider:
         cutoff = time.monotonic() + seconds
         if deadline is not None:
             cutoff = min(cutoff, deadline)
-        # Both locks are nonblocking. The read-only mode never installs checkout,
-        # whose account read would otherwise re-enter browser custody.
+        # A composed native financial adapter borrows this same operation;
+        # nested account reads must not acquire a second browser lease.
         with self.operation():
             if self.terminal_failure:
                 raise HouseholdError(self.terminal_failure)
-            receipt = self.bridge.request("provider_read", {"tool": tool, "arguments": dict(arguments),
-                                          "facts_contract": FACTS_CONTRACTS[tool]},
+            payload = {"tool": tool, "arguments": dict(arguments), "facts_contract": FACTS_CONTRACTS[tool]}
+            if self._accepted_account is not None:
+                payload["accepted_account"] = deepcopy(self._accepted_account)
+            receipt = self.bridge.request("provider_read", payload,
                                           deadline=cutoff, include_response=True)
             response = receipt["response"]
             if response["task_state"] != "completed":
