@@ -35,11 +35,10 @@ PRODUCT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PRODUCT))
 import provider_oauth
 from provider_oauth import LoopbackLogin, ProviderTokenStorage, login_client
-from retail_mcp import RetailMcpClient, REQUIRED_TOOLS
+from retail_mcp import RetailMcpClient, REQUIRED_TOOLS, ODA_ENDPOINT, MATHEM_ENDPOINT
 from core import HouseholdError
 
 
-TEST_ROOT = Path(tempfile.gettempdir()) / "meal-concierge-mc04-20260906"
 ISSUER = "https://login.synthetic.invalid/"
 SECRET_MARKER = "SYNTHETIC-SECRET-DO-NOT-LOG"
 REAL_ASYNC_CLIENT = httpx2.AsyncClient
@@ -97,7 +96,7 @@ class ProviderWire:
                  initial_expires_in=3600, redirect_refresh=None, discovery_issuer=ISSUER,
                  tool_results=None):
         self.provider = provider
-        self.endpoint = RetailMcpClient(TEST_ROOT, provider=provider).endpoint
+        self.endpoint = MATHEM_ENDPOINT if provider == "mathem" else ODA_ENDPOINT
         self.token_outcome = token_outcome
         self.reject_call = reject_call
         self.unavailable_after_login = unavailable_after_login
@@ -247,10 +246,9 @@ class ProviderOAuthTests(unittest.TestCase):
         for distribution in ("mcp", "mcp-types"):
             if importlib.metadata.version(distribution) != "2.2.0":
                 raise AssertionError(f"{distribution} must be pinned to 2.2.0")
-        TEST_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="oauth-acceptance-", dir=TEST_ROOT)
+        self.temporary = tempfile.TemporaryDirectory(prefix="oauth-acceptance-")
         self.directory = Path(self.temporary.name)
         self.addCleanup(self.temporary.cleanup)
 
