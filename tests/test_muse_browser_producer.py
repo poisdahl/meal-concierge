@@ -170,7 +170,8 @@ class ProducerCLITests(unittest.TestCase):
         result = self.run_cli("end", b'{"dispatch":"clicked_once"}',
                              extra=("--native-metadata", str(original)), observed_at=observed)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.worker.join(3)
+        # Ending closes native custody; the original waiter still reaches its deadline.
+        self.worker.join(WAITER_SECONDS + 2)
         self.assertFalse(self.worker.is_alive())
         self.assertEqual(self.results, [])
         self.assertEqual(len(self.errors), 1)
