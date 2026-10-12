@@ -7,6 +7,7 @@ import math
 import re
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 
 from clients.muse import MAX_PRODUCTS, validate_response as catalog_response
@@ -444,7 +445,10 @@ class MuseCartNotDispatched(HouseholdError):
 
 
 class MuseNativeCartProvider(MuseNativeReadProvider):
-    """One explicitly enabled unit delta, using the ordinary core cart journal."""
+    """Bound unit effects for raw cart changes and shared product-plan applies."""
+
+    # Nonfinancial plan sync needs complete quantities; a missing displayed total stays unknown.
+    managed_cart_summary = staticmethod(cart_contents)
 
     @contextmanager
     def change(self, app, request):
@@ -454,6 +458,21 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
                 yield
             finally:
                 del self._operation.change
+
+    @contextmanager
+    def managed_apply(self, app, request, command_id):
+        with self.change(app, request):
+            self._operation.change.update(managed_request=deepcopy(request),
+                                          command_id=command_id, last_cart=None)
+            yield
+
+    @staticmethod
+    def _cart_intent_digest(pending):
+        frozen = deepcopy(pending)
+        if frozen.get("native_managed"):
+            # At dispatch the verified prefix equals this unit's immutable before.
+            frozen["native_managed"]["verified"] = frozen["before"]
+        return digest(frozen)
 
     def binding(self, store):
         if not self._account_ids or self.terminal_failure:
@@ -478,7 +497,7 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
                 record = read_json(path)
                 if not isinstance(record, Mapping) or not isinstance(record.get("payload"), Mapping):
                     raise HouseholdError("Muse browser request record changed; preserve the journal")
-                if record.get("operation") == "cart_change" and record["payload"].get("intent_digest") == digest(pending):
+                if record.get("operation") == "cart_change" and record["payload"].get("intent_digest") == self._cart_intent_digest(pending):
                     matches.append(request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)[1])
             if len(matches) != 1:
                 raise HouseholdError("Muse original cart request is unavailable or ambiguous; preserve the journal")
@@ -511,7 +530,7 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
 
     def _cart_payload(self, pending):
         return {
-            "intent_digest": digest(pending), "operations": pending["operations"],
+            "intent_digest": self._cart_intent_digest(pending), "operations": pending["operations"],
             "before_quantities": pending["before"], "expected_quantities": pending["expected"],
             "account": {"url": "https://oda.com/no/account/delivery/",
                         "edit_urls": ["https://oda.com/no/account/delivery/edit/" + str(key) + "/"
@@ -527,13 +546,49 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
         change = getattr(self._operation, "change", None)
         if tool != "manipulate_cart":
             result = super().call(tool, arguments, deadline=deadline)
-            if tool == "get_cart" and change is not None and not change["dispatched"]:
-                app = change["app"]
-                before = app._cart_lines(cart_contents(result))[0]
-                if app._cart_digest(before) != change["request"]["cart_digest"]:
-                    raise HouseholdError("Muse cart changed since its reviewed cart_digest; no action dispatched")
-                change["before"] = before
+            if tool == "get_cart" and change is not None:
+                if "managed_request" in change:
+                    change["last_cart"] = result
+                elif not change["dispatched"]:
+                    app = change["app"]
+                    before = app._cart_lines(cart_contents(result))[0]
+                    if app._cart_digest(before) != change["request"]["cart_digest"]:
+                        raise HouseholdError("Muse cart changed since its reviewed cart_digest; no action dispatched")
+                    change["before"] = before
             return result
+        if change is not None and "managed_request" in change:
+            return self._managed_units(arguments, deadline=deadline)
+        return self._dispatch_unit(arguments, deadline=deadline)
+
+    def _managed_units(self, arguments, *, deadline):
+        fields(arguments, {"operations"})
+        change = self._operation.change
+        app = change["app"]
+        cart = change["last_cart"]
+        if cart is None:
+            raise HouseholdError("managed native batch requires a complete pre-write cart")
+        for operation in arguments["operations"]:
+            direction = 1 if operation["quantity"] > 0 else -1
+            for _ in range(abs(operation["quantity"])):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise HouseholdError("managed cart deadline reached; reconcile the original verified prefix")
+                before = app._cart_lines(cart_contents(cart))[0]
+                unit = [{"productId": operation["productId"], "quantity": direction}]
+                app._native_managed_intent(change["command_id"], change["managed_request"], before, unit)
+                marker = {"binding_digest": self.binding(app.store), "intent_id": str(uuid.uuid4())}
+                with app.store.locked() as state:
+                    state["pending_cart_change"]["native_cart_binding"] = marker
+                change.update(request={"operations": [{"product_id": str(operation["productId"]),
+                                                        "quantity": direction}]},
+                              before=before, marker=marker, dispatched=False)
+                self._dispatch_unit({"operations": unit}, deadline=deadline)
+                cart = self.call("get_cart", {}, deadline=deadline)
+                app._verify_native_managed_batch(change["command_id"],
+                                                app._cart_lines(cart_contents(cart))[0])
+        return cart
+
+    def _dispatch_unit(self, arguments, *, deadline):
+        change = getattr(self._operation, "change", None)
         if change is None or not getattr(self._operation, "held", False) or change["dispatched"]:
             raise HouseholdError("Muse cart dispatch requires its original guarded unit-change operation")
         fields(arguments, {"operations"})
@@ -554,7 +609,9 @@ class MuseNativeCartProvider(MuseNativeReadProvider):
                 or pending.get("before") != change.get("before")
                 or state.get("pending_checkout") or state.get("pending_cancellation")):
             raise HouseholdError("Muse original enabled cart policy or pending intent changed; preserve its journal")
-        if policy != {"enabled": True, "binding_digest": binding}:
+        # The complete reviewed apply was admitted once by its original policy.
+        # Disabling future admission does not replace or revoke that bounded command.
+        if "managed_request" not in change and policy != {"enabled": True, "binding_digest": binding}:
             raise MuseCartNotDispatched(pending)
         facts = self.bridge.request("cart_change", self._cart_payload(pending), deadline=deadline)
         if facts == {"dispatch": "not_dispatched"}:

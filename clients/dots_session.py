@@ -249,39 +249,7 @@ class NativeHost:
         if self.last_cart is None:
             raise HouseholdError("managed native batch requires a complete pre-write cart")
         before = self.app._cart_lines(cart_summary(self.last_cart))[0]
-        expected = dict(before)
-        for item in operations:
-            product = item["productId"]
-            quantity = expected.get(product, 0) + item["quantity"]
-            if quantity < 0:
-                raise HouseholdError("managed batch exceeds observed cart quantities")
-            if quantity:
-                expected[product] = quantity
-            else:
-                expected.pop(product, None)
-        with self.store.locked() as state:
-            pending = state.get("pending_cart_change")
-            if pending:
-                managed = pending.get("native_managed")
-                if (not managed or managed["command_id"] != self.command_id
-                        or managed["verified"] != before or pending["expected"] != before):
-                    raise HouseholdError("reconcile the original native managed batch before dispatch")
-                managed = deepcopy(managed)
-            else:
-                plan = state.get("cart_plan")
-                digest = self.request.get("product_plan_digest")
-                if (not isinstance(plan, dict) or not state.get("managed_product_apply_fence")
-                        or plan.get("provider") != "meny" or state.get("order_change")
-                        or re.fullmatch(r"[a-f0-9]{64}", digest or "") is None):
-                    raise HouseholdError("original managed menu/product-plan intent is required")
-                managed = {"command_id": self.command_id, "request": deepcopy(self.request),
-                           "menu_ref": deepcopy(plan["menu_ref"]), "product_plan_digest": digest,
-                           "context_digest": self.app._product_current_context(state),
-                           "initial_plan": deepcopy(plan), "initial": before, "verified": before}
-            state["pending_cart_change"] = {
-                "provider": "meny", "order_change": None, "operations": deepcopy(operations),
-                "before": before, "expected": expected, "native_managed": managed}
-        return True
+        return self.app._native_managed_intent(self.command_id, self.request, before, operations)
 
     def pending_binding(self):
         state = self.store.read()
@@ -454,11 +422,7 @@ class NativeHost:
                 return result
             cart = self.call("get_cart", {}, deadline=deadline)
             live = self.app._cart_lines(cart_summary(cart))[0]
-            with self.store.locked() as state:
-                pending = state["pending_cart_change"]
-                if live != pending["expected"]:
-                    raise HouseholdError("managed native batch readback changed; reconcile without resend")
-                pending["native_managed"]["verified"] = live
+            self.app._verify_native_managed_batch(self.command_id, live)
             return cart
         raise HouseholdError("native foreground provider operation is not supported")
 
@@ -640,13 +604,8 @@ def command(root, value, reader):
             with stack:
                 result = (cart_policy(app.store, config, request) if request["operation"] == "native_cart_policy"
                           else app.handle(request))
-                with app.store.locked() as current:
-                    pending = current.get("pending_cart_change")
-                    if (pending and pending.get("native_managed")
-                            and pending["native_managed"]["command_id"] == command_id
-                            and request.get("operation") == "products" and request.get("action") == "apply"
-                            and app._native_managed_finalized(current, pending)):
-                        current.pop("pending_cart_change")
+                if request.get("operation") == "products" and request.get("action") == "apply":
+                    app._finalize_native_managed_apply(command_id)
                 output = {"ok": True, "result": result}
         except (HouseholdError, OSError, ValueError, TypeError, KeyError, RuntimeError, UnicodeError) as exc:
             output = {"ok": False, "error": str(exc)}

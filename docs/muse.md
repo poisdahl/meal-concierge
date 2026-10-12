@@ -234,20 +234,41 @@ not qualify selected-address, delivery, payment, session longevity or complete
 Meal Concierge shopping support. Configuration and synthetic tests do not
 replace real host qualification.
 
-## Opt-in native unit cart changes
+## Opt-in native cart changes and product-plan apply
 
 `--provider-transport browser_cart` uses the same protected home, canonical
 browser directory and original task-chain anchor as `browser_readonly`. It keeps
-the read-only transport unchanged and adds only `cart.change` for one exact
-product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`.
+the read-only transport unchanged and adds `cart.change` for one exact
+product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`
+and exact `cart.reconcile` with `decision:"keep_current"`.
 This bounded adapter also supports ordinary `products.prepare`, saved-plan
 `products.get` and preparation continuations using the existing cloud catalog.
 Every prepare request must explicitly set `include_recurring:false`, and a
 continuation cannot change a stored recurring-enabled scope. The existing
 bounded page-1 search and product-plan continuation budgets apply. Missing
 prices, package facts and dietary evidence remain unknown; a preparation
-result grants no cart authority. Whole-menu apply arguments are omitted.
-This mode does not implement whole-menu `products.apply`, delivery selection,
+result grants no cart authority by itself. A complete saved-menu plan returns its
+ordinary `products.apply` arguments. Apply requires the enabled original-context
+policy and the complete reviewed plan/digest or returned plan reference, with
+`cart_change_requested:true`; recurring-enabled and partial applies are unavailable.
+The shared Application retains menu ownership and existing baseline goods. Each
+bounded native unit uses a distinct original permit and complete readback before
+the next unit. Partial or unknown outcomes retain the current journal and verified
+prefix; `cart.reconcile_change` reads and never repeats an effect. Waiting native
+tasks block further observations as well as writes until their actual ending.
+After reconciliation, review the current cart digest, make its read-only
+`keep_current` decision, then prepare and review a fresh complete plan. Its
+`products.apply` with `restore_missing:true` and that exact cart digest completes
+only the remaining quantities. Direct restoring/excluding cart decisions are
+unavailable in this adapter. The original
+apply has one 600-second budget, including validation and every native handoff.
+Disabling future admission blocks new applies; an already admitted exact apply
+retains that original bounded authority.
+
+`price_mode:"estimate"` can supply observed package counts and merchandise cost
+for nonfinancial cart sync. Deposit and total payable remain unknown; no missing
+cart total is filled with zero. Actual payable terms need a separate complete
+checkout observation and approval. This mode does not implement delivery selection,
 checkout or cancellation. Bounded displayed order history and exact displayed
 order details use the same read-only observations without enabling cart policy.
 
