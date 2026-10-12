@@ -1372,8 +1372,8 @@ snapshots even if the current menu or recipient later changes.
 
 ## Natural-language workflow
 
-The shared skill and MCP initialization instructions guide both plain-text and
-dialog-capable hosts. At a natural handoff, show the verified result and one
+The shared skill, MCP initialization instructions and operation descriptions
+guide both plain-text and dialog-capable hosts. At a natural handoff, show the verified result and one
 concrete question with a few relevant choices. Continue already-requested work
 after its missing answer arrives; resolve tool references internally and reuse
 current authorization. Menu-only, cart-only, read-only and stop requests retain
