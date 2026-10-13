@@ -53,7 +53,7 @@ _VARIABLE_PACKAGE = re.compile(
 )
 # Numeric metadata is recognized by its role, never a product/brand/origin name.
 _PACKAGE_METADATA = re.compile(
-    r"(?:[0-9]{1,3}(?:[.,][0-9]{1,2})?%|klasse [1-3]|"
+    r"(?:[0-9]{1,3}(?:[.,][0-9]{1,2})?\s*%(?:\s+fett)?|klasse [1-3]|"
     r"(?:lagret i )?[0-9]{1,2}(?:[–-][0-9]{1,2})? (?:måneder|mnd))", re.IGNORECASE,
 )
 _PACKAGE_WORD = r"[^\W\d_]+(?:[.'’/-][^\W\d_]+)*\.?"
@@ -253,9 +253,16 @@ def _package_capacities(values):
 
 def _described_package(text: str, provider: str):
     if provider in {"oda", "mathem"}:
-        # These providers separate descriptors from the final package size.
+        # These providers separate package sizes and descriptors with commas.
         # Commas without a following space can be decimal separators.
         segments = text.split(", ")
+        if provider == "oda":
+            # Browser cards may put inert brand metadata after the size.
+            # Quantity limits and qualifiers must remain visible to validation.
+            while len(segments) > 1 and _package_descriptor(segments[-1]):
+                segments.pop()
+            if len(segments) == 1:
+                return _strict_package(segments[0]), None
         size = _strict_package(segments[-1])
         if size is None or len(segments) < 2:
             return None, None

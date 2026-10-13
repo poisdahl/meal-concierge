@@ -326,6 +326,48 @@ class ProductObservationTests(unittest.TestCase):
         self.assertEqual(plan["requirements"][0]["selection"]["package_count"], 2)
         self.assertIsNone(plan["totals"]["total_payable_ore"])
 
+    def test_oda_card_subtitles_prepare_observed_whole_packages(self):
+        shopping = menu(
+            {"item": "havregryn", "quantity": 240, "unit": "g"},
+            {"item": "melk", "quantity": 1200, "unit": "ml"},
+        )
+        cards = {
+            "havregryn": {"id": 1035, "name": "Havregryn", "description": "1,1 kg, Axa",
+                          "price": "26.90", "availability": True},
+            "melk": {"id": 430, "name": "Lettmelk", "description": "1% fett, 1 l, TINE",
+                     "price": "21.40", "availability": True},
+        }
+        observations, approvals = {}, []
+        for requirement in menu_requirements(shopping)[0]:
+            query = requirement["item"]
+            observed = normalize_retail_product_search({"result": [{
+                "query": query, "hasMore": True, "products": [cards[query]],
+            }]}, observed_at=OBSERVED_AT)
+            self.assertEqual(observed["products"][0]["display"]["package"], cards[query]["description"])
+            observations[requirement["requirement_id"]] = observed
+            approvals.append({"requirement_id": requirement["requirement_id"],
+                              "candidate_refs": [cards[query]["id"]], "search_query": query})
+        plan = build_product_plan(
+            provider="oda", binding={"kind": "saved_menu"}, menu=shopping,
+            observations=observations, candidate_approvals=approvals, price_mode="estimate",
+        )
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual({row["item"]: row["selection"]["package_count"]
+                          for row in plan["requirements"]}, {"havregryn": 1, "melk": 2})
+        self.assertEqual(plan["totals"]["merchandise_ore"], 6970)
+        self.assertIsNone(plan["totals"]["mandatory_deposit_ore"])
+        self.assertIsNone(plan["totals"]["total_payable_ore"])
+
+    def test_oda_trailing_descriptors_do_not_hide_ambiguous_capacity(self):
+        for label in (
+            "1% fett, TINE", "1 l, 2 l, TINE", "1 l, 500 ml, TINE",
+            "1 l, per flaske, TINE", "1 l, maks 3 per kunde, TINE",
+            "1 l, 1% protein, TINE", "1 l, ca., TINE", "1 l, 5, TINE",
+            "1 l,, TINE", "1% fett, 1 l, TINE,", "1 l, avrent, TINE",
+        ):
+            with self.subTest(label=label):
+                self.assertIsNone(parse_package(label, provider="oda"))
+
     def test_fixture_backed_meny_forms_keep_money_and_offer_boundaries(self):
         fixture = json.loads((FIXTURES / "meny_product_observations.json").read_text(encoding="utf-8"))
         result = normalize_meny_product_search(fixture["response"], observed_at=OBSERVED_AT)
