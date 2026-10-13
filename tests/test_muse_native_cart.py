@@ -247,10 +247,11 @@ sys.argv = sys.argv[1:]
         def delayed_catalog(tool, facts):
             nonlocal elapsed
             if tool == "product_search":
-                elapsed += 170
-                temporary = clock.with_suffix(".tmp")
-                temporary.write_text(str(elapsed))
-                temporary.replace(clock)
+                if elapsed < 340:
+                    elapsed += 170
+                    temporary = clock.with_suffix(".tmp")
+                    temporary.write_text(str(elapsed))
+                    temporary.replace(clock)
                 if any(word in facts["query"].lower() for word in ("rice", "ris")):
                     facts["products"] = [{"url": "https://oda.com/no/products/29830-synthetic-rice/",
                         "name": "Synthetic rice", "description": "500 g", "price": "5,00 kr",
@@ -264,6 +265,15 @@ sys.argv = sys.argv[1:]
         self.assertEqual(elapsed, 340)
         requirements = prepared["product_plan"]["requirements"]
         self.assertEqual(len(requirements), 2)
+        initial_requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                            if read_json(path)["payload"].get("tool") == "product_search"]
+        self.assertEqual(len(initial_requests), 2)
+        for record in initial_requests:
+            seconds = (datetime.fromisoformat(record["expires_at"])
+                       - datetime.fromisoformat(record["issued_at"])).total_seconds()
+            self.assertGreater(seconds, 179)
+            self.assertLessEqual(seconds, 180)
+            self.assertTrue((self.broker / "closed" / (record["request_id"] + ".json")).exists())
         approvals = [row["observation"]["products"][0]["candidate_approval"] for row in requirements]
         selected = self.rpc({"operation": "products", "action": "prepare",
             "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
@@ -274,15 +284,6 @@ sys.argv = sys.argv[1:]
         self.assertEqual(sorted(row["selection"]["package_count"] for row in saved["requirements"]), [1, 3])
         self.assertEqual(saved["totals"]["merchandise_ore"], 12470)
         self.assertEqual(elapsed, 340)
-        requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
-                    if read_json(path)["payload"].get("tool") == "product_search"]
-        self.assertEqual(len(requests), 2)
-        for record in requests:
-            seconds = (datetime.fromisoformat(record["expires_at"])
-                       - datetime.fromisoformat(record["issued_at"])).total_seconds()
-            self.assertGreater(seconds, 179)
-            self.assertLessEqual(seconds, 180)
-            self.assertTrue((self.broker / "closed" / (record["request_id"] + ".json")).exists())
         self.assertFalse(self.rpc({"operation": "native_cart_policy", "action": "show"})["enabled"])
         self.assertFalse(self.action_records)
         self.assertEqual(self.quantities(), {})
