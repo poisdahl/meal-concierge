@@ -945,6 +945,42 @@ class CoreTestsBase:
         cart["totalGrossAmount"] = 33.9
         self.assertEqual(cart_summary(cart)["total"], 33.9)
 
+    def test_oda_cart_breakdown_reaches_paginated_agent_view(self):
+        from agent_views import _cart_view
+        cart = {"items": [
+            {"product_id": 10, "name": "Rice", "quantity": 2, "totalGrossAmount": "60.00"},
+            {"product_id": 11, "name": "Beans", "quantity": 1, "totalGrossAmount": "40.00"},
+        ], "totalGrossAmount": "152.50", "totalBreakdown": {
+            "subtotal": "100.00", "productDiscounts": "-10.00", "couponDiscount": "-5.00",
+            "deliveryFee": "19.00", "bottleDeposit": "2.00", "packaging": "17.50",
+            "surcharge": "29.00", "total": "152.50",
+            "surchargeThresholdDescription": "Synthetic provider description",
+        }}
+        summary = cart_summary(cart)
+        self.assertEqual(summary["amounts"], {
+            "product_subtotal": 100.0, "discounts": -15.0, "delivery_price": 19.0,
+            "deposits": 2.0, "bags": 17.5, "other_fees": {"small_order_surcharge": 29.0},
+            "provider_total": 152.5,
+        })
+        for offset in (0, 1):
+            view = _cart_view("get", {"cart": cart}, offset, 1, "items")
+            self.assertEqual(view["amounts"], summary["amounts"])
+            self.assertEqual(view["total"], 152.5)
+        original = deepcopy(cart["totalBreakdown"])
+        for changes in ({"subtotal": None}, {"newFee": "5.00"}):
+            cart["totalBreakdown"] = {**original, **changes}
+            self.assertIsNone(cart_summary(cart)["amounts"]["product_subtotal"])
+            self.assertEqual(cart_summary(cart)["total"], 152.5)
+        cart["totalBreakdown"] = {key: value for key, value in original.items() if key != "couponDiscount"}
+        self.assertIsNone(cart_summary(cart)["amounts"]["discounts"])
+        for changes in ({"total": "153.00"}, {"subtotal": "101.00"},
+                        {"packaging": "NaN"}, {"productDiscounts": "5.00"},
+                        {"surcharge": True}, {"deliveryFee": "-1.00"}):
+            with self.subTest(changes=changes):
+                cart["totalBreakdown"] = {**original, **changes}
+                with self.assertRaisesRegex(HouseholdError, "provider cart breakdown"):
+                    cart_summary(cart)
+
     def test_checkout_amounts_require_named_other_fees(self):
         cart = {
             "items": [],
@@ -8479,6 +8515,20 @@ class FlowTests(unittest.TestCase):
             with mock.patch.object(self.oda, "probe", side_effect=HouseholdError("provider unavailable")):
                 self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
         self.assertEqual(self.oda.calls, [])
+
+    def test_setup_equipment_offer_is_optional_and_preserves_reported_items(self):
+        original = deepcopy(self.store.read()["profile"]["meals"]["equipment"])
+        setup = self.app.handle({"operation": "setup", "action": "show"})
+        self.assertEqual(setup["current"]["weekly_menu"]["equipment"], original)
+        self.assertIn("during_equipment", setup["guide"])
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
+        self.assertEqual(self.store.read()["profile"]["meals"]["equipment"], original)
+        reported = original + ["blender"]
+        self.app.handle({"operation": "profile", "action": "update",
+                         "changes": {"meals": {"equipment": reported}}})
+        shown = self.app.handle({"operation": "setup", "action": "show"})
+        self.assertEqual(shown["current"]["weekly_menu"]["equipment"], reported)
+        self.assertFalse(shown["configuration_required"])
 
     def test_setup_question_does_not_reenter_the_locked_state_store(self):
         with self.store.locked() as state:

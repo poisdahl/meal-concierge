@@ -1419,6 +1419,39 @@ def cart_summary(cart: Mapping[str, Any]) -> dict[str, Any]:
         "delivery": delivery,
     }
     raw_amounts = cart.get("amounts")
+    if raw_amounts is None and "totalGrossAmount" in cart:
+        breakdown = cart.get("totalBreakdown")
+        amount_keys = {"subtotal", "deliveryFee", "productDiscounts", "couponDiscount",
+                       "bottleDeposit", "packaging", "surcharge", "total"}
+        # Only the observed complete provider shape establishes an itemization.
+        if (isinstance(breakdown, Mapping) and amount_keys <= breakdown.keys()
+                and not set(breakdown) - amount_keys - {"surchargeThresholdDescription"}
+                and all(breakdown[key] is not None for key in amount_keys)):
+            from decimal import Decimal, InvalidOperation
+            try:
+                values = {}
+                for key in amount_keys:
+                    raw = breakdown[key]
+                    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+                        raise ValueError("invalid amount")
+                    value = Decimal(str(raw))
+                    if not value.is_finite() or (value > 0 if key in {"productDiscounts", "couponDiscount"} else value < 0):
+                        raise ValueError("invalid amount")
+                    values[key] = value
+                if (values["total"] != Decimal(str(total))
+                        or sum(value for key, value in values.items() if key != "total") != values["total"]):
+                    raise HouseholdError("provider cart breakdown total is inconsistent")
+            except (InvalidOperation, ValueError) as exc:
+                raise HouseholdError("provider cart breakdown amounts are invalid") from exc
+            raw_amounts = {
+                "product_subtotal": float(values["subtotal"]),
+                "delivery_price": float(values["deliveryFee"]),
+                "discounts": float(values["productDiscounts"] + values["couponDiscount"]),
+                "deposits": float(values["bottleDeposit"]),
+                "bags": float(values["packaging"]),
+                "other_fees": {"small_order_surcharge": float(values["surcharge"])},
+                "provider_total": float(values["total"]),
+            }
     if raw_amounts is not None:
         amount_keys = {
             "product_subtotal", "delivery_price", "discounts",
