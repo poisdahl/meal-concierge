@@ -828,8 +828,8 @@ class WeeklyPlannerTests(unittest.TestCase):
         plan = self.plan(self.request(self.save_candidates(2)))
         original = self.app._materialize_planner_menu
 
-        def materialize_then_change_profile(handoff, resolved):
-            menu = original(handoff, resolved)
+        def materialize_then_change_profile(handoff, resolved, *, language=None):
+            menu = original(handoff, resolved, language=language)
             with self.store.locked() as state:
                 state["profile"]["cuisine"]["wanted"] = ["Changed concurrently"]
             return menu
@@ -896,8 +896,8 @@ class WeeklyPlannerTests(unittest.TestCase):
         plan = self.plan(self.request(self.save_candidates(2)))
         original = self.app._materialize_planner_menu
 
-        def materialize_then_change_profile(handoff, resolved):
-            menu = original(handoff, resolved)
+        def materialize_then_change_profile(handoff, resolved, *, language=None):
+            menu = original(handoff, resolved, language=language)
             with self.store.locked() as state:
                 state["profile"]["cuisine"]["wanted"] = ["Changed concurrently"]
             return menu
@@ -920,9 +920,9 @@ class WeeklyPlannerTests(unittest.TestCase):
         original = self.app._materialize_planner_menu
         materialize_calls = 0
 
-        def pause_first_materialization(handoff, resolved):
+        def pause_first_materialization(handoff, resolved, *, language=None):
             nonlocal materialize_calls
-            menu = original(handoff, resolved)
+            menu = original(handoff, resolved, language=language)
             materialize_calls += 1
             if materialize_calls == 1:
                 entered.set()
