@@ -162,3 +162,45 @@ class WeightReservationTests(unittest.TestCase):
             amounts['other_fees'] = {'Vektreservasjon': fee}
             with self.assertRaises(HouseholdError):
                 _oda_checkout_amounts_minor(amounts)
+
+
+    def test_deposit_is_included_and_bound_in_checkout(self):
+        rows = [['1 vare', '100,00 kr'], ['Delsum', '100,00 kr'],
+                ['Pant', '12,00 kr'], ['Leveringsemballasje', '10,00 kr'],
+                ['Levering', '9,00 kr'], ['Total inkl. MVA', '131,00 kr']]
+        options = {'selected': 2, 'button': 'Bekreft og betal 131,00 kr'}
+        read = _oda_checkout_amount_script(13100, expected_product_count=1)
+        observed = self.evaluate(read, rows=rows, **options)['result']
+        self.assertTrue(observed['amounts_valid'], observed)
+        self.assertEqual(observed['amounts']['deposits'], 1200)
+        click = _oda_checkout_amount_script(13100, expected_product_count=1,
+            expected_amounts=observed['amounts'], expected_url=CHECKOUT_URL)
+        self.assertEqual(self.evaluate(click, rows=rows, **options)['clicks'], ['PAY'])
+        changes = [
+            [*rows, rows[2]],
+            [*rows[:2], ['Pant', '-12,00 kr'], *rows[3:]],
+            [*rows[:2], ['Unknown fee', '12,00 kr'], *rows[3:]],
+            [*rows[:2], ['Pant', '13,00 kr'], ['Leveringsemballasje', '9,00 kr'], *rows[4:]],
+        ]
+        for changed in changes:
+            with self.subTest(rows=changed):
+                self.assertEqual(self.evaluate(click, rows=changed, **options)['clicks'], [])
+        for extra in ({'hiddenRows': [2]}, {'outsideRows': [rows[2]]}):
+            with self.subTest(extra=extra):
+                self.assertFalse(self.evaluate(read, rows=rows, **options, **extra)['result']['amounts_valid'])
+                self.assertEqual(self.evaluate(click, rows=rows, **options, **extra)['clicks'], [])
+        duplicate = self.evaluate(read, rows=[*rows, rows[2]], **options)['result']
+        self.assertIn('ambiguous_deposits', duplicate['amount_check_failures'])
+        browser = object.__new__(OdaBrowser)
+        browser._eval = mock.Mock(return_value=duplicate)
+        with self.assertRaisesRegex(HouseholdError, 'ambiguous_deposits'):
+            browser._read_checkout_amounts(13100, 1)
+        browser._eval.assert_called_once()
+
+    def test_absent_deposit_retains_unknown_value(self):
+        rows = [['1 vare', '100,00 kr'], ['Delsum', '100,00 kr'],
+                ['Total inkl. MVA', '100,00 kr']]
+        observed = self.evaluate(_oda_checkout_amount_script(10000, expected_product_count=1),
+                                 rows=rows)['result']
+        self.assertTrue(observed['amounts_valid'])
+        self.assertIsNone(observed['amounts']['deposits'])
