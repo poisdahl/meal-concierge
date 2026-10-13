@@ -103,7 +103,7 @@ sys.argv = sys.argv[1:]
                         continue
                     producer = None
                     if getattr(self, "finite_producer", False) and record["operation"] == "provider_read":
-                        producer = [sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py")]
+                        producer = [sys.executable, "-I", "-B", str(read_fixture.ROOT / "muse_browser_producer.py")]
                         args = ["--directory", str(self.broker), "--request-id", record["request_id"],
                                 "--task-id", record["task_id"]]
                         claimed = subprocess.run([*producer, "claim", *args], capture_output=True, timeout=5)

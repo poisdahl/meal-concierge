@@ -147,6 +147,8 @@ retain a 110-second bound.
 These bounds include browser-task execution and automatic completion delivery;
 shorter caller deadlines still apply. The `orders.get` RPC wait is 420 seconds
 across clients, leaving 60 seconds beyond its two native order-read bounds.
+The direct `catalog.products` RPC waits 240 seconds, beyond its native search
+budget; other catalog actions retain their ordinary 120-second wait.
 Native product preparation has a 420-second operation budget, including its
 five-second plan-building reserve, so two serial catalog reads can finish.
 Ordinary provider preparation retains its 240-second operation budget.
