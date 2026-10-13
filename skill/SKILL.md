@@ -168,7 +168,11 @@ before offering actions; a historical order date alone is not an active order.
    [recipe sources](references/recipe-sources.md) for web extraction and review.
    Exact user URLs need no global search-setting change. Prefer sourced recipes; generate a recipe only when the user wants
    that or the available real recipes cannot reasonably meet the request.
-3. Choose the menu yourself. Call menu `plan` with
+3. Choose the menu yourself. Before `plan`, compare the full recipe methods
+   with the saved equipment list. If required equipment is missing, adapt the
+   method coherently to available equipment or choose another recipe. Never
+   add equipment to the profile unless the user says they have it.
+   Call menu `plan` with
    `planner_input.selection_mode="agent"`, chronological `days` (or explicitly requested calendar `dates`), and ordered
    exact `candidates` (`recipe_ref={id,revision}` or `discovery_ref`). Supply one
    candidate per cooking date; accepted batch settings derive leftover dates.
@@ -250,6 +254,11 @@ before offering actions; a historical order date alone is not an active order.
    message follow `presentation_guidance` and the presentation rule below before
    cart changes. Preserve its dates,
    portions, source references and digest; never construct a digest yourself.
+   Immediately before saving or editing an existing menu, read `get` and use
+   its exact current `menu_ref`. If a stale-reference rejection occurs, refresh
+   once and check whether intervening changes conflict with the user's request;
+   preserve those changes or ask about the conflict instead of overwriting them.
+   Retry only a definitely rejected write, never an uncertain operation.
    To save a requested distinct whole new draft during a pending purchase,
    pass both the plan's `save_ref` as `planner_ref` and the
    exact current `menu_ref` returned by `get`. This leaves the pending purchase frozen; do
@@ -262,7 +271,8 @@ before offering actions; a historical order date alone is not an active order.
    optional `leafy_green` carries the structured assessment above.
    Fresh add/replace can also carry
    `dietary_facets` with `source:"explicit"` when needed for strict targets;
-   base it on the exact recipe snapshot. Set `served_with:"dinner"` for a
+   base it on the exact recipe snapshot. A side salad uses `meal_type:"side"`,
+   not `"salad"`. Set `served_with:"dinner"` for a
    side served with that date's dinner (or `"lunch"`/`"other"` otherwise),
    including each linked serving. A dinner side needs enough portions for the
    dinner's people to count fully toward leafy-green days. Only one dinner slot
