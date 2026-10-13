@@ -15,13 +15,56 @@ class RelativePlanningTests(unittest.TestCase):
     save_candidates = fixture.WeeklyPlannerTests.save_candidates
     plan = fixture.WeeklyPlannerTests.plan
 
-    def saved(self, batch=False):
+    def saved(self, batch=False, language=None):
         with self.store.locked() as state:
             state['profile']['meals'].update(dinner_days=6 if batch else 2,
                 dishes=2, batch_dishes=2 if batch else 0, meal_mode='batch' if batch else 'fresh',
                 cook_days=['Monday','Thursday'], recurring_batch_accepted=True)
         result = self.plan({'candidates': self.save_candidates(2)})
-        return self.app.handle({'operation':'menu','action':'save','planner_ref':result['save_ref']})['menu']
+        return self.app.handle({'operation':'menu','action':'save','planner_ref':result['save_ref'], **({'language':language} if language else {})})['menu']
+
+    def test_localized_fresh_preparations_remain_shoppable_and_editable(self):
+        self.check_localized_preparations(batch=False)
+
+    def test_localized_batch_preparations_remain_shoppable_and_editable(self):
+        self.check_localized_preparations(batch=True)
+
+    def check_localized_preparations(self, batch):
+        from test_meal_concierge_products import FakeProvider
+        from service import Application
+        import batch_planning as bp
+        menu = self.saved(batch=batch, language='nb')
+        original = {slot['slot_id']: deepcopy(mp.recipe_for_slot(menu, slot)) for slot in mp.preparation_slots(menu)}
+        self.assertEqual(len(mp.schedule(menu)), 6 if batch else 2)
+        self.assertTrue(assess_menu(self.store.read())['ready'])
+        for source in mp.preparation_slots(menu):
+            self.assertEqual(source['snapshot_digest'],
+                             mp.recipe_snapshot_digest(mp.recipe_for_slot(menu, source)))
+        for component in bp.sources(menu):
+            self.assertEqual(component['source_snapshot_digest'],
+                             mp.slot_by_id(menu, component['source_slot_id'])['snapshot_digest'])
+        provider = FakeProvider()
+        app = Application(self.store, provider, None)
+        prepared = app.handle({'operation':'products','action':'prepare',
+            'menu_ref':mp.menu_ref(menu), 'include_recurring':False})
+        self.assertIn('product_plan', prepared)
+        self.assertTrue(any(name == 'product_search' for name, _ in provider.calls))
+        added = app.handle({'operation':'menu','action':'add_slot',
+            'menu_ref':mp.menu_ref(menu), 'idempotency_key':f'localized-side-{batch}',
+            'slot_input':{'day':4,'meal_type':'side','portions':1,
+                          'reference':menu['slots'][0]['reference']}})['menu']
+        side = next(slot for slot in added['slots'] if slot['meal_type'] == 'side')
+        moved = app.handle({'operation':'menu','action':'edit_slots',
+            'menu_ref':mp.menu_ref(added), 'idempotency_key':f'localized-move-{batch}',
+            'edits':[{'action':'move','slot_id':side['slot_id'],'day':5}]})['menu']
+        self.assertEqual(next(slot for slot in moved['slots'] if slot['meal_type'] == 'side')['day'], 5)
+        for slot_id, recipe in original.items():
+            current = mp.recipe_for_slot(moved, mp.slot_by_id(moved, slot_id))
+            self.assertEqual({k:v for k,v in current.items() if k != 'preparation_slot_id'}, recipe)
+        for source in mp.preparation_slots(moved):
+            self.assertEqual(source['snapshot_digest'],
+                             mp.recipe_snapshot_digest(mp.recipe_for_slot(moved, source)))
+
 
     def test_relative_plan_save_render_and_later_edit(self):
         menu = self.saved()

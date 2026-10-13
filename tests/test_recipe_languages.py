@@ -105,6 +105,10 @@ class RecipeLanguageTests(unittest.TestCase):
                                'planner_ref': planned['plan']['save_ref']})['menu']
             self.assertEqual(menu['dishes'][0]['name'], 'Gulrotsuppe')
             self.assertEqual(menu['output_language'], 'en')
+            import menu_planning as mp
+            self.assertEqual(len(mp.schedule(menu)), 1)
+            self.assertEqual(menu['slots'][0]['snapshot_digest'],
+                             mp.recipe_snapshot_digest(mp.recipe_for_slot(menu, menu['slots'][0])))
             rendered = render_menu(menu, app.recipes.assets)
             self.assertIn('600 g carrots (diced)', rendered['text'])
             self.assertIn('Ingredients', rendered['text'])
