@@ -22,6 +22,7 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 
 READ_SECONDS = 110.0
 ORDER_READ_SECONDS = 180.0
+PRODUCT_SEARCH_SECONDS = 180.0
 TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking", "get_delivery_slots"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
@@ -264,7 +265,8 @@ class MuseNativeReadProvider:
             raise HouseholdError("Muse native account/cart read takes no arguments")
         if deadline is not None and (type(deadline) not in {int, float} or not math.isfinite(deadline)):
             raise HouseholdError("Muse native provider deadline must be finite")
-        seconds = ORDER_READ_SECONDS if tool in {"get_order", "order_tracking"} else READ_SECONDS
+        seconds = (PRODUCT_SEARCH_SECONDS if tool == "product_search" else
+                   ORDER_READ_SECONDS if tool in {"get_order", "order_tracking"} else READ_SECONDS)
         cutoff = time.monotonic() + seconds
         if deadline is not None:
             cutoff = min(cutoff, deadline)

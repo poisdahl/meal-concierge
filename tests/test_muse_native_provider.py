@@ -324,19 +324,20 @@ sys.argv = sys.argv[1:]
             self.assertIn("never the entire historical account", request["payload"]["facts_contract"])
             self.assertFalse((self.broker / "consumed" / (request["request_id"] + ".json")).exists())
 
-    def test_real_native_requests_keep_default_and_order_windows_distinct(self):
+    def test_real_native_requests_keep_default_catalog_and_order_windows_distinct(self):
         self.finite_producer = True
         self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"})
         self.rpc({"operation": "orders", "action": "list", "limit": 1})
         self.rpc({"operation": "cart", "action": "get"})
+        self.rpc({"operation": "catalog", "action": "products", "query": "squash", "limit": 1})
         requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
                     if path not in self.history]
         self.assertEqual({r["payload"]["tool"] for r in requests},
-                         {"get_delivery_addresses", "get_order", "order_tracking", "get_orders", "get_cart"})
+                         {"get_delivery_addresses", "get_order", "order_tracking", "get_orders", "get_cart", "product_search"})
         for record in requests:
             seconds = (datetime.fromisoformat(record["expires_at"])
                        - datetime.fromisoformat(record["issued_at"])).total_seconds()
-            expected = 180 if record["payload"]["tool"] in {"get_order", "order_tracking"} else 110
+            expected = 180 if record["payload"]["tool"] in {"product_search", "get_order", "order_tracking"} else 110
             self.assertGreater(seconds, expected - 1)
             self.assertLessEqual(seconds, expected)
 

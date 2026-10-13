@@ -57,6 +57,8 @@ MAX_PREPARED_REPLANS = 32
 
 
 class PlanningOperations:
+    products_prepare_budget_seconds = PRODUCT_OPERATION_TIMEOUT
+
     @staticmethod
     def _feedback_slot(state: Mapping[str, Any], value: Any, *, allow_predecessor: bool = False) -> dict[str, Any]:
         if not isinstance(value, Mapping) or set(value) != {"menu_ref", "slot_id", "recipe_key", "reference"}:
@@ -3725,7 +3727,8 @@ class PlanningOperations:
                 self._clear_persisted_product_plan(state.get("cart_plan"))
             return {"recorded": True, "menu_ref": reference, "ingredient_decisions": list(merged.values()),
                     "cart_changed": False, "next": "Use these recorded ingredients for this menu; prepare/apply its updated products for an authorized shop."}
-        timeout = self.products_apply_budget_seconds if action == "apply" else PRODUCT_OPERATION_TIMEOUT
+        timeout = (self.products_apply_budget_seconds if action == "apply" else
+                   self.products_prepare_budget_seconds if action == "prepare" else PRODUCT_OPERATION_TIMEOUT)
         deadline = time.monotonic() + timeout
         if request.get("_deadline") is not None:
             deadline = min(deadline, request["_deadline"])
