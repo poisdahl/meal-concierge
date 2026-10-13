@@ -2563,6 +2563,57 @@ process.stdout.write(eval(input.script));
                 self.assertIn("Nektariner", surface["unavailable_message"])
                 self.assertNotIn("Du må fjerne noen varer", surface["unavailable_message"])
 
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for browser script tests")
+    def test_cart_surface_distinguishes_checkout_blockers(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        scripts = []
+        browser._eval = lambda source: scripts.append(source) or {}
+        browser._cart_surface()
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location={href:input.url};
+const buttons=Array.from({length:input.buttons||0},()=>({innerText:'Fortsett',
+ disabled:!!input.disabled,getAttribute:()=>null,setAttribute:()=>{},
+ getBoundingClientRect:()=>({width:100,height:20})}));
+const main={innerText:'Handlekurv',querySelectorAll:s=>s==='button'?buttons:[]};
+global.document={body:main,querySelector:s=>s==='main'?main:input.login?{}:null,
+ querySelectorAll:()=>[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(eval(input.script));
+"""
+        for options, action, reason in [
+            ({'url':'https://oda.com/no/login/'}, 'blocked', 'wrong_page'),
+            ({'login':True}, 'blocked', 'login_required'),
+            ({'buttons':2}, 'blocked', 'ambiguous_continue'),
+            ({'buttons':1,'disabled':True}, 'wait', 'continue_disabled'),
+            ({}, 'wait', 'continue_missing'),
+            ({'buttons':1}, 'continue', None),
+        ]:
+            with self.subTest(reason=reason):
+                run = subprocess.run([shutil.which('node'), '-e', harness],
+                    input=json.dumps({'script':scripts[0], 'url':CART_URL, **options}),
+                    text=True, capture_output=True, check=True, timeout=10)
+                surface = json.loads(run.stdout)
+                self.assertEqual(surface.get('action'), action)
+                self.assertEqual(surface.get('reason'), reason)
+
+    def test_checkout_blocker_reports_reason_without_clicking_or_raw_data(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = 'oda'
+        browser._open = lambda _url: None
+        browser._invoke = lambda *_args: {}
+        browser._click_action = lambda *_args, **_kwargs: self.fail('blocked checkout clicked')
+        for reason, expected in [('continue_disabled', 'continue button is disabled'),
+                                 ('login_required', 'shows a login form'),
+                                 ('private unexpected page text', 'one usable continue control')]:
+            with self.subTest(reason=reason):
+                browser._cart_surface = lambda: {'action':'wait','reason':reason}
+                with mock.patch('oda_browser.time.sleep'):
+                    with self.assertRaisesRegex(HouseholdError, expected) as caught:
+                        browser._continue_checkout_cart()
+                self.assertIn('No payment submission', str(caught.exception))
+                self.assertNotIn('private unexpected', str(caught.exception))
+
     def test_checkout_retries_a_failed_read_only_cart_open(self):
         browser = OdaBrowser.__new__(OdaBrowser)
         events = []

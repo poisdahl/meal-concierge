@@ -1668,7 +1668,7 @@ class PlanningOperations:
         return result, resolved, request
 
     def _materialize_planner_menu(
-        self, handoff: Mapping[str, Any], resolved: list[Mapping[str, Any]]
+        self, handoff: Mapping[str, Any], resolved: list[Mapping[str, Any]], *, language: str | None = None
     ) -> dict[str, Any]:
         selection = handoff["selection"]
         slots = selection.get("source_slots", selection.get("slots")) if isinstance(selection, Mapping) else None
@@ -1705,6 +1705,11 @@ class PlanningOperations:
             "salads": [],
             "schedule": schedule,
         }, trusted_snapshots=True)
+        if language is not None:
+            from recipe_languages import menu_language
+            # Display metadata is part of the frozen recipe snapshot. Add it
+            # before binding preparations and recurring batch dependencies.
+            menu = menu_language(menu, language)
         menu["slots"] = [{
             "slot_id": "slot_" + mp.digest({"selection": handoff["selection_digest"], "date": mp.slot_day(slot)})[:32],
             **mp.day_fields(mp.slot_day(slot)), "meal_type": "dinner", "portions": slot["portions"], "recipe_key": slot["recipe_key"],
@@ -1903,7 +1908,7 @@ class PlanningOperations:
                     _planner_result, resolved, planner_request = self._verify_planner_handoff(
                         planner_handoff
                     )
-                menu = self._materialize_planner_menu(planner_handoff, resolved)
+                menu = self._materialize_planner_menu(planner_handoff, resolved, language=language)
                 planner_context = (deepcopy(planner_handoff), resolved, planner_request)
                 override_map = dict(planner_request["cooldown_overrides"])
             else:

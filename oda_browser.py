@@ -2132,7 +2132,21 @@ class OdaBrowser:
                     f"{surface['unavailable_message']} "
                     "Remove or replace that item in the cart before preparing checkout again."
                 )
-            raise HouseholdError("Oda cart cannot continue to checkout")
+            reasons = {
+                "wrong_page": "the browser did not reach the store cart",
+                "login_required": "the cart shows a login form",
+                "ambiguous_cart": "more than one cart panel is visible",
+                "ambiguous_continue": "more than one matching cart control is visible",
+                "continue_disabled": "the cart continue button is disabled",
+                "continue_missing": "the cart continue button was not found",
+                "cart_not_ready": "the cart panel did not become ready",
+            }
+            reason = reasons.get(surface.get("reason"), "the cart did not expose one usable continue control")
+            raise HouseholdError(
+                f"{self.checkout_provider.title()} cart cannot continue to checkout: {reason}. "
+                "No payment submission was made by this navigation. Inspect this checkout browser's "
+                "cart and stock notices before preparing checkout again."
+            )
         self._click_action("continue", mouse=True)
         return "continue"
 
@@ -2154,8 +2168,8 @@ class OdaBrowser:
  };
  const storefrontLinkOnly=ALLOW_STOREFRONT_LINK;
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
- if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked'});
- if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
+ if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked',reason:'wrong_page'});
+ if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked',reason:'login_required'});
  const dialogs=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
  for(const root of dialogs){const message=stockMessage(root);if(message)return JSON.stringify({action:'blocked',unavailable_message:message});}
  let roots=[];
@@ -2173,15 +2187,16 @@ class OdaBrowser:
      return full.length===1||(!storefrontLinkOnly&&next.length===1&&new RegExp(CART_CONTENTS,'i').test(text));
    });
  }
- if(roots.length>1)return JSON.stringify({action:'blocked'});
- if(roots.length===0)return JSON.stringify({action:'wait'});
+ if(roots.length>1)return JSON.stringify({action:'blocked',reason:'ambiguous_cart'});
+ if(roots.length===0)return JSON.stringify({action:'wait',reason:'cart_not_ready'});
  const root=roots[0];
- const next=storefrontLinkOnly&&location.href!==CART?[]:[...root.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+ const matching=storefrontLinkOnly&&location.href!==CART?[]:[...root.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+ const next=matching.filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true');
  const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===FULL_CART_LABEL&&x.href===CART);
- if(next.length>1||full.length>1)return JSON.stringify({action:'blocked'});
+ if(next.length>1||full.length>1)return JSON.stringify({action:'blocked',reason:'ambiguous_continue'});
  if(next.length===1){next[0].setAttribute('data-oda-household-action','continue');return JSON.stringify({action:'continue'});}
  if(full.length===1){full[0].setAttribute('data-oda-household-action','full-cart');return JSON.stringify({action:'full_cart'});}
- return JSON.stringify({action:'wait'});
+ return JSON.stringify({action:'wait',reason:matching.length?'continue_disabled':'continue_missing'});
 })()
 """.replace("ALLOW_STOREFRONT_LINK", "true" if mathem else "false")
           .replace("CONTINUE_LABEL", json.dumps("Fortsätt" if mathem else "Fortsett"))
