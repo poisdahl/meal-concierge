@@ -134,6 +134,7 @@ ODA_CHECKOUT_AMOUNT_LABELS = {
     "discounts": "Du sparer",
     "discounted_subtotal": "Delsum",
     "bags": "Leveringsemballasje",
+    "deposits": "Pant",
     "delivery_price": "Levering",
     "other_fee": "Tillegg for mindre bestilling",
     "weight_reservation": "Vektreservasjon",
@@ -149,7 +150,7 @@ MATHEM_CHECKOUT_AMOUNT_LABELS = {
     "provider_total": "Totalt inkl. moms",
 }
 # Observed product discounts and delivery credit are separate rows. Other
-# discounts or deposit rows still require their own verified provider contract.
+# discounts or provider-specific fees require their own verified contract.
 MATHEM_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vara|(?:0|[2-9]|[1-9]\d{1,6}) varor)")
 ODA_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vare|(?:0|[2-9]|[1-9]\d{1,6}) varer)")
 ODA_CHECKOUT_AMOUNT_KEYS = (
@@ -324,6 +325,7 @@ def _oda_checkout_amount_script(
    delivery_discount:rowState(amountLabels.delivery_discount),
    discounted_subtotal:rowState(amountLabels.discounted_subtotal),
    bags:rowState(amountLabels.bags),
+   deposits:rowState(amountLabels.deposits),
    other_fee:rowState(amountLabels.other_fee),
    weight_reservation:rowState(amountLabels.weight_reservation),
    provider_total:rowState(amountLabels.provider_total),
@@ -367,14 +369,14 @@ def _oda_checkout_amount_script(
    product_subtotal:states.product_subtotal.value,
    delivery_price:states.delivery_price.value,
    discounts:productDiscount===null&&states.delivery_discount.state==='absent'?null:(productDiscount||0)+(states.delivery_discount.value||0),
-   deposits:null,
+   deposits:states.deposits.value,
    bags:states.bags.value,
    other_fees:otherFees,
    provider_total:states.provider_total.value,
    ...(MATHEM_BREAKDOWN?{discount_breakdown:{product_discount:states.discounts.value,delivery_discount:states.delivery_discount.value}}:{}),
  };
- const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state!=='invalid');
- const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
+ const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state!=='invalid');
+ const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
  const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(productDiscount||0);
  // On addition retry the overview gross total and the payment calculation are
@@ -382,8 +384,8 @@ def _oda_checkout_amount_script(
  const totalValid=discountsAgree&&(ADDITION_RETRY
    ? (ODA_ADDITION_RETRY
       ? amounts.product_subtotal===ADDITION_GOODS&&Number.isSafeInteger(amounts.provider_total)&&amounts.provider_total>0
-      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee,states.weight_reservation].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
-   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+feeTotal);
+      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
+   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(amounts.deposits||0)+feeTotal);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&itemizedRowsValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
    ...Object.entries(states).filter(([,row])=>row.state==='invalid').map(([key])=>'ambiguous_'+key),
@@ -1991,7 +1993,7 @@ class OdaBrowser:
             "unrecognized_amount_row", "original_total_changed",
             *("ambiguous_" + key for key in (
                 "product_subtotal", "delivery_price", "discounts", "delivery_discount",
-                "discounted_subtotal", "bags", "other_fee", "weight_reservation", "provider_total",
+                "discounted_subtotal", "bags", "deposits", "other_fee", "weight_reservation", "provider_total",
             )),
         }
         for attempt in range(3):
