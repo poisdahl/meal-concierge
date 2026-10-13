@@ -141,12 +141,18 @@ the supported background executor and serve its broker request concurrently.
 Health remains local. Actual signed-out or changed-account failures remain
 latched, and unresolved native task custody must be reconciled before another
 read. Protected MCP status still does not retry rejected authentication.
-No action permit is consumed. Native `get_order` and `order_tracking` reads each
-have a 180-second bound; other native provider reads retain a 110-second bound.
+No action permit is consumed. Native `product_search`, `get_order` and
+`order_tracking` reads each have a 180-second bound; other native provider reads
+retain a 110-second bound.
 These bounds include browser-task execution and automatic completion delivery;
 shorter caller deadlines still apply. The `orders.get` RPC wait is 420 seconds
 across clients, leaving 60 seconds beyond its two native order-read bounds.
-Other order RPC waits remain 300 seconds and ordinary defaults remain 120 seconds.
+Native product preparation has a 420-second operation budget, including its
+five-second plan-building reserve, so two serial catalog reads can finish.
+Ordinary provider preparation retains its 240-second operation budget.
+The `products.prepare` RPC wait is 480 seconds and `products.apply` waits
+660 seconds, beyond the existing 600-second native apply budget. Other product
+and order RPC waits remain 300 seconds and ordinary defaults remain 120 seconds.
 Publication still
 requires a genuine completed task and facts no more than 30 seconds old. Preserve
 late endings and unknown custody after a timeout; never dispatch another task to replace uncertain work.

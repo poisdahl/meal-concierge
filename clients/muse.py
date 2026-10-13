@@ -500,6 +500,8 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
 
 
 class NativeCartMuseApplication(NativeReadMuseApplication):
+    products_prepare_budget_seconds = 420
+
     def _prepare_or_read_products(self, request):
         if request["action"] == "prepare":
             if request.get("include_recurring") is not False:
@@ -513,7 +515,8 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         self._observe_terminal_failure()
         try:
             with self.product_plan_lock:
-                result = Application.handle(self, {**request, "_deadline": time.monotonic() + 240})
+                seconds = self.products_prepare_budget_seconds if request["action"] == "prepare" else 240
+                result = Application.handle(self, {**request, "_deadline": time.monotonic() + seconds})
                 result.pop("partial_apply_arguments", None)
                 continuation = result.get("continue_arguments")
                 if isinstance(continuation, dict):

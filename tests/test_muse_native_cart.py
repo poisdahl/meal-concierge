@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -100,7 +101,15 @@ sys.argv = sys.argv[1:]
                         self.action_records.append(record)
                         self.seen.append("cart_change")
                         continue
-                    claim_request(self.broker, record["request_id"], record["task_id"])
+                    producer = None
+                    if getattr(self, "finite_producer", False) and record["operation"] == "provider_read":
+                        producer = [sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py")]
+                        args = ["--directory", str(self.broker), "--request-id", record["request_id"],
+                                "--task-id", record["task_id"]]
+                        claimed = subprocess.run([*producer, "claim", *args], capture_output=True, timeout=5)
+                        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+                    else:
+                        claim_request(self.broker, record["request_id"], record["task_id"])
                     if record["operation"] == "delivery_select":
                         facts, task_state = self.delivery_effect(record)
                     elif record["operation"] == "cart_change":
@@ -147,7 +156,13 @@ sys.argv = sys.argv[1:]
                     response = {"request_id": record["request_id"], "request_digest": digest(record),
                                 "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
                                 "task_state": task_state, "facts": facts}
-                    respond_request(self.broker, record["request_id"], record["task_id"], response)
+                    if producer:
+                        published = subprocess.run([*producer, "respond", *args, "--observed-at",
+                            response["observed_at"], "--ending-state", task_state],
+                            input=json.dumps(facts).encode(), capture_output=True, timeout=5)
+                        self.assertEqual(published.returncode, 0, published.stderr)
+                    else:
+                        respond_request(self.broker, record["request_id"], record["task_id"], response)
                 except Exception as error:
                     self.failures.append(repr(error))
 
@@ -203,6 +218,75 @@ sys.argv = sys.argv[1:]
                   "product_plan_ref": selected["product_plan_ref"]}, ok=False)
         self.assertFalse(self.action_records)
         self.assertNotIn("pending_cart_change", self.store.read())
+        self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+        for path, original in self.history.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Real native service process is Linux")
+    def test_two_slow_catalog_reads_finish_one_prepare_without_cart_authority(self):
+        clock = self.home / "fixture-monotonic-offset"
+        clock.write_text("0")
+        command = list(self.process.args)
+        command[4] = self.runner.replace("sys.argv = sys.argv[1:]", """
+import time
+from pathlib import Path
+clock = Path(sys.argv[sys.argv.index('--home') + 1]) / 'fixture-monotonic-offset'
+real_monotonic = time.monotonic
+time.monotonic = lambda: real_monotonic() + float(clock.read_text())
+sys.argv = sys.argv[1:]
+""")
+        self.process.terminate()
+        self.process.communicate(timeout=5)
+        (self.home / "service.sock").unlink()
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        read_fixture.wait_for(lambda: (self.home / "service.sock").exists())
+        self.rpc({"operation": "health"})
+        self.finite_producer = True
+        elapsed = 0
+
+        def delayed_catalog(tool, facts):
+            nonlocal elapsed
+            if tool == "product_search":
+                elapsed += 170
+                temporary = clock.with_suffix(".tmp")
+                temporary.write_text(str(elapsed))
+                temporary.replace(clock)
+                if any(word in facts["query"].lower() for word in ("rice", "ris")):
+                    facts["products"] = [{"url": "https://oda.com/no/products/29830-synthetic-rice/",
+                        "name": "Synthetic rice", "description": "500 g", "price": "5,00 kr",
+                        "unitPrice": "10,00 kr", "unitName": "kg", "availability": True}]
+            return facts
+
+        self.transform = delayed_catalog
+        reference = self.prepare_menu(two_ingredients=True, squash_grams=700)
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                             "include_recurring": False, "price_mode": "estimate"})
+        self.assertEqual(elapsed, 340)
+        requirements = prepared["product_plan"]["requirements"]
+        self.assertEqual(len(requirements), 2)
+        approvals = [row["observation"]["products"][0]["candidate_approval"] for row in requirements]
+        selected = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
+            "candidate_approvals": approvals})
+        saved = self.rpc({"operation": "products", "action": "get",
+                          "product_plan_ref": selected["product_plan_ref"]})
+        self.assertEqual(saved["status"], "prepared")
+        self.assertEqual(sorted(row["selection"]["package_count"] for row in saved["requirements"]), [1, 3])
+        self.assertEqual(saved["totals"]["merchandise_ore"], 12470)
+        self.assertEqual(elapsed, 340)
+        requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                    if read_json(path)["payload"].get("tool") == "product_search"]
+        self.assertEqual(len(requests), 2)
+        for record in requests:
+            seconds = (datetime.fromisoformat(record["expires_at"])
+                       - datetime.fromisoformat(record["issued_at"])).total_seconds()
+            self.assertGreater(seconds, 179)
+            self.assertLessEqual(seconds, 180)
+            self.assertTrue((self.broker / "closed" / (record["request_id"] + ".json")).exists())
+        self.assertFalse(self.rpc({"operation": "native_cart_policy", "action": "show"})["enabled"])
+        self.assertFalse(self.action_records)
+        self.assertEqual(self.quantities(), {})
+        self.assertFalse(self.store.read().get("pending_cart_change"))
         self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
         for path, original in self.history.items():
             self.assertEqual(path.read_bytes(), original)
