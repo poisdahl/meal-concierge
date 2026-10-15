@@ -1348,7 +1348,13 @@ raise SystemExit(client.main())
             child.wait(timeout=10)
             self.assertEqual(child.returncode, 0)
             self.assertEqual(child.stderr.read(), b"")
-            self.assertEqual(termios.tcgetattr(slave), original)
+            restored = termios.tcgetattr(slave)
+            if sys.platform == "darwin":
+                # Darwin sets PENDIN when canonical mode is restored. It is
+                # pending-input state, not a terminal setting left changed.
+                restored[3] &= ~termios.PENDIN
+                original[3] &= ~termios.PENDIN
+            self.assertEqual(restored, original)
         finally:
             if child.poll() is None:
                 child.kill()
