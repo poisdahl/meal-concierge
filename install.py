@@ -387,6 +387,8 @@ def write_json(path, value):
 
 def browser_paths(args, provider, existing=None, *, runtime_path=None):
     """Discover and validate the same browser prerequisites for every store."""
+    if provider == 'none':
+        return {}
     try:
         return discover_browser_paths(
             args.agent_browser, args.browser_executable, existing,
@@ -416,8 +418,8 @@ def merged_runtime_path(stored, current):
 
 def configured_provider(settings):
     provider = str(settings.get('provider') or 'oda').casefold()
-    if provider not in {'oda', 'meny', 'mathem'}:
-        raise RuntimeError('provider must be oda, meny or mathem')
+    if provider not in {'none', 'oda', 'meny', 'mathem'}:
+        raise RuntimeError('provider must be none, oda, meny or mathem')
     return provider
 
 
@@ -543,7 +545,7 @@ def offline(meta):
 @contextmanager
 def data_ownership(meta):
     p = meta['paths']
-    with ownership(p['state'], p['browser_profile'], p['browser_home'], p['browser_socket_directory']), listener_ownership(p['socket']):
+    with ownership(p['state'], p.get('browser_profile'), p.get('browser_home'), p.get('browser_socket_directory')), listener_ownership(p['socket']):
         yield
 
 
@@ -763,15 +765,133 @@ def configured_browser_launch(args, meta):
     return browser_launch_settings(**settings)
 
 
+def _store_document_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+def _sync_backup(destination):
+    for root, _directories, files in os.walk(destination, topdown=False):
+        for name in files:
+            descriptor = os.open(Path(root) / name, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        descriptor = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    for directory in destination.parents:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def connect_store(meta, args, home):
+    """Connect one previously store-free household, stopped and replay-safe."""
+    from core import _atomic_json, first_store_state
+    provider = args.provider
+    if provider not in {'oda', 'meny', 'mathem'}:
+        raise RuntimeError('connect-store requires --provider oda, meny or mathem')
+    if any(getattr(args, key) is not None for key in ('config', 'state', 'socket')):
+        raise RuntimeError('connect-store preserves the existing config, state and service socket paths')
+    pending = home / 'pending-store.json'
+    maintenance = home / 'maintenance.json'
+    if (home / 'pending-install.json').exists():
+        raise RuntimeError('finish the pending installation before connecting a store')
+    journal = json.loads(pending.read_text()) if pending.exists() else None
+    marker = json.loads(maintenance.read_text()) if maintenance.exists() else None
+    if marker is not None and (marker.get('kind') != 'first_store_connection' or journal is not None and marker != journal):
+        raise RuntimeError('finish the existing maintenance operation before connecting a store')
+    journal = journal or marker
+    targets = {'state': Path(meta['paths']['state']) / 'state.json',
+               'config': Path(meta['paths']['config']), 'runtime': home / 'runtime.json'}
+    current = {key: json.loads(path.read_text()) for key, path in targets.items()}
+    if journal is not None:
+        if journal.get('kind') != 'first_store_connection' or journal.get('provider') != provider:
+            raise RuntimeError('resume the pending store connection with its original provider')
+        destination = Path(journal['backup'])
+        staged = {key: json.loads((destination / ('connected-' + key + '.json')).read_text()) for key in targets}
+        if {key: _store_document_digest(value) for key, value in staged.items()} != journal['after']:
+            raise RuntimeError('pending store connection files changed; restore or inspect the exact backup')
+        candidate = staged['runtime']
+        for key in ('tokens', 'browser_home', 'browser_profile', 'browser_socket_directory'):
+            value = getattr(args, key)
+            if value is not None and str(Path(value).expanduser().resolve()) != candidate['paths'][key]:
+                raise RuntimeError('resume with the original store connection paths')
+        checked = browser_paths(args, provider, candidate['paths'], runtime_path=candidate['runtime_path'])
+        if any(candidate['paths'].get(key) != value for key, value in checked.items()) or configured_browser_launch(args, candidate) != candidate['browser_launch']:
+            raise RuntimeError('resume with the original browser configuration')
+    else:
+        if configured_provider(current['config']) != 'none':
+            raise RuntimeError('connect-store applies only to a household without a store; provider switching is not supported')
+        after = first_store_state(current['state'], provider)
+        candidate = json.loads(json.dumps(meta))
+        for key, default in {'tokens': home / 'tokens', 'browser_home': home / 'browser',
+                             'browser_profile': home / 'browser/profile', 'browser_socket_directory': home / 'browser/run'}.items():
+            candidate['paths'][key] = str(Path(getattr(args, key) or default).expanduser().resolve())
+        candidate['paths'].update(browser_paths(args, provider))
+        candidate['paths']['maintenance'] = str(maintenance)
+        candidate['browser_launch'] = configured_browser_launch(args, candidate)
+        candidate['runtime_path'] = merged_runtime_path(meta.get('runtime_path', os.defpath), os.environ.get('PATH', os.defpath))
+        staged = {'state': after, 'config': {**current['config'], 'provider': provider}, 'runtime': candidate}
+        destination = home / 'backups' / ('before-store-' + uuid.uuid4().hex)
+        journal = {'format': 1, 'kind': 'first_store_connection', 'provider': provider,
+                   'backup': str(destination),
+                   'before': {key: _store_document_digest(value) for key, value in current.items()},
+                   'after': {key: _store_document_digest(value) for key, value in staged.items()}}
+    code_root = Path(candidate['code_root']).resolve()
+    for key, value in candidate['paths'].items():
+        if key not in {'browser_binary', 'browser_executable'}:
+            path = Path(value).resolve()
+            if path == code_root or path.is_relative_to(code_root) or code_root.is_relative_to(path):
+                raise RuntimeError('code and private data paths must be disjoint')
+    socket_limit = 103 if platform.system() == 'Darwin' else 107
+    prefix = {'meny': 'meal-concierge-meny-', 'mathem': 'mathem-household-', 'oda': 'oda-household-'}[provider]
+    session = prefix + str(staged['config'].get('instance') or 'household')
+    sockets = [candidate['paths']['socket'], str(Path(candidate['paths']['browser_socket_directory']) / (session + '.sock'))]
+    if any(len(os.fsencode(path)) > socket_limit for path in sockets):
+        raise RuntimeError('Unix socket path is too long; choose a shorter --browser-socket-directory')
+    with offline(candidate):
+        observed = {key: json.loads(path.read_text()) for key, path in targets.items()}
+        if any(_store_document_digest(value) not in {journal['before'][key], journal['after'][key]} for key, value in observed.items()):
+            raise RuntimeError('household files changed outside the pending store connection; nothing overwritten')
+        if not pending.exists() and not maintenance.exists():
+            backup(meta, destination)
+            _atomic_json(destination / 'runtime.json', current['runtime'])
+            for key, value in staged.items():
+                _atomic_json(destination / ('connected-' + key + '.json'), value)
+            _sync_backup(destination)
+            _atomic_json(pending, journal)
+        _atomic_json(maintenance, journal)
+        for key in ('state', 'config'):
+            _atomic_json(targets[key], staged[key])
+        write_unit(candidate)
+        _atomic_json(targets['runtime'], candidate)
+        pending.unlink(missing_ok=True)
+        directory = os.open(home, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+            maintenance.unlink()
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    print('Store connected locally; service remains stopped. Start explicitly and complete store login separately.')
+    print('Offline backup:', destination)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
     parser.add_argument('--uv', help='explicit uv executable when it is not on the host PATH')
     parser.add_argument('--name', default='meal-concierge' if platform.system() == 'Linux' else 'com.meal-concierge')
-    parser.add_argument('--provider', choices=['oda', 'meny', 'mathem'])
+    parser.add_argument('--provider', choices=['none', 'oda', 'meny', 'mathem'])
     parser.add_argument('--household')
     parser.add_argument('--adopt', action='store_true')
     parser.add_argument('--legacy-unit', help='exact already stopped native service owner for adoption')
@@ -809,8 +929,8 @@ def main():
         raise RuntimeError('--allow-recipe-removals applies only to import-recipe-pack')
     if args.allow_recipe_removals and args.expected_sha256 is None:
         raise RuntimeError('--allow-recipe-removals requires --expected-sha256 for the exact pack')
-    if any(getattr(args, 'browser_' + key) is not None for key in ('mode', 'display', 'xauthority')) and args.action not in {'install', 'update', 'check-browser'}:
-        raise RuntimeError('browser launch settings apply only to install, update or check-browser')
+    if any(getattr(args, 'browser_' + key) is not None for key in ('mode', 'display', 'xauthority')) and args.action not in {'install', 'update', 'connect-store', 'check-browser'}:
+        raise RuntimeError('browser launch settings apply only to install, update, connect-store or check-browser')
     if args.action == 'discover':
         print(json.dumps(discover(home), indent=2)); return
     if args.action == 'check-browser':
@@ -820,6 +940,10 @@ def main():
         meta = json.loads(manifest.read_text())
         settings = json.loads(Path(meta['paths']['config']).read_text())
         provider = configured_provider(settings)
+        if provider == 'none':
+            print(json.dumps({'provider': provider, 'browser_required': False}))
+            print('No store is configured; browser prerequisites are not required.')
+            return
         changing_browser = (
             not all(meta['paths'].get(key) for key in ('browser_binary', 'browser_executable'))
             or args.agent_browser is not None or args.browser_executable is not None
@@ -883,6 +1007,13 @@ def main():
             settings = meta.pop('initial_config', None)
             if args.action == 'install' and path.exists():
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
+            if args.action == 'connect-store':
+                if not path.exists():
+                    raise RuntimeError('connect-store requires a completed installation')
+                connect_store(meta, args, home)
+                return
+            if (home / 'pending-store.json').exists() or ((home / 'maintenance.json').exists() and json.loads((home / 'maintenance.json').read_text()).get('kind') == 'first_store_connection'):
+                raise RuntimeError('resume connect-store with its original provider before other maintenance or lifecycle actions')
             if args.action in {'start', 'stop', 'restart', 'run'}:
                 lifecycle(meta, args.action); return
             if args.action in {'history-preview', 'history-archive', 'history-restore', 'history-rebaseline'}:
@@ -986,7 +1117,10 @@ def main():
                 if args.adopt or not args.provider or not args.household:
                     raise RuntimeError('new install requires --provider and --household; adoption requires an existing config')
                 settings = {'household': args.household, 'instance': 'household', 'provider': args.provider, 'confirmation_policy': 'fresh', 'primary_recipe_library_id': 'builtin', 'recipe_libraries': [{'library_id': 'builtin', 'provider': 'builtin', 'read_only': False}]}
-            paths.update(browser_paths(args, configured_provider(settings)))
+            if configured_provider(settings) == 'none':
+                paths = {key: value for key, value in paths.items() if key in {'config', 'state', 'socket'}}
+            else:
+                paths.update(browser_paths(args, configured_provider(settings)))
             code_root = (args.code_root or Path.home() / '.local/lib/meal-concierge' / args.name).expanduser().resolve()
             # No replaceable tree may contain any user data, or vice versa.
             for target in [home, *[Path(v) for k, v in paths.items() if k not in {'browser_binary', 'browser_executable'}]]:
@@ -995,10 +1129,11 @@ def main():
             meta = {'format': 1, 'home': str(home), 'code_root': str(code_root), 'name': args.name, 'manager': manager, 'unit': str(unit) if unit is not None else None, 'paths': paths, 'runtime_path': os.environ.get('PATH', os.defpath)}
             if manager != 'external' and active(meta):
                 raise RuntimeError('another service already uses this name')
-        meta['browser_launch'] = configured_browser_launch(args, meta)
         actual_settings = dict(settings or json.loads(Path(meta['paths']['config']).read_text()))
         actual_settings['provider'] = configured_provider(actual_settings)
-        if manifest.exists():
+        if actual_settings['provider'] != 'none':
+            meta['browser_launch'] = configured_browser_launch(args, meta)
+        if manifest.exists() and actual_settings['provider'] != 'none':
             # Validate prerequisites while a healthy owner may still be running.
             # Only after this succeeds do we require the caller to stop it and
             # publish the resolved paths as part of the normal atomic update.
@@ -1018,9 +1153,11 @@ def main():
             meta['paths'].update(checked_browser_paths)
             if changing_browser:
                 meta['runtime_path'] = runtime_path
+        elif manifest.exists():
+            assert_stopped(meta)
         socket_limit = 103 if platform.system() == 'Darwin' else 107
         socket_paths = [meta['paths']['socket']]
-        if actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary'):
+        if actual_settings['provider'] != 'none' and (actual_settings.get('provider') != 'mathem' or meta['paths'].get('browser_binary')):
             prefix = {'meny': 'meal-concierge-meny-', 'mathem': 'mathem-household-'}.get(actual_settings.get('provider'), 'oda-household-')
             session = prefix + str(actual_settings.get('instance') or 'household')
             socket_paths.append(str(Path(meta['paths']['browser_socket_directory']) / (session + '.sock')))

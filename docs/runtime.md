@@ -87,12 +87,20 @@ an update request. Do not replace another household or an existing service.
 
 For a **new** installation, [choose a program release](#choose-a-program-release)
 and run from its retained checkout, replacing the example household and provider
-(`oda`, `mathem` or `meny`):
+(`oda`, `mathem` or `meny`), or use the store-free example below:
 
 ```sh
 ./install.sh install --provider oda --household "My household" \
   --agent-browser /absolute/path/to/agent-browser \
   --browser-executable /absolute/path/to/chrome
+./install.sh start
+./install.sh attach
+```
+
+For recipes, menus and ordinary lists without a store or browser:
+
+```sh
+./install.sh install --provider none --household "My household"
 ./install.sh start
 ./install.sh attach
 ```
@@ -115,7 +123,29 @@ second service to repair the first. See
 [existing installation adoption](runtime-reference.md#existing-installations)
 for a deliberate move from a legacy supervisor or Compose layout.
 
-### 2. Connect the store
+### 2. Connect the store (optional)
+
+For a browser-free household, use `--provider none` with the installation
+command above. Skip browser prerequisites and store login. Verify setup, a saved
+recipe, a menu and its shopping list instead. Existing installations with a
+store keep their current provider and ordering behavior.
+
+To connect the first store later, stop this installation and run:
+
+```sh
+./install.sh stop --home /absolute/data-home
+./install.sh connect-store --home /absolute/data-home --provider oda
+./install.sh start --home /absolute/data-home
+```
+
+Use `mathem` or `meny` for those stores. Install the chosen store's browser
+prerequisites first and supply its browser paths if needed. The operation keeps
+the existing private paths and takes an offline backup. It preserves recipes,
+menus, preferences and list additions, and asks for setup review again. It does
+not authorize a store account, start the service or order anything. Interrupted
+connection must be resumed with the same command before other maintenance;
+see [recovery details](runtime-reference.md#first-store-connection).
+
 
 Follow [store login](#provider-oauth) below. Online recipes from your selected,
 connected store are available without importing a local collection. A new local

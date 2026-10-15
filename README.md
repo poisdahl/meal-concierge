@@ -45,8 +45,11 @@ See [shared setup](docs/runtime.md#install-and-attach) for host and browser prer
 
 ### Requirements
 
-Choose **one store per installation**; trusted agents can share the household.
-Shopping needs your own store account and an address in its delivery area.
+Use Meal Concierge **without a store** for recipes, inspiration, menus and a
+normal shopping list. No store account or browser is required in this mode.
+Optionally connect **one store per installation** for product suggestions and
+ordering; trusted agents can share the household. Catalog matching needs your
+own store connection. Delivery also needs an address in its delivery area.
 
 | Store | Country / currency | Payment through Meal Concierge |
 |---|---|---|
@@ -67,9 +70,10 @@ to **Grok Bot** for its cloud installation. Replace the bracketed name:
 > Follow the matching installation guide. Connect to my existing household if
 > present; otherwise install the latest published stable program release using
 > docs/runtime.md#choose-a-program-release. Pin its tag to a full commit; do not
-> install main. Ask which host, store and household to use as needed. Preserve my
+> install main. Ask which host and household to use, and whether I want a store connection. Preserve my
 > data and settings. Verify the running build, tools and skill. Help me complete
-> store login and activation, then verify the store connection. Report the release
+> store login and activation if requested; otherwise verify local recipes, menus
+> and the shopping list without a store. Report the release
 > tag, running commit and any incomplete setup.
 
 Setup reuses an existing household without upgrading it. See

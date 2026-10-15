@@ -99,6 +99,30 @@ paths remain supported by `service.py`; native adoption does not convert Compose
 or claim live parity. MENY login and the private `vipps_phone_number` used by
 Oda or MENY require the authorized provider setup.
 
+## First store connection
+
+`install --provider none` needs neither `agent-browser` nor Chromium. The service
+owns its local state and socket with the same process/alias checks as connected
+installations. No retailer or checkout browser is constructed. Omitting a
+provider retains the legacy Oda default; `none` is explicit.
+
+Only a store-free installation can use `connect-store --provider oda|mathem|meny`.
+Stop it first. Browser validation runs before private documents change. The
+installer backs up the complete private installation and old `runtime.json`,
+stages the exact connected state/config/runtime documents, and records their
+before/after digests in `pending-store.json` and `maintenance.json`. It publishes
+those documents and the stopped supervisor unit, then clears the journals.
+Recipes and shopping-list state remain in place. This is not a provider switch
+for an existing shopping account, and direct config editing remains rejected.
+
+If interrupted, rerun `connect-store` with the same provider and original browser
+settings/paths. It resumes only if each document matches its exact original or
+staged digest; unrelated edits are never overwritten. The service cannot start
+through the installer while connection is pending. Preserve the journal and
+backup when investigating an error. After completion, start explicitly and
+perform the store's usual login. Store connection and checkout readiness remain
+separate checks.
+
 ## History retention
 
 Recipe revisions, source snapshots and library journals remain in `recipes.sqlite3`.

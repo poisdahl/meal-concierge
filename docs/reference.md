@@ -365,6 +365,33 @@ tool, the profile tool, or a private `profile_overrides.recipes.sources` value.
 Provider selection and confirmation policy remain config-bound and require a
 separate state/service change rather than an in-place setup edit.
 
+## General and retailer-tailored shopping lists
+
+`meal_concierge_shopping_list` exposes `get`, `update`, `refresh` and `match`.
+`get` is a local read, including in `provider=none` mode. It derives the current
+menu's requirements using the same portion/batch and recorded-pantry calculation
+as product preparation. It preserves unresolved ingredients, without guessing
+quantities. Pages contain at most 20 rows (`offset`, `limit`) and printable text.
+
+Mutations and matching require the current `list_ref`. `extra_items` replaces
+personal additions with `{id, item, quantity?, unit?}` records; use the returned
+`extra_id` as the input `id` when preserving an addition. `checked_items` maps
+returned row `id`s to booleans. `refresh` acknowledges menu changes without
+removing extras. Checks persist across restarts and explicit replanning, reopen
+when required quantities change, and reset for a new independent menu. They do
+not subtract stock, modify product plans or change carts. Record pantry facts
+with `products.record_ingredients`.
+
+Explicit `match` uses the existing guarded `products.prepare` with the saved
+menu and `include_recurring=false`. It returns bounded `product_result`; read
+more pages with `products.get`, and use returned product-review continuations.
+Without a connection it returns the ordinary list and `not_configured`. Failed
+catalog access does not remove the ordinary list. Personal extras, recurring
+goods and delivery are excluded from the estimate; extras remain listed as
+unmatched. Retailer suggestions are references for another physical shop, never
+claims about that shop's prices or stock. Matching does not authorize ordering:
+normal `products.apply`, cart, delivery and checkout contracts still apply.
+
 ## Product observations and bounded selection
 
 Product search normalizes Oda, Mathem and MENY results into one bounded observation

@@ -6,7 +6,9 @@ description: Operate an installed Meal Concierge household service for meals, gr
 # Meal Concierge
 
 Use this household's currently discovered Meal Concierge MCP tools. The service
-owns the configured household, store, account, recipe bank and payment path.
+owns the configured household, recipe bank and any connected store/account/payment
+path. With `provider=none`, recipes, menus and ordinary shopping lists work
+without login. Do not require store, delivery or payment setup for these tasks.
 A name in conversation never selects another account. Start with saved preferences
 and, when resuming, `status.workflow.next_action`. That indicates unfinished work,
 not a new purchase mandate. Answer simple reads without starting a larger flow.
@@ -386,6 +388,30 @@ size, availability and dietary facts. Mathem and MENY have no invented equivalen
 hints. Never invoke native bulk recipe-to-cart expansion without a supported
 preview. Read [recipe sources](references/recipe-sources.md) when importing text,
 photos, PDFs or a complex external source, or checking adaptation provenance.
+
+## Shopping lists
+
+For an ordinary shopping list call `meal_concierge_shopping_list` with `get`.
+Do not search a catalog or prepare a cart merely to show a list. Present the
+returned items and unresolved quantities. Use `update` with the exact `list_ref`
+for personal additions or checks. `extra_items` replaces the additions: retain
+unrelated extras using each returned `extra_id` as input `id`; use the full row
+`id` for `checked_items`. Page through existing extras before replacing them.
+Checks mean list completion, not confirmed pantry stock. Changed quantities and
+new independent menus reopen rows; explicit replans preserve unchanged checks.
+
+Only when the user wants retailer suggestions, call `match` with the current
+`list_ref`. A connected account is needed, but ordering is optional. Explain that
+product suggestions/prices cover menu ingredients; personal extras stay on the
+ordinary list and are excluded from that estimate, along with recurring goods
+and delivery. If offline, keep the ordinary list usable. Oda products used as a
+REMA reference do not establish REMA assortment, price or stock. Do not imply
+cross-retailer comparison from a single connected store.
+
+Follow the returned product-review continuations and use `products.get` for
+later pages. If the user then requests a cart, continue through the existing
+reviewed `products.apply` and checkout flow below. Neither list checks nor
+matching is permission to mutate a cart, place an order or pay.
 
 ## Select products and update the cart
 

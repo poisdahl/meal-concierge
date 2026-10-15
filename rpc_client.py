@@ -46,6 +46,8 @@ SOCKET = Path(os.environ.get("MEAL_CONCIERGE_SOCKET", "/run/meal-concierge/servi
 
 
 def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
+    if operation == "shopping_list" and arguments.get("action") == "match":
+        return rpc_timeout("products", {**arguments, "action": "prepare"})
     order_operation = operation == "orders"
     cart_change = operation == "cart" and arguments.get("action") != "get"
     delivery_operation = operation == "delivery"

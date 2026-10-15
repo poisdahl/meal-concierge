@@ -162,6 +162,10 @@ def valid_email_address(value: Any) -> bool:
 
 def checkout_payment_settings(value: Any, provider: str) -> dict[str, Any]:
     """Validate the non-secret payment preference at config/setup/state boundaries."""
+    if provider == "none":
+        if value not in (None, {}):
+            raise HouseholdError("checkout payment requires a connected store")
+        return {}
     if value is None:
         value = {"method": "vipps" if provider == "meny" else "saved_card"}
     if not isinstance(value, Mapping) or not set(value).issubset({"method", "card_last4"}):
@@ -182,6 +186,8 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
     if config.get("provider") == "mathem":
         schedule["timezone"] = "Europe/Stockholm"
         profile["recipes"]["sources"].update(oda=False, meny=False, mathem=True)
+    if config.get("provider") == "none":
+        profile["recipes"]["sources"].update(oda=False, meny=False, mathem=False)
     _merge(profile, config.get("profile_overrides", {}))
     validate_profile(profile)
     return {
@@ -220,6 +226,26 @@ def initial_state(config: Mapping[str, Any]) -> dict[str, Any]:
         "protected_results": {},
         "protected_requests": {},
     }
+
+
+def first_store_state(state: Mapping[str, Any], provider: str) -> dict[str, Any]:
+    """Prepare one explicit first store connection; installer owns offline publication."""
+    if provider not in {"oda", "mathem", "meny"}:
+        raise HouseholdError("first store connection requires oda, mathem or meny")
+    if state.get("provider") != "none" or state.get("version") != STATE_VERSION:
+        raise HouseholdError("first store connection requires current no-store state")
+    if any(state.get(key) for key in (
+        "cart_plan", "pending_checkout", "pending_cart_change", "pending_cancellation", "order_change",
+        "delivery_selection", "order_snapshots", "order_snapshot_providers", "protected_results", "protected_requests",
+        "product_favorites", "recurring_items", "email_jobs",
+    )):
+        raise HouseholdError("no-store state contains store-bound history; first connection cannot reinterpret it")
+    result = deepcopy(dict(state))
+    result["provider"] = provider
+    result["checkout_payment"] = checkout_payment_settings(None, provider)
+    result["profile"]["recipes"]["sources"][provider] = True
+    result["setup"].update(status="needs_review", reviewed_at=None)
+    return result
 
 
 def initial_recipe_delivery(*, legacy_email: bool = False, legacy: bool = False) -> dict[str, Any]:
