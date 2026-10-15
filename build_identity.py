@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 
 MANIFEST = 'build-identity.json'
@@ -19,7 +20,7 @@ def create(source, release, python_version):
         content = path.read_bytes()
         digest.update(len(name).to_bytes(8, 'big') + name)
         digest.update(len(content).to_bytes(8, 'big') + content)
-    commit, dirty = None, None
+    commit, dirty, release_tag = None, None, None
     try:
         def git(*args):
             return subprocess.run(['git', '-C', str(source), *args], check=True,
@@ -29,9 +30,15 @@ def create(source, release, python_version):
             commit = git('rev-parse', 'HEAD')
             dirty = bool(git('status', '--porcelain', '--untracked-files=all', '--',
                              '*.py', 'runtime-requirements.txt', 'skill'))
+            # Only exact stable program tags identify a release base. An untagged
+            # checkout may simply lack tags; never infer that it is newer.
+            tags = [tag for tag in git('tag', '--points-at', 'HEAD').splitlines()
+                    if re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)]
+            release_tag = max(tags, key=lambda tag: tuple(map(int, tag[1:].split('.'))), default=None)
     except (OSError, subprocess.SubprocessError):
         pass
-    return {'format': 1, 'source_commit': commit, 'source_modified': dirty,
+    return {'format': 1, 'release_tag': release_tag,
+            'source_commit': commit, 'source_modified': dirty,
             'source_sha256': digest.hexdigest(),
             'dependencies_sha256': hashlib.sha256((release / 'runtime-requirements.txt').read_bytes()).hexdigest(),
             'python': python_version, 'interface_version': INTERFACE_VERSION,

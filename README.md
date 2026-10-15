@@ -141,9 +141,13 @@ See [release selection](docs/runtime.md#choose-a-program-release).
 
 To verify an existing installation without updating it, ask:
 
-> Show the running Meal Concierge build and full source commit from service
-> status. Compare it with my selected release tag and report any mismatch or
-> unavailable identity. Do not update anything.
+> Which Meal Concierge release are you running? Read service status and report
+> any local changes or unknown release identity. Do not update anything.
+
+To check for updates, ask:
+
+> Is a newer stable Meal Concierge program release available? Compare the running
+> version with the official program releases. Do not install anything.
 
 ## Add or update the recipe collection
 

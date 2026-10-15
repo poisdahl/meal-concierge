@@ -41,7 +41,9 @@ Compare the full commit with the selected release's tag/recorded commit; the
 status output should be empty. Retain this source directory for client packaging
 and maintenance. A commit-specific GitHub source archive is also usable, but
 does not carry Git metadata: retain its provenance separately and expect the
-[running build](maintenance.md#identifying-the-running-build) to lack a Git commit.
+[running build](maintenance.md#identifying-the-running-build) to lack a Git commit
+and release tag. Prefer the tagged Git checkout so agents can identify the
+installed release directly from status.
 
 `install.sh install` and `install.sh update` stage the source they run from.
 They do not fetch the latest program or accept a program `--version` flag.
