@@ -80,6 +80,38 @@ class RecipeDeliveryPresentationTests(unittest.TestCase):
         self.assertNotIn('Cook.', linked)
         self.assertIn('Original credit', linked)
 
+    def test_web_source_title_without_publisher_is_not_reported_missing(self):
+        source = {"kind": "web", "relationship": "adapted", "title": "Original <recipe>",
+                  "url": "https://example.com/original"}
+        menu = {"dishes": [{"name": "Adapted dinner", "source": source,
+                            "rights": {"storage": "full", "credit": "Example Kitchen"}}]}
+        for language, label in (("no", "Tilpasset"), ("en", "Adapted")):
+            with self.subTest(language=language):
+                menu["output_language"] = language
+                rendered = menu_email_html(menu)
+                self.assertIn(f'<strong>{label}:</strong> <a href="https://example.com/original">Original &lt;recipe&gt;</a>. Example Kitchen', rendered)
+                self.assertNotIn("Kilde ikke registrert", rendered)
+                self.assertNotIn("Source not recorded", rendered)
+        self.assertNotIn("publisher", source)
+
+    def test_source_caption_fallbacks_preserve_known_credits_and_safe_links(self):
+        cases = [
+            ({"kind": "web", "publisher": "Example Kitchen", "title": "Original",
+              "url": "https://example.com/recipe"}, "Example Kitchen – Original", True),
+            ({"kind": "web", "url": "https://example.com/recipe"}, "example.com", True),
+            ({"kind": "web", "title": "Printed original"}, "Printed original", False),
+            ({"kind": "pasted_text", "title": "Original"}, "Innsendt oppskrift – Original", False),
+            ({"kind": "generated"}, "Generert oppskrift", False),
+            ({}, "Kilde ikke registrert", False),
+            ({"kind": "web", "url": "javascript:alert(1)"}, "Kilde ikke registrert", False),
+        ]
+        for source, caption, linked in cases:
+            with self.subTest(source=source):
+                rendered = menu_email_html({"dishes": [{"name": "Dinner", "source": source}]})
+                self.assertIn(caption, rendered)
+                self.assertEqual('<a href=' in rendered, linked)
+                self.assertNotIn("javascript:", rendered)
+
     def test_new_delivery_preferences_default_to_visible_estimate_labels(self):
         preferences = initial_recipe_delivery()["preferences"]
 
