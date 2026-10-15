@@ -2390,6 +2390,8 @@ class PlanningOperations:
                     replacement = deepcopy(dict(replacement))
                     replacement.setdefault("strategy", "cheapest")
                     changes = {**changes, "delivery": replacement}
+                if self.provider == "none" and (changes.get("auto_checkout") is True or changes.get("mode") in {"cart_ready", "auto_checkout"}):
+                    raise HouseholdError("store shopping automation requires a connected store")
                 before = scheduler_settings_digest(schedule)
                 schedule.update(deepcopy(changes))
                 validate_schedule(schedule, self.provider)
@@ -3443,20 +3445,16 @@ class PlanningOperations:
                 "product preparation requires a complete weekly menu that satisfies saved dietary minimums: "
                 + canonical(minimums)
             )
-        saved = snapshot.get("menu_ingredient_decisions") or {}
         reference = binding.get("menu_ref")
         if (binding.get("kind") == "planner_selection" and snapshot.get("menu")
                 and canonical(snapshot["menu"].get("planner_selection")) == canonical(binding.get("planner_handoff"))):
             reference = self._cart_menu_ref(snapshot["menu"])
-        if reference is not None and saved.get("menu_ref") == reference:
-            binding = {**binding, "ingredient_decisions_digest": hashlib.sha256(canonical(saved["decisions"]).encode()).hexdigest()}
-            exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=ingredient_decisions)
-            merged = {canonical(d["source"]): d for d in ingredient_decisions or []}
-            # A returned stale plan must never resurrect an older stock assertion.
-            # Explicit changes go through record_ingredients; current saved facts
-            # also win when returning a newly refreshed plan after stale apply.
-            merged.update({canonical(d["source"]): deepcopy(d) for d in saved["decisions"]})
-            ingredient_decisions = list(merged.values())
+        from shopping_lists import effective_ingredient_decisions
+        ingredient_decisions, decisions_digest = effective_ingredient_decisions(
+            snapshot, menu, ingredient_decisions, reference=reference,
+        )
+        if decisions_digest is not None:
+            binding = {**binding, "ingredient_decisions_digest": decisions_digest}
         requirements, _issues = exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=ingredient_decisions)
         requirement_ids = {row["requirement_id"] for row in requirements}
         approvals = normalize_approvals(candidate_approvals, requirement_ids)

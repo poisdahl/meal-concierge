@@ -4,7 +4,11 @@ Talk to your agent in your preferred language. Start with a request such as:
 
 > Plan four dinners from Thursday for two, using the carrots we already have.
 
-Meal Concierge can use recipes from your selected, connected store without
+Meal Concierge works without a store using saved recipes, an optional offline
+collection and enabled recipe discovery. You can plan menus and keep a shopping
+list without logging into a retailer.
+
+With a store connection it can use recipes from that store without
 an imported recipe collection. It can also use recipes you save in its local
 bank. See [adding recipes](recipe-import.md) for personal recipes and the
 optional offline collection.
@@ -30,9 +34,36 @@ Examples:
 - “Include vegetarian lunches as well as dinners.”
 - “Show which recipe sources you are using.”
 
-One installation belongs to one store and household. To shop at another store,
+One installation belongs to one household, optionally connected to one store.
+A household started without a store can connect its first store later while
+keeping recipes, menus and its shopping list. To shop at another store,
 use a separate installation; do not change the provider on an existing bank of
 orders and shopping settings. Multiple trusted agents can share one installation.
+
+## Shopping lists, with or without a store
+
+Ask “Make a shopping list from this menu” or “Add coffee and paper to my list.”
+The ordinary list is local: it combines ingredient quantities, portions and batch
+cooking, subtracts explicitly recorded stock, and keeps uncertain quantities
+visible. You can check items off, add personal extras and ask for a plain-text
+list. Checking an item does not update pantry stock or a shopping cart.
+Changed quantities reopen checked rows; a new independent menu starts fresh
+checks. Personal extras remain until you remove them. Explicit replanning keeps
+unchanged checks within the same shopping task.
+
+Ask explicitly for product suggestions from the connected Oda, Mathem or MENY
+catalog to tailor the menu ingredients to that store. A store connection is
+required, but you do not have to order: you can use the suggestions when shopping
+in person. The generic list remains available when the store is disconnected.
+Product suggestions and price estimates cover **menu ingredients**; personal
+extras stay on the ordinary list and are not included in the estimate. Delivery
+fees and recurring groceries are also excluded from this view.
+
+Oda suggestions may serve as a reference when shopping at REMA, but they do not
+verify REMA's assortment, prices or stock. Prices and availability always belong
+to the named retailer. One installation does not compare several connected
+retailers. To order, ask to add the reviewed products to the cart and continue
+through the existing cart, delivery and checkout steps.
 
 ## Dietary goals and substitutions
 

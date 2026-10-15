@@ -216,7 +216,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "wikibooks": WikibooksSource(),
         } if external_recipe_sources is None else external_recipe_sources)
         self.integration: dict[str, Any]
-        if self.provider == "meny":
+        if self.provider == "none":
+            self.integration = {"status": "not_configured", "provider": "none",
+                                "message": "Recipes, menus and shopping lists are available without a store."}
+        elif self.provider == "meny":
             # MENY readiness can require a full browser navigation. Keep the
             # local RPC socket available during service startup and perform
             # that bounded probe on the first status or provider operation.
@@ -622,6 +625,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return self._setup(request)
         if operation == "profile":
             return self._profile(request)
+        if (self.provider == "none" and operation in {"product_favorites", "recurring"}
+                and request.get("action", "list") not in {"list", "due"}):
+            raise HouseholdError("Connect a store before saving retailer products; use shopping_list personal extras without a store.")
         if operation == "product_favorites":
             return self._items(request, "product_favorites")
         if operation == "recurring":
@@ -642,6 +648,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             return self._recipes(request)
         if operation == "menu":
             return self._menu(request)
+        if operation == "shopping_list":
+            from shopping_lists import handle_shopping_list
+            return handle_shopping_list(self, request)
         if operation == "recipe_delivery":
             return self._recipe_delivery(request)
         if operation == "feedback":
@@ -649,6 +658,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         if operation == "schedule":
             return self._schedule(request)
         action = request.get("action")
+        if self.provider == "none" and (
+            operation in {"catalog", "cart", "delivery", "orders", "checkout"}
+            or (operation == "products" and action != "record_ingredients")
+        ):
+            raise HouseholdError("No store is connected. Use shopping_list for a general list; connect a store for product matching or ordering.")
         email_due_requires_meny = (
             operation == "email" and action in {"due", "reconcile"}
             and (request.get("provider") is None or request.get("provider") == "meny")
@@ -763,6 +777,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
 
     def _store_readiness(self, checkout_payment: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Explain known configuration without navigating or testing checkout."""
+        if self.provider == "none":
+            return {"provider": "none", "connection_check": {"status": "not_configured", "next_action": None},
+                    "local_recipes_available": True, "shopping_lists_available": True,
+                    "note": "Store connection is optional. Plan meals and use general shopping lists without login. Catalog matching requires a store account; ordering is a separate request."}
         connected = self.integration.get("status") == "ready"
         connection_status = (
             "verified" if connected else
@@ -828,7 +846,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         from dietary_guidance import dietary_guidance
         profile = state["profile"]
         meals = profile["meals"]
-        return {
+        result = {
             "household": state["household"],
             "provider": self.provider,
             "people": meals["people"],
@@ -859,6 +877,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "primary_recipe_library_id": self.primary_recipe_library_id,
             "optional_recipe_libraries": "Configure external recipe libraries only with the local interactive recipe_library_setup.py helper.",
         }
+        if self.provider == "none":
+            for key in ("purchasing", "confirmation_policy", "checkout_payment", "payment_choices", "payment_note"):
+                result.pop(key, None)
+        return result
 
     def _setup_question(self, state: Mapping[str, Any]) -> dict[str, Any]:
         required = (state.get("setup") or {}).get("status") != "complete"
@@ -872,9 +894,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "next": "Call meal_concierge_setup action=apply with keep_current=true, or keep_current=false and only the requested changes." if required else "Use action=rerun to review this configuration again.",
         }
 
-    @staticmethod
-    def _user_guide() -> dict[str, Any]:
-        return {
+    def _user_guide(self) -> dict[str, Any]:
+        result = {
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
             "during_diet": "Explain the actual saved dietary goal and its dietary_guidance. New/reset defaults use a concrete editable Norwegian starter preset with adult whole-diet reference amounts; offer keep/change/remove. Existing customized or cleared goals stay as saved. Another country or eating pattern is welcome; never infer it from the retailer or conversation language.",
             "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
@@ -884,6 +905,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "overview_request": "Show me everything Meal Concierge can do and all my current settings, preferences, recurring items and delivery options.",
             "presentation": "Give the relevant short guide at each setup step, then the overview phrase once at completion. Translate to the user's language; do not dump technical tool instructions.",
         }
+        if self.provider == "none":
+            result["during_preferences"] = "Choose recipes and meals for any dates or number of dinners, including batch cooking and leftovers. Tell me about dietary needs, cooking time and ingredients to use up. No store connection is needed."
+            result["after_setup"] = "Ask for meal inspiration, a saved menu, full recipes or a general shopping list. Add personal items and mark list rows. Store connection is optional for product suggestions and never requests ordering."
+        return result
 
     def _setup_gate(self, request: Mapping[str, Any]) -> dict[str, Any] | None:
         interactive = request.get("interactive") is True
@@ -1176,8 +1201,8 @@ def config(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict) or not value.get("household"):
         raise SystemExit("invalid household config")
     provider = str(value.get("provider") or "oda").casefold()
-    if provider not in {"oda", "meny", "mathem"}:
-        raise SystemExit("provider must be oda, meny or mathem")
+    if provider not in {"none", "oda", "meny", "mathem"}:
+        raise SystemExit("provider must be none, oda, meny or mathem")
     value["provider"] = provider
     confirmation_policy = str(value.get("confirmation_policy") or "fresh").casefold()
     if confirmation_policy not in {"fresh", "standing"}:
@@ -1242,7 +1267,8 @@ def main() -> None:
         raise SystemExit("offline update is incomplete; repair it before starting the service")
     settings = config(args.config)
     validate_browser_prerequisites(args, settings)
-    with ownership(args.state, args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid):
+    browser_owner = (None, None, None, None, None, None) if settings["provider"] == "none" else (args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid)
+    with ownership(args.state, *browser_owner):
         run(args, settings)
 
 
@@ -1277,7 +1303,9 @@ def run(args, settings=None) -> None:
         "browser_display": getattr(args, "browser_display", None),
         "browser_xauthority": getattr(args, "browser_xauthority", None),
     }
-    if settings["provider"] in {"oda", "mathem"}:
+    if settings["provider"] == "none":
+        provider_client = None
+    elif settings["provider"] in {"oda", "mathem"}:
         if args.tokens is None:
             raise SystemExit(f"--tokens is required for provider {settings['provider']}")
         provider_client = RetailMcpClient(args.tokens, provider=settings["provider"])
@@ -1288,7 +1316,7 @@ def run(args, settings=None) -> None:
             vipps_phone_number=settings.get("vipps_phone_number"),
         )
     email_provider_clients: dict[str, Any] = {}
-    if args.tokens is not None:
+    if settings["provider"] != "none" and args.tokens is not None:
         for retained_provider in ("oda", "mathem"):
             if retained_provider != settings["provider"]:
                 email_provider_clients[retained_provider] = RetailMcpClient(
@@ -1306,7 +1334,9 @@ def run(args, settings=None) -> None:
             # An optional connection is reported unavailable by the recipes tool;
             # it must not block the built-in bank or grocery/order paths.
             continue
-    if settings["provider"] == "mathem":
+    if settings["provider"] == "none":
+        checkout_browser = None
+    elif settings["provider"] == "mathem":
         checkout_browser = MathemBrowser(provider_client=provider_client, **browser_arguments)
     else:
         checkout_browser = OdaBrowser(

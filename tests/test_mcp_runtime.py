@@ -135,16 +135,19 @@ def serve(root):
 
 
 @contextmanager
-def household():
+def household(provider="mathem"):
     # /tmp keeps the Darwin Unix socket path below its 104-byte bound.
     with tempfile.TemporaryDirectory(prefix="mc01-", dir=os.environ.get("MC01_SCRATCH", "/tmp")) as directory:
         root = Path(directory)
         (root / "config.json").write_text(json.dumps({
             "household": "MC01-" + uuid.uuid4().hex, "instance": root.name,
-            "provider": "mathem", "confirmation_policy": "fresh", "profile_overrides": {},
+            "provider": provider, "confirmation_policy": "fresh", "profile_overrides": {},
         }))
         with (root / "service.log").open("w+") as log:
-            process = subprocess.Popen([sys.executable, "-I", str(HERE), "--serve", str(root)],
+            command = ([sys.executable, "-I", str(CORE / "service.py"), "--config", str(root / "config.json"),
+                        "--state", str(root / "state"), "--socket", str(root / "service.sock")]
+                       if provider == "none" else [sys.executable, "-I", str(HERE), "--serve", str(root)])
+            process = subprocess.Popen(command,
                                        env={"PATH": os.defpath, "HOME": str(root),
                                             "MC01_MACOS_SMOKE": os.environ.get("MC01_MACOS_SMOKE", "0")},
                                        stdout=log, stderr=log)
@@ -193,7 +196,7 @@ async def call(client, tool, **args):
     result = await client.call_tool("meal_concierge_" + tool, args)
     assert not result.is_error, result
     text = json.loads(result.content[0].text)
-    if tool in {"setup", "catalog", "menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
+    if tool in {"shopping_list", "setup", "catalog", "menu", "products", "status", "recipes", "recipe_discovery", "cart", "orders", "profile", "recipe_web_search", "recipe_web_read"}:
         assert len(result.content) == 1 and result.content[0].type == "text", result
         assert result.structured_content is None, result
         assert isinstance(text, dict), result
@@ -208,6 +211,35 @@ async def wait_file(path):
     async with asyncio.timeout(10):
         while not path.exists():
             await asyncio.sleep(0.02)
+
+
+async def no_store_checks(root):
+    from test_meal_concierge_planner import recipe
+    async with session(root) as (client, initialized):
+        status = await call(client, "status")
+        assert status["integration"]["status"] == "not_configured"
+        setup = await call(client, "setup", action="apply", keep_current=True)
+        assert setup["current"]["provider"] == "none"
+        assert "checkout_payment" not in setup["current"]
+        saved = (await call(client, "recipe_write", recipe=recipe("Rice dish", "rice", ingredient="ris"),
+                            idempotency_key="no-store-recipe"))["recipe"]
+        planned = await call(client, "menu", action="plan", planner_input={
+            "selection_mode":"agent", "days":[1], "portions":2,
+            "candidates":[{"recipe_ref":{"id":saved["id"],"revision":saved["revision"]}}]})
+        # Agent presentation returns the exact save reference with the proposal.
+        reference = planned.get("save_ref") or planned.get("plan", {}).get("save_ref")
+        assert reference, planned
+        await call(client, "menu", action="save", planner_ref=reference)
+        listing = await call(client, "shopping_list")
+        assert listing["items"][0]["item"] == "ris", listing
+        listing = await call(client, "shopping_list", action="update", list_ref=listing["list_ref"],
+                             extra_items=[{"id":"coffee","item":"Kaffe"}])
+        matched = await call(client, "shopping_list", action="match", list_ref=listing["list_ref"])
+        assert matched["matching_status"] == "not_configured"
+        assert matched["items"] == listing["items"]
+        failed = await client.call_tool("meal_concierge_cart", {"action":"get"})
+        assert "No store" in failed.content[0].text, failed
+    print(json.dumps({"no_store": "real service + SDK recipes/menu/list; optional matching; commerce refused"}), flush=True)
 
 
 async def sdk_checks(root, process):
@@ -237,7 +269,7 @@ async def sdk_checks(root, process):
             assert tool.input_schema["type"] == "object"
             description = (tool.description or "").casefold()
             assert "cli.py" not in description and "local cli" not in description, tool.name
-            if tool.name in {"meal_concierge_setup", "meal_concierge_catalog", "meal_concierge_profile", "meal_concierge_recipe_web_search", "meal_concierge_recipe_web_read", "meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products", "meal_concierge_status", "meal_concierge_recipes", "meal_concierge_recipe_discovery", "meal_concierge_cart", "meal_concierge_orders"}:
+            if tool.name in {"meal_concierge_shopping_list", "meal_concierge_setup", "meal_concierge_catalog", "meal_concierge_profile", "meal_concierge_recipe_web_search", "meal_concierge_recipe_web_read", "meal_concierge_recipe_image", "meal_concierge_menu", "meal_concierge_products", "meal_concierge_status", "meal_concierge_recipes", "meal_concierge_recipe_discovery", "meal_concierge_cart", "meal_concierge_orders"}:
                 assert tool.output_schema is None
             else:
                 assert tool.output_schema["type"] == "object"
@@ -705,6 +737,8 @@ def main():
     else:
         print(json.dumps(isolated_runtime()), flush=True)
         sys.addaudithook(no_external_network)
+        with household("none") as (root, process):
+            asyncio.run(no_store_checks(root))
         with household() as (root, process):
             asyncio.run(sdk_checks(root, process))
             if args.codex:
