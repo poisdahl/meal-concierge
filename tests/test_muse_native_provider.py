@@ -165,7 +165,7 @@ class NativeReadTests(unittest.TestCase):
         self.assertEqual(value["ok"], ok)
         return value.get("result", value)
 
-    def restart_with_short_reads(self, transport, *, read_seconds=1.0):
+    def restart_with_short_reads(self, transport, *, read_seconds=1.0, accepted_account=None):
         self.process.terminate()
         self.process.communicate(timeout=5)
         socket = self.home / "service.sock"
@@ -180,8 +180,34 @@ sys.argv = sys.argv[1:]
         self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", runner,
             str(ROOT / "clients/muse.py"), "run", "--home", str(self.home),
             "--provider-transport", transport, "--browser-directory", str(self.broker),
-            "--browser-task-id", "synthetic-original-task"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            "--browser-task-id", "synthetic-original-task",
+            *(["--accepted-account", str(accepted_account)] if accepted_account is not None else [])],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         wait_for(lambda: socket.exists())
+
+    def test_real_cli_first_observation_requires_original_account_and_latches_change(self):
+        accepted = self.root / "accepted-account.json"
+        accepted.write_text(json.dumps(ACCOUNT))
+        accepted.chmod(0o600)
+        original = accepted.read_bytes()
+        for transport in ("browser_readonly", "browser_cart"):
+            with self.subTest(transport=transport):
+                self.transform = lambda tool, facts: facts
+                self.restart_with_short_reads(transport, accepted_account=accepted)
+                self.assertEqual(self.rpc({"operation": "health"})["integration"]["status"], "ready")
+                self.transform = lambda tool, facts: {**facts, "account": {
+                    **ACCOUNT, "edit_urls": ["https://oda.com/no/account/delivery/edit/202/"]}}
+                self.rpc({"operation": "cart", "action": "get"}, ok=False)
+                count = len(self.seen)
+                status = self.rpc({"operation": "status"})
+                self.assertEqual(status["integration"]["status"], "unavailable")
+                self.assertEqual(len(self.seen), count)
+                self.assertEqual(accepted.read_bytes(), original)
+                self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+                current = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                           if read_json(path)["owner_pid"] == self.process.pid]
+                self.assertTrue(current)
+                self.assertTrue(all(row["payload"]["accepted_account"] == ACCOUNT for row in current))
 
     def test_expired_unclaimed_startup_read_recovers_on_explicit_status(self):
         for transport in ("browser_readonly", "browser_cart"):
@@ -298,19 +324,20 @@ sys.argv = sys.argv[1:]
             self.assertIn("never the entire historical account", request["payload"]["facts_contract"])
             self.assertFalse((self.broker / "consumed" / (request["request_id"] + ".json")).exists())
 
-    def test_real_native_requests_keep_default_and_order_windows_distinct(self):
+    def test_real_native_requests_keep_default_catalog_and_order_windows_distinct(self):
         self.finite_producer = True
         self.rpc({"operation": "orders", "action": "get", "order_id": "SYNTHETIC-A1"})
         self.rpc({"operation": "orders", "action": "list", "limit": 1})
         self.rpc({"operation": "cart", "action": "get"})
+        self.rpc({"operation": "catalog", "action": "products", "query": "squash", "limit": 1})
         requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
                     if path not in self.history]
         self.assertEqual({r["payload"]["tool"] for r in requests},
-                         {"get_delivery_addresses", "get_order", "order_tracking", "get_orders", "get_cart"})
+                         {"get_delivery_addresses", "get_order", "order_tracking", "get_orders", "get_cart", "product_search"})
         for record in requests:
             seconds = (datetime.fromisoformat(record["expires_at"])
                        - datetime.fromisoformat(record["issued_at"])).total_seconds()
-            expected = 180 if record["payload"]["tool"] in {"get_order", "order_tracking"} else 110
+            expected = 180 if record["payload"]["tool"] in {"product_search", "get_order", "order_tracking"} else 110
             self.assertGreater(seconds, expected - 1)
             self.assertLessEqual(seconds, expected)
 

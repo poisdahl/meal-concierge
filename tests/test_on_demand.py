@@ -79,7 +79,7 @@ class OnDemandTests(unittest.TestCase):
                     textpage.close()
                 page.close()
         text = " ".join(text.split())
-        for expected in ("600 g", "3 l", "6 porsjoner", "2026-10-05", "Chop the carrots.",
+        for expected in ("600 g", "3 l", "6 porsjoner", "Mandag 5. oktober 2026", "Chop the carrots.",
                          "Simmer in the water.", "synthetic test author", "synthetic geometry"):
             self.assertIn(expected, text)
         state = json.loads((self.root / "state/state.json").read_text())

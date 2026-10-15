@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import menu_planning as mp
 from datetime import date, datetime, timedelta
 import hashlib
 import math
@@ -20,7 +21,7 @@ from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError,
                          _oda_checkout_amounts_minor,
                          delivery_signature as oda_delivery_signature,
                          require_order_binding)
-from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
+from core import CancellationPreconditionError, CheckoutPreconditionError, HouseholdError, cart_contents, cart_summary, checkout_payment_settings, cheapest_delivery_slot, delivery_candidate_digest, delivery_price_display, validate_delivery_slot
 from retail_mcp import retail_cart_delivery_matches_slot, oda_cart_delivery_window, retail_delivery_slot_date
 from meny import MENY_ORDER_TIMEOUT, MenyOrderChangeDispatchError, meny_checkout_reviews_match
 from planning_assessment import assess_menu
@@ -49,6 +50,9 @@ from service_common import (
     scheduler_settings_digest,
     validate_schedule
 )
+
+
+DELIVERY_SNAPSHOT_TIMEOUT = 15.0
 
 
 ODA_VIPPS_ORDER_BINDING_SOURCES = frozenset({
@@ -555,15 +559,28 @@ class OrderOperations:
         if self.provider in {"oda", "mathem"}:
             if cart is None:
                 return False
-            cart_delivery = cart_summary(cart).get("delivery")
+            cart_delivery = self._delivery_cart_summary(cart).get("delivery")
             observed_slot = observation.get("slot")
             if cart_delivery is None or observed_slot is None:
                 return False
-            if not retail_cart_delivery_matches_slot(
+            if not self._cart_delivery_matches_slot(
                 cart_delivery, observed_slot, provider=self.provider,
             ):
                 return False
         return True
+
+    def _delivery_cart_summary(self, cart):
+        native = getattr(self.provider_client, "delivery_cart_summary", None)
+        return native(cart) if callable(native) else cart_summary(cart)
+
+    def _cart_delivery_window(self, delivery, *, today=None):
+        native = getattr(self.provider_client, "cart_delivery_window", None)
+        return native(delivery, today=today) if callable(native) else oda_cart_delivery_window(delivery, today=today)
+
+    def _cart_delivery_matches_slot(self, delivery, slot, *, provider=None, today=None):
+        native = getattr(self.provider_client, "cart_delivery_matches_slot", None)
+        return (native(delivery, slot, today=today) if callable(native)
+                else retail_cart_delivery_matches_slot(delivery, slot, provider=provider or self.provider, today=today))
 
     @staticmethod
     def _same_delivery_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
@@ -585,6 +602,7 @@ class OrderOperations:
         address_id: Any = None,
         allow_recovery: bool = False,
         display_metadata: dict[str, str] | None = None,
+        availability: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         calls = dates or [None]
         slots: list[dict[str, Any]] = []
@@ -602,6 +620,8 @@ class OrderOperations:
             if not isinstance(raw_slots, list):
                 raise HouseholdError(f"{self.provider.upper()} delivery slots are not normalized")
             normalized_call = [validate_delivery_slot(slot) for slot in raw_slots]
+            if availability is not None and isinstance(result.get("availability"), Mapping):
+                availability.append(deepcopy(result["availability"]))
             if display_metadata is not None:
                 raw_display = result.get("display") if isinstance(result, Mapping) else None
                 if self.provider == "meny" and (
@@ -662,13 +682,13 @@ class OrderOperations:
         applicable = self._delivery_observation_applies(
             observation, state, cart=scope_cart, occurrence=occurrence,
         )
-        cart_delivery = cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
+        cart_delivery = self._delivery_cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
         current_dates = None
         if applicable and isinstance(observation.get("slot"), Mapping):
             current_dates = [self._delivery_slot_date(observation["slot"])]
         elif self.provider == "oda" and isinstance(cart_delivery, Mapping):
             oda_today = self._now().astimezone(ZoneInfo("Europe/Oslo")).date()
-            current_dates = [oda_cart_delivery_window(cart_delivery, today=oda_today)["date"]]
+            current_dates = [self._cart_delivery_window(cart_delivery, today=oda_today)["date"]]
         current_slots = self._normalized_provider_slots(current_dates, deadline=deadline)
         selected = [slot for slot in current_slots if slot["selected"]]
         if len(selected) > 1:
@@ -678,7 +698,7 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     selected_slot is None
-                    or not retail_cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
+                    or not self._cart_delivery_matches_slot(cart_delivery, selected_slot, provider=self.provider)
                 ):
                     raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected_slot is not None:
@@ -828,7 +848,7 @@ class OrderOperations:
             cart_delivery = cart_summary(fresh_scope_cart).get("delivery")
             if (
                 not isinstance(cart_delivery, Mapping)
-                or not retail_cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
+                or not self._cart_delivery_matches_slot(cart_delivery, verified, provider=self.provider)
             ):
                 raise HouseholdError(
                     "automatic delivery selection is uncertain; provider cart and slots disagree"
@@ -877,11 +897,11 @@ class OrderOperations:
         target = expected_slot
         if target is None and applicable and isinstance(observation.get("slot"), Mapping):
             target = observation["slot"]
-        cart_delivery = cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
+        cart_delivery = self._delivery_cart_summary(scope_cart).get("delivery") if self.provider in {"oda", "mathem"} else None
         dates = [self._delivery_slot_date(target)] if isinstance(target, Mapping) else None
         if dates is None and self.provider == "oda" and isinstance(cart_delivery, Mapping):
             oda_today = self._now().astimezone(ZoneInfo("Europe/Oslo")).date()
-            dates = [oda_cart_delivery_window(cart_delivery, today=oda_today)["date"]]
+            dates = [self._cart_delivery_window(cart_delivery, today=oda_today)["date"]]
         selected = [
             slot for slot in self._normalized_provider_slots(
                 dates, deadline=deadline, allow_recovery=allow_recovery,
@@ -892,7 +912,7 @@ class OrderOperations:
             if isinstance(cart_delivery, Mapping):
                 if (
                     len(selected) != 1
-                    or not retail_cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
+                    or not self._cart_delivery_matches_slot(cart_delivery, selected[0], provider=self.provider)
                 ):
                     raise HouseholdError("Cart and selected delivery listing disagree")
             elif selected:
@@ -1182,6 +1202,8 @@ class OrderOperations:
             scheduler_context=pending.get("scheduler_context"),
             payment_override=pending["checkout_payment"] if "payment_preference" in pending else None,
         )
+        if "summary" not in prepared:
+            return {"confirmed": False, "reprepared": True, **prepared}
         problem = self._scheduled_checkout_problem(prepared["summary"], occurrence or None, automatic=pending.get("automatic_checkout", bool(occurrence)))
         if problem is not None:
             with self.store.locked() as state:
@@ -1199,6 +1221,43 @@ class OrderOperations:
             "reason": "delivery price or cheapest candidate set changed",
             **prepared,
         }
+
+    def _menu_start_context(self, state, delivery):
+        menu = state.get("menu") or {}
+        if not mp.relative(menu) or state.get("order_change"):
+            return None
+        slot = delivery.get("slot", delivery)
+        context = {"menu_ref": mp.menu_ref(menu), "status": "needs_start_date",
+            "dinner_time": state["profile"]["meals"].get("dinner_time"),
+            "next": "Reuse the user's stated first-meal date or authorized discretion. Otherwise suggest a start from the delivery window and known meal plans; clarify when ambiguous. No universal hour cutoff. Resolve first_meal_date in checkout prepare and show the proposed range before purchase; choosing a start is not purchase approval."}
+        zone = ZoneInfo(state.get("schedule", {}).get("timezone") or "Europe/Oslo")
+        try:
+            end = datetime.fromisoformat(slot["end_at"].replace("Z", "+00:00"))
+            if end.utcoffset() is None:
+                raise ValueError()
+            end = end.astimezone(zone)
+            day = end.date()
+            context.update(delivery_end=end.isoformat(), timezone=zone.key,
+                choices=[day.isoformat(), (day + timedelta(days=1)).isoformat()], other_start_date_allowed=True)
+        except (KeyError, TypeError, ValueError):
+            context["delivery_time_status"] = "unknown"
+        return context
+
+    def _delivery_restriction_snapshot(self, request):
+        """Bind optional browser evidence to the same cart and selected address."""
+        deadline = request.get("_deadline")
+        cart = cart_contents(self.provider_client.call("get_cart", {}, deadline=deadline))
+        addresses = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
+        rows = addresses.get("result") if isinstance(addresses, Mapping) else None
+        if not isinstance(rows, list):
+            raise HouseholdError("delivery diagnostic address unavailable")
+        selected = [row for row in rows if isinstance(row, Mapping) and row.get("isSelected") is True]
+        if len(selected) != 1 or not isinstance(selected[0].get("address"), str):
+            raise HouseholdError("delivery diagnostic selected address unavailable")
+        address = {key: selected[0].get(key) for key in ("id", "address")}
+        # Prices and row order can change without changing the goods being diagnosed.
+        items = sorted((row["product_id"], row["quantity"]) for row in cart["items"])
+        return {"items": items, "address": address}
 
     def _delivery(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
@@ -1219,16 +1278,91 @@ class OrderOperations:
                     except ValueError as exc:
                         raise HouseholdError("delivery dates must be one to seven ISO dates") from exc
             display: dict[str, str] = {}
+            availability: list[dict[str, Any]] = []
+            inspect = getattr(self.browser, "cart_delivery_restrictions", None)
+            snapshot = None
+            pending_keys = ("pending_checkout", "pending_cart_change", "pending_cancellation", "order_change")
+            remaining = (request.get("_deadline") or float("inf")) - time.monotonic()
+            if self.provider == "oda" and callable(inspect) and remaining > 10 and not any(self.store.read().get(key) for key in pending_keys):
+                try:
+                    # Two fresh provider sessions need a bounded network budget; reserve
+                    # at least ten for the requested provider slot reads.
+                    before_deadline = min(time.monotonic() + DELIVERY_SNAPSHOT_TIMEOUT, (request.get("_deadline") or float("inf")) - 10)
+                    snapshot = self._delivery_restriction_snapshot({**request, "_deadline": before_deadline})
+                    if request.get("address_id") is not None and request["address_id"] != snapshot["address"]["id"]:
+                        snapshot = None
+                except HouseholdError:
+                    pass  # Optional diagnosis must not block the provider's slot list.
             slots = self._normalized_provider_slots(
                 dates,
                 deadline=request.get("_deadline"),
                 address_id=request.get("address_id"),
                 allow_recovery=request.get("_allow_browser_recovery") is True,
                 display_metadata=display,
+                availability=availability,
             )
+            diagnostics = {"availability": availability} if availability else {}
+            # Available windows do not establish that the assembled goods are
+            # still in stock. Inspect a bound cart even when all dates have slots.
+            if (self.provider == "oda" and callable(inspect)) or not slots or any(row.get("selectable") == 0 for row in availability):
+                guidance = "Report observed current-cart stock notices before offering delivery. If checked dates have no selectable slots, unavailable is not the same as full; a purchasable product is not a delivery-date promise. Offer an authorized replacement or omission for this shop for stock notices; waiting is also an option for an observed delivery-delay restriction. Preserve recipe coverage and recurring settings. Re-list after an authorized cart change. Unknown does not mean no restriction; do not blame a historical item or infer that a stock notice caused an unavailable date."
+                diagnostics.update({"restriction_status": "unknown",
+                    "restriction_reason": "inspection_unavailable",
+                    "cart_stock_status": "unknown",
+                    "next": guidance})
+                if (self.provider == "oda" and callable(inspect) and snapshot is not None and snapshot["items"]
+                        and (request.get("_deadline") or float("inf")) - time.monotonic() > DELIVERY_SNAPSHOT_TIMEOUT):
+                    # Keep a final snapshot budget after the browser stage, even
+                    # when the caller supplied a shorter overall deadline.
+                    deadline = min((request.get("_deadline") or float("inf")) - DELIVERY_SNAPSHOT_TIMEOUT, time.monotonic() + 30)
+                    try:
+                        with self._browser_operation(deadline):
+                            state = self.store.read()
+                            if any(state.get(key) for key in pending_keys):
+                                diagnostics["restriction_reason"] = "protected_operation_pending"
+                            elif self._delivery_restriction_snapshot({**request, "_deadline": deadline}) != snapshot:
+                                diagnostics["restriction_reason"] = "cart_or_address_changed"
+                            else:
+                                try:
+                                    observed = inspect(snapshot, deadline=deadline)
+                                    if observed.get("cart_stock_notices"):
+                                        diagnostics["cart_stock_status"] = "observed"
+                                        diagnostics["cart_stock_notices"] = observed["cart_stock_notices"]
+                                        diagnostics["cart_stock_source"] = "current_cart_page"
+                                        diagnostics["restriction_reason"] = "stock_notice_is_not_delivery_cause"
+                                        diagnostics["next"] = "The current cart has an observed stock/availability notice, even if delivery windows are selectable. Offer a suitable replacement or omission for this shop, preserving recipe coverage and recurring settings. Resolve it before selecting delivery, then re-list the windows. Do not claim this notice caused a full or unavailable date. Checkout still rechecks stock and the final total."
+                                    elif "cart_restrictions" in observed:
+                                        warnings = observed["cart_restrictions"]
+                                        diagnostics["restriction_status"] = "observed" if warnings else "not_observed"
+                                        diagnostics["restriction_reason"] = "current_delivery_page"
+                                        diagnostics["cart_restrictions"] = warnings
+                                finally:
+                                    # A changed cart can itself make inspection fail.
+                                    # Compare even on that path; an unreadable check
+                                    # cannot establish either a cause or a change.
+                                    after_deadline = min(request.get("_deadline") or float("inf"), time.monotonic() + DELIVERY_SNAPSHOT_TIMEOUT)
+                                    try:
+                                        after = self._delivery_restriction_snapshot({**request, "_deadline": after_deadline})
+                                    except HouseholdError:
+                                        after = None
+                                    if after != snapshot:
+                                        diagnostics["restriction_status"] = "unknown"
+                                        diagnostics.pop("cart_restrictions", None)
+                                        diagnostics["cart_stock_status"] = "unknown"
+                                        diagnostics.pop("cart_stock_notices", None)
+                                        diagnostics.pop("cart_stock_source", None)
+                                        diagnostics["next"] = guidance
+                                        diagnostics["restriction_reason"] = "cart_or_address_changed" if after is not None else "inspection_unavailable"
+                    except HouseholdError:
+                        pass
+                if diagnostics.get("restriction_reason") == "cart_or_address_changed":
+                    diagnostics["next"] = "The cart or address changed while delivery was being inspected. Re-list the requested dates for the current cart before offering or selecting a window. No restriction has been attributed to these stale observations."
+                    slots = []
+                    diagnostics["availability_stale"] = True
             return {
                 "provider": self.provider,
                 "slots": slots,
+                **diagnostics,
                 "price_display": {
                     slot["slot_ref"]: delivery_price_display(slot)
                     for slot in slots
@@ -1274,8 +1408,12 @@ class OrderOperations:
                     candidate = candidates[0]
                     provider_slot_id = candidate["provider_slot_id"]
                     if provider_slot_id is None:
-                        raise HouseholdError("the requested provider delivery slot has no provider id")
-                    arguments["delivery_slot_id"] = provider_slot_id
+                        native_arguments = getattr(self.provider_client, "delivery_selection_arguments", None)
+                        if not callable(native_arguments) or set(arguments) != {"delivery_slot_id"}:
+                            raise HouseholdError("the requested provider delivery slot has no provider id")
+                        arguments = native_arguments(candidate)
+                    else:
+                        arguments["delivery_slot_id"] = provider_slot_id
                     self._scheduled_select(request, arguments, deadline)
                     selected_date = self._delivery_slot_date(candidate)
                     fresh = [
@@ -1291,11 +1429,11 @@ class OrderOperations:
                     normalized = fresh[0]
                     self._record_scheduled_effect(request.get("_scheduler_context"), "resolved", normalized)
                     raw_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-                    cart = cart_summary(raw_cart)
+                    cart = self._delivery_cart_summary(raw_cart)
                     delivery = cart.get("delivery")
                     if (
                         not isinstance(delivery, Mapping)
-                        or not retail_cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
+                        or not self._cart_delivery_matches_slot(delivery, normalized, provider=self.provider)
                     ):
                         raise HouseholdError(f"{self.provider.upper()} delivery selection is uncertain; inspect the provider selection")
                     if change:
@@ -1343,6 +1481,8 @@ class OrderOperations:
                             "staged_for_order": change["order_id"],
                             "next": "Prepare a fresh review of the exact window and full original/new totals. An unchanged or lower total is authorized by the requested window; an increase needs a covering price limit or one approval.",
                         })
+                    if not change and (context := self._menu_start_context(self.store.read(), normalized)):
+                        response["menu_start"] = context
                     return response
                 if self.provider == "meny":
                     self.browser.verify_order_change(
@@ -1383,6 +1523,8 @@ class OrderOperations:
                             cart=scope_cart,
                             occurrence=str(request.get("_occurrence") or "") or None,
                         )
+                    if not change and (context := self._menu_start_context(self.store.read(), normalized)):
+                        result = {**result, "menu_start": context}
                     return result
         raise HouseholdError("unknown delivery action")
 
@@ -1747,6 +1889,16 @@ class OrderOperations:
             return self._cancel(action, cancellation_deadline, confirmation_id=str(request.get("confirmation_id") or ""))
         raise HouseholdError("unknown order action")
 
+    def _cancellation_order_unchanged(self, current, before):
+        native = getattr(self.browser, "cancellation_order_unchanged", None)
+        return native(current, before) if callable(native) else canonical(current) == canonical(before)
+
+    def _cancellation_completed(self, order_id, current):
+        native = getattr(self.browser, "native_cancellation_completed", None)
+        if getattr(self.browser, "native_receipt_reconciliation", False) and callable(native):
+            return native(order_id, current)
+        return str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}
+
     def _cancel(
         self,
         action: str,
@@ -1769,7 +1921,7 @@ class OrderOperations:
         if self._now() >= datetime.fromisoformat(pending["expires_at"]):
             raise HouseholdError("cancellation confirmation expired")
         current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
-        if pending["status"] != "awaiting_confirmation" or canonical(current) != canonical(pending["before"]):
+        if pending["status"] != "awaiting_confirmation" or not self._cancellation_order_unchanged(current, pending["before"]):
             raise HouseholdError("the order changed; ask for a new cancellation confirmation")
         if self.provider in {"oda", "mathem"}:
             require_order_binding(pending["browser"].get("binding"))
@@ -1811,12 +1963,16 @@ class OrderOperations:
                     before_click,
                     deadline=deadline,
                 )
-                tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
-                require_provider_identity(tracking, order_id, tracking=True)
+                if getattr(self.browser, "native_receipt_reconciliation", False):
+                    current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
+                    tracking = current["tracking"]
+                else:
+                    tracking = self.provider_client.call("order_tracking", {"order_number": order_id}, deadline=deadline)
+                    require_provider_identity(tracking, order_id, tracking=True)
+                    current = {"order": current["order"], "tracking": tracking}
                 if self.provider in {"oda", "mathem"}:
                     self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                     expected_binding=require_order_binding(pending["browser"].get("binding")))
-                current = {"order": current["order"], "tracking": tracking}
             except CancellationPreconditionError:
                 with self.store.locked() as state:
                     current_pending = state.get("pending_cancellation")
@@ -1829,7 +1985,7 @@ class OrderOperations:
                     if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
                         state["pending_cancellation"]["status"] = "uncertain"
                 raise
-            cancelled = str(tracking.get("status") or "").casefold() in {"cancelled", "canceled"}
+            cancelled = self._cancellation_completed(order_id, current)
             with self.store.locked() as state:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):
                     raise HouseholdError("cancellation state changed while reconciling the order")
@@ -1843,7 +1999,9 @@ class OrderOperations:
                         self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
-                        "tracking_status": str(tracking.get("status") or "").casefold(),
+                        "tracking_status": None if getattr(self.browser, "native_receipt_reconciliation", False) else str(tracking.get("status") or "").casefold(),
+                        **({"merchant_evidence": {"status": current["order"]["status"], "source": current["order"]["source"]}}
+                           if getattr(self.browser, "native_receipt_reconciliation", False) else {}),
                         "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     }
@@ -1955,7 +2113,7 @@ class OrderOperations:
                 raise HouseholdError("cancellation has not reached reconciliation")
             order_id = pending["order_id"]
             current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
-            cancelled = str((current.get("tracking") or {}).get("status") or "").casefold() in {"cancelled", "canceled"}
+            cancelled = self._cancellation_completed(order_id, current)
             if self.provider in {"oda", "mathem"}:
                 self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                 expected_binding=require_order_binding(pending["browser"].get("binding")))
@@ -1972,7 +2130,9 @@ class OrderOperations:
                         self._archive_cancelled_checkout(state, bound_checkout, order_id)
                     terminal = {
                         "cancelled": True, "order_id": order_id,
-                        "tracking_status": str((current.get("tracking") or {}).get("status") or "").casefold(),
+                        "tracking_status": None if getattr(self.browser, "native_receipt_reconciliation", False) else str((current.get("tracking") or {}).get("status") or "").casefold(),
+                        **({"merchant_evidence": {"status": current["order"]["status"], "source": current["order"]["source"]}}
+                           if getattr(self.browser, "native_receipt_reconciliation", False) else {}),
                         "retry_allowed": False, "confirmation_id": pending["confirmation_id"],
                         "payment_resolution": {"authorization_release": "unknown", "refund": "unknown"},
                     }
@@ -2225,6 +2385,8 @@ class OrderOperations:
         action = request.get("action", "prepare")
         if any(key in request for key in ("expected_checkout_digest", "owner_authorization")) and action != "retire_attempt":
             raise HouseholdError("Local retirement evidence is available only for retire_attempt")
+        if "first_meal_date" in request and action != "prepare":
+            raise HouseholdError("first_meal_date is a checkout preparation choice")
         if "delivery_price_approved" in request and (type(request["delivery_price_approved"]) is not bool or action != "confirm"):
             raise HouseholdError("delivery_price_approved is a boolean for one freshly reviewed checkout confirmation only")
         if self.provider == "mathem" and self.browser is None and action not in {"prepare", "auto"}:
@@ -2342,6 +2504,7 @@ class OrderOperations:
                 payment_override=request.get("checkout_payment"),
                 requested_order_id=request.get("order_id"),
                 identity_review=request.get("identity_review"),
+                first_meal_date=request.get("first_meal_date"),
             )
         if action == "confirm":
             return self._checkout_confirm(deadline, str(request.get("confirmation_id") or ""), request=request)
@@ -2380,7 +2543,7 @@ class OrderOperations:
                 }
             else:
                 prepared = self._checkout({"action": "prepare", "occurrence": request.get("occurrence")})
-            if prepared.get("cart_reconciliation_required") is True:
+            if prepared.get("cart_reconciliation_required") is True or prepared.get("status") == "needs_input":
                 return {"confirmed": False, **prepared}
             with self.store.locked() as state:
                 existing = self._protected_request(state, "checkout", idempotency_key)
@@ -2393,6 +2556,8 @@ class OrderOperations:
                     raise HouseholdError("checkout idempotency_key is bound to another attempt")
             result = self._checkout_confirm(deadline, prepared["confirmation_id"], request=request)
             if result.get("reprepared") is True:
+                if result.get("status") == "needs_input":
+                    return result
                 replacement_id = str(result.get("confirmation_id") or "")
                 if not replacement_id:
                     raise HouseholdError("reprepared checkout has no confirmation identity")
@@ -2589,6 +2754,7 @@ class OrderOperations:
         requested_order_id: str | None = None,
         _switch_confirmation_id: str | None = None,
         identity_review: Mapping[str, Any] | None = None,
+        first_meal_date: str | None = None,
     ) -> dict[str, Any]:
         if identity_review is not None and (
                 self.provider not in {"oda", "mathem"} or self.browser is None
@@ -2717,6 +2883,20 @@ class OrderOperations:
             if expired_awaiting_confirmation(state.get("pending_cancellation"), self._now()):
                 state["pending_cancellation"] = None
             pending_cancellation = deepcopy(state.get("pending_cancellation"))
+        inherited_start = first_meal_date is None
+        relative_menu = bool(mp.relative(menu_baseline or {}) and not order_change and not independent_cart)
+        if first_meal_date is not None:
+            mp.checked_day(first_meal_date)
+            if not relative_menu:
+                raise HouseholdError("first_meal_date applies only to an unbound relative menu")
+        if relative_menu and first_meal_date is None:
+            prior_schedule = (baseline or {}).get("summary", {}).get("menu_schedule") or {}
+            if prior_schedule and (baseline or {}).get("menu_ref") == mp.menu_ref(menu_baseline):
+                first_meal_date = prior_schedule["first_meal_date"]
+            else:
+                return {"status": "needs_input", "reason": "first_meal_date_required",
+                    "menu_start": self._menu_start_context(self.store.read(), (self.store.read().get("delivery_selection") or {}).get("slot") or {}),
+                    "next": "Resolve when the first meal should be: reuse existing user intent or authorized discretion, otherwise ask alongside delivery. Then prepare with first_meal_date. Do not infer purchase authorization from this answer."}
         allow_recovery = self.provider == "meny" and not order_change and not pending_cancellation
         if order_change:
             if self.provider == "oda" and checkout_payment["method"] == "vipps" and (order_change.get("requested_delivery") or order_change.get("delivery_only")):
@@ -2883,7 +3063,7 @@ class OrderOperations:
                     if self.provider == "oda" and observed_window is None:
                         # Oda's cart uses "Hjemlevering mellom kl 13 og 18, i morgen".
                         # Its existing exact parser binds relative labels to Oslo's date.
-                        window = oda_cart_delivery_window(after_delivery, today=self._now().astimezone(ZoneInfo("Europe/Oslo")).date())
+                        window = self._cart_delivery_window(after_delivery, today=self._now().astimezone(ZoneInfo("Europe/Oslo")).date())
                         if window["date"] == order_change["before"]["order"].get("deliveryDate"):
                             observed_date = date.fromisoformat(window["date"])
                             months = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")
@@ -2958,6 +3138,23 @@ class OrderOperations:
                     if product_summary.get("coverage_status") == "practical_estimate":
                         summary["menu_coverage"] = "practical_estimate"
                         summary["quantity_estimates"] = deepcopy(product_summary.get("quantity_estimates", []))
+            if relative_menu and summary.get("menu_attribution") == "menu_bound":
+                context = self._menu_start_context(self.store.read(), summary.get("delivery") or {})
+                if not context or not context.get("delivery_end"):
+                    return {"status": "needs_input", "reason": "menu_delivery_date_unknown",
+                        "next": "Read and verify the selected delivery window before dating this relative menu."}
+                if first_meal_date < datetime.fromisoformat(context["delivery_end"]).date().isoformat():
+                    raise HouseholdError("first meal cannot precede the selected delivery window's end date")
+                prior_schedule = (baseline or {}).get("summary", {}).get("menu_schedule") or {}
+                if inherited_start and prior_schedule and canonical(prior_schedule.get("delivery")) != canonical(summary["delivery"]):
+                    return {"status": "needs_input", "reason": "menu_delivery_changed",
+                        "menu_start": context, "next": "The delivery changed. Review the first-meal date again and prepare a fresh checkout."}
+                mp.require_calendar_eligible(self.store.read(), menu_baseline)
+                bound = mp.bind_calendar(menu_baseline, first_meal_date, summary["delivery"], timezone_name=context["timezone"])
+                summary["menu_schedule"] = {"first_meal_date": first_meal_date,
+                    "last_meal_date": max(s["date"] for s in bound["slots"]), "timezone": context["timezone"],
+                    "source_menu_ref": mp.menu_ref(menu_baseline), "delivery": deepcopy(summary["delivery"]),
+                    "bound_menu_ref": mp.menu_ref(bound), "schedule": deepcopy(bound["schedule"])}
             if self.provider == "meny":
                 review = deepcopy(dict(review))
                 review["delivery_guard"] = deepcopy(dict(delivery_binding))
@@ -3378,6 +3575,10 @@ class OrderOperations:
         """Validate only local state before the exact recovery click."""
         from dietary_assessment import digest
 
+        try:
+            mp.require_calendar_eligible(state, pending.get("menu") or {})
+        except HouseholdError as exc:
+            raise CheckoutPreconditionError(str(exc)) from exc
         confirmation_id = child["confirmation_id"]
         if self._read_protected_result(state, confirmation_id, "checkout"):
             raise CheckoutPreconditionError("Recovery confirmation already has a protected result")
@@ -4459,6 +4660,7 @@ class OrderOperations:
                     if state["checkout_payment"] != pending.get("payment_preference", pending.get("checkout_payment")):
                         raise HouseholdError("payment preference changed or was not bound; prepare a new summary")
                     self._pending_scheduler_guard(state, pending)
+                    mp.require_calendar_eligible(state, pending.get("menu") or {})
                     state["pending_checkout"]["status"] = "clicking"
                     if (self.provider in {"oda", "mathem"}
                             and (not pending_change.get("requested_delivery") or price_review["payable_ore"] > 0)
@@ -4469,6 +4671,11 @@ class OrderOperations:
                         pending["authentication_unresolved"] = True
 
                 def before_click() -> None:
+                    with self.store.locked() as locked:
+                        try:
+                            mp.require_calendar_eligible(locked, pending.get("menu") or {})
+                        except HouseholdError as exc:
+                            raise CheckoutPreconditionError(str(exc)) from exc
                     # MENY's provider client is this same locked browser tab;
                     # submit_checkout performs its own exact fresh review.
                     if self.provider in {"oda", "mathem"}:
@@ -4686,14 +4893,34 @@ class OrderOperations:
         snapshot = state.get("order_snapshots", {}).get(order_id)
         if not isinstance(snapshot, Mapping):
             return None
+        if snapshot.get("calendar_status"):
+            return {"provider": self.provider, "order_id": order_id, "status": "needs_input",
+                "reason": snapshot["calendar_status"], "menu_ref": self._cart_menu_ref(snapshot),
+                "next": "The purchase is confirmed. Meal history changed or the start-date review is unavailable; retain the order and ask how to schedule the remaining meals. No recipe email was queued. Never purchase again to fix the calendar."}
         job = next((j for j in state["email_jobs"] if j.get("provider") == self.provider
                     and j.get("order_id") == order_id and j.get("trigger") == "after_purchase"), None)
+        from delivery_operations import legacy_held
+        email = None
+        guidance = ["No further checkout is needed."]
+        if job:
+            status = job["status"]
+            if status in {"claimed", "sending", "uncertain"}:
+                email = {"action": "reconcile_order", "status": status}
+                guidance.append("Use email_sender reconcile_order for the original recipe email attempt; never resend an uncertain delivery. If its executor receipt is missing, inspect email status rather than start another send.")
+            elif status == "pending" and not legacy_held(state, job):
+                email = {"action": "send_order", "status": status}
+                guidance.append("Use email_sender send_order to complete this existing authorized recipe email job, preserving the original order and sender binding.")
+            else:
+                email = {"action": "status", "status": status, "held": legacy_held(state, job)}
+                guidance.append("Recipe email is already settled or held. Report its actual status; do not send again or release held work without an explicit instruction.")
+        else:
+            guidance.append("No after-purchase email job is queued. Do not infer a send request from channel availability; offer recipes only when useful to the conversation.")
+        guidance.append("For explicitly requested native chat or PDF delivery, use recipe_delivery with this provider/order, stable request_id, actual authorized destination and verified capabilities. Enabled chat alone is not a sending request.")
         return {"provider": self.provider, "order_id": order_id,
-                "menu_ref": self._cart_menu_ref(snapshot),
-                "email": ({"action": "send_order", "status": job["status"]} if job else None),
+                "menu_ref": self._cart_menu_ref(snapshot), "email": email,
                 "chat_enabled": state["recipe_delivery"]["preferences"]["chat"]["enabled"],
                 "request_id": "purchase-" + hashlib.sha256(f"{self.provider}:{order_id}".encode()).hexdigest()[:24],
-                "next": "Deliver this purchased menu through its authorized channels. Use email_sender send_order for the queued email; preserve original receipts on recovery. For requested native chat or PDF fallback, request recipe_delivery with this provider/order and stable request_id, actual authorized destination and verified capabilities. No further checkout is needed."}
+                "next": " ".join(guidance)}
 
     def _record_order_snapshot(self, state: dict[str, Any], pending: Mapping[str, Any], order_id: str) -> None:
         order_id = safe_order_id(order_id)
@@ -4737,13 +4964,41 @@ class OrderOperations:
         previous_order_id = snapshot.get("order_id")
         if previous_order_id and previous_order_id != order_id:
             return
+        existing = state.get("order_snapshots", {}).get(order_id)
+        if isinstance(existing, Mapping):
+            return
+        source_ref = mp.menu_ref(snapshot)
+        if mp.relative(snapshot):
+            reviewed = pending.get("summary", {}).get("menu_schedule") or {}
+            try:
+                if reviewed.get("source_menu_ref") != source_ref:
+                    raise HouseholdError("relative start review is unavailable")
+                mp.require_calendar_eligible(state, snapshot)
+                bound = mp.bind_calendar(snapshot, reviewed["first_meal_date"], reviewed["delivery"], timezone_name=reviewed["timezone"])
+                if mp.menu_ref(bound) != reviewed.get("bound_menu_ref"):
+                    raise HouseholdError("relative calendar review changed")
+                history = state["menu_planning"]["history"]
+                history.setdefault(mp.lock_key(snapshot), deepcopy(snapshot))
+                state["menu_planning"]["locks"][mp.lock_key(bound)] = [slot_id for slot_id in state["menu_planning"]["locks"].get(mp.lock_key(snapshot), []) if slot_id in {s["slot_id"] for s in bound["slots"]}]
+                snapshot = bound
+            except (HouseholdError, KeyError, TypeError, ValueError, OverflowError):
+                # Merchant success must remain recorded even if legacy calendar
+                # evidence is incomplete. Never repeat the purchase to fix dates.
+                snapshot["calendar_status"] = "needs_start_date_review"
         snapshot["phase"] = "ordered"
         delivery = pending.get("summary", {}).get("delivery") or {}
         delivery_date = delivery.get("date")
         if isinstance(delivery.get("slot"), Mapping):
             delivery_date = self._delivery_slot_date(delivery["slot"])
-        if isinstance(delivery_date, str):
+        if isinstance(delivery_date, str) and not snapshot.get("calendar_binding"):
             snapshot["delivery_date"] = delivery_date
+        if snapshot.get("calendar_status"):
+            from service_common import menu_digest
+            state["menu_planning"]["history"].setdefault(mp.lock_key(pending["menu"]), deepcopy(pending["menu"]))
+            snapshot["revision"] += 1
+            snapshot["digest"] = menu_digest(snapshot)
+            state["menu_planning"]["locks"][mp.lock_key(snapshot)] = deepcopy(
+                state["menu_planning"]["locks"].get(mp.lock_key(pending["menu"]), []))
         snapshot["order_id"] = order_id
         first_confirmation = order_id not in state.get("order_snapshots", {})
         state.setdefault("order_snapshots", {})[order_id] = snapshot
@@ -4756,10 +5011,21 @@ class OrderOperations:
             usage["ordered_slot_ids"] = [s["slot_id"] for s in snapshot.get("slots", []) if s["slot_id"] not in snapshot.get("historical_slot_ids", [])]
             usage["order_id"] = order_id
             usage["updated_at"] = self._now().isoformat()
+        if snapshot.get("calendar_binding"):
+            by_owner = {}
+            for slot in snapshot["slots"]:
+                owner = snapshot.get("slot_owners", {}).get(slot["slot_id"], menu_id)
+                by_owner.setdefault(owner, {})[slot["slot_id"]] = slot
+            for owner, bound_slots in by_owner.items():
+                record = state["recipe_usage"].get(owner)
+                if not isinstance(record, dict):
+                    continue
+                record["slots"] = [deepcopy(bound_slots.get(s["slot_id"], s)) for s in record.get("slots", [])]
+                record["week"] = date.fromisoformat(min(s["date"] for s in bound_slots.values())).strftime("%G-W%V")
         current = state.get("menu")
-        if isinstance(current, Mapping) and current.get("menu_id") == snapshot.get("menu_id") and current.get("digest") == snapshot.get("digest"):
+        if isinstance(current, Mapping) and current.get("menu_id") == snapshot.get("menu_id") and mp.menu_ref(current) == source_ref:
             state["menu"] = deepcopy(snapshot)
-        if first_confirmation:
+        if first_confirmation and not snapshot.get("calendar_status"):
             self._enqueue_purchase_email(state, snapshot, order_id)
         OrderOperations._prune_order_snapshots(state, keep_order_id=order_id)
 
@@ -4866,6 +5132,35 @@ class OrderOperations:
             choice = self.browser.choose_checkout_bank_app(context, before_choice, deadline=deadline)
             return {**self._checkout_reconcile_unlocked(deadline, confirmation_id),
                     "bank_app_method_chosen": choice.get("chosen") is True}
+
+    def _finalize_confirmed_checkout(self, state, pending, order_id, tracking_status, *,
+                                     recovery_dispatched=False, owner_payment_completed=False,
+                                     merchant_evidence=None):
+        """Commit shared attribution and terminal journals after transport proof."""
+        state["pending_checkout"] = None
+        self._record_order_snapshot(state, pending, order_id)
+        terminal = {
+            "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
+            "recipe_delivery": self._purchase_delivery(state, order_id),
+            "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
+            **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
+            "payment": self._payment_evidence(tracking_status),
+            **({"owner_payment_completed": True} if owner_payment_completed else {}),
+            "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
+            "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
+                pending.get("menu"), pending.get("cart_plan")),
+            **({"menu_coverage": pending["summary"]["menu_coverage"]} if "menu_coverage" in pending["summary"] else {}),
+        }
+        if merchant_evidence is not None:
+            terminal["merchant_evidence"] = deepcopy(merchant_evidence)
+            terminal["payment"] = {**terminal["payment"], "source": "native_order_detail",
+                                   "provider_status": merchant_evidence["payment_status"]}
+        self._store_protected_result(state, pending["confirmation_id"], "checkout", terminal,
+            target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+        if pending.get("recovery"):
+            self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
+                target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+        return terminal
 
     def _checkout_reconcile(self, deadline: float | None = None, confirmation_id: str = "", *,
                             vipps_approval_completed: bool = False,
@@ -5137,6 +5432,19 @@ class OrderOperations:
         nondispatch_reader = getattr(self.browser, "checkout_nondispatch_evidence", None)
         nondispatch_evidence = (nondispatch_reader(pending, deadline=deadline)
                                if self.provider == "oda" and callable(nondispatch_reader) else None)
+        if getattr(self.browser, "native_receipt_reconciliation", False) and not nondispatch_evidence:
+            if vipps_approval_completed or vipps_request_not_received or owner_payment_completed:
+                raise HouseholdError("Muse native merchant receipt does not accept payment reports as proof")
+            evidence = self.browser.native_checkout_receipt(pending, deadline=deadline)
+            if evidence is None:
+                return {"confirmed": False, "confirmation_id": pending["confirmation_id"],
+                        "retry_allowed": False,
+                        "next": "Preserve the original native task. A click acknowledgement alone does not identify an accepted order; never submit again."}
+            with self.store.locked() as state:
+                if canonical(state.get("pending_checkout")) != canonical(pending):
+                    raise HouseholdError("checkout state changed while reconciling the native receipt")
+                return self._finalize_confirmed_checkout(state, pending, evidence["order_id"], None,
+                                                         merchant_evidence=evidence)
         confirmation_order_id = None
         if self.provider == "meny":
             confirmation_order_id, pending = self._meny_confirmation_before_navigation(pending, deadline)
@@ -5561,27 +5869,8 @@ class OrderOperations:
                 raise HouseholdError("checkout state changed while reconciling the order")
             if confirmed:
                 order_id = str(order.get("orderNumber") or order.get("order_number") or order.get("id"))
-                state["pending_checkout"] = None
-                self._record_order_snapshot(state, pending, order_id)
-                terminal = {
-                    "confirmed": True, "order_id": order_id, "tracking_status": tracking_status,
-                    "recipe_delivery": self._purchase_delivery(state, order_id),
-                    "retry_allowed": False, "confirmation_id": (pending["recovery"] if recovery_dispatched else pending)["confirmation_id"],
-                    **({"original_confirmation_id": pending["confirmation_id"]} if recovery_dispatched else {}),
-                    "payment": self._payment_evidence(tracking_status),
-                    **({"owner_payment_completed": True} if owner_payment_completed else {}),
-                    "menu_shortfall": deepcopy(pending["summary"].get("menu_shortfall", [])),
-                    "menu_attribution": pending["summary"].get("menu_attribution") or self._checkout_menu_attribution(
-                        pending.get("menu"), pending.get("cart_plan")),
-                    **({"menu_coverage": pending["summary"]["menu_coverage"]} if "menu_coverage" in pending["summary"] else {}),
-                }
-                self._store_protected_result(
-                    state, pending["confirmation_id"], "checkout", terminal,
-                    target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]),
-                )
-                if pending.get("recovery"):
-                    self._store_protected_result(state, pending["recovery"]["confirmation_id"], "checkout", terminal,
-                        target_id=order_id, intent_signature=checkout_intent_signature(pending["summary"]))
+                terminal = self._finalize_confirmed_checkout(state, pending, order_id, tracking_status,
+                    recovery_dispatched=recovery_dispatched, owner_payment_completed=owner_payment_completed)
             elif expired_unpaid or undispatched_retryable:
                 self._release_detached_checkout_usage(state, pending)
                 state["pending_checkout"] = None

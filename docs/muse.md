@@ -101,6 +101,23 @@ all partial-page facts:
 {"operation":"orders","action":"get","order_id":"EXACT_OBSERVED_REFERENCE","response_view":"agent"}
 ```
 
+When recovering an established account, pass `--accepted-account` with the
+absolute path of its existing private, owned account-link JSON. It has exactly
+`url` and `edit_urls`, using the delivery-account route and its complete original
+edit-link set. The provider enforces that set from its first startup observation;
+positive observations for another account are rejected before publication. The
+file does not authenticate the browser or change its account. Do not replace it
+with newly observed foreign links to make a failed check pass. Omitting this
+option retains the existing process-local account continuity behavior.
+
+The composed financial adapter also compares the complete account set on its
+checkout, receipt and cancellation observations. A complete different set
+latches the native provider; an incomplete observation is rejected without
+claiming an account change. The original accepted account accompanies those
+requests and their frozen financial review. Protected MCP keeps its existing
+selected-address checks. This foundation does not enable checkout in
+`browser_readonly` or `browser_cart`.
+
 The startup account probe and subsequent reads publish `provider_read` requests
 through the existing canonical browser broker. Each payload contains `tool` and
 `arguments`; only `product_search`, `get_cart`, `get_delivery_addresses` and
@@ -124,12 +141,20 @@ the supported background executor and serve its broker request concurrently.
 Health remains local. Actual signed-out or changed-account failures remain
 latched, and unresolved native task custody must be reconciled before another
 read. Protected MCP status still does not retry rejected authentication.
-No action permit is consumed. Native `get_order` and `order_tracking` reads each
-have a 180-second bound; other native provider reads retain a 110-second bound.
+No action permit is consumed. Native `product_search`, `get_order` and
+`order_tracking` reads each have a 180-second bound; other native provider reads
+retain a 110-second bound.
 These bounds include browser-task execution and automatic completion delivery;
 shorter caller deadlines still apply. The `orders.get` RPC wait is 420 seconds
 across clients, leaving 60 seconds beyond its two native order-read bounds.
-Other order RPC waits remain 300 seconds and ordinary defaults remain 120 seconds.
+The direct `catalog.products` RPC waits 240 seconds, beyond its native search
+budget; other catalog actions retain their ordinary 120-second wait.
+Native product preparation has a 420-second operation budget, including its
+five-second plan-building reserve, so two serial catalog reads can finish.
+Ordinary provider preparation retains its 240-second operation budget.
+The `products.prepare` RPC wait is 480 seconds and `products.apply` waits
+660 seconds, beyond the existing 600-second native apply budget. Other product
+and order RPC waits remain 300 seconds and ordinary defaults remain 120 seconds.
 Publication still
 requires a genuine completed task and facts no more than 30 seconds old. Preserve
 late endings and unknown custody after a timeout; never dispatch another task to replace uncertain work.
@@ -217,22 +242,62 @@ not qualify selected-address, delivery, payment, session longevity or complete
 Meal Concierge shopping support. Configuration and synthetic tests do not
 replace real host qualification.
 
-## Opt-in native unit cart changes
+## Opt-in native cart changes and product-plan apply
 
 `--provider-transport browser_cart` uses the same protected home, canonical
 browser directory and original task-chain anchor as `browser_readonly`. It keeps
-the read-only transport unchanged and adds only `cart.change` for one exact
-product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`.
+the read-only transport unchanged and adds `cart.change` for one exact
+product and a `+1` or `-1` unit delta, plus read-only `cart.reconcile_change`
+and exact `cart.reconcile` with `decision:"keep_current"`.
 This bounded adapter also supports ordinary `products.prepare`, saved-plan
 `products.get` and preparation continuations using the existing cloud catalog.
 Every prepare request must explicitly set `include_recurring:false`, and a
 continuation cannot change a stored recurring-enabled scope. The existing
 bounded page-1 search and product-plan continuation budgets apply. Missing
 prices, package facts and dietary evidence remain unknown; a preparation
-result grants no cart authority. Whole-menu apply arguments are omitted.
-This mode does not implement whole-menu `products.apply`, delivery selection,
-checkout or cancellation. Bounded displayed order history and exact displayed
+result grants no cart authority by itself. A complete saved-menu plan returns its
+ordinary `products.apply` arguments. Apply requires the enabled original-context
+policy and the complete reviewed plan/digest or returned plan reference, with
+`cart_change_requested:true`; recurring-enabled and partial applies are unavailable.
+The shared Application retains menu ownership and existing baseline goods. Each
+bounded native unit uses a distinct original permit and complete readback before
+the next unit. Partial or unknown outcomes retain the current journal and verified
+prefix; `cart.reconcile_change` reads and never repeats an effect. Waiting native
+tasks block further observations as well as writes until their actual ending.
+After reconciliation, review the current cart digest, make its read-only
+`keep_current` decision, then prepare and review a fresh complete plan. Its
+`products.apply` with `restore_missing:true` and that exact cart digest completes
+only the remaining quantities. Direct restoring/excluding cart decisions are
+unavailable in this adapter. The original
+apply has one 600-second budget, including validation and every native handoff.
+Disabling future admission blocks new applies; an already admitted exact apply
+retains that original bounded authority.
+
+`price_mode:"estimate"` can supply observed package counts and merchandise cost
+for nonfinancial cart sync. Deposit and total payable remain unknown; no missing
+cart total is filled with zero. Actual payable terms need a separate complete
+checkout observation and approval. This mode does not implement checkout or
+cancellation. Bounded displayed order history and exact displayed
 order details use the same read-only observations without enabling cart policy.
+
+`delivery.list` observes the ordinary upcoming-delivery picker, including actual
+available/enabled price buttons, and dismisses it unchanged. Each native slot has
+`provider_slot_id:null` and a local `oda-native:<date>:<start>-<end>` reference.
+Raw column/row/button labels and observation time remain in native provenance.
+The year uses the next nonpast date at that observation time; Europe/Oslo and NOK
+are provider policy, not displayed year/timezone/currency assertions. An observed
+weekday must agree. Unavailable cells remain diagnostics, and an AX expanded hint
+alone never proves selection: one enabled cell must match the fresh held cart
+window. These date rules apply only to upcoming delivery, never historical receipts.
+
+`delivery.select` accepts that exact freshly returned reference, preserves the
+original address and unattended preference, and grants one original native permit
+for one unique enabled cell at the observed price. Independent picker/cart
+readback verifies the selection and every cart quantity. A waiting or unknown
+native task blocks further requests until its actual original ending; inspect
+that ending and list the current selection before any new request. Selecting an
+already selected and freshly correlated slot is idempotent. Delivery selection
+never adds or removes goods and does not grant purchase authority.
 
 Writes start disabled. In the ordinary CLI, inspect
 `{"operation":"native_cart_policy","action":"show"}` and explicitly set
@@ -402,7 +467,10 @@ exclusively published and fsynced. The producer must:
    emits `checkout_click` or `cancellation_click`. Native approval mode emits
    `checkout_delegate` or `cancellation_delegate` and additionally carries
    `authorization={mode:native_approval, expiry_role:admission,
-   purchase_approval_required:true/false}`. Checkout requires fresh purchase
+   purchase_approval_required:true/false, task_binding:accepted_child_v1}`.
+   Historical delegations without `task_binding` retain their existing evidence
+   contract; do not invent bindings for already completed records.
+   Checkout requires fresh purchase
    approval; cancellation uses the reviewed exact-order authorization and every
    platform approval required for that action.
    Opted-in native Muse checkout has a 600-second total core budget, within the
@@ -452,8 +520,24 @@ exclusively published and fsynced. The producer must:
    single dispatch and actual completed task receipt; otherwise preserve the
    uncertainty and reconcile the original attempt.
 5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
-   review/journal, then run `consume` once **before one sole steer**
-   of the original task chain. Consumption records delegation, not dispatch or
+   review/journal, then run `consume` once **before one initial
+   `browser.spawn_task`** in the existing shared profile. Only a fresh successful
+   consume acknowledgement permits that one spawn. Finding a previously consumed
+   record on resume grants no dispatch authority. A completed read-only review
+   is not the financial task and must not be relabelled as one.
+   Retain the original native success receipt, then run `bind` once with its
+   literal JSON on closed stdin. The observed host success receipt contains
+   `ok:true`, `status:"accepted"` and the actual `browser_task_id`; these are
+   required, while the entire original metadata is retained. Its
+   `execution_state:"not_reported"` is not a running-state attestation and no
+   acceptance timestamp was supplied. A parent-made `{task_id,dispatched_child_id,accepted}`
+   mapping is not the original acceptance. The command derives the request
+   digest, logical anchor and journal binding and durably binds one child. A
+   financial child cannot be reused for another delegation. Do not relay final
+   effect authority before binding is acknowledged. Every subsequent
+   information or approval continuation uses `browser.steer_task` on that same
+   waiting child, with no second consume or spawn.
+   Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
    one final action. `purchase_approval_required:true` requires fresh explicit
@@ -479,6 +563,27 @@ use `end` for late or unresolved custody, without making old review facts fresh.
 If a valid completed response already exists, preserve it rather than appending
 another ending. Use ordinary checkout or cancellation reconciliation
 with the exact original confirmation to establish the merchant outcome.
+
+For new bound delegations, `respond` and `end` additionally require
+`--native-metadata /absolute/private/original-completion.json`. Retain the entire
+original host metadata, including `browser_task_id`, `outcome:"completed"` and
+`completed_at_utc`; use that same actual time for `--observed-at`. Both the
+producer and broker check the child against its immutable acceptance binding,
+including during later custody and cancellation reconciliation. The logical
+anchor is not the child ID. These remain trusted host observations, not
+cryptographically authenticated platform receipts.
+Whole-second host completion reports compare issuance and consumption lower
+bounds at that reported precision; the original timestamp is never restamped.
+Fractional reports and other observation contracts retain strict comparisons.
+
+Genuine acceptance arriving after expiry or owner loss can still be retained
+with `bind`; it neither renews admission nor allows another task. Missing
+acceptance, an uncertain consume acknowledgement, failed binding durability or
+an undocumented spawn failure preserves the original consumed attempt and
+custody. The installed host contract does not define a definitive no-child
+failure receipt; do not invent a completed BrowserTask or `not_dispatched`
+ending after consumption. Gather the original execution evidence and reconcile
+without replay.
 
 A documented information reply may resume the **same** admitted task when its
 actual retained action history establishes that no final effect occurred. The
@@ -513,7 +618,7 @@ consumed or possibly dispatched action cannot use this refusal outcome.
 ### Native producer commands
 
 The installed source includes `muse_browser_producer.py`: thin `claim`,
-`consume`, `respond` and `end` commands using the existing broker functions.
+`consume`, `bind`, `respond` and `end` commands using the existing broker functions.
 No session-specific scripts, handcrafted records or compact all-match packets
 are required. The producer takes literal JSON from the supported browser's
 **automatic result delivery**. A task acceptance receipt is not a completion;
@@ -535,6 +640,16 @@ actual stdout, stderr, exit and native job receipt:
 "$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" claim \
   --directory "$MUSE_BROWSER_DIRECTORY" \
   --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN"
+```
+
+After one freshly consumed financial delegation and its actual initial spawn,
+retain the original success receipt and bind it before any effect continuation:
+
+```sh
+"$MUSE_PYTHON" -I -B "$MUSE_SOURCE/muse_browser_producer.py" bind \
+  --directory "$MUSE_BROWSER_DIRECTORY" \
+  --request-id "$CURRENT_REQUEST_ID" --task-id "$ORIGINAL_NATIVE_CHAIN" \
+  < "$ORIGINAL_NATIVE_ACCEPTANCE_JSON"
 ```
 
 Claim once before steering. For each prepare or confirm, obtain the fresh
@@ -599,6 +714,23 @@ using the same arguments as `respond`. It records unresolved native custody,
 including late financial endings, without refreshing old facts or authorizing
 replay. Do not call it while a task is still waiting or already has a completed
 response. Reconcile any financial outcome with the original confirmation.
+If a manual `provider_read` claim accidentally substituted the actual native child
+ID for the original service anchor, preserve it and every response byte. After the
+original request expires and its core `closed` record proves the waiter ended,
+`close-corrupt-read` can append a custody-only discarded-read ending. Its closed
+stdin must contain exactly `{"acceptance": <actual acceptance receipt>,
+"completion": <actual completed native metadata>}`. The accepted/completed child
+must match that corrupt claim; retain the genuine historical completion UTC.
+The command uses the same directory, request ID and original anchor arguments as
+`claim`. It returns `read_discarded_custody_closed:true`, never published facts.
+It supports only this demonstrated child-ID substitution on an ordinary read,
+and rejects valid claims, active waiters, actions, consumed permits and financial
+bindings. Original files remain unchanged and their hashes are checked on every
+later custody check. No old observation becomes usable; any further search needs
+a fresh ordinary request served by the installed producer. This is a trusted
+host attestation of the real child's ending, not authentication of the corrupt
+historical claim. Other claim corruption remains unresolved.
+
 Errors contain fixed `error.stage` and `error.category` values on stderr and a
 nonzero exit, without echoing private paths or observation values.
 
@@ -934,3 +1066,57 @@ the runner and any waiting CLI are gone before releasing that home or removing
 its stale socket. Keep the household data and first request/response/output
 evidence. A missing native output or vanished parent does not establish that the
 foreground service stopped; reconcile the original execution before restarting.
+
+
+## Native cart with purchase approval
+
+The existing `browser_cart` runner can explicitly compose its original native
+provider with the financial adapter using `--browser-action-mode native_approval`
+and `--accepted-account /absolute/original-account-set.json`. Read-only mode and
+the default timed cart runner remain nonfinancial. Keep the same home, shared
+operation directory and task anchor; first reconcile existing custody and stop
+only the original owned runner when a restart is necessary.
+
+Use the ordinary manual `checkout.prepare`, `checkout.confirm` and
+`checkout.reconcile` JSON requests. The shared fresh checkout journal binds the
+complete cart, delivery, amounts, account, actual checkout address and saved
+card. Native account rows need no invented selected-address marker: the actual
+final checkout address must match exactly one row in the complete account set.
+The delegated original native child must receive genuine purchase approval.
+A clicked acknowledgement alone cannot attribute an order or authorize replay.
+For the actual completed purchase task, retain literal facts with exactly
+`dispatch: "clicked_once"`, `reference` (the independently visible new order
+reference), and `order_url` (its actual ordinary order-detail href). Preserve its
+raw acceptance and same-child completion metadata through the existing producer.
+Missing reference or an uncertain original task remains pending.
+
+Reconciliation independently reads that exact order and requires complete goods,
+separately observed package quantities, the literal `Betalt` payment badge, a
+complete empty payment-warning section, matching observed total/delivery, and a
+fresh receipt/account/address binding. The original absolute slot remains frozen;
+fresh relative labels use their actual host observation date, and explicit year
+contradictions are rejected. Yearless receipt text remains yearless evidence.
+Combined receipt names retain every
+variant, package and brand field; the matcher does not invent title/subtitle
+splits or accept a generic name. Tracking and bank authorization/capture remain
+unknown. Shared snapshots, menu attribution and protected results record the
+merchant proof and make repeated reconciliation idempotent.
+
+Cancellation uses the normal Home confirmed-order menu and proven nonfinal
+preview. For native `cancellation_review`, add `entry` with exactly `url`,
+`order_url`, `reference`, `menu_control`, and `preview_control`. Home must be
+`https://oda.com/no/`; at least one actually observed link/reference must identify
+the same order, and any supplied value must agree. Controls contain their literal
+`label` and boolean `enabled`; preview is `Kanseller bestillingen`, distinct from
+final `Kanseller bestillingen min`. Preserve the existing independently bound
+receipt and fully reviewed/dismissed dialog. Receipt identity plus an unassociated
+Home banner is insufficient. The original cancellation delegation rechecks this
+same target and consequence. A final click acknowledgement remains uncertain
+until an independent exact detail read explicitly says `Kansellert`; shared
+cancellation journals retain the result and bank refund/release stay unknown.
+Only source request IDs and observation times are omitted from semantic reread
+comparison; complete provenance remains in persisted observations.
+
+These contracts and synthetic tests do not establish live purchase approval or
+cancellation availability. Actual native tasks must supply observed fields;
+missing terms stay unknown and cannot be copied from expected values.

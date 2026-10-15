@@ -30,7 +30,7 @@ class AdHocPlanningTests(unittest.TestCase):
         self.assertEqual(planner.saved_menu_minimum_evaluation(saved, self.store.read()['profile'])['enforced_status'], 'pass')
         self.assertEqual(self.provider.calls, [])
 
-    def test_period_and_default_today(self):
+    def test_period_and_default_relative_days(self):
         candidates = self.save_candidates(2)
         result = self.plan({'period': {'start_date': '2026-10-04', 'end_date': '2026-10-05'}, 'candidates': candidates})
         self.assertEqual(result['save_handoff']['request']['dates'], ['2026-10-04', '2026-10-05'])
@@ -39,7 +39,9 @@ class AdHocPlanningTests(unittest.TestCase):
             state['profile']['meals']['dinner_days'] = 2
             state['profile']['meals']['dishes'] = 2
             effective = self.app._effective_planner_request({'candidates': candidates}, state, anchor_current_date=True)
-        self.assertEqual(effective['dates'], ['2026-10-04', '2026-10-05'])
+        self.assertEqual(effective['days'], [1, 2])
+        self.assertNotIn('week', effective)
+        self.assertNotIn('dates', effective)
 
     def test_explicit_week_retains_calendar_boundary(self):
         with self.assertRaisesRegex(planner.PlannerError, 'belong'):

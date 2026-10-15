@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -32,6 +33,8 @@ sys.argv = sys.argv[1:]
 
     def setUp(self):
         self.quantity = 0
+        self.extra_quantities = {}
+        self.action_hook = None
         self.action_result = "dispatched"
         self.action_records = []
         self.catalog_state = "completed"
@@ -78,6 +81,13 @@ sys.argv = sys.argv[1:]
         self.assertTrue(ok, result)
         return result
 
+    def quantities(self):
+        return {**({"29829": self.quantity} if self.quantity else {}),
+                **{key: value for key, value in self.extra_quantities.items() if value}}
+
+    def observation(self, tool, arguments):
+        return read_fixture.observation(tool, arguments)
+
     def produce(self):
         served = {path.name for path in self.history if path.parent.name == "requests"}
         while not self.stop.wait(0.01):
@@ -91,38 +101,68 @@ sys.argv = sys.argv[1:]
                         self.action_records.append(record)
                         self.seen.append("cart_change")
                         continue
-                    claim_request(self.broker, record["request_id"], record["task_id"])
-                    if record["operation"] == "cart_change":
+                    producer = None
+                    if getattr(self, "finite_producer", False) and record["operation"] == "provider_read":
+                        producer = [sys.executable, "-I", "-B", str(read_fixture.ROOT / "muse_browser_producer.py")]
+                        args = ["--directory", str(self.broker), "--request-id", record["request_id"],
+                                "--task-id", record["task_id"]]
+                        claimed = subprocess.run([*producer, "claim", *args], capture_output=True, timeout=5)
+                        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+                    else:
+                        claim_request(self.broker, record["request_id"], record["task_id"])
+                    if record["operation"] == "delivery_select":
+                        facts, task_state = self.delivery_effect(record)
+                    elif record["operation"] == "cart_change":
                         pending = read_json(self.home / "state/state.json")["pending_cart_change"]
                         self.assertEqual(record["payload"]["intent_digest"], digest(pending))
-                        self.assertEqual(pending["before"], {"29829": self.quantity} if self.quantity else {})
+                        self.assertEqual(pending["before"], self.quantities())
                         self.assertEqual(record["payload"]["operations"], pending["operations"])
                         self.assertEqual(record["payload"]["expected_quantities"], pending["expected"])
                         self.action_records.append(record)
                         self.seen.append("cart_change")
-                        if self.action_result == "late_refusal":
+                        outcome = (self.action_hook(len(self.action_records), pending)
+                                   if self.action_hook else self.action_result)
+                        if outcome == "late_refusal":
                             continue
-                        if self.action_result == "not_dispatched":
+                        if outcome == "not_dispatched":
                             facts = {"dispatch": "not_dispatched"}
                         else:
                             consume_request(self.broker, record["request_id"], record["task_id"])
-                            self.quantity += pending["operations"][0]["quantity"]
-                            facts = {"dispatch": "dispatched"} if self.action_result == "dispatched" else {}
-                        task_state = "waiting_for_information" if self.action_result == "waiting" else "completed"
+                            unit = pending["operations"][0]
+                            key = str(unit["productId"])
+                            if key == "29829":
+                                self.quantity += unit["quantity"]
+                            else:
+                                self.extra_quantities[key] = self.extra_quantities.get(key, 0) + unit["quantity"]
+                            facts = {"dispatch": "dispatched"} if outcome in {"dispatched", "waiting"} else {}
+                        task_state = "waiting_for_information" if outcome == "waiting" else "completed"
                     else:
                         self.assertEqual(record["operation"], "provider_read")
                         tool = record["payload"]["tool"]
                         self.seen.append(tool)
-                        facts = read_fixture.observation(tool, record["payload"]["arguments"])
-                        if tool == "get_cart" and self.quantity:
-                            facts.update(empty=False, items=[{"url": "https://oda.com/no/products/29829-synthetic-squash/",
-                                "title": "Synthetic squash", "subtitle": "250 g", "quantity": self.quantity, "price": None}])
+                        facts = self.observation(tool, record["payload"]["arguments"])
+                        if tool == "get_cart" and self.quantities():
+                            rows = []
+                            for key, quantity in self.quantities().items():
+                                name, package = {"29829": ("Synthetic squash", "250 g"),
+                                                 "29830": ("Synthetic rice", "500 g")}.get(
+                                                    key, ("Synthetic baseline", "1 pack"))
+                                rows.append({"url": f"https://oda.com/no/products/{key}-synthetic/",
+                                             "title": name, "subtitle": package,
+                                             "quantity": quantity, "price": None})
+                            facts.update(empty=False, items=rows)
                         facts = self.transform(tool, facts)
                         task_state = self.catalog_state if tool == "product_search" else "completed"
                     response = {"request_id": record["request_id"], "request_digest": digest(record),
                                 "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
                                 "task_state": task_state, "facts": facts}
-                    respond_request(self.broker, record["request_id"], record["task_id"], response)
+                    if producer:
+                        published = subprocess.run([*producer, "respond", *args, "--observed-at",
+                            response["observed_at"], "--ending-state", task_state],
+                            input=json.dumps(facts).encode(), capture_output=True, timeout=5)
+                        self.assertEqual(published.returncode, 0, published.stderr)
+                    else:
+                        respond_request(self.broker, record["request_id"], record["task_id"], response)
                 except Exception as error:
                     self.failures.append(repr(error))
 
@@ -137,9 +177,9 @@ sys.argv = sys.argv[1:]
         return self.rpc({"operation": "cart", "action": "change", "cart_digest": cart_digest or cart["cart_digest"],
                          "operations": [{"product_id": "29829", "quantity": quantity}]}, ok=ok)
 
-    def prepare_menu(self, *, two_ingredients=False):
+    def prepare_menu(self, *, two_ingredients=False, squash_grams=250):
         recipe = {"name": "Synthetic squash", "language": "nb-NO", "portions": 2,
-            "ingredients": [{"raw": "250 g squash", "quantity": 250, "unit": "g", "item": "squash", "scalable": True}],
+            "ingredients": [{"raw": f"{squash_grams} g squash", "quantity": squash_grams, "unit": "g", "item": "squash", "scalable": True}],
             "steps": ["Cook the squash."], "source": {"kind": "user", "relationship": "user_supplied",
             "title": "Synthetic squash", "publisher": "Fixture", "external_id": "native-squash"},
             "rights": {"storage": "full", "credit": "Fixture"}, "times": {"active_minutes": 20}}
@@ -155,7 +195,7 @@ sys.argv = sys.argv[1:]
                          "planner_ref": planned["plan"]["save_ref"]})["menu"]
         return {key: menu[key] for key in ("menu_id", "revision", "digest")}
 
-    def test_native_product_prepare_selection_and_saved_read_without_cart_authority(self):
+    def test_native_product_prepare_selection_and_saved_read_require_enabled_cart_policy(self):
         reference = self.prepare_menu()
         prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
                              "include_recurring": False, "price_mode": "estimate"})
@@ -170,9 +210,10 @@ sys.argv = sys.argv[1:]
         self.assertEqual(readback["totals"]["merchandise_ore"], 3990)
         self.assertIsNone(readback["totals"]["total_payable_ore"])
         for result in (prepared, selected, readback):
-            self.assertNotIn("apply_arguments", result)
             self.assertNotIn("partial_apply_arguments", result)
-            self.assertIn("apply is unavailable", result["next"])
+            self.assertIn("original enabled cart policy", result["next"])
+        self.assertTrue(selected["apply_arguments"])
+        self.assertTrue(readback["apply_arguments"])
         self.rpc({"operation": "products", "action": "apply",
                   "product_plan_ref": selected["product_plan_ref"]}, ok=False)
         self.assertFalse(self.action_records)
@@ -180,6 +221,214 @@ sys.argv = sys.argv[1:]
         self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
         for path, original in self.history.items():
             self.assertEqual(path.read_bytes(), original)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Real native service process is Linux")
+    def test_two_slow_catalog_reads_finish_one_prepare_without_cart_authority(self):
+        clock = self.home / "fixture-monotonic-offset"
+        clock.write_text("0")
+        command = list(self.process.args)
+        command[4] = self.runner.replace("sys.argv = sys.argv[1:]", """
+import time
+from pathlib import Path
+clock = Path(sys.argv[sys.argv.index('--home') + 1]) / 'fixture-monotonic-offset'
+real_monotonic = time.monotonic
+time.monotonic = lambda: real_monotonic() + float(clock.read_text())
+sys.argv = sys.argv[1:]
+""")
+        self.process.terminate()
+        self.process.communicate(timeout=5)
+        (self.home / "service.sock").unlink()
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        read_fixture.wait_for(lambda: (self.home / "service.sock").exists())
+        self.rpc({"operation": "health"})
+        self.finite_producer = True
+        elapsed = 0
+
+        def delayed_catalog(tool, facts):
+            nonlocal elapsed
+            if tool == "product_search":
+                if elapsed < 340:
+                    elapsed += 170
+                    temporary = clock.with_suffix(".tmp")
+                    temporary.write_text(str(elapsed))
+                    temporary.replace(clock)
+                if any(word in facts["query"].lower() for word in ("rice", "ris")):
+                    facts["products"] = [{"url": "https://oda.com/no/products/29830-synthetic-rice/",
+                        "name": "Synthetic rice", "description": "500 g", "price": "5,00 kr",
+                        "unitPrice": "10,00 kr", "unitName": "kg", "availability": True}]
+            return facts
+
+        self.transform = delayed_catalog
+        reference = self.prepare_menu(two_ingredients=True, squash_grams=700)
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                             "include_recurring": False, "price_mode": "estimate"})
+        self.assertEqual(elapsed, 340)
+        requirements = prepared["product_plan"]["requirements"]
+        self.assertEqual(len(requirements), 2)
+        initial_requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                            if read_json(path)["payload"].get("tool") == "product_search"]
+        self.assertEqual(len(initial_requests), 2)
+        for record in initial_requests:
+            seconds = (datetime.fromisoformat(record["expires_at"])
+                       - datetime.fromisoformat(record["issued_at"])).total_seconds()
+            self.assertGreater(seconds, 179)
+            self.assertLessEqual(seconds, 180)
+            self.assertTrue((self.broker / "closed" / (record["request_id"] + ".json")).exists())
+        approvals = [row["observation"]["products"][0]["candidate_approval"] for row in requirements]
+        selected = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
+            "candidate_approvals": approvals})
+        saved = self.rpc({"operation": "products", "action": "get",
+                          "product_plan_ref": selected["product_plan_ref"]})
+        self.assertEqual(saved["status"], "prepared")
+        self.assertEqual(sorted(row["selection"]["package_count"] for row in saved["requirements"]), [1, 3])
+        self.assertEqual(saved["totals"]["merchandise_ore"], 12470)
+        self.assertEqual(elapsed, 340)
+        self.assertFalse(self.rpc({"operation": "native_cart_policy", "action": "show"})["enabled"])
+        self.assertFalse(self.action_records)
+        self.assertEqual(self.quantities(), {})
+        self.assertFalse(self.store.read().get("pending_cart_change"))
+        self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+        for path, original in self.history.items():
+            self.assertEqual(path.read_bytes(), original)
+
+    def managed_plan(self):
+        self.extra_quantities = {"9999": 1}
+        def transform(tool, facts):
+            if tool == "product_search" and any(word in facts["query"].lower() for word in ("rice", "ris")):
+                facts["products"] = [{"url": "https://oda.com/no/products/29830-synthetic-rice/",
+                    "name": "Synthetic rice", "description": "500 g", "price": "5,00 kr",
+                    "unitPrice": "10,00 kr", "unitName": "kg", "availability": True}]
+            return facts
+        self.transform = transform
+        reference = self.prepare_menu(two_ingredients=True, squash_grams=700)
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                             "include_recurring": False, "price_mode": "estimate"})
+        approvals = [row["observation"]["products"][0]["candidate_approval"]
+                     for row in prepared["product_plan"]["requirements"]]
+        selected = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
+            "candidate_approvals": approvals})
+        self.assertEqual(selected["product_plan"]["status"], "prepared", selected)
+        self.assertIsNone(selected["product_plan"]["totals"]["total_payable_ore"])
+        return {"operation": "products", **selected["apply_arguments"], "cart_change_requested": True}
+
+    def test_complete_pantry_plan_with_empty_cart_needs_no_payable_total(self):
+        reference = self.prepare_menu()
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+            "include_recurring": False, "price_mode": "estimate", "ingredient_decisions": [{
+                "source": {"collection": "dishes", "recipe_index": 0, "ingredient_index": 0},
+                "action": "have_all"}]})
+        self.enable()
+        result = self.rpc({"operation": "products", **prepared["apply_arguments"],
+                           "cart_change_requested": True})
+        self.assertTrue(result["applied"], result)
+        self.assertTrue(result["nothing_to_buy"], result)
+        self.assertFalse(self.action_records)
+        state = self.store.read()
+        self.assertNotIn("pending_cart_change", state)
+        self.assertNotIn("managed_product_apply_fence", state)
+        self.assertTrue(state["product_plan_completion"]["nothing_to_buy"])
+
+    def test_managed_multi_product_apply_keeps_baseline_and_verifies_quantities_above_one(self):
+        request = self.managed_plan()
+        self.enable()
+        result = self.rpc(request)
+        self.assertTrue(result["applied"], result)
+        self.assertEqual(self.quantities(), {"29829": 3, "29830": 1, "9999": 1})
+        state = self.store.read()
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {"9999": 1})
+        self.assertEqual(state["cart_plan"]["added_quantities"], {"29829": 3, "29830": 1})
+        self.assertNotIn("pending_cart_change", state)
+        self.assertNotIn("managed_product_apply_fence", state)
+        self.assertEqual(len(self.action_records), 4)
+        self.assertEqual(len({row["payload"]["intent_digest"] for row in self.action_records}), 4)
+        self.assertTrue(all((self.broker / "consumed" / (row["request_id"] + ".json")).exists()
+                            for row in self.action_records))
+
+    def test_managed_refusal_preserves_verified_prefix_and_reconciles_without_effect(self):
+        request = self.managed_plan()
+        self.enable()
+        self.action_hook = lambda number, pending: "not_dispatched" if number == 2 else "dispatched"
+        result = self.rpc(request)
+        self.assertFalse(result["applied"], result)
+        pending = self.store.read()["pending_cart_change"]
+        self.assertEqual(pending["native_managed"]["verified"], {"29829": 1, "9999": 1})
+        self.assertEqual(self.quantities(), {"29829": 1, "9999": 1})
+        records = len(self.action_records)
+        reconciled = self.rpc({"operation": "cart", "action": "reconcile_change"})
+        self.assertTrue(reconciled["reconciled"], reconciled)
+        state = self.store.read()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {"29829": 1})
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {"9999": 1})
+        self.assertIn("managed_product_apply_fence", state)
+        self.assertNotIn("pending_cart_change", state)
+        self.assertEqual(len(self.action_records), records)
+        self.assertFalse((self.broker / "consumed" / (self.action_records[-1]["request_id"] + ".json")).exists())
+        self.action_hook = None
+        self.resume_managed_plan(expected_added=3)
+
+    def resume_managed_plan(self, expected_added):
+        cart = self.rpc({"operation": "cart", "action": "get"})
+        reference = self.store.read()["cart_plan"]["menu_ref"]
+        records = len(self.action_records)
+        self.rpc({"operation": "cart", "action": "reconcile", "decision": "restore_missing",
+                  "menu_ref": reference, "cart_digest": cart["cart_digest"]}, ok=False)
+        decision = self.rpc({"operation": "cart", "action": "reconcile", "decision": "keep_current",
+                             "menu_ref": reference, "cart_digest": cart["cart_digest"]})
+        self.assertTrue(decision["reconciled"], decision)
+        self.assertEqual(len(self.action_records), records)
+        prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
+                             "include_recurring": False, "price_mode": "estimate"})
+        approvals = [row["observation"]["products"][0]["candidate_approval"]
+                     for row in prepared["product_plan"]["requirements"]]
+        selected = self.rpc({"operation": "products", "action": "prepare",
+            "product_plan_ref": prepared["product_plan_ref"], "include_recurring": False,
+            "candidate_approvals": approvals})
+        request = {"operation": "products", **selected["apply_arguments"], "cart_change_requested": True,
+                   "restore_missing": True, "cart_digest": cart["cart_digest"]}
+        resumed = self.rpc(request)
+        self.assertTrue(resumed["applied"], resumed)
+        self.assertEqual(self.quantities(), {"29829": 3, "29830": 1, "9999": 1})
+        self.assertEqual(len(self.action_records) - records, expected_added)
+        state = self.store.read()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {"29829": 3, "29830": 1})
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {"9999": 1})
+        self.assertNotIn("pending_cart_change", state)
+        self.assertNotIn("managed_product_apply_fence", state)
+
+    def test_managed_waiting_unit_blocks_next_effect_until_original_late_ending(self):
+        request = self.managed_plan()
+        self.enable()
+        self.action_hook = lambda number, pending: "waiting" if number == 2 else "dispatched"
+        result = self.rpc(request)
+        self.assertNotEqual(result.get("applied"), True, result)
+        pending = deepcopy(self.store.read()["pending_cart_change"])
+        self.assertEqual(self.quantities(), {"29829": 2, "9999": 1})
+        self.assertEqual(pending["native_managed"]["verified"], {"29829": 1, "9999": 1})
+        self.assertEqual(len(self.action_records), 2)
+        records = [read_json(path) for path in (self.broker / "requests").glob("*.json")]
+        original = self.action_records[-1]
+        self.assertFalse([record for record in records if record["issued_at"] > original["issued_at"]])
+        self.rpc({"operation": "native_cart_policy", "action": "set", "enabled": False})
+        self.rpc({"operation": "cart", "action": "reconcile_change"}, ok=False)
+        self.assertEqual(self.store.read()["pending_cart_change"], pending)
+        self.assertEqual(len(list((self.broker / "requests").glob("*.json"))), len(records))
+        original = self.action_records[-1]
+        end_request(self.broker, original["request_id"], original["task_id"], {
+            "request_id": original["request_id"], "request_digest": digest(original),
+            "task_id": original["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
+            "task_state": "completed", "facts": {"dispatch": "dispatched"}})
+        self.assertTrue(self.rpc({"operation": "cart", "action": "reconcile_change"})["reconciled"])
+        state = self.store.read()
+        self.assertEqual(state["cart_plan"]["added_quantities"], {"29829": 2})
+        self.assertEqual(state["cart_plan"]["baseline_quantities"], {"9999": 1})
+        self.assertIn("managed_product_apply_fence", state)
+        self.assertNotIn("pending_cart_change", state)
+        self.assertEqual(len(self.action_records), 2)
+        self.action_hook = None
+        self.enable()
+        self.resume_managed_plan(expected_added=2)
 
     def test_native_product_prepare_requires_explicit_recurring_scope_before_catalog_read(self):
         reference = self.prepare_menu()

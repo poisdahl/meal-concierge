@@ -63,9 +63,11 @@ NATIVE_READ_ALLOWED = {**ALLOWED, "products": {"get", "record_ingredients"},
                       "cart": {None, "get"}, "delivery": {"addresses"}, "orders": {None, "list", "get"}}
 NATIVE_CART_GUIDANCE = ("Muse's opt-in browser cart mode supports one explicit unit addition or removal "
     "after a fresh complete cart read and an enabled original-context policy, plus bounded product "
-    "preparation and saved-plan reads with include_recurring=false. Reconcile uncertain changes "
-    "without repeating them. Bounded displayed order history is readable; whole-menu product apply, "
-    "delivery selection, checkout and order changes remain unavailable. Exact displayed order details "
+    "preparation, saved-plan reads and complete reviewed product-plan applies with include_recurring=false. "
+    "Managed applies preserve existing goods and verify each bounded unit; reconcile uncertain changes "
+    "without repeating them. Estimated payable amounts remain unknown until checkout review. "
+    "Bounded displayed order history and the upcoming delivery picker are readable; explicit native delivery selection preserves all goods. Checkout and order changes "
+    "remain unavailable. Exact displayed order details "
     "are readable; unverified goods and payment/tracking facts remain unknown.")
 
 
@@ -498,6 +500,8 @@ class NativeReadMuseApplication(ProtectedMuseApplication):
 
 
 class NativeCartMuseApplication(NativeReadMuseApplication):
+    products_prepare_budget_seconds = 420
+
     def _prepare_or_read_products(self, request):
         if request["action"] == "prepare":
             if request.get("include_recurring") is not False:
@@ -511,8 +515,8 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         self._observe_terminal_failure()
         try:
             with self.product_plan_lock:
-                result = Application.handle(self, {**request, "_deadline": time.monotonic() + 240})
-                result.pop("apply_arguments", None)
+                seconds = self.products_prepare_budget_seconds if request["action"] == "prepare" else 240
+                result = Application.handle(self, {**request, "_deadline": time.monotonic() + seconds})
                 result.pop("partial_apply_arguments", None)
                 continuation = result.get("continue_arguments")
                 if isinstance(continuation, dict):
@@ -522,7 +526,39 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
                     else:
                         result.pop("continue_arguments")
                 result["client_guidance"] = NATIVE_CART_GUIDANCE
-                result["next"] = "Review this local plan or continue prepare with include_recurring=false. Whole-menu cart apply is unavailable in this mode."
+                result["next"] = "Review this plan or continue prepare with include_recurring=false; apply only its complete reviewed product-plan reference with the original enabled cart policy."
+                return result
+        finally:
+            self._observe_terminal_failure()
+
+    def _apply_products(self, request):
+        if any(str(key).startswith("_") for key in request) or request.get("partial_apply"):
+            raise HouseholdError("Muse managed apply requires one complete public product-plan request")
+        native_request = dict(request)
+        reference = request.get("product_plan_ref")
+        if reference is not None:
+            record = self._product_plan_record(self.store.read(), reference)
+            if record.get("include_recurring") is not False or request.get("include_recurring", False) is not False:
+                raise HouseholdError("Muse apply requires an original recurring-disabled product plan")
+            arguments = record.get("apply_arguments") or {}
+            native_request.setdefault("product_plan_digest", arguments.get("product_plan_digest"))
+        else:
+            plan = request.get("product_plan")
+            recurring = (plan.get("binding", {}).get("include_recurring")
+                         if isinstance(plan, Mapping) else request.get("include_recurring"))
+            if recurring is not False:
+                raise HouseholdError("Muse apply requires include_recurring=false")
+        self._observe_terminal_failure()
+        command_id = str(uuid.uuid4())
+        try:
+            with self.product_plan_lock, self.provider_client.operation():
+                binding = self.provider_client.binding(self.store)
+                if self.store.read().get("muse_native_cart_policy") != {"enabled": True, "binding_digest": binding}:
+                    raise HouseholdError("Muse native cart writes are disabled for this original context")
+                with self.provider_client.managed_apply(self, native_request, command_id):
+                    result = Application.handle(self, request)
+                    self._finalize_native_managed_apply(command_id)
+                result["client_guidance"] = NATIVE_CART_GUIDANCE
                 return result
         finally:
             self._observe_terminal_failure()
@@ -563,18 +599,38 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
         if request.get("operation") == "native_cart_policy":
             return self._policy(request)
         action = request.get("action")
-        if request.get("operation") == "products" and isinstance(action, str) and action in {"prepare", "get"}:
-            return self._prepare_or_read_products(request)
+        if (self.browser is not None and (request.get("operation") == "checkout"
+                or request.get("operation") == "orders" and action in {"cancel_prepare", "cancel_confirm", "cancel_reconcile"})):
+            return ProtectedMuseApplication.handle(self, request)
+        if request.get("operation") == "products" and isinstance(action, str):
+            if action in {"prepare", "get"}:
+                return self._prepare_or_read_products(request)
+            if action == "apply":
+                return self._apply_products(request)
+        if request.get("operation") == "delivery" and action in {None, "list", "select"}:
+            if (set(request) - {"operation", "action", "dates", "slot_ref", "contract"}
+                    or (action == "select" and request.get("dates") is not None)):
+                raise HouseholdError("Muse native delivery preserves the original address and unattended preference")
+            bounded = {**request, "_deadline": time.monotonic() + (360 if action == "select" else 240)}
+            with self.provider_client.delivery_selection(self, bounded):
+                result = Application.handle(self, bounded)
+            result["client_guidance"] = NATIVE_CART_GUIDANCE
+            return result
         if request.get("operation") != "cart":
             result = super().handle(request)
             result["client_guidance"] = NATIVE_CART_GUIDANCE
             return result
         action = request.get("action", "get")
         if (action is not None and not isinstance(action, str)
-                or action not in {None, "get", "change", "reconcile_change"}):
-            raise HouseholdError("Muse browser cart mode supports get, one-unit change and read-only reconcile_change")
+                or action not in {None, "get", "change", "reconcile_change", "reconcile"}):
+            raise HouseholdError("Muse browser cart mode supports get, one-unit change and read-only reconciliation")
         if request.get("response_view", "full") != "full" or any(str(key).startswith("_") for key in request):
             raise HouseholdError("Muse browser cart requests require full observations and public arguments")
+        if action == "reconcile":
+            if (request.get("decision") != "keep_current"
+                    or request.get("exclude_product_ids") or request.get("accept_missing_product_ids")
+                    or set(request) - {"operation", "action", "decision", "menu_ref", "cart_digest", "response_view", "contract"}):
+                raise HouseholdError("Muse cart reconciliation supports only the exact read-only keep_current decision; restore through a fresh complete products.apply")
         if action == "change":
             if (set(request) - {"operation", "action", "operations", "cart_digest", "response_view", "contract"}
                     or not isinstance(request.get("cart_digest"), str)
@@ -625,12 +681,25 @@ class NativeCartMuseApplication(NativeReadMuseApplication):
             request = {**request, "_native_cart_binding": marker}
         return Application._cart(self, request)
 
+    def _delivery(self, request):
+        if request.get("action") == "addresses":
+            return NativeReadMuseApplication._delivery(self, request)
+        return Application._delivery(self, request)
+
     def _store_readiness(self, checkout_payment=None):
-        return {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
-                "browser_check": {"status": "configured", "scope": "one_unit_cart"}, "note": NATIVE_CART_GUIDANCE}
+        result = {**super()._store_readiness(checkout_payment), "provider_transport": "browser_cart",
+                  "browser_check": {"status": "configured", "scope": "managed_products_unit_cart_and_delivery"},
+                  "note": NATIVE_CART_GUIDANCE}
+        if self.browser is not None:
+            result["browser_check"].update(action_mode=self.browser.action_mode,
+                scope="managed_cart_delivery_and_original_native_purchase_approval")
+            result["payment_check"] = {"status": "unknown"}
+            result["note"] = NATIVE_BROWSER_GUIDANCE
+        return result
 
     def _user_guide(self):
-        return {**MuseApplication._user_guide(), "after_setup": NATIVE_CART_GUIDANCE}
+        return {**MuseApplication._user_guide(),
+                "after_setup": NATIVE_BROWSER_GUIDANCE if self.browser is not None else NATIVE_CART_GUIDANCE}
 
 
 def initialize(home: Path, provider: str, household: str, *, credential_name=None, operation_directory=None) -> None:
@@ -682,16 +751,27 @@ def load_home(home: Path):
 
 
 def serve(home: Path, *, browser_directory=None, browser_task_id=None,
-          browser_action_mode="timed", provider_transport="mcp") -> None:
+          browser_action_mode="timed", provider_transport="mcp", accepted_account=None) -> None:
     settings = load_home(home)
     marker = read_json(home / "muse-client.json")
     protected = marker["kind"] == "protected_oda_mcp"
     if provider_transport not in {"mcp", "browser_readonly", "browser_cart"}:
         raise HouseholdError("Muse provider transport is unsupported")
     native_read = provider_transport in {"browser_readonly", "browser_cart"}
+    if accepted_account is not None and not native_read:
+        raise HouseholdError("An accepted account applies only to native browser provider modes")
+    if accepted_account is not None and not accepted_account.is_absolute():
+        raise HouseholdError("Muse accepted account file must be absolute")
+    accepted = read_json(accepted_account) if accepted_account is not None else None
+    if accepted_account is not None:
+        from muse_browser import account_links
+        account_links(accepted)
+    native_financial = provider_transport == "browser_cart" and browser_action_mode == "native_approval"
     if native_read and (not protected or browser_directory is None or browser_task_id is None
-                        or browser_action_mode != "timed"):
+                        or browser_action_mode != "timed" and not native_financial):
         raise HouseholdError("Muse browser read mode requires the existing protected home and browser options, without an action mode")
+    if native_financial and accepted is None:
+        raise HouseholdError("Muse native purchase approval requires the existing accepted entire account set")
     if (browser_directory is None) != (browser_task_id is None):
         raise HouseholdError("Muse native browser requires both directory and original task identity")
     if browser_action_mode != "timed" and browser_directory is None:
@@ -705,15 +785,17 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
             from muse_native_provider import MuseNativeReadProvider
             if provider_transport == "browser_cart":
                 from muse_native_provider import MuseNativeCartProvider
-                shop = MuseNativeCartProvider(marker["operation_directory"], browser_task_id)
+                shop = MuseNativeCartProvider(marker["operation_directory"], browser_task_id,
+                                              accepted_account=accepted)
             else:
-                shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id)
+                shop = MuseNativeReadProvider(marker["operation_directory"], browser_task_id,
+                                              accepted_account=accepted)
         else:
             shop = MuseProtectedMcpClient(marker["operation_directory"], marker["credential_name"])
         if browser_directory is not None:
             if Path(browser_directory) != shop.operation_directory / "browser":
                 raise HouseholdError("Muse browser must use the canonical shared provider browser directory")
-            if not native_read:
+            if not native_read or native_financial:
                 from muse_browser import MuseBrowser
                 browser = MuseBrowser(browser_directory, browser_task_id, shop,
                                       action_mode=browser_action_mode)
@@ -725,7 +807,8 @@ def serve(home: Path, *, browser_directory=None, browser_task_id=None,
         store = StateStore(home / "state", settings)
         if browser is not None:
             browser.state_store = store
-        app = cls(store, shop, browser, external_recipe_sources={})
+        options = {"products_apply_budget_seconds": 600} if provider_transport == "browser_cart" else {}
+        app = cls(store, shop, browser, external_recipe_sources={}, **options)
         Server(home / "service.sock", os.getgid(), os.getuid(), app).run()
 
 
@@ -763,12 +846,15 @@ def main() -> int:
                         help="final-action authority: timed permit or one-shot native approval delegation; run only")
     parser.add_argument("--provider-transport", choices=("mcp", "browser_readonly", "browser_cart"),
                         help="explicit protected MCP or native browser reads; run only")
+    parser.add_argument("--accepted-account", type=Path,
+                        help="existing private original account-link JSON; native provider run only")
     args = parser.parse_args()
     try:
         if not args.home.is_absolute():
             raise HouseholdError("Muse home must be absolute")
         if args.action != "run" and (args.browser_directory is not None or args.browser_task_id is not None
-                                     or args.browser_action_mode is not None or args.provider_transport is not None):
+                                     or args.browser_action_mode is not None or args.provider_transport is not None
+                                     or args.accepted_account is not None):
             raise HouseholdError("Muse native browser options apply only to run")
         if args.action == "init":
             if not args.provider or not args.household:
@@ -778,7 +864,7 @@ def main() -> int:
         elif args.action == "run":
             serve(args.home, browser_directory=args.browser_directory, browser_task_id=args.browser_task_id,
                   browser_action_mode=args.browser_action_mode or "timed",
-                  provider_transport=args.provider_transport or "mcp")
+                  provider_transport=args.provider_transport or "mcp", accepted_account=args.accepted_account)
         else:
             if not args.request_id:
                 raise HouseholdError("respond requires --request-id")

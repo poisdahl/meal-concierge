@@ -1,5 +1,5 @@
 """Public producer CLI, literal JSON delivery and real one-use broker custody."""
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 import json
 import os
@@ -13,7 +13,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
-from muse_browser import NativeBridge, claim_request, read_json
+from muse_browser import NativeBridge, claim_request, read_json, native_authorization, durable_publish, digest, validate_response
 from muse_browser_producer import ProducerError, parse_json, publish, validate_native_read
 from muse_native_provider import FACTS_CONTRACTS
 
@@ -85,6 +85,19 @@ class InputBoundaryTests(unittest.TestCase):
                                  {"facts": facts})
             self.assertEqual(facts, before)
 
+    def test_positive_native_read_requires_complete_accepted_account_set(self):
+        accepted = deepcopy(FACTS["account"])
+        accepted["edit_urls"].append("https://oda.com/no/account/delivery/edit/2/")
+        record = {"operation": "provider_read", "payload": {**READ_PAYLOAD, "accepted_account": accepted}}
+        for links in ([accepted["edit_urls"][0]], accepted["edit_urls"] +
+                      ["https://oda.com/no/account/delivery/edit/3/"]):
+            facts = {**READ_FACTS, "account": {**accepted, "edit_urls": links}}
+            with self.subTest(links=links), self.assertRaises(HouseholdError):
+                validate_native_read(record, {"facts": facts})
+        facts = {**READ_FACTS, "account": {**accepted, "edit_urls": list(reversed(accepted["edit_urls"]))}}
+        validate_native_read(record, {"facts": facts})
+        self.assertEqual(record["payload"]["accepted_account"], accepted)
+
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Muse cloud owner identity is Linux")
 class ProducerCLITests(unittest.TestCase):
@@ -100,6 +113,7 @@ class ProducerCLITests(unittest.TestCase):
         self.results, self.errors = [], []
 
     def request(self, operation="checkout_review", payload=None, seconds=WAITER_SECONDS):
+        before = set((self.broker / "requests").glob("*.json"))
         def waiter():
             try:
                 with self.bridge.custody():
@@ -112,7 +126,7 @@ class ProducerCLITests(unittest.TestCase):
         self.addCleanup(self.worker.join, WAITER_SECONDS + 2)
         cutoff = time.monotonic() + 2
         while time.monotonic() < cutoff:
-            paths = list((self.broker / "requests").glob("*.json"))
+            paths = [path for path in (self.broker / "requests").glob("*.json") if path not in before]
             if paths:
                 self.key = paths[0].stem
                 self.marker = self.broker / "publications" / (self.key + ".json")
@@ -120,17 +134,50 @@ class ProducerCLITests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("real source waiter did not issue a request")
 
-    def run_cli(self, command, data=b"", *, request_id=None, extra=()):
+    def run_cli(self, command, data=b"", *, request_id=None, extra=(), observed_at=None):
         args = [sys.executable, "-I", "-B", str(PRODUCER), command,
                 "--directory", str(self.broker), "--request-id", request_id or self.key,
                 "--task-id", self.bridge.task_id]
         if command in {"respond", "end"}:
-            args += ["--observed-at", datetime.now(timezone.utc).isoformat(), "--ending-state", "completed"]
+            args += ["--observed-at", observed_at or datetime.now(timezone.utc).isoformat(), "--ending-state", "completed"]
         return subprocess.run(args + list(extra), input=data, capture_output=True, timeout=5)
 
     def assert_failure(self, result, stage, category):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stderr), {"error": {"stage": stage, "category": category}})
+
+    def test_delegation_cli_requires_original_child_and_preserves_failed_publication_for_ending(self):
+        payload = {"authorization": native_authorization(True),
+                   "journal_binding": {"confirmation_id": "synthetic-original-confirmation",
+                                       "journal_digest": "a" * 64}}
+        self.request("checkout_delegate", payload)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        self.assertEqual(self.run_cli("consume").returncode, 0)
+        self.assertEqual(self.run_cli("bind", b'{"ok":true,"status":"accepted","browser_task_id":"synthetic-child:original"}').returncode, 0)
+        observed = datetime.now(timezone.utc).isoformat()
+        metadata = self.broker / "synthetic-completion.json"
+        durable_publish(metadata, {"browser_task_id": "synthetic-child:wrong", "outcome": "completed",
+                                   "completed_at_utc": observed})
+        extra = ("--native-metadata", str(metadata))
+        self.assert_failure(self.run_cli("respond", b'{"dispatch":"clicked_once"}',
+                                        extra=extra, observed_at=observed), "request", "claim_rejected")
+        self.assertTrue(self.marker.exists())
+        original = self.broker / "synthetic-original-completion.json"
+        durable_publish(original, {"browser_task_id": "synthetic-child:original", "outcome": "completed",
+                                   "completed_at_utc": observed})
+        self.assert_failure(self.run_cli("respond", b'{"dispatch":"clicked_once"}',
+                          extra=("--native-metadata", str(original)), observed_at=observed),
+                          "publish", "invocation_consumed")
+        result = self.run_cli("end", b'{"dispatch":"clicked_once"}',
+                             extra=("--native-metadata", str(original)), observed_at=observed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Ending closes native custody; the original waiter still reaches its deadline.
+        self.worker.join(WAITER_SECONDS + 2)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [])
+        self.assertEqual(len(self.errors), 1)
+        ending = read_json(self.broker / "endings" / (self.key + ".json"))
+        self.assertEqual(ending["native_completion"], read_json(original))
 
     def test_wrong_exact_order_is_rejected_before_response_publication(self):
         payload = {"tool": "get_order", "arguments": {"order_number": "SYNTHETIC-A1"},
@@ -281,6 +328,142 @@ class ProducerCLITests(unittest.TestCase):
         self.assertEqual(self.results, [])
         self.assertEqual(len(self.errors), 1)
         self.assertEqual(list((self.broker / "responses").glob("*.json")), [])
+
+    def corrupt_read(self):
+        self.request("provider_read", READ_PAYLOAD, seconds=0.5)
+        record = read_json(self.broker / "requests" / (self.key + ".json"))
+        child = "synthetic-browser-child"
+        self.native_task = {"acceptance": {"ok": True, "status": "accepted", "browser_task_id": child},
+                            "completion": {"browser_task_id": child, "outcome": "completed",
+                                           "completed_at_utc": datetime.now(timezone.utc).isoformat()}}
+        claim = self.broker / "claims" / (self.key + ".json")
+        claim.write_text(json.dumps({"request_digest": digest(record), "task_id": child}))
+        claim.chmod(0o660)
+        response = self.broker / "responses" / (self.key + ".json")
+        response.write_text(json.dumps({"manual_unusable_reply": READ_FACTS}))
+        response.chmod(0o660)
+        self.worker.join(2)
+        self.assertFalse(self.worker.is_alive())
+        self.assertEqual(self.results, [])
+        while datetime.now(timezone.utc) < datetime.fromisoformat(record["expires_at"]):
+            time.sleep(0.01)
+        return record
+
+    def close_corrupt(self, native_task=None):
+        return self.run_cli("close-corrupt-read", json.dumps(native_task or self.native_task).encode())
+
+    def test_corrupt_child_claim_closes_only_custody_and_preserves_every_original_byte(self):
+        record = self.corrupt_read()
+        originals = {kind: (self.broker / kind / (self.key + ".json")).read_bytes()
+                     for kind in ("requests", "claims", "responses", "closed")}
+        with self.assertRaises(HouseholdError):
+            with self.bridge.custody():
+                pass
+        result = self.close_corrupt()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"read_discarded_custody_closed": True})
+        ending = read_json(self.broker / "endings" / (self.key + ".json"))
+        self.assertNotIn("facts", ending)
+        self.assertEqual(ending["native_task"], self.native_task)
+        for kind, original in originals.items():
+            self.assertEqual((self.broker / kind / (self.key + ".json")).read_bytes(), original)
+        with self.assertRaises(HouseholdError):
+            validate_response(record, ending, fresh=False)
+        with self.bridge.custody():
+            pass
+        for operation in ("claim", "respond", "consume"):
+            self.assertNotEqual(self.run_cli(operation, b"{}").returncode, 0)
+        self.assertNotEqual(self.close_corrupt().returncode, 0)
+        self.results.clear()
+        self.errors.clear()
+        self.request("provider_read", READ_PAYLOAD)
+        self.assertEqual(self.run_cli("claim").returncode, 0)
+        result = self.run_cli("respond", json.dumps(READ_FACTS).encode())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(2)
+        self.assertEqual(self.results, [READ_FACTS])
+        self.assertEqual(self.errors, [])
+
+    def test_corrupt_read_closure_rejects_changed_claim_response_and_closed_records(self):
+        self.corrupt_read()
+        self.assertEqual(self.close_corrupt().returncode, 0)
+        for kind in ("claims", "responses", "closed"):
+            with self.subTest(kind=kind):
+                path = self.broker / kind / (self.key + ".json")
+                original = path.read_bytes()
+                path.write_bytes(original + b" ")
+                with self.assertRaises(HouseholdError):
+                    with self.bridge.custody():
+                        pass
+                path.write_bytes(original)
+
+    def test_corrupt_read_requires_terminal_matching_native_receipts(self):
+        self.corrupt_read()
+        for field, value in (("outcome", "waiting_for_information"),
+                             ("browser_task_id", "synthetic-wrong-child"),
+                             ("completed_at_utc", "2000-01-01T00:00:00Z")):
+            native = deepcopy(self.native_task)
+            native["completion"][field] = value
+            with self.subTest(field=field):
+                self.assert_failure(self.close_corrupt(native), "request", "corrupt_read_rejected")
+        native = deepcopy(self.native_task)
+        native["acceptance"]["status"] = "refused"
+        self.assert_failure(self.close_corrupt(native), "request", "corrupt_read_rejected")
+        self.assertFalse((self.broker / "endings" / (self.key + ".json")).exists())
+
+    def test_corrupt_read_cannot_close_an_unclosed_or_unexpired_waiter(self):
+        record = self.corrupt_read()
+        closed = self.broker / "closed" / (self.key + ".json")
+        original = closed.read_bytes()
+        closed.unlink()
+        self.assert_failure(self.close_corrupt(), "request", "corrupt_read_rejected")
+        closed.write_bytes(original)
+        closed.chmod(0o600)
+        request = self.broker / "requests" / (self.key + ".json")
+        record["expires_at"] = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+        request.write_text(json.dumps(record))
+        self.assert_failure(self.close_corrupt(), "request", "corrupt_read_rejected")
+
+    def test_corrupt_read_rejects_actions_consumed_bindings_and_valid_claims(self):
+        record = self.corrupt_read()
+        request = self.broker / "requests" / (self.key + ".json")
+        original = request.read_bytes()
+        for operation in ("cart_change", "delivery_select", "checkout_click", "cancellation_click",
+                          "checkout_delegate", "cancellation_delegate", "checkout_review", "order_binding"):
+            record["operation"] = operation
+            request.write_text(json.dumps(record))
+            with self.subTest(operation=operation):
+                self.assert_failure(self.close_corrupt(), "request", "corrupt_read_rejected")
+        request.write_bytes(original)
+        for kind in ("consumed", "native-tasks"):
+            root = self.broker / kind
+            root.mkdir(mode=0o700, exist_ok=True)
+            path = root / (self.key + ".json")
+            durable_publish(path, {})
+            self.assert_failure(self.close_corrupt(), "request", "corrupt_read_rejected")
+            path.unlink()
+        claim = self.broker / "claims" / (self.key + ".json")
+        record = json.loads(original)
+        claim.write_text(json.dumps({"request_digest": digest(record), "task_id": record["task_id"]}))
+        claim.chmod(0o600)
+        self.assert_failure(self.close_corrupt(), "request", "corrupt_read_rejected")
+        end = self.run_cli("end", b'{"actual_ending":"synthetic completed read"}')
+        self.assertEqual(end.returncode, 0, end.stderr)
+
+    def test_another_unresolved_read_still_blocks_after_corrupt_read_closure(self):
+        self.corrupt_read()
+        self.assertEqual(self.close_corrupt().returncode, 0)
+        # A real producer subprocess must start before the read expires.
+        self.request("provider_read", READ_PAYLOAD, seconds=5)
+        claimed = self.run_cli("claim")
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.worker.join(7)
+        with self.assertRaises(HouseholdError):
+            with self.bridge.custody():
+                pass
+        self.assertEqual(self.run_cli("end", b'{"actual_ending":"synthetic completed read"}').returncode, 0)
+        with self.bridge.custody():
+            pass
 
     def test_argument_and_byte_limits_precede_path_writes(self):
         self.request()

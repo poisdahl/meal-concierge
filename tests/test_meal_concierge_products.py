@@ -326,6 +326,48 @@ class ProductObservationTests(unittest.TestCase):
         self.assertEqual(plan["requirements"][0]["selection"]["package_count"], 2)
         self.assertIsNone(plan["totals"]["total_payable_ore"])
 
+    def test_oda_card_subtitles_prepare_observed_whole_packages(self):
+        shopping = menu(
+            {"item": "havregryn", "quantity": 240, "unit": "g"},
+            {"item": "melk", "quantity": 1200, "unit": "ml"},
+        )
+        cards = {
+            "havregryn": {"id": 1035, "name": "Havregryn", "description": "1,1 kg, Axa",
+                          "price": "26.90", "availability": True},
+            "melk": {"id": 430, "name": "Lettmelk", "description": "1% fett, 1 l, TINE",
+                     "price": "21.40", "availability": True},
+        }
+        observations, approvals = {}, []
+        for requirement in menu_requirements(shopping)[0]:
+            query = requirement["item"]
+            observed = normalize_retail_product_search({"result": [{
+                "query": query, "hasMore": True, "products": [cards[query]],
+            }]}, observed_at=OBSERVED_AT)
+            self.assertEqual(observed["products"][0]["display"]["package"], cards[query]["description"])
+            observations[requirement["requirement_id"]] = observed
+            approvals.append({"requirement_id": requirement["requirement_id"],
+                              "candidate_refs": [cards[query]["id"]], "search_query": query})
+        plan = build_product_plan(
+            provider="oda", binding={"kind": "saved_menu"}, menu=shopping,
+            observations=observations, candidate_approvals=approvals, price_mode="estimate",
+        )
+        self.assertEqual(plan["status"], "prepared")
+        self.assertEqual({row["item"]: row["selection"]["package_count"]
+                          for row in plan["requirements"]}, {"havregryn": 1, "melk": 2})
+        self.assertEqual(plan["totals"]["merchandise_ore"], 6970)
+        self.assertIsNone(plan["totals"]["mandatory_deposit_ore"])
+        self.assertIsNone(plan["totals"]["total_payable_ore"])
+
+    def test_oda_trailing_descriptors_do_not_hide_ambiguous_capacity(self):
+        for label in (
+            "1% fett, TINE", "1 l, 2 l, TINE", "1 l, 500 ml, TINE",
+            "1 l, per flaske, TINE", "1 l, maks 3 per kunde, TINE",
+            "1 l, 1% protein, TINE", "1 l, ca., TINE", "1 l, 5, TINE",
+            "1 l,, TINE", "1% fett, 1 l, TINE,", "1 l, avrent, TINE",
+        ):
+            with self.subTest(label=label):
+                self.assertIsNone(parse_package(label, provider="oda"))
+
     def test_fixture_backed_meny_forms_keep_money_and_offer_boundaries(self):
         fixture = json.loads((FIXTURES / "meny_product_observations.json").read_text(encoding="utf-8"))
         result = normalize_meny_product_search(fixture["response"], observed_at=OBSERVED_AT)
@@ -1516,6 +1558,45 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(plan["status"], "needs_input")
         self.assertIsNone(plan["comparison_claim"])
         self.assertEqual(plan["unresolved_requirements"][0]["reason"], "candidate_price_or_eligibility_unresolved")
+
+    def test_never_buy_boil_in_bag_category_blocks_practical_package_choice(self):
+        menu_value = menu({"item": "fullkornsris", "quantity": 225, "unit": "g"})
+        requirement = menu_requirements(menu_value)[0][0]
+        profile = {"diet": {"rules": [{"kind": "never_buy", "term": "boil-in-bag produkter"}]}}
+        for name, blocked in (
+            ("R Fullkornsris Boil-in-bag 8x125g", True),
+            ("Fullkornsris Boil in bag", True),
+            ("Fullkornsris uten boil-in-bag", False),
+            ("Naturris fullkorn", False),
+        ):
+            with self.subTest(name=name):
+                candidate = product("10", name, 1000, "g", [option(3290)])
+                plan = build_product_plan(
+                    provider="oda", binding={"kind": "saved_menu", "menu_ref": {
+                        "menu_id": "menu_fixture", "revision": 1, "digest": "a" * 64,
+                    }}, menu=menu_value,
+                    observations={requirement["requirement_id"]: observation("fullkornsris", [candidate])},
+                    candidate_approvals=[{
+                        "requirement_id": requirement["requirement_id"], "candidate_refs": ["10"],
+                        "package_count": 1, "quantity_basis": "Observed 1 kg pack covers 225 g.",
+                    }], dietary_profile=profile,
+                )
+                self.assertEqual(plan["status"], "needs_input" if blocked else "prepared")
+                finding = plan["requirements"][0]["dietary_assessments"][0]
+                self.assertEqual(finding["blocked"], blocked)
+                self.assertEqual(finding["condition"], "conflict" if blocked else "unknown")
+                if blocked:
+                    self.assertEqual(plan["unresolved_requirements"][0]["reason"],
+                                     "dietary_conflict_no_compatible_candidate")
+
+    def test_boil_in_bag_aliases_preserve_literal_mixed_separator_rules(self):
+        from dietary_assessment import assess
+        for term in ("boil in-bag", "boil-in bag", "boil in-bag produkter", "boil-in bag products"):
+            with self.subTest(term=term):
+                profile = {"diet": {"rules": [{"kind": "never_buy", "term": term}]}}
+                for name in (term, "Fullkornsris Boil in-bag", "Fullkornsris Boil-in bag"):
+                    self.assertTrue(assess(profile, {"name": name})[0]["blocked"])
+                self.assertEqual(assess(profile, {"name": "Ris uten boil in-bag"})[0]["condition"], "unknown")
 
     def test_hard_household_product_constraints_need_authoritative_evidence(self):
         menu_value = menu({"item": "Mel", "quantity": 500, "unit": "g"})

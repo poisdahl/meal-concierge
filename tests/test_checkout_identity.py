@@ -1,6 +1,7 @@
 import unittest
 
-from checkout_identity import checkout_line_mismatch, checkout_lines_match, review_checkout_lines
+from checkout_identity import (checkout_line_mismatch, checkout_lines_match,
+                               combined_checkout_lines_match, review_checkout_lines)
 
 
 def product(name="Kaffe", description="Malt, 500 g", brand="God", quantity=1, **extra):
@@ -251,3 +252,36 @@ class CheckoutIdentityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CombinedCheckoutIdentityTests(unittest.TestCase):
+    def test_complete_ordered_name_quantity_and_native_id_assignment(self):
+        expected = [product("Yoghurt", "Vanilje, 500 g", "Nord", quantity=3, product_id="1"),
+                    product("Havregryn", "1 kg", "", quantity=1, product_id="2")]
+        actual = [{"combined_name": "Havregryn 1kg", "quantity": 1, "product_id": None},
+                  {"combined_name": "Yoghurt Vanilje, 500g, Nord", "quantity": 3, "product_id": None}]
+        self.assertTrue(combined_checkout_lines_match(expected, actual))
+        actual[1]["combined_name"] = "Merchant's changed complete label"
+        actual[1]["product_id"] = "1"
+        self.assertTrue(combined_checkout_lines_match(expected, actual))
+        actual[1]["product_id"] = "2"
+        self.assertFalse(combined_checkout_lines_match(expected, actual))
+
+    def test_truncated_variant_package_brand_and_quantity_never_match(self):
+        expected = [product("Yoghurt", "Vanilje, 500 g", "Nord", quantity=3)]
+        for name in ("Yoghurt", "Yoghurt Vanilje, Nord", "Yoghurt 500g, Nord",
+                     "Yoghurt Vanilje, 500g", "Nord 500g Vanilje Yoghurt",
+                     "Yoghurt Vanilje, 1 kg, Nord"):
+            self.assertFalse(combined_checkout_lines_match(expected,
+                [{"combined_name": name, "quantity": 3}]), name)
+        for quantity in (None, True, -1, 0, 2):
+            self.assertFalse(combined_checkout_lines_match(expected,
+                [{"combined_name": "Yoghurt Vanilje, 500 g, Nord", "quantity": quantity}]))
+
+    def test_refunds_extra_rows_ambiguity_and_mixed_schema_refuse(self):
+        one = {"combined_name": "Kaffe Malt, 500 g, God", "quantity": 1}
+        self.assertFalse(combined_checkout_lines_match([product(), product()], [one, one]))
+        self.assertFalse(combined_checkout_lines_match([product()], [one, one]))
+        self.assertFalse(combined_checkout_lines_match([product()], [{**one, "subtitle": "invented"}]))
+        self.assertFalse(combined_checkout_lines_match([product()], [{**one, "identity_conflict": True}]))
+        self.assertTrue(combined_checkout_lines_match([], []))

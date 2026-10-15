@@ -356,8 +356,8 @@ def retail_web_recipe_input(source_recipe: dict[str, Any], provider: str, *, dea
     candidate = deepcopy(rows[0].get("candidate"))
     if not isinstance(candidate, dict) or candidate.get("source", {}).get("url") != url:
         raise HouseholdError("retailer recipe page identity changed")
-    candidate["name"] = unescape(candidate["name"])
-    if candidate["name"] != unescape(source_recipe["name"]):
+    candidate["name"] = unescape(candidate["name"]).strip()
+    if candidate["name"] != unescape(source_recipe["name"]).strip():
         raise HouseholdError("retailer recipe title changed; obtain a fresh search reference")
     # These exact /no/ and /se/ pages expose numeric recipeYield as portions,
     # matching the displayed Porsjoner/Portioner selector. Other yield shapes

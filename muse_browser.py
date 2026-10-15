@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
@@ -20,26 +21,27 @@ from zoneinfo import ZoneInfo
 
 from core import (CancellationPreconditionError, CheckoutPreconditionError,
                   HouseholdError, checkout_payment_settings, validate_delivery_slot)
-from checkout_identity import review_checkout_lines
+from checkout_identity import combined_checkout_lines_match, review_checkout_lines
 from clients.muse import private_directory, read_json as _read_json, timestamp
 from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, ODA_CHECKOUT_AMOUNT_LABELS,
                          OdaBrowser, _oda_checkout_amounts_minor,
                          cancellation_delivery_matches, cancellation_total_matches,
                          checkout_delivery_matches, oda_checkout_amount_minor,
                          require_order_binding)
-from service_common import money_cents
+from service_common import canonical, money_cents
 
 
 CLICK_OPERATIONS = {"checkout_click", "cancellation_click"}
 DELEGATION_OPERATIONS = {"checkout_delegate", "cancellation_delegate"}
-ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS | {"cart_change"}
+ACTION_OPERATIONS = CLICK_OPERATIONS | DELEGATION_OPERATIONS | {"cart_change", "delivery_select"}
+NATIVE_TASK_BINDING = "accepted_child_v1"
 READ_OPERATION_TIMEOUT = 540.0
 ACTION_OPERATION_TIMEOUT = 30.0
 CART_ACTION_TIMEOUT = 150.0
 
 
 def operation_timeout(operation):
-    return CART_ACTION_TIMEOUT if operation == "cart_change" else (
+    return CART_ACTION_TIMEOUT if operation in {"cart_change", "delivery_select"} else (
         ACTION_OPERATION_TIMEOUT if operation in ACTION_OPERATIONS else READ_OPERATION_TIMEOUT)
 
 
@@ -137,6 +139,7 @@ def request_record(directory, request_id, task_id, *, active=True):
                 or process_start(record.get("owner_pid")) != record.get("owner_start")
                 or not timestamp(record["issued_at"]) <= datetime.now(timezone.utc) < timestamp(record["expires_at"]))):
         raise HouseholdError("Muse browser request expired, changed or lost its owner")
+    native_task_binding_required(record)
     return directory, record
 
 
@@ -162,6 +165,90 @@ def consume_request(directory, request_id, task_id):
             raise HouseholdError("Muse browser task already returned; no action is authorized")
         durable_publish(directory / "consumed" / (request_id + ".json"),
                         {**claim, "consumed_at": datetime.now(timezone.utc).isoformat()})
+
+
+def native_task_binding_required(record):
+    authorization = record["payload"].get("authorization")
+    if record["operation"] not in DELEGATION_OPERATIONS or not isinstance(authorization, Mapping):
+        return False
+    if "task_binding" not in authorization:
+        return False
+    if authorization["task_binding"] != NATIVE_TASK_BINDING:
+        raise HouseholdError("Muse native task binding contract is unsupported")
+    return True
+
+
+def native_authorization(purchase, *, legacy=False):
+    value = {"mode": "native_approval", "expiry_role": "admission", "purchase_approval_required": purchase}
+    return value if legacy else {**value, "task_binding": NATIVE_TASK_BINDING}
+
+
+def native_time_lower_bound(reported, value):
+    """Compare at the genuine host report's precision without changing it."""
+    lower = timestamp(value)
+    if isinstance(reported, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})", reported):
+        lower = lower.replace(microsecond=0)
+    return lower
+
+
+def native_acceptance_child(acceptance):
+    if (not isinstance(acceptance, Mapping) or acceptance.get("ok") is not True
+            or acceptance.get("status") != "accepted"
+            or not isinstance(acceptance.get("browser_task_id"), str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", acceptance["browser_task_id"]) is None):
+        raise HouseholdError("Muse native task requires its original acceptance receipt")
+    return acceptance["browser_task_id"]
+
+
+def checkout_delegation_matches(payload, review, binding):
+    return any(payload == {"review": review, "review_digest": digest(review),
+                "effect": "one_final_new_order_click", "journal_binding": binding,
+                "authorization": native_authorization(True, legacy=legacy),
+                **({"accepted_account": review["accepted_account"]} if "accepted_account" in review else {})}
+               for legacy in (False, True))
+
+
+def validate_consumed(directory, record):
+    claim = {"request_digest": digest(record), "task_id": record["task_id"]}
+    name = record["request_id"] + ".json"
+    if required_json(directory / "claims" / name) != claim:
+        raise HouseholdError("Muse browser custody record changed")
+    consumed = required_json(directory / "consumed" / name)
+    if (not isinstance(consumed, Mapping) or set(consumed) != set(claim) | {"consumed_at"}
+            or any(consumed.get(key) != value for key, value in claim.items())
+            or not timestamp(record["issued_at"]) <= timestamp(consumed["consumed_at"]) < timestamp(record["expires_at"])):
+        raise HouseholdError("Muse browser consumed permit changed")
+
+
+def bind_native_task(directory, request_id, task_id, acceptance):
+    """Retain original host acceptance; this never grants another dispatch."""
+    directory = broker_paths(directory)
+    with transition_lock(directory):
+        directory, record = request_record(directory, request_id, task_id, active=False)
+        if not native_task_binding_required(record):
+            raise HouseholdError("Muse native task binding is not required by this request")
+        child = native_acceptance_child(acceptance)
+        validate_consumed(directory, record)
+        name = request_id + ".json"
+        if any((directory / kind / name).exists() or (directory / kind / name).is_symlink()
+               for kind in ("responses", "endings")):
+            raise HouseholdError("Muse browser task already returned")
+        root = directory / "native-tasks"
+        root.mkdir(mode=0o700, exist_ok=True)
+        private_directory(root)
+        parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+        for path in root.glob("*.json"):
+            prior = required_json(path)
+            if not isinstance(prior, Mapping):
+                raise HouseholdError("Muse native financial task binding is invalid")
+            if native_acceptance_child(prior.get("acceptance")) == child:
+                raise HouseholdError("Muse financial task is already bound")
+        durable_publish(root / name, {"request_digest": digest(record), "task_id": task_id,
+                        "journal_binding": record["payload"]["journal_binding"], "acceptance": dict(acceptance)})
 
 
 @contextmanager
@@ -206,6 +293,7 @@ def end_request(directory, request_id, task_id, response):
         try:
             prior = read_json(directory / "responses" / (request_id + ".json"))
             validate_response(record, prior, fresh=False)
+            validate_claim(directory, record, response=prior)
         except (FileNotFoundError, HouseholdError):
             prior = None
         validate_response(record, response, fresh=False)
@@ -213,6 +301,104 @@ def end_request(directory, request_id, task_id, response):
             raise HouseholdError("Muse browser ending requires an unresolved original task")
         validate_claim(directory, record, response=response)
         durable_publish(directory / "endings" / (request_id + ".json"), response)
+
+
+
+DISCARDED_READ_ENDING = "read_discarded_custody_closed_v1"
+
+
+def corrupt_read_bytes(path, *, optional=False):
+    """Read corrupt evidence without accepting it as a broker observation."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise HouseholdError("Muse corrupt read evidence is missing") from None
+    except OSError:
+        raise HouseholdError("Muse corrupt read evidence is unsafe") from None
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o007):
+            raise HouseholdError("Muse corrupt read evidence is unsafe")
+        data = stream.read(65_537)
+    if len(data) > 65_536:
+        raise HouseholdError("Muse corrupt read evidence exceeds the byte limit")
+    return data
+
+
+def corrupt_read_ending_fields(directory, record, native_task):
+    from muse_native_provider import TOOLS
+    now = datetime.now(timezone.utc)
+    name = record["request_id"] + ".json"
+    if (record["operation"] != "provider_read" or not isinstance(record["payload"].get("tool"), str)
+            or record["payload"]["tool"] not in TOOLS
+            or any(key in record["payload"] for key in ("authorization", "journal_binding"))
+            or now < timestamp(record["expires_at"])
+            or any((directory / kind / name).exists() or (directory / kind / name).is_symlink()
+                   for kind in ("consumed", "native-tasks"))):
+        raise HouseholdError("Muse corrupt custody closure requires an expired ordinary read")
+    closed = required_json(directory / "closed" / name)
+    if (not isinstance(closed, Mapping) or set(closed) != {"request_digest", "task_id", "closed_at"}
+            or closed["request_digest"] != digest(record) or closed["task_id"] != record["task_id"]
+            or not timestamp(record["issued_at"]) <= timestamp(closed["closed_at"]) <= now):
+        raise HouseholdError("Muse corrupt read waiter has not ended")
+    raw_claim = corrupt_read_bytes(directory / "claims" / name)
+    try:
+        pairs = json.loads(raw_claim, object_pairs_hook=lambda value: value)
+        if (not isinstance(pairs, list) or len(pairs) != 2
+                or any(not isinstance(pair, tuple) or len(pair) != 2 for pair in pairs)
+                or {pair[0] for pair in pairs} != {"request_digest", "task_id"}):
+            raise ValueError("claim shape")
+        claim = dict(pairs)
+    except (ValueError, TypeError, UnicodeError):
+        raise HouseholdError("Muse corrupt read claim shape is unsupported") from None
+    if (not isinstance(native_task, Mapping) or set(native_task) != {"acceptance", "completion"}
+            or not isinstance(native_task["completion"], Mapping)):
+        raise HouseholdError("Muse corrupt read requires its actual completed native task")
+    child = native_acceptance_child(native_task["acceptance"])
+    completion = native_task["completion"]
+    completed = completion.get("completed_at_utc")
+    if (claim != {"request_digest": digest(record), "task_id": child}
+            or child == record["task_id"] or completion.get("browser_task_id") != child
+            or completion.get("outcome") != "completed"
+            or not native_time_lower_bound(completed, record["issued_at"]) <= timestamp(completed) <= now):
+        raise HouseholdError("Muse corrupt read child and actual ending do not match")
+    response = corrupt_read_bytes(directory / "responses" / name, optional=True)
+    return {"kind": DISCARDED_READ_ENDING, "request_id": record["request_id"],
+            "request_digest": digest(record), "task_id": record["task_id"],
+            "claim_sha256": hashlib.sha256(raw_claim).hexdigest(),
+            "response_sha256": hashlib.sha256(response).hexdigest() if response is not None else None,
+            "closed_sha256": hashlib.sha256(corrupt_read_bytes(directory / "closed" / name)).hexdigest(), "native_task": deepcopy(dict(native_task))}
+
+
+def validate_corrupt_read_ending(directory, record, ending):
+    if not isinstance(ending, Mapping) or set(ending) != {
+            "kind", "request_id", "request_digest", "task_id", "claim_sha256",
+            "response_sha256", "closed_sha256", "native_task", "closed_at"}:
+        raise HouseholdError("Muse discarded read ending is invalid")
+    expected = corrupt_read_ending_fields(directory, record, ending["native_task"])
+    if ({key: value for key, value in ending.items() if key != "closed_at"} != expected
+            or not max(timestamp(record["expires_at"]),
+                       timestamp(ending["native_task"]["completion"]["completed_at_utc"]))
+                <= timestamp(ending["closed_at"]) <= datetime.now(timezone.utc)):
+        raise HouseholdError("Muse discarded read evidence changed")
+
+
+def close_corrupt_read(directory, request_id, task_id, native_task):
+    """Discard an ended read whose manual claim substituted its child ID.
+
+    Preserve all original bytes. This attests custody closure, never successful
+    publication, historical claim validity, fresh catalog facts or action authority.
+    """
+    directory = broker_paths(directory)
+    with transition_lock(directory):
+        directory, record = request_record(directory, request_id, task_id, active=False)
+        ending = {**corrupt_read_ending_fields(directory, record, native_task),
+                  "closed_at": datetime.now(timezone.utc).isoformat()}
+        validate_corrupt_read_ending(directory, record, ending)
+        durable_publish(directory / "endings" / (request_id + ".json"), ending)
 
 
 def validate_claim(directory, record, *, response):
@@ -230,15 +416,37 @@ def validate_claim(directory, record, *, response):
             raise HouseholdError("Muse browser action has no consumed permit") from None
         if refused:
             raise HouseholdError("Muse browser consumed action cannot attest pre-dispatch refusal")
-        if (not isinstance(consumed, Mapping) or set(consumed) != set(claim) | {"consumed_at"}
-                or any(consumed.get(key) != value for key, value in claim.items())
-                or not timestamp(record["issued_at"]) <= timestamp(consumed["consumed_at"]) < timestamp(record["expires_at"])):
-            raise HouseholdError("Muse browser consumed permit changed")
+        validate_consumed(directory, record)
+        if native_task_binding_required(record):
+            try:
+                private_directory(directory / "native-tasks")
+            except OSError:
+                raise HouseholdError("Muse native financial task binding is unavailable") from None
+            binding = required_json(directory / "native-tasks" / name)
+            if (not isinstance(binding, Mapping)
+                    or set(binding) != {"request_digest", "task_id", "journal_binding", "acceptance"}
+                    or binding["request_digest"] != digest(record) or binding["task_id"] != record["task_id"]
+                    or binding["journal_binding"] != record["payload"]["journal_binding"]
+                    or not isinstance(binding["acceptance"], Mapping)):
+                raise HouseholdError("Muse native financial task binding changed")
+            child = native_acceptance_child(binding["acceptance"])
+            metadata = response.get("native_completion")
+            if (response["task_state"] == "completed"
+                    and (not isinstance(metadata, Mapping) or metadata.get("browser_task_id")
+                        != child)):
+                raise HouseholdError("Muse financial completion belongs to another native task")
+            if response["task_state"] == "completed":
+                completed = metadata.get("completed_at_utc")
+                if timestamp(completed) < native_time_lower_bound(completed, consumed["consumed_at"]):
+                    raise HouseholdError("Muse financial completion predates its delegation")
 
 
 def validate_response(record, response, *, fresh=True):
+    bound = (native_task_binding_required(record) and isinstance(response, Mapping)
+             and response.get("task_state") == "completed" and response.get("facts") != {"dispatch": "not_dispatched"})
     if (not isinstance(response, Mapping)
-            or set(response) != {"request_id", "request_digest", "task_id", "observed_at", "task_state", "facts"}
+            or set(response) != ({"request_id", "request_digest", "task_id", "observed_at", "task_state", "facts"}
+                                 | ({"native_completion"} if bound else set()))
             or response.get("request_id") != record["request_id"]
             or response.get("request_digest") != digest(record)
             or response.get("task_id") != record["task_id"]
@@ -247,8 +455,16 @@ def validate_response(record, response, *, fresh=True):
             or not isinstance(response.get("facts"), Mapping)):
         raise HouseholdError("Muse browser observation identity or state changed")
     observed = timestamp(response["observed_at"])
+    issued = timestamp(record["issued_at"])
+    if bound:
+        metadata = response["native_completion"]
+        if (not isinstance(metadata, Mapping) or metadata.get("outcome") != "completed"
+                or not isinstance(metadata.get("browser_task_id"), str)
+                or timestamp(metadata.get("completed_at_utc")) != observed):
+            raise HouseholdError("Muse financial completion metadata is unavailable or changed")
+        issued = native_time_lower_bound(metadata["completed_at_utc"], record["issued_at"])
     current = datetime.now(timezone.utc)
-    if (not timestamp(record["issued_at"]) <= observed <= current
+    if (not issued <= observed <= current
             or fresh and ((current - observed).total_seconds() > 30
                           or current >= timestamp(record["expires_at"]))):
         raise HouseholdError("Muse browser observation is stale or expired")
@@ -282,38 +498,47 @@ class NativeBridge:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise HouseholdError("Muse browser has an active owner") from None
-            # A timed-out claimed native task may still be working. Its actual
-            # ending must be returned to the original request before replacement.
-            for claim_path in (self.directory / "claims").glob("*.json"):
-                reply = self.directory / "responses" / claim_path.name
-                original = required_json(self.directory / "requests" / claim_path.name)
-                if not isinstance(original, Mapping):
-                    raise HouseholdError("Muse browser custody record is invalid")
-                _, record = request_record(self.directory, claim_path.stem,
-                                           original.get("task_id"), active=False)
-                try:
-                    ending = read_json(self.directory / "endings" / claim_path.name)
-                except FileNotFoundError:
-                    pass
-                else:
-                    validate_response(record, ending, fresh=False)
-                    if ending["task_state"] != "completed":
-                        raise HouseholdError("Muse browser has no actual task ending")
-                    validate_claim(self.directory, record, response=ending)
-                    continue
-                response = required_json(reply)
-                validate_response(record, response, fresh=False)
-                validate_claim(self.directory, record, response=response)
-                if response["task_state"] != "completed":
-                    if (record["operation"] in ACTION_OPERATIONS | {"provider_read"}
-                            or record["task_id"] != self.task_id
-                            or process_start(record["owner_pid"]) != record["owner_start"]):
-                        raise HouseholdError("Finish the original waiting Muse task before replacement")
+            self.check_task_endings()
             yield
         finally:
             os.close(fd)
 
+    def check_task_endings(self):
+        # A timed-out claimed native task may still be working. Its actual
+        # ending must be returned to the original request before replacement.
+        for claim_path in (self.directory / "claims").glob("*.json"):
+            reply = self.directory / "responses" / claim_path.name
+            original = required_json(self.directory / "requests" / claim_path.name)
+            if not isinstance(original, Mapping):
+                raise HouseholdError("Muse browser custody record is invalid")
+            _, record = request_record(self.directory, claim_path.stem,
+                                       original.get("task_id"), active=False)
+            try:
+                ending = read_json(self.directory / "endings" / claim_path.name)
+            except FileNotFoundError:
+                pass
+            else:
+                if isinstance(ending, Mapping) and ending.get("kind") == DISCARDED_READ_ENDING:
+                    validate_corrupt_read_ending(self.directory, record, ending)
+                    continue
+                validate_response(record, ending, fresh=False)
+                if ending["task_state"] != "completed":
+                    raise HouseholdError("Muse browser has no actual task ending")
+                validate_claim(self.directory, record, response=ending)
+                continue
+            response = required_json(reply)
+            validate_response(record, response, fresh=False)
+            validate_claim(self.directory, record, response=response)
+            if response["task_state"] != "completed":
+                if (record["operation"] in ACTION_OPERATIONS | {"provider_read"}
+                        or record["task_id"] != self.task_id
+                        or process_start(record["owner_pid"]) != record["owner_start"]):
+                    raise HouseholdError("Finish the original waiting Muse task before replacement")
+
     def request(self, operation, payload, *, deadline=None, expires_at=None, include_response=False):
+        # Nested reads borrow the held lease, but cannot replace an unresolved
+        # native task. Recheck before every publication, including readback.
+        self.check_task_endings()
         seconds = operation_timeout(operation)
         if deadline is not None:
             if isinstance(deadline, bool) or not isinstance(deadline, (float, int)) or not math.isfinite(deadline):
@@ -380,7 +605,7 @@ def checkout_amounts(rows, product_count, expected_total):
     """
     if (type(product_count) is not int or not 0 < product_count <= 1_000_000
             or type(expected_total) is not int or expected_total < 0
-            or not isinstance(rows, list) or not 3 <= len(rows) <= 8):
+            or not isinstance(rows, list) or not 3 <= len(rows) <= 9):
         raise HouseholdError("Muse checkout amount section is unavailable")
     product_label = "1 vare" if product_count == 1 else f"{product_count} varer"
     labels = {product_label: "product_subtotal",
@@ -405,19 +630,41 @@ def checkout_amounts(rows, product_count, expected_total):
     if not {"product_subtotal", "discounted_subtotal", "provider_total"} <= observed.keys():
         raise HouseholdError("Muse checkout required amount row is missing")
     subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
+    fee_keys = ("other_fee", "weight_reservation")
     payable = (subtotal + observed.get("delivery_price", 0)
-               + observed.get("bags", 0) + observed.get("other_fee", 0))
+               + observed.get("bags", 0) + sum(observed.get(key, 0) for key in fee_keys))
     if (observed["discounted_subtotal"] != subtotal
             or observed["provider_total"] != payable
             or payable != expected_total):
         raise HouseholdError("Muse checkout amount arithmetic or cart total changed")
     amounts = {key: observed[key] / 100 if key in observed else None
                for key in ODA_CHECKOUT_AMOUNT_KEYS}
-    if "other_fee" in observed:
-        amounts["other_fees"] = {ODA_CHECKOUT_AMOUNT_LABELS["other_fee"]:
-                                 observed["other_fee"] / 100}
+    amounts["other_fees"] = {ODA_CHECKOUT_AMOUNT_LABELS[key]: observed[key] / 100
+                             for key in fee_keys if key in observed} or None
     _oda_checkout_amounts_minor(amounts)
     return amounts
+
+
+def native_receipt_delivery_matches(slot, display, observed_at):
+    """Compare to the frozen absolute slot; retain yearless display as such."""
+    slot = validate_delivery_slot(slot)
+    start, end = (timestamp(slot[key]).astimezone(ZoneInfo("Europe/Oslo"))
+                  for key in ("start_at", "end_at"))
+    if start.date() != end.date() or start.second or end.second or start.microsecond or end.microsecond:
+        return False
+    display = text(display)
+    years = re.findall(r"\b[12][0-9]{3}\b", display)
+    if years and years != [str(start.year)]:
+        return False
+    relative = re.findall(r"\bi (dag|morgen)\b", display.casefold())
+    if relative:
+        observed_date = timestamp(observed_at).astimezone(ZoneInfo("Europe/Oslo")).date()
+        if len(relative) != 1 or observed_date + timedelta(days=relative[0] == "morgen") != start.date():
+            return False
+    months = ("jan", "feb", "mar", "apr", "mai", "jun", "jul", "aug", "sep", "okt", "nov", "des")
+    expected = f"{start:%H:%M}-{end:%H:%M}, {start.day}. {months[start.month - 1]}"
+    return checkout_delivery_matches(expected, [display],
+        today=timestamp(observed_at).astimezone(ZoneInfo("Europe/Oslo")).date())
 
 
 def account_links(value):
@@ -501,6 +748,24 @@ class MuseBrowser:
         self.state_store = state_store
         self.action_mode = action_mode
         self.last_review_at = None
+        self._native_observed_at = None
+
+    @contextmanager
+    def _custody(self):
+        provider_bridge = getattr(self.provider_client, "bridge", None)
+        if isinstance(provider_bridge, NativeBridge):
+            if (provider_bridge.directory != self.bridge.directory
+                    or provider_bridge.task_id != self.bridge.task_id):
+                raise HouseholdError("Muse native provider and financial browser binding differ")
+            if getattr(self.provider_client, "_accepted_account", None) is None:
+                raise HouseholdError("Muse native financial custody requires the original accepted account")
+            if self.provider_client.terminal_failure:
+                raise HouseholdError(self.provider_client.terminal_failure)
+            with self.provider_client.operation():
+                yield
+        else:
+            with self.bridge.custody():
+                yield
 
     def _addresses(self, deadline):
         value = self.provider_client.call("get_delivery_addresses", {}, deadline=deadline)
@@ -508,6 +773,26 @@ class MuseBrowser:
         if not isinstance(rows, list):
             raise HouseholdError("Muse provider account addresses are unavailable")
         return rows
+
+    def _observe(self, operation, payload, deadline):
+        accepted = getattr(self.provider_client, "_accepted_account", None)
+        native = isinstance(getattr(self.provider_client, "bridge", None), NativeBridge)
+        if native:
+            payload = {**payload, "accepted_account": deepcopy(accepted)}
+        if native:
+            observation = self.bridge.request(operation, payload, deadline=deadline, include_response=True)["response"]
+            facts = dict(observation["facts"])
+            self._native_observed_at = observation["observed_at"]
+        else:
+            facts = self.bridge.request(operation, payload, deadline=deadline)
+        if native:
+            receipt = facts.get("receipt", facts) if isinstance(facts, Mapping) else None
+            sections = (["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]
+                        if operation == "checkout_review" else ["receipt", "account"])
+            if not isinstance(receipt, Mapping) or receipt.get("complete_sections") != sections:
+                raise HouseholdError("Muse native financial account observation is incomplete")
+            self.provider_client.validate_account(receipt.get("account"))
+        return facts
 
     def _selected_reference(self, address, deadline):
         selected = [r for r in self._addresses(deadline)
@@ -519,7 +804,7 @@ class MuseBrowser:
         return selected[0]["id"]
 
     def review_checkout(self, cart, *, payment=None, identity_review=None, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             return self._review_checkout(cart, payment=payment, identity_review=identity_review, deadline=deadline)
 
     def _review_checkout(self, cart, *, payment, identity_review=None, deadline=None):
@@ -529,17 +814,28 @@ class MuseBrowser:
         choice = checkout_payment_settings(payment or {"method": "saved_card"}, "oda")
         if choice["method"] != "saved_card":
             raise HouseholdError("Muse native checkout supports the current saved card only")
-        reference = self._selected_reference(expected["delivery_address"], deadline)
-        facts = self.bridge.request("checkout_review", {"kind": "new_separate_order",
-                    "expected": expected, "payment": choice}, deadline=deadline)
+        native = isinstance(getattr(self.provider_client, "bridge", None), NativeBridge)
+        reference = None if native else self._selected_reference(expected["delivery_address"], deadline)
+        facts = self._observe("checkout_review", {"kind": "new_separate_order",
+                    "expected": expected, "payment": choice}, deadline)
         required = {"url", "account", "address", "delivery_sections", "items", "warnings",
                     "amount_rows", "payment", "submit_controls", "complete_sections"}
         if (set(facts) != required or facts["url"] != "https://oda.com/no/checkout/confirm/"
                 or facts["complete_sections"] != ["account", "items", "warnings", "amounts", "delivery", "payment", "submit"]
-                or facts["warnings"] != [] or reference not in account_links(facts["account"])
+                or facts["warnings"] != []
+                or reference is not None and reference not in account_links(facts["account"])
                 or address_text(facts["address"]).casefold() != expected["delivery_address"].casefold()
                 or not checkout_delivery_matches(expected["delivery_text"], facts["delivery_sections"])):
             raise HouseholdError("Muse checkout account, address, delivery or stock does not match")
+        if native:
+            references = account_links(facts["account"])
+            matches = [row["id"] for row in self._addresses(deadline)
+                       if isinstance(row, Mapping) and type(row.get("id")) is int
+                       and row["id"] in references and isinstance(row.get("address"), str)
+                       and address_text(row["address"]).casefold() == address_text(facts["address"]).casefold()]
+            if len(matches) != 1:
+                raise HouseholdError("Muse observed checkout address is unavailable or ambiguous")
+            reference = matches[0]
         actual = facts["items"]
         if (not isinstance(actual, list) or len(actual) != len(expected["lines"])
                 or any(not isinstance(r, Mapping) or set(r) != {"product_id", "title", "subtitle", "quantity"}
@@ -585,6 +881,8 @@ class MuseBrowser:
                 "amounts": amounts, "account_reference_digest": account_digest,
                 "surface": {"evidence_kind": "native_host_observation", **facts},
                 **({"native_action_mode": self.action_mode} if self.action_mode != "timed" else {}),
+                **({"accepted_account": deepcopy(self.provider_client._accepted_account)}
+                   if isinstance(getattr(self.provider_client, "bridge", None), NativeBridge) else {}),
                 **({"identity_review": identity["review"]} if identity.get("review") else {})}
 
     def checkout_nondispatch_evidence(self, pending, *, deadline=None):
@@ -598,7 +896,7 @@ class MuseBrowser:
                    "expires_at": pending["expires_at"],
                    "journal_digest": digest({**pending, "status": "clicking"})}
         matches = []
-        with self.bridge.custody(), transition_lock(self.bridge.directory):
+        with self._custody(), transition_lock(self.bridge.directory):
             for path in (self.bridge.directory / "requests").glob("*.json"):
                 raw = required_json(path)
                 payload = raw.get("payload") if isinstance(raw, Mapping) else None
@@ -608,11 +906,7 @@ class MuseBrowser:
                 _, record = request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)
                 payload = record["payload"]
                 if (record["operation"] != "checkout_delegate"
-                        or payload != {"review": pending["browser_review"],
-                            "review_digest": digest(pending["browser_review"]),
-                            "effect": "one_final_new_order_click", "journal_binding": binding,
-                            "authorization": {"mode": "native_approval", "expiry_role": "admission",
-                                              "purchase_approval_required": True}}):
+                        or not checkout_delegation_matches(payload, pending["browser_review"], binding)):
                     return None
                 for kind in ("claims", "consumed", "responses", "endings", "publications"):
                     other = self.bridge.directory / kind / path.name
@@ -630,7 +924,7 @@ class MuseBrowser:
         return matches[0] if len(matches) == 1 else None
 
     def submit_checkout(self, cart, review, before_click=None, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             try:
                 current = self._review_checkout(cart, payment=review["payment_choice"],
                     identity_review=review.get("identity_review"), deadline=deadline)
@@ -643,11 +937,11 @@ class MuseBrowser:
             result = self._effect_request("checkout_click", {"review": current,
                         "review_digest": digest(current), "effect": "one_final_new_order_click"},
                         current, deadline=deadline)
-            if result != {"dispatch": "clicked_once"}:
+            if result != {"dispatch": "clicked_once"} and self._completion_reference(result) is None:
                 raise HouseholdError("Muse checkout outcome is unknown; reconcile the original attempt")
             # The core independently reconciles exact new order/tracking/binding.
             # Never invent bank-tab context from a URL or click acknowledgement.
-            return {"authentication_unresolved": True}
+            return {} if self.native_receipt_reconciliation else {"authentication_unresolved": True}
 
     def _effect_request(self, operation, payload, review, *, deadline=None):
         if self.state_store is None:
@@ -660,23 +954,134 @@ class MuseBrowser:
             raise HouseholdError("Muse browser original clicking journal changed")
         binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
                    "journal_digest": digest(pending)}
+        if isinstance(getattr(self.provider_client, "bridge", None), NativeBridge):
+            accepted = self.provider_client._accepted_account
+            if review.get("accepted_account") != accepted:
+                raise HouseholdError("Muse original financial account scope changed")
+            payload = {**payload, "accepted_account": deepcopy(accepted)}
         if self.action_mode == "native_approval":
             # Admission commits one native task, not a click. Its purchase
             # approval supplies fresh authority; an expired waiter cannot
             # revoke or replay a consumed delegation.
             operation = "cancellation_delegate" if cancellation else "checkout_delegate"
-            payload = {**payload, "authorization": {"mode": "native_approval",
-                "expiry_role": "admission", "purchase_approval_required": not cancellation}}
+            payload = {**payload, "authorization": native_authorization(not cancellation)}
         return self.bridge.request(operation, {**payload, "journal_binding": binding},
                                    deadline=deadline, expires_at=pending["expires_at"])
 
-    def _order_binding(self, order_id, order, facts, expected_binding, deadline):
-        expected = OdaBrowser._order_expectation(order_id, order)
+    @property
+    def native_receipt_reconciliation(self):
+        return (self.action_mode == "native_approval"
+                and isinstance(getattr(self.provider_client, "bridge", None), NativeBridge))
+
+    @staticmethod
+    def _completion_reference(facts):
+        if (not isinstance(facts, Mapping)
+                or set(facts) != {"dispatch", "reference", "order_url"}
+                or facts["dispatch"] != "clicked_once"
+                or not isinstance(facts["reference"], str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", facts["reference"]) is None
+                or facts["order_url"] != OdaBrowser._order_url(facts["reference"])):
+            return None
+        return facts["reference"]
+
+    def checkout_completion_reference(self, pending):
+        """Read one original child ending; a click acknowledgement has no ID."""
+        if (not self.native_receipt_reconciliation or pending.get("order_change")
+                or pending.get("recovery") or pending.get("automatic_checkout")):
+            raise HouseholdError("Muse native receipt requires its original separate checkout")
+        binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
+                   "journal_digest": digest({**pending, "status": "clicking"})}
+        matches = []
+        with self._custody(), transition_lock(self.bridge.directory):
+            for path in (self.bridge.directory / "requests").glob("*.json"):
+                raw = required_json(path)
+                payload = raw.get("payload") if isinstance(raw, Mapping) else None
+                journal = payload.get("journal_binding") if isinstance(payload, Mapping) else None
+                if not isinstance(journal, Mapping) or journal.get("confirmation_id") != pending["confirmation_id"]:
+                    continue
+                _, record = request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)
+                if (record["operation"] != "checkout_delegate" or not native_task_binding_required(record)
+                        or not checkout_delegation_matches(record["payload"], pending["browser_review"], binding)):
+                    raise HouseholdError("Muse original native checkout delegation changed")
+                name = record["request_id"] + ".json"
+                ending = self.bridge.directory / "endings" / name
+                response = required_json(ending if ending.exists() else self.bridge.directory / "responses" / name)
+                validate_response(record, response, fresh=False)
+                validate_claim(self.bridge.directory, record, response=response)
+                matches.append(self._completion_reference(response["facts"]) if response["task_state"] == "completed" else None)
+        if len(matches) != 1:
+            raise HouseholdError("Muse original native checkout completion is unavailable or ambiguous")
+        return matches[0]
+
+    @staticmethod
+    def _native_order_expectation(order_id, order):
+        if (order.get("orderNumber") != order_id or order.get("evidence_kind") != "browser_rendered"
+                or not isinstance(order.get("amount_displays"), list)):
+            raise HouseholdError("Muse native receipt identity or amounts are unavailable")
+        totals = [row for row in order["amount_displays"] if isinstance(row, Mapping)
+                  and isinstance(row.get("label"), str)
+                  and row["label"].casefold() in {"total inkl. mva", "total inkl. mva.", "total"}]
+        if len(totals) != 1 or not isinstance(order.get("delivery_display"), str) or not order["delivery_display"]:
+            raise HouseholdError("Muse native receipt total or delivery is unavailable or ambiguous")
+        return {"order_id": order_id, "total_minor": native_amount_minor("Total inkl. MVA", totals[0]["value"]),
+                "delivery_text": order["delivery_display"]}
+
+    def native_checkout_receipt(self, pending, *, deadline=None):
+        """Bind independently observed merchant acceptance to the original task."""
+        reference = self.checkout_completion_reference(pending)
+        if reference is None:
+            return None
+        before = pending.get("orders_before", {}).get("orders", [])
+        if any(str(row.get("orderNumber") or row.get("order_number") or row.get("id") or "") == reference
+               for row in before if isinstance(row, Mapping)):
+            raise HouseholdError("Muse native checkout reference belongs to an earlier order")
+        order = self.provider_client.call("get_order", {"order_number": reference}, deadline=deadline)
+        observed = self._native_order_expectation(reference, order)
+        expected = OdaBrowser._cart_expectation(pending["cart"])
+        if (order.get("goods_complete") is not True or order.get("payment_status") != "Betalt"
+                or order.get("payment_warnings") != [] or not order.get("status")
+                or text(order["status"]).casefold() in {"kansellert", "ubetalt"}
+                or observed["total_minor"] != money_cents(pending["summary"]["total"])
+                or not native_receipt_delivery_matches(pending["summary"]["delivery"]["slot"],
+                    observed["delivery_text"], order["source"]["observed_at"])):
+            raise HouseholdError("Muse independent merchant acceptance, total or delivery differs")
+        rows = order.get("products")
+        if not isinstance(rows, list) or any(row.get("status_labels") for row in rows):
+            raise HouseholdError("Muse native receipt goods are incomplete or substituted/refunded")
+        actual = [{"combined_name": row["name"], "quantity": row["quantity"],
+                   "product_id": None if row.get("id") is None else str(row["id"])} for row in rows]
+        if not combined_checkout_lines_match(expected["lines"], actual):
+            raise HouseholdError("Muse native receipt complete product identity or quantity differs")
+        binding = {"account_reference_digest": pending["browser_review"]["account_reference_digest"],
+                   "receipt_address": pending["summary"]["delivery"]["address"]}
+        slot = pending["summary"]["delivery"]["slot"]
+        self.read_order_binding(reference, order, expected_binding=binding, deadline=deadline,
+                                native_delivery_slot=slot)
+        return {"order_id": reference, "payment_status": "Betalt", "order": order,
+                "source": deepcopy(order.get("source")), "binding": binding, "delivery_slot": deepcopy(slot)}
+
+    def _order_binding(self, order_id, order, facts, expected_binding, deadline, native_delivery_slot=None):
+        native = isinstance(getattr(self.provider_client, "bridge", None), NativeBridge)
+        if native and native_delivery_slot is None:
+            results = self.state_store.read().get("protected_results", {}) if self.state_store is not None else {}
+            matches = [record["result"].get("merchant_evidence", {}).get("delivery_slot")
+                       for record in results.values() if isinstance(record, Mapping)
+                       and record.get("kind") == "checkout" and record.get("target_id") == order_id
+                       and isinstance(record.get("result"), Mapping) and record["result"].get("confirmed") is True]
+            if len(matches) != 1 or not isinstance(matches[0], Mapping):
+                raise HouseholdError("Muse native receipt requires its original absolute delivery slot")
+            native_delivery_slot = matches[0]
+        delivery_matches = (isinstance(facts.get("delivery_sections"), list) and len(facts["delivery_sections"]) == 1
+            and native_receipt_delivery_matches(native_delivery_slot, facts["delivery_sections"][0], self._native_observed_at)
+            if native else None)
+        expected = (self._native_order_expectation(order_id, order)
+                    if isinstance(getattr(self.provider_client, "bridge", None), NativeBridge)
+                    else OdaBrowser._order_expectation(order_id, order))
         if (set(facts) != {"url", "order_id", "currency", "receipt_address", "account", "delivery_sections", "total_rows", "complete_sections"}
                 or facts["complete_sections"] != ["receipt", "account"]
                 or facts["url"] != OdaBrowser._order_url(order_id)
                 or facts["order_id"] != order_id or facts["currency"] != "NOK"
-                or not cancellation_delivery_matches(expected["delivery_text"], facts["delivery_sections"])
+                or not (delivery_matches if native else cancellation_delivery_matches(expected["delivery_text"], facts["delivery_sections"]))
                 or not cancellation_total_matches(expected["total_minor"], facts["total_rows"])):
             raise HouseholdError("Muse order receipt identity, delivery or total changed")
         address = address_text(facts["receipt_address"])
@@ -695,14 +1100,14 @@ class MuseBrowser:
             raise HouseholdError("Muse order account/address binding is unavailable or ambiguous")
         return dict(expected_binding) if expected_binding is not None else candidates[0]
 
-    def read_order_binding(self, order_id, order, *, expected_binding=None, deadline=None):
+    def read_order_binding(self, order_id, order, *, expected_binding=None, deadline=None, native_delivery_slot=None):
         if expected_binding is not None:
             require_order_binding(expected_binding)
         OdaBrowser._order_url(order_id)
-        with self.bridge.custody():
-            facts = self.bridge.request("order_binding", {"order_id": order_id,
-                       "preserve_payment_page": True}, deadline=deadline)
-            return self._order_binding(order_id, order, facts, expected_binding, deadline)
+        with self._custody():
+            facts = self._observe("order_binding", {"order_id": order_id,
+                       "preserve_payment_page": True}, deadline)
+            return self._order_binding(order_id, order, facts, expected_binding, deadline, native_delivery_slot)
 
     def read_cancelled_checkout_binding(self, pending, order_id, order, *, expected_binding, deadline=None):
         """Correlate an original completion with a fresh already-cancelled receipt."""
@@ -716,7 +1121,7 @@ class MuseBrowser:
         binding = {"confirmation_id": pending["confirmation_id"], "expires_at": pending["expires_at"],
                    "journal_digest": digest({**pending, "status": "clicking"})}
         originals = []
-        with self.bridge.custody():
+        with self._custody():
             with transition_lock(self.bridge.directory):
                 for path in (self.bridge.directory / "requests").glob("*.json"):
                     raw = required_json(path)
@@ -725,11 +1130,8 @@ class MuseBrowser:
                     if not isinstance(journal, Mapping) or journal.get("confirmation_id") != pending["confirmation_id"]:
                         continue
                     _, record = request_record(self.bridge.directory, path.stem, self.bridge.task_id, active=False)
-                    if (record["operation"] != "checkout_delegate" or record["payload"] != {
-                            "review": pending["browser_review"], "review_digest": digest(pending["browser_review"]),
-                            "effect": "one_final_new_order_click", "journal_binding": binding,
-                            "authorization": {"mode": "native_approval", "expiry_role": "admission",
-                                              "purchase_approval_required": True}}):
+                    if (record["operation"] != "checkout_delegate"
+                            or not checkout_delegation_matches(record["payload"], pending["browser_review"], binding)):
                         raise HouseholdError("Muse original checkout delegation changed")
                     name = record["request_id"] + ".json"
                     ending_path = self.bridge.directory / "endings" / name
@@ -743,9 +1145,9 @@ class MuseBrowser:
             if len(originals) != 1:
                 raise HouseholdError("Muse original checkout completion is unavailable or ambiguous")
             original = originals[0]
-            facts = self.bridge.request("cancelled_checkout_binding", {
+            facts = self._observe("cancelled_checkout_binding", {
                 "order_id": order_id, "original_checkout_request_id": original["request_id"],
-                "original_request_digest": digest(original), "preserve_payment_page": True}, deadline=deadline)
+                "original_request_digest": digest(original), "preserve_payment_page": True}, deadline)
             if (set(facts) != {"receipt", "checkout_completion"}
                     or facts["checkout_completion"] != {"request_id": original["request_id"], "order_id": order_id}
                     or not isinstance(facts["receipt"], Mapping)):
@@ -754,7 +1156,7 @@ class MuseBrowser:
 
     def order_payment_state(self, order_id, *, deadline=None):
         OdaBrowser._order_url(order_id)
-        with self.bridge.custody():
+        with self._custody():
             facts = self.bridge.request("payment_state", {"order_id": order_id,
                         "preserve_payment_page": True}, deadline=deadline)
             # Retry/payment resumption are outside this manual saved-card path.
@@ -763,16 +1165,50 @@ class MuseBrowser:
                 raise HouseholdError("Muse payment state requires supported native evidence")
             return facts
 
+    def cancellation_order_unchanged(self, current, before):
+        if not self.native_receipt_reconciliation:
+            return canonical(current) == canonical(before)
+        def semantic(value):
+            result = deepcopy(value)
+            for key in ("order", "tracking"):
+                source = result.get(key, {}).get("source")
+                if isinstance(source, dict):
+                    source.pop("request_id", None)
+                    source.pop("observed_at", None)
+            return result
+        return semantic(current) == semantic(before)
+
+    def native_cancellation_completed(self, order_id, current):
+        order = current.get("order")
+        return (isinstance(order, Mapping) and order.get("orderNumber") == order_id
+                and order.get("evidence_kind") == "browser_rendered"
+                and order.get("status") == "Kansellert")
+
     def review_cancellation(self, order_id, order, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             return self._review_cancellation(order_id, order, deadline=deadline)
 
     def _review_cancellation(self, order_id, order, *, deadline=None, expected_binding=None):
         OdaBrowser._order_url(order_id)
-        facts = self.bridge.request("cancellation_review", {"order_id": order_id,
-                    "dialog_open_only_if_proven_nonfinal": True, "dismiss_without_cancelling": True}, deadline=deadline)
-        if set(facts) != {"receipt", "dialog"} or not isinstance(facts["receipt"], Mapping):
+        facts = self._observe("cancellation_review", {"order_id": order_id,
+                    "dialog_open_only_if_proven_nonfinal": True, "dismiss_without_cancelling": True}, deadline)
+        native = self.native_receipt_reconciliation
+        if set(facts) != ({"receipt", "dialog", "entry"} if native else {"receipt", "dialog"}) or not isinstance(facts["receipt"], Mapping):
             raise HouseholdError("Muse cancellation review is unavailable")
+        if native:
+            entry = facts["entry"]
+            if (not isinstance(entry, Mapping)
+                    or set(entry) != {"url", "order_url", "reference", "menu_control", "preview_control"}
+                    or entry["url"] != "https://oda.com/no/"
+                    or entry["order_url"] is not None and entry["order_url"] != OdaBrowser._order_url(order_id)
+                    or entry["reference"] is not None and entry["reference"] != order_id
+                    or entry["order_url"] is None and entry["reference"] is None):
+                raise HouseholdError("Muse Home cancellation target is unavailable or belongs to another order")
+            menu = entry["menu_control"]
+            if (not isinstance(menu, Mapping) or set(menu) != {"label", "enabled"}
+                    or menu["enabled"] is not True or not text(menu["label"])):
+                raise HouseholdError("Muse Home cancellation menu is unavailable")
+            controls([entry["preview_control"]], r"Kanseller bestillingen")
         binding = self._order_binding(order_id, order, facts["receipt"], expected_binding, deadline)
         dialog = facts["dialog"]
         if (not isinstance(dialog, Mapping) or set(dialog) != {"text", "final_controls", "dismiss_controls", "closed"}
@@ -784,10 +1220,12 @@ class MuseBrowser:
             raise HouseholdError("Muse cancellation and dismissal controls are ambiguous")
         return {"available": True, "binding": binding, "consequence": text(dialog["text"]),
                 **({"native_action_mode": self.action_mode} if self.action_mode != "timed" else {}),
+                **({"accepted_account": deepcopy(self.provider_client._accepted_account)}
+                   if isinstance(getattr(self.provider_client, "bridge", None), NativeBridge) else {}),
                 "surface": {"evidence_kind": "native_host_observation", **facts}}
 
     def submit_cancellation(self, order_id, order, review, before_click=None, *, deadline=None):
-        with self.bridge.custody():
+        with self._custody():
             try:
                 current = self._review_cancellation(order_id, order, deadline=deadline,
                                                    expected_binding=review["binding"])

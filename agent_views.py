@@ -10,7 +10,7 @@ MCP_MENU_WIRE_BUDGET = 45_000
 MENU_PRESENTATION_GUIDANCE = {
     "when": "In the first message presenting this proposed, saved or revised meal plan, not only after shopping. State whether it is saved.",
     "include": "Give dish names, short descriptions, dates/portions and known active/total times. Credit each actual recipe publisher/author and available source link beside the dish; label adaptations. An internal collection is storage, not necessarily the author. If attribution is missing, say so; never invent it.",
-    "offer": "Would you like the full meal plan with all ingredients and cooking steps? You can swap any dish, ask for particular meals, or tell me what you already have and want to use up.",
+    "offer": "At a genuine handoff, ask one short question with relevant choices: prepare the shopping list and check food at home, change a dish, or show full ingredients and cooking steps. Number choices 1., 2., 3. in ordinary text. With native question tools use their choices/options fields and rendering rules, including multi-select for compatible choices. Accept number replies; clarify mutually exclusive selections. If shopping is already requested, continue it instead of asking again. Honor plan-only, stop and declined steps; routine reads need no offer.",
     "language": "Use the user's language. Say meal plan (måltidsplan in Norwegian); use ukemeny only for a genuinely weekly plan. Keep the offer short and do not repeat it on routine status reads.",
 }
 
@@ -179,6 +179,9 @@ def _compact_batch(batch: Any) -> dict[str, Any]:
         )
         if key in batch
     }
+    if type(compact.get("source_date")) is int:
+        compact["source_day"] = compact.pop("source_date")
+        compact["eating_days"] = compact.pop("eating_dates", [])
     guidance_value = batch.get("guidance")
     if isinstance(guidance_value, dict):
         compact["guidance"] = {
@@ -197,11 +200,14 @@ def _compact_plan_slot(
     compact = {
         key: slot[key]
         for key in (
-            "date", "reference", "recipe_key", "name", "portions", "source_date",
+            "day", "date", "reference", "recipe_key", "name", "portions", "source_date",
             "kind", "new_shopping_requirements",
         )
         if key in slot
     }
+    for source, target in (("date", "day"), ("source_date", "source_day")):
+        if type(compact.get(source)) is int:
+            compact[target] = compact.pop(source)
     if reasons:
         compact_reasons = _compact_plan_reasons(
             slot.get("reason_contributions", []), details=reason_details
@@ -462,12 +468,12 @@ def _menu_successor_summary(successor: Any) -> dict[str, Any]:
     import menu_planning as mp
     slots = [{
         **{key: slot[key] for key in (
-            "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
+            "day", "date", "meal_type", "portions", "recipe_key", "reference", "kind", "source_slot_id"
         ) if key in slot},
         **(_menu_recipe_presentation(mp.recipe_for_slot(successor, slot, allow_stale=True))
            if successor.get("dishes") else {}),
     } for slot in successor.get("slots", []) if isinstance(slot, dict)]
-    return {"week": successor.get("week"), "slots": slots}
+    return {**({"planning_mode": "relative"} if mp.relative(successor) else {"week": successor.get("week")}), "slots": slots}
 
 
 def _nonprepared_replan_projection(
@@ -692,6 +698,10 @@ def _menu_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
         view["menu_ref"] = _fields(menu, ("menu_id", "revision", "digest"))
         view.update(_fields(menu, ("week", "phase", "weekly_plan_complete", "order_id", "supersedes", "planning_scope")))
         view["menu"] = {**view["menu_ref"], **_fields(menu, ("week", "phase"))}
+        if (menu.get("planning_scope") or {}).get("planning_mode") == "relative":
+            view.pop("week", None)
+            view["menu"].pop("week", None)
+            view["menu"]["planning_mode"] = "relative"
         if menu.get("output_language"):
             view["output_language"] = menu["output_language"]
             view["recipe_languages"] = _page([
@@ -769,7 +779,11 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
                                               "email_status", "next_action", "settled", "resume"))
         view["workflow"]["menu"] = _assessment_view(workflow.get("menu"), offset, limit, section)
     if isinstance(result.get("store_readiness"), dict):
-        view["store_readiness"] = _fields(result["store_readiness"], ("status", "payment", "reason", "next"))
+        readiness = result["store_readiness"]
+        view["store_readiness"] = _fields(readiness, ("provider", "store_url", "local_recipes_available", "note"))
+        for check in ("connection_check", "browser_check", "delivery_check", "payment_check"):
+            if isinstance(readiness.get(check), dict):
+                view["store_readiness"][check] = _fields(readiness[check], ("status", "scope", "next_action"))
     return view
 
 

@@ -1,5 +1,7 @@
 """Read-only menu coverage and household workflow, derived from existing state."""
 from collections.abc import Mapping
+import menu_planning as mp
+from planner import request_days
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -32,15 +34,15 @@ def assess_menu(state):
     meals = profile["meals"]
     selection = menu.get("planner_selection") or {}
     requested = menu.get("planning_scope") or selection.get("request") or {}
-    expected_days = len(requested["dates"]) if "dates" in requested else meals["dinner_days"]
+    expected_days = len(request_days(requested)) if "dates" in requested or "days" in requested else meals["dinner_days"]
     expected_portions = requested.get("portions") or meals["portions"]
     dishes = menu.get("dishes", [])
     recipes = [*dishes, *menu.get("salads", [])]
     slots = menu.get("slots") or []
-    covered_days = len({slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}) if slots else None
+    covered_days = len({mp.slot_day(slot) for slot in slots if slot.get("meal_type") == "dinner"}) if slots else None
     issues = []
-    actual_dates = {slot.get("date") for slot in slots if slot.get("meal_type") == "dinner"}
-    if slots and (covered_days != expected_days or ("dates" in requested and actual_dates != set(requested["dates"]))):
+    actual_dates = {mp.slot_day(slot) for slot in slots if slot.get("meal_type") == "dinner"}
+    if slots and (covered_days != expected_days or (("dates" in requested or "days" in requested) and actual_dates != set(request_days(requested)))):
         issues.append({"code": "dinner_day_coverage", "expected": expected_days, "actual": covered_days})
     if not slots and len(dishes) != meals["dishes"]:
         issues.append({"code": "dish_coverage", "expected": meals["dishes"], "actual": len(dishes)})
@@ -185,6 +187,24 @@ def workflow_status(state, *, now=None):
         next_action = {"operation": "orders", "action": "cancel_reconcile" if cancellation.get("status") in {"clicking", "uncertain"} else "cancel_confirm", "reason": "Finish the existing cancellation.", "confirmation_id": cancellation.get("confirmation_id"), "order_id": cancellation.get("order_id")}
     elif change:
         next_action = {"operation": "orders", "action": "get", "reason": "Review the exact order being changed before continuing.", "order_id": change.get("order_id")}
+    elif menu.get("phase") == "ordered" and menu.get("calendar_status"):
+        next_action = {"operation": "menu", "action": "get",
+                       "reason": "The purchase is confirmed, but the meal calendar needs review. Read the saved menu and ask how to schedule the remaining meals. Preserve the confirmed order and recorded meal history; do not purchase again or schedule/send recipes to repair the calendar."}
+    elif menu.get("phase") == "ordered" and any(
+            j.get("trigger") == "after_purchase"
+            and j.get("status") in {"pending", "claimed", "sending", "uncertain"} for j in jobs):
+        job = next(j for j in jobs if j.get("trigger") == "after_purchase"
+                   and j.get("status") in {"pending", "claimed", "sending", "uncertain"})
+        from delivery_operations import legacy_held
+        reconcile = job.get("status") != "pending"
+        if not reconcile and legacy_held(state, job):
+            next_action = {"operation": "email", "action": "status",
+                           "reason": "Recipe email is paused, disabled or held. Keep it stopped; do not send or release it without an explicit new instruction."}
+        else:
+            next_action = {"operation": "email_sender", "action": "reconcile_order" if reconcile else "send_order",
+                           "provider": state["provider"], "order_id": order_id,
+                           "reason": ("Reconcile the original recipe email attempt; never resend an uncertain delivery. If no original executor receipt is available, inspect status rather than starting another send."
+                                      if reconcile else "Complete the existing authorized after-purchase recipe email through its managed sender. No further checkout is needed.")}
     elif (menu.get("phase") == "ordered" and not jobs and state.get("email_recipient")
           and ((state.get("recipe_delivery") or {}).get("sender_binding") or {}).get("timing") not in {"on_request", "after_purchase"}):
         next_action = {"operation": "email", "action": "schedule", "reason": "Schedule recipes for the exact confirmed order and delivery date."}
@@ -221,7 +241,7 @@ def _continuation(action, state, menu, cart):
     """Add executable argument shape without inventing input or authorization."""
     operation, name = action['operation'], action['action']
     arguments = {'action': name}
-    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment'):
+    for key in ('confirmation_id', 'order_id', 'recovery', 'checkout_payment', 'provider'):
         if action.get(key) is not None:
             arguments[key] = deepcopy(action[key])
     needs = []

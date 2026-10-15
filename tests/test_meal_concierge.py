@@ -503,6 +503,14 @@ class CoreTestsBase:
         self.assertEqual(module.rpc_timeout("status", {}), 120)
         self.assertEqual(module.rpc_timeout("checkout", {"action": "submit"}), 660)
         self.assertEqual(module.rpc_timeout("recipe_pack", {"action": "import"}), 660)
+        self.assertEqual(module.rpc_timeout("products", {}), 480)
+        self.assertEqual(module.rpc_timeout("products", {"action": "prepare"}), 480)
+        self.assertEqual(module.rpc_timeout("products", {"action": "apply"}), 660)
+        self.assertEqual(module.rpc_timeout("products", {"action": "get"}), 300)
+        self.assertEqual(module.rpc_timeout("catalog", {}), 240)
+        self.assertEqual(module.rpc_timeout("catalog", {"action": "products"}), 240)
+        self.assertEqual(module.rpc_timeout("catalog", {"action": "recipes"}), 120)
+        self.assertEqual(Application.products_prepare_budget_seconds, 240)
         module.rpc = mock.Mock(return_value={})
         module.meal_concierge_checkout(action='confirm', confirmation_id='review-one', dietary_review_digest='digest-one', weekly=True)
         self.assertEqual(module.rpc.call_args.kwargs['dietary_review_digest'], 'digest-one')
@@ -936,6 +944,42 @@ class CoreTestsBase:
         # The native Oda total remains authoritative when present.
         cart["totalGrossAmount"] = 33.9
         self.assertEqual(cart_summary(cart)["total"], 33.9)
+
+    def test_oda_cart_breakdown_reaches_paginated_agent_view(self):
+        from agent_views import _cart_view
+        cart = {"items": [
+            {"product_id": 10, "name": "Rice", "quantity": 2, "totalGrossAmount": "60.00"},
+            {"product_id": 11, "name": "Beans", "quantity": 1, "totalGrossAmount": "40.00"},
+        ], "totalGrossAmount": "152.50", "totalBreakdown": {
+            "subtotal": "100.00", "productDiscounts": "-10.00", "couponDiscount": "-5.00",
+            "deliveryFee": "19.00", "bottleDeposit": "2.00", "packaging": "17.50",
+            "surcharge": "29.00", "total": "152.50",
+            "surchargeThresholdDescription": "Synthetic provider description",
+        }}
+        summary = cart_summary(cart)
+        self.assertEqual(summary["amounts"], {
+            "product_subtotal": 100.0, "discounts": -15.0, "delivery_price": 19.0,
+            "deposits": 2.0, "bags": 17.5, "other_fees": {"small_order_surcharge": 29.0},
+            "provider_total": 152.5,
+        })
+        for offset in (0, 1):
+            view = _cart_view("get", {"cart": cart}, offset, 1, "items")
+            self.assertEqual(view["amounts"], summary["amounts"])
+            self.assertEqual(view["total"], 152.5)
+        original = deepcopy(cart["totalBreakdown"])
+        for changes in ({"subtotal": None}, {"newFee": "5.00"}):
+            cart["totalBreakdown"] = {**original, **changes}
+            self.assertIsNone(cart_summary(cart)["amounts"]["product_subtotal"])
+            self.assertEqual(cart_summary(cart)["total"], 152.5)
+        cart["totalBreakdown"] = {key: value for key, value in original.items() if key != "couponDiscount"}
+        self.assertIsNone(cart_summary(cart)["amounts"]["discounts"])
+        for changes in ({"total": "153.00"}, {"subtotal": "101.00"},
+                        {"packaging": "NaN"}, {"productDiscounts": "5.00"},
+                        {"surcharge": True}, {"deliveryFee": "-1.00"}):
+            with self.subTest(changes=changes):
+                cart["totalBreakdown"] = {**original, **changes}
+                with self.assertRaisesRegex(HouseholdError, "provider cart breakdown"):
+                    cart_summary(cart)
 
     def test_checkout_amounts_require_named_other_fees(self):
         cart = {
@@ -2554,6 +2598,57 @@ process.stdout.write(eval(input.script));
                 self.assertEqual(surface["action"], "blocked")
                 self.assertIn("Nektariner", surface["unavailable_message"])
                 self.assertNotIn("Du må fjerne noen varer", surface["unavailable_message"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for browser script tests")
+    def test_cart_surface_distinguishes_checkout_blockers(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        scripts = []
+        browser._eval = lambda source: scripts.append(source) or {}
+        browser._cart_surface()
+        harness = r"""
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+global.location={href:input.url};
+const buttons=Array.from({length:input.buttons||0},()=>({innerText:'Fortsett',
+ disabled:!!input.disabled,getAttribute:()=>null,setAttribute:()=>{},
+ getBoundingClientRect:()=>({width:100,height:20})}));
+const main={innerText:'Handlekurv',querySelectorAll:s=>s==='button'?buttons:[]};
+global.document={body:main,querySelector:s=>s==='main'?main:input.login?{}:null,
+ querySelectorAll:()=>[]};
+global.getComputedStyle=()=>({display:'block',visibility:'visible'});
+process.stdout.write(eval(input.script));
+"""
+        for options, action, reason in [
+            ({'url':'https://oda.com/no/login/'}, 'blocked', 'wrong_page'),
+            ({'login':True}, 'blocked', 'login_required'),
+            ({'buttons':2}, 'blocked', 'ambiguous_continue'),
+            ({'buttons':1,'disabled':True}, 'wait', 'continue_disabled'),
+            ({}, 'wait', 'continue_missing'),
+            ({'buttons':1}, 'continue', None),
+        ]:
+            with self.subTest(reason=reason):
+                run = subprocess.run([shutil.which('node'), '-e', harness],
+                    input=json.dumps({'script':scripts[0], 'url':CART_URL, **options}),
+                    text=True, capture_output=True, check=True, timeout=10)
+                surface = json.loads(run.stdout)
+                self.assertEqual(surface.get('action'), action)
+                self.assertEqual(surface.get('reason'), reason)
+
+    def test_checkout_blocker_reports_reason_without_clicking_or_raw_data(self):
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser.checkout_provider = 'oda'
+        browser._open = lambda _url: None
+        browser._invoke = lambda *_args: {}
+        browser._click_action = lambda *_args, **_kwargs: self.fail('blocked checkout clicked')
+        for reason, expected in [('continue_disabled', 'continue button is disabled'),
+                                 ('login_required', 'shows a login form'),
+                                 ('private unexpected page text', 'one usable continue control')]:
+            with self.subTest(reason=reason):
+                browser._cart_surface = lambda: {'action':'wait','reason':reason}
+                with mock.patch('oda_browser.time.sleep'):
+                    with self.assertRaisesRegex(HouseholdError, expected) as caught:
+                        browser._continue_checkout_cart()
+                self.assertIn('No payment submission', str(caught.exception))
+                self.assertNotIn('private unexpected', str(caught.exception))
 
     def test_checkout_retries_a_failed_read_only_cart_open(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -8421,6 +8516,20 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(self.app.handle({"operation": "status"})["store_readiness"]["connection_check"]["status"], "unknown")
         self.assertEqual(self.oda.calls, [])
 
+    def test_setup_equipment_offer_is_optional_and_preserves_reported_items(self):
+        original = deepcopy(self.store.read()["profile"]["meals"]["equipment"])
+        setup = self.app.handle({"operation": "setup", "action": "show"})
+        self.assertEqual(setup["current"]["weekly_menu"]["equipment"], original)
+        self.assertIn("during_equipment", setup["guide"])
+        self.app.handle({"operation": "setup", "action": "apply", "keep_current": True})
+        self.assertEqual(self.store.read()["profile"]["meals"]["equipment"], original)
+        reported = original + ["blender"]
+        self.app.handle({"operation": "profile", "action": "update",
+                         "changes": {"meals": {"equipment": reported}}})
+        shown = self.app.handle({"operation": "setup", "action": "show"})
+        self.assertEqual(shown["current"]["weekly_menu"]["equipment"], reported)
+        self.assertFalse(shown["configuration_required"])
+
     def test_setup_question_does_not_reenter_the_locked_state_store(self):
         with self.store.locked() as state:
             with mock.patch.object(
@@ -10689,7 +10798,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(duplicate_due, {"send": False, "reason": "email is already claimed before dispatch"})
         payload = self.app.handle({"operation": "email", "action": "begin_send", "order_id": "old", "claim_token": due["claim_token"]})
         self.assertIn("Meny og oppskrifter", payload["subject"])
-        self.assertIn("<h2>A</h2>", payload["html"])
+        self.assertRegex(payload["html"], r"<h2[^>]*>A</h2>")
         self.assertEqual(payload["automation_environment"], {"HERMES_WORKSPACE_AUTOMATION_PROFILE": "test-email"})
         self.app.handle({"operation": "email", "action": "release", "order_id": "old", "claim_token": due["claim_token"]})
         moved = (datetime.now(ZoneInfo("Europe/Oslo")).date() + timedelta(days=1)).isoformat()

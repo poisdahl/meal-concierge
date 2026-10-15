@@ -1083,14 +1083,37 @@ ID and revision even after cleanup or a later explicit recipe update.
 ## Deterministic weekly-menu planning
 
 `meal_concierge_menu(action="plan")` validates and materializes exact menus.
+
+Undated requests default to `planning_mode="relative"` and bounded distinct
+integer `days` (one to seven entries, indices 1–31). Calendar `week`, `dates` and
+`period` are mutually exclusive with relative days. Canonical relative slots
+carry `day`, never provisional ISO dates. The legacy menu `week` is only the
+history assessment week until binding; it is hidden from relative presentation.
+Add/edit slots with `day`, and replan with `remaining_days`. Gaps and preparation
+identities remain stable; elapsed calendar time does not make unbound days past.
+Absolute use-by evidence requires a dated plan; relative storage intervals retain
+their actual day gaps.
+
+Delivery selection returns `menu_start` context. The host uses existing intent or
+asks a concise first-meal choice alongside delivery; no universal hour cutoff is
+applied. `checkout prepare(first_meal_date="YYYY-MM-DD")` freezes a date preview
+in `summary.menu_schedule` for relative menu purchases. The date anchors the
+earliest retained meal day, preserving gaps between subsequent days. Missing intent returns
+`needs_input` before checkout staging. Existing dated plans remain unchanged.
+Successful merchant confirmation creates a dated revision preserving serving and
+preparation IDs and original planner provenance. Retries retain the first order
+snapshot and email job. Later delivery changes do not silently rewrite history
+or resend recipes.
+
 For the ordinary model-led path, use `planner_input.selection_mode="agent"`,
-chronological dates, and exactly one ordered candidate per cooking date. Accepted
-batch layouts determine leftover dates. The service preserves that order without
+chronological days (or explicit dates), and exactly one ordered candidate per
+cooking day. Accepted batch layouts determine leftover days. The service preserves that order without
 permutation ranking; exact references, readiness, configured hard restrictions
 and explicit strict targets still apply. Cooldown remains visible variety
 guidance in agent mode. Automatic discovery requires
 `selection_mode="ranked"` (also the omitted-field legacy behavior).
-The request contains a week and optional exact dates and portions.
+Explicit dated requests contain a week or exact dates/period; relative requests
+contain days. Both support explicit portions.
 Omit `candidates` for automatic discovery through the enabled local bank (including
 installed user/imported/bundled/collection entries) and selected enabled retailer. The server
 returns per-source statuses and bounded work counts in `plan.discovery`, loads
@@ -1099,9 +1122,8 @@ native detail/pagination contracts, shortfalls and unknowns never enable AI
 fallback. Installed packs do not require upstream API switches or sessions.
 A supplied bounded `candidates` list retains explicit-scope behavior. Each candidate must contain exactly one built-in
 `recipe_ref: {id, revision}` or one still-valid frozen `discovery_ref`; names,
-URLs, ordinals, copied recipe documents and “latest” are rejected. Dates omitted
-by the caller are derived once from the saved dinner/eat-day profile and then
-returned as exact ISO dates in the canonical request. The service derives one
+URLs, ordinals, copied recipe documents and “latest” are rejected. An undated request derives relative days from the saved dinner/eat-day profile.
+Only an explicitly weekly or dated request derives canonical ISO dates. The service derives one
 `as_of_date` in the saved household timezone. A supplied date must equal that
 current household date for the initial plan. That exact date is frozen in the
 handoff; ranking and save do not compare it with a later wall clock.
@@ -1353,8 +1375,15 @@ state and SQLite database together in backups; neither belongs in Git.
 
 Menus carry a server-owned `menu_id`, revision and content digest. Bank recipes
 are materialized from an exact recipe ID/revision and optional portion count.
-Updating or clearing a menu requires its current returned `menu_id` and
-`expected_revision`, so a stale request cannot replace newer work.
+Replacing or clearing a menu requires the exact current `menu_ref` from `menu get`,
+so a stale request cannot replace newer work. Saving a distinct whole menu
+archives the outgoing snapshot and allocates a new identity when it has order,
+cancellation, cooking, override or successor history, even in the same week.
+A plain mutable draft instead advances its revision. The new menu becomes current;
+existing order snapshots and historical recipe usage remain unchanged. A confirmed
+or cancelled order alone does not block a new menu. Unresolved linked financial
+operations retain their existing protections. Use remaining-week replanning or
+exact slot edits to carry previous meals into the active menu.
 The default six-week repeat history includes planned, ordered and explicitly
 marked-cooked use. Ranked planning requires an exact override reason for a
 blocked candidate; agent selections and exact menu edits may repeat it while
@@ -1364,6 +1393,17 @@ their recipe-email jobs keep immutable menu, recipient, subject and HTML
 snapshots even if the current menu or recipient later changes.
 
 ## Natural-language workflow
+
+The shared skill, MCP initialization instructions and operation descriptions
+guide both plain-text and dialog-capable hosts. At a natural handoff, show the verified result and one
+concrete question with a few relevant choices. Continue already-requested work
+after its missing answer arrives; resolve tool references internally and reuse
+current authorization. Menu-only, cart-only, read-only and stop requests retain
+their scope. Optional recipe views do not interrupt authorized shopping, and
+neither a next-action suggestion nor `ready_to_call` grants purchase or send
+permission. Native status retains the actual connection, browser, delivery and
+payment readiness checks, including supported next actions and local-recipe
+availability.
 
 Setup and status include `store_readiness` for the selected store. It is derived
 from existing configuration and the last connection result, without browsing,
@@ -2216,3 +2256,34 @@ apply. Clear retains the menu, invalidates old product-plan digests (including
 stale apply arguments), and removes cart completion after verified empty readback.
 `change` uses typed `{product_id,quantity}` signed package deltas; the historical
 `productId` spelling remains accepted. `{op:"clear"}` is not an operation.
+
+### Cart and Oda delivery review
+
+A fresh cart read's exact digest can be used directly to accept a manual removal
+from the current menu with `cart.reconcile` and `keep_current`; no failed checkout
+attempt is needed first. Changes after that read still require a fresh review.
+A requested new weekly shop can start with an empty cart when the retained cart
+plan belongs to another recorded week. Same-week edits retain removal decisions.
+
+Delivery list retains per-date full/unavailable/selectable counts. If any checked
+date has no selectable slots, Oda inspects `/no/checkout/delivery/` in a separate
+inspection tab under the browser lock, only without pending cart, checkout,
+cancellation or order changes. The browser account and exact cart must match the
+provider, including an explicitly requested address. The reader waits for the
+observed visible stock-delay banner; absent/loading/unrecognized evidence stays
+`restriction_status=unknown`, never proof of unrestricted delivery. This optional
+read cannot choose delivery, change goods or pay. Failure preserves the slot
+response; a changed cart/address instead marks `availability_stale=true` and
+requires a fresh list. Dates outside the requested range remain unverified.
+
+Product review retains the retailer's `availability_description`. Product
+purchasability and successful cart insertion are not delivery-date guarantees.
+Explain observed delayed items before selecting a window, offer replacement,
+omission for this shop or waiting, and re-list after authorized changes. Banner
+examples may be incomplete; preserve required ingredient coverage and standing
+recurring preferences. Final checkout revalidation remains in place.
+
+Oda's displayed `Vektreservasjon` is retained as its own entry in `other_fees`.
+The temporary weight reservation contributes to the amount being authorized;
+it is not a promise of the final settled charge. Its presence and exact value
+are frozen with every other checkout amount and checked again before submission.

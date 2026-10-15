@@ -845,7 +845,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 key: deepcopy(meals[key])
                 for key in (
                     "meal_mode", "recurring_batch_accepted", "dinner_days", "dishes",
-                    "batch_dishes", "salads", "cook_days", "eat_days",
+                    "batch_dishes", "salads", "cook_days", "eat_days", "equipment",
                 )
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
@@ -878,6 +878,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
             "during_diet": "Explain the actual saved dietary goal and its dietary_guidance. New/reset defaults use a concrete editable Norwegian starter preset with adult whole-diet reference amounts; offer keep/change/remove. Existing customized or cleared goals stay as saved. Another country or eating pattern is welcome; never infer it from the retailer or conversation language.",
             "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
+            "during_equipment": "At first setup ask: Would you like to record your kitchen equipment? 1. List equipment. 2. Skip for now. Examples: hand blender, blender, food processor or air fryer. Show the current saved equipment and allow corrections. Save explicit answers with profile update meals.equipment, preserving other items unless removal is requested. Skipping leaves equipment unchanged and does not block setup or planning; keeping defaults does not confirm example appliances.",
             "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
             "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",
             "overview_request": "Show me everything Meal Concierge can do and all my current settings, preferences, recurring items and delivery options.",

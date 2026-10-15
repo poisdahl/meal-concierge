@@ -12,14 +12,16 @@ import threading
 import time
 import unittest
 import uuid
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
 from clients import muse
 from muse_browser import (ACTION_OPERATIONS, DELEGATION_OPERATIONS, MuseBrowser,
-                          NativeBridge, checkout_amounts, claim_request,
+                          NativeBridge, bind_native_task, checkout_amounts, claim_request,
                           consume_request, digest, durable_publish, end_request,
+                          native_authorization, native_task_binding_required,
                           original_checkout_completed, process_start, read_json,
                           request_record, respond_request)
 from service import Server
@@ -51,6 +53,44 @@ class NativeAmountTests(unittest.TestCase):
         result = checkout_amounts(rows, 34, 132260)
         self.assertEqual(result["other_fees"], {"Tillegg for mindre bestilling": 15.0})
         self.assertEqual(result["delivery_price"], 29.0)
+
+    def test_observed_weight_reservation_belongs_to_payable_and_fees(self):
+        for value, minor in (("25,50 kr", 2550), ("0,00 kr", 0)):
+            with self.subTest(value=value):
+                rows = deepcopy(ROWS)
+                rows.append({"label": "Vektreservasjon", "value": value})
+                rows[4]["value"] = "1 304,10 kr" if minor else "1 278,60 kr"
+                result = checkout_amounts(rows, 34, 127860 + minor)
+                self.assertEqual(result["other_fees"], {"Vektreservasjon": minor / 100})
+                self.assertEqual(result["provider_total"], (127860 + minor) / 100)
+
+    def test_all_named_fees_and_one_unlabeled_zero_are_preserved(self):
+        rows = deepcopy(ROWS)
+        rows.extend([{"label": "Levering", "value": "29,00 kr"},
+                     {"label": "Tillegg for mindre bestilling", "value": "15,00 kr"},
+                     {"label": "Vektreservasjon", "value": "25,50 kr"},
+                     {"label": "", "value": "0,00 kr"}])
+        rows[4]["value"] = "1 348,10 kr"
+        result = checkout_amounts(rows, 34, 134810)
+        self.assertEqual(result["other_fees"], {"Tillegg for mindre bestilling": 15.0,
+                                              "Vektreservasjon": 25.5})
+        self.assertEqual(result["delivery_price"], 29.0)
+        for invalid in ({"label": "Vektreservasjon", "value": "25,50 kr"},
+                        {"label": "Unknown charge", "value": "0,00 kr"},
+                        {"label": None, "value": "0,00 kr"}):
+            with self.subTest(invalid=invalid), self.assertRaises(HouseholdError):
+                checkout_amounts(rows + [invalid], 34, 134810)
+
+    def test_weight_reservation_cannot_be_ignored_duplicated_or_negative(self):
+        reservation = {"label": "Vektreservasjon", "value": "25,50 kr"}
+        for extra in ([reservation], [reservation, reservation],
+                      [{"label": "Vektreservasjon", "value": "−25,50 kr"}]):
+            with self.subTest(extra=extra), self.assertRaises(HouseholdError):
+                checkout_amounts(deepcopy(ROWS) + extra, 34, 127860)
+        rows = deepcopy(ROWS) + [reservation]
+        rows[4]["value"] = "1 304,10 kr"
+        with self.assertRaises(HouseholdError):
+            checkout_amounts(rows, 34, 127860)
 
     def test_native_compact_currency_and_one_unlabeled_zero_preserve_fee_unknown(self):
         rows = [{"label": "34 varer", "value": "1309,10kr"},
@@ -121,9 +161,197 @@ class NativeFixture(unittest.TestCase):
         return result
 
     def response(self, record, state="completed", facts=None):
-        return {"request_id": record["request_id"], "request_digest": digest(record),
+        response = {"request_id": record["request_id"], "request_digest": digest(record),
                 "task_id": record["task_id"], "observed_at": datetime.now(timezone.utc).isoformat(),
                 "task_state": state, "facts": facts or {}}
+        if native_task_binding_required(record) and state == "completed" and response["facts"] != {"dispatch": "not_dispatched"}:
+            response["native_completion"] = {"browser_task_id": "synthetic-child:" + record["request_id"],
+                "outcome": "completed", "completed_at_utc": response["observed_at"]}
+        return response
+
+
+class NativeTaskBindingTests(NativeFixture):
+    __unittest_skip__ = False
+
+    def setUp(self):
+        super().setUp()
+        if not sys.platform.startswith("linux"):
+            for name in ("muse_browser.process_start", __name__ + ".process_start"):
+                patch = mock.patch(name, return_value="12345")
+                patch.start()
+                self.addCleanup(patch.stop)
+
+    def delegation(self, *, child="synthetic-child:original", bind=True, issued_at=None):
+        record = self.record("checkout_delegate", payload={"authorization": native_authorization(True),
+            "journal_binding": {"confirmation_id": "synthetic-confirmation", "journal_digest": "a" * 64}},
+            **({"issued_at": issued_at,
+                "expires_at": (datetime.fromisoformat(issued_at) + timedelta(seconds=30)).isoformat()} if issued_at else {}))
+        claim_request(self.directory, record["request_id"], "original-task")
+        consume_request(self.directory, record["request_id"], "original-task")
+        acceptance = {"ok": True, "status": "accepted", "execution_state": "not_reported",
+                      "browser_task_id": child, "synthetic_extra": "retained original metadata"}
+        if bind:
+            bind_native_task(self.directory, record["request_id"], "original-task", acceptance)
+        return record, acceptance
+
+    def completed(self, record, child="synthetic-child:original"):
+        response = self.response(record, facts={"dispatch": "clicked_once"})
+        response["native_completion"]["browser_task_id"] = child
+        return response
+
+    def test_one_admission_and_binding_reject_replacement_and_child_reuse(self):
+        record, acceptance = self.delegation()
+        path = self.directory / "native-tasks" / (record["request_id"] + ".json")
+        before = path.read_bytes()
+        self.assertEqual(read_json(path)["acceptance"], acceptance)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        for operation in (lambda: consume_request(self.directory, record["request_id"], "original-task"),
+                          lambda: bind_native_task(self.directory, record["request_id"], "original-task", acceptance),
+                          lambda: bind_native_task(self.directory, record["request_id"], "original-task",
+                                                   {**acceptance, "browser_task_id": "synthetic-child:replacement"})):
+            with self.assertRaises(HouseholdError):
+                operation()
+        other, _ = self.delegation(bind=False)
+        with self.assertRaises(HouseholdError):
+            bind_native_task(self.directory, other["request_id"], "original-task", acceptance)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unknown_acceptance_preserves_custody_and_cannot_attest_no_dispatch(self):
+        record, _ = self.delegation(bind=False)
+        for acceptance in ({"task_id": "original-task", "dispatched_child_id": "synthetic-child:original",
+                            "accepted": True}, {}, {"browser_task_id": None},
+                           {"ok": False, "status": "accepted", "browser_task_id": "synthetic-child:original"},
+                           {"ok": True, "status": "rejected", "browser_task_id": "synthetic-child:original"},
+                           {"browser_task_id": "synthetic-child:original"}):
+            with self.assertRaises(HouseholdError):
+                bind_native_task(self.directory, record["request_id"], "original-task", acceptance)
+        for response in (self.completed(record), self.response(record, facts={"dispatch": "not_dispatched"})):
+            with self.assertRaises(HouseholdError):
+                end_request(self.directory, record["request_id"], "original-task", response)
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
+        self.assertFalse(list((self.directory / "endings").glob("*.json")))
+
+    def test_explicit_unsupported_binding_is_not_historical_compatibility(self):
+        for value in (None, "unknown_version"):
+            record = self.record("checkout_delegate", payload={
+                "authorization": {**native_authorization(True), "task_binding": value}})
+            with self.assertRaisesRegex(HouseholdError, "contract is unsupported"):
+                claim_request(self.directory, record["request_id"], "original-task")
+        self.assertFalse(list((self.directory / "claims").glob("*.json")))
+
+    def test_replaced_binding_parent_directory_cannot_supply_a_completion(self):
+        record, _ = self.delegation()
+        root = self.directory / "native-tasks"
+        preserved = self.directory / "original-native-tasks"
+        root.rename(preserved)
+        root.symlink_to(preserved, target_is_directory=True)
+        for publish in (respond_request, end_request):
+            with self.assertRaises(HouseholdError):
+                publish(self.directory, record["request_id"], "original-task", self.completed(record))
+        self.assertFalse(list((self.directory / "responses").glob("*.json")))
+        self.assertFalse(list((self.directory / "endings").glob("*.json")))
+
+    def test_changed_retained_acceptance_cannot_close_custody(self):
+        record, _ = self.delegation()
+        path = self.directory / "native-tasks" / (record["request_id"] + ".json")
+        value = read_json(path)
+        value["acceptance"]["ok"] = False
+        path.write_text(json.dumps(value))
+        with self.assertRaises(HouseholdError):
+            respond_request(self.directory, record["request_id"], "original-task", self.completed(record))
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
+
+    def test_whole_second_completion_uses_reported_precision_without_restamping(self):
+        observed = datetime.now(timezone.utc).replace(microsecond=0)
+        with mock.patch("muse_browser.datetime") as clock:
+            clock.now.return_value = observed.replace(microsecond=200000)
+            record, _ = self.delegation(issued_at=observed.replace(microsecond=100000).isoformat())
+            clock.now.return_value = observed.replace(microsecond=800000)
+            response = self.completed(record)
+            response["observed_at"] = response["native_completion"]["completed_at_utc"] = observed.isoformat()
+            for earlier in ((observed - timedelta(seconds=1)).isoformat(),
+                            observed.replace(microsecond=150000).isoformat()):
+                prior = deepcopy(response)
+                prior["observed_at"] = prior["native_completion"]["completed_at_utc"] = earlier
+                with self.assertRaises(HouseholdError):
+                    respond_request(self.directory, record["request_id"], "original-task", prior)
+            respond_request(self.directory, record["request_id"], "original-task", response)
+        self.assertEqual(read_json(self.directory / "responses" / (record["request_id"] + ".json")), response)
+
+    def test_completion_child_and_time_enforced_by_broker_and_custody_scan(self):
+        record, _ = self.delegation()
+        response = self.completed(record)
+        for changes in ({"browser_task_id": "synthetic-child:other"},
+                        {"completed_at_utc": "2000-01-01T00:00:00Z"}, {"outcome": "waiting"}):
+            wrong = {**response, "native_completion": {**response["native_completion"], **changes}}
+            with self.assertRaises(HouseholdError):
+                respond_request(self.directory, record["request_id"], "original-task", wrong)
+        # A malformed response written outside the producer cannot close custody.
+        path = self.directory / "responses" / (record["request_id"] + ".json")
+        wrong = {**response, "native_completion": {**response["native_completion"],
+                                                 "browser_task_id": "synthetic-child:other"}}
+        durable_publish(path, wrong)
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
+        # Genuine original ending remains retainable after invalid publication.
+        end_request(self.directory, record["request_id"], "original-task", response)
+        with self.bridge.custody():
+            pass
+
+    def test_late_acceptance_and_completion_do_not_renew_owner_or_admission(self):
+        record, acceptance = self.delegation(bind=False)
+        response = self.completed(record)
+        late = datetime.now(timezone.utc) + timedelta(minutes=1)
+        response["observed_at"] = response["native_completion"]["completed_at_utc"] = late.isoformat()
+        lost_owner = mock.patch("muse_browser.process_start", return_value=None)
+        with lost_owner, mock.patch("muse_browser.datetime") as clock:
+            clock.now.return_value = late
+            bind_native_task(self.directory, record["request_id"], "original-task", acceptance)
+            with self.assertRaises(HouseholdError):
+                consume_request(self.directory, record["request_id"], "original-task")
+            end_request(self.directory, record["request_id"], "original-task", response)
+        self.assertEqual(read_json(self.directory / "endings" / (record["request_id"] + ".json")), response)
+
+    def test_public_cli_binds_original_acceptance_and_retains_matching_actual_ending(self):
+        record, acceptance = self.delegation(bind=False)
+        script = Path(__file__).resolve().parents[1] / "muse_browser_producer.py"
+        arguments = ["--directory", str(self.directory), "--request-id", record["request_id"],
+                     "--task-id", "original-task"]
+        def cli(command, data, extra=()):
+            return subprocess.run([sys.executable, "-I", "-B", str(script), command, *arguments, *extra],
+                                  input=json.dumps(data).encode(), capture_output=True, timeout=5)
+        result = cli("bind", acceptance)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"bound": True})
+        self.assertNotEqual(cli("bind", {**acceptance, "browser_task_id": "synthetic-child:replacement"}).returncode, 0)
+        response = self.completed(record)
+        metadata_path = self.directory / "completion.json"
+        durable_publish(metadata_path, {**response["native_completion"], "activity_title": "SYNTHETIC ONLY"})
+        extra = ["--observed-at", response["observed_at"], "--ending-state", "completed",
+                 "--native-metadata", str(metadata_path)]
+        result = cli("end", response["facts"], extra)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ending = read_json(self.directory / "endings" / (record["request_id"] + ".json"))
+        self.assertEqual(ending["native_completion"], read_json(metadata_path))
+        self.assertEqual(ending["facts"], response["facts"])
+        with self.bridge.custody():
+            pass
+
+    def test_historical_delegate_and_unconsumed_refusal_keep_existing_semantics(self):
+        for authorization in (native_authorization(True, legacy=True), native_authorization(True)):
+            record = self.record("checkout_delegate", payload={"authorization": authorization})
+            claim_request(self.directory, record["request_id"], "original-task")
+            if "task_binding" not in authorization:
+                consume_request(self.directory, record["request_id"], "original-task")
+            facts = {"dispatch": "not_dispatched"} if "task_binding" in authorization else {"dispatch": "clicked_once"}
+            response = self.response(record, facts=facts)
+            respond_request(self.directory, record["request_id"], "original-task", response)
+            before = (self.directory / "responses" / (record["request_id"] + ".json")).read_bytes()
+            with self.bridge.custody():
+                pass
+            self.assertEqual((self.directory / "responses" / (record["request_id"] + ".json")).read_bytes(), before)
 
 
 class NativeBrokerTests(NativeFixture):
@@ -168,17 +396,18 @@ class NativeBrokerTests(NativeFixture):
         claim_request(self.directory, record["request_id"], "original-task")
         respond_request(self.directory, record["request_id"], "original-task", self.response(record))
         for operation, seconds in [("checkout_review", 541),
-                                   *[(op, 151 if op == "cart_change" else 31) for op in ACTION_OPERATIONS]]:
+                                   *[(op, 151 if op in {"cart_change", "delivery_select"} else 31) for op in ACTION_OPERATIONS]]:
             with self.subTest(operation=operation):
                 now = datetime.now(timezone.utc)
                 record = self.record(operation, issued_at=now.isoformat(),
                     expires_at=(now + timedelta(seconds=seconds)).isoformat())
                 with self.assertRaises(HouseholdError):
                     claim_request(self.directory, record["request_id"], "original-task")
-        now = datetime.now(timezone.utc)
-        record = self.record("cart_change", issued_at=now.isoformat(),
-            expires_at=(now + timedelta(seconds=150)).isoformat())
-        claim_request(self.directory, record["request_id"], "original-task")
+        for operation in ("cart_change", "delivery_select"):
+            now = datetime.now(timezone.utc)
+            record = self.record(operation, issued_at=now.isoformat(),
+                expires_at=(now + timedelta(seconds=150)).isoformat())
+            claim_request(self.directory, record["request_id"], "original-task")
 
     def test_cart_consume_refuses_an_expired_shorter_window(self):
         now = datetime.now(timezone.utc)
@@ -444,10 +673,15 @@ class NativeCoreRpcTests(NativeFixture):
             self.assertLessEqual(record["expires_at"], pending["expires_at"])
             if operation in DELEGATION_OPERATIONS:
                 self.assertEqual(record["payload"]["authorization"], {"mode": "native_approval",
-                    "expiry_role": "admission", "purchase_approval_required": operation == "checkout_delegate"})
+                    "expiry_role": "admission", "purchase_approval_required": operation == "checkout_delegate",
+                    "task_binding": "accepted_child_v1"})
             else:
                 self.assertNotIn("authorization", record["payload"])
             consume_request(self.directory, record["request_id"], "original-task")
+            if native_task_binding_required(record):
+                bind_native_task(self.directory, record["request_id"], "original-task",
+                                 {"ok": True, "status": "accepted",
+                                  "browser_task_id": "synthetic-child:" + record["request_id"]})
             if operation in DELEGATION_OPERATIONS and (self.defer_delegation or self.deny_delegation):
                 self.pending_delegation = record
                 return {"dispatch": "approval_denied" if self.deny_delegation else "awaiting_purchase_approval"}
@@ -591,6 +825,32 @@ class NativeCoreRpcTests(NativeFixture):
         finally:
             client.close()
             thread.join(5)
+
+    def test_compensated_named_fee_drift_cannot_delegate_payment(self):
+        self.browser.action_mode = "native_approval"
+        self.shop.cart["total"] = 40.0
+        self.final_label = "Bekreft og betal 40,00kr"
+        self.checkout_amount_rows = [
+            {"label": "1 vare", "value": "35,00kr"},
+            {"label": "Delsum", "value": "35,00kr"},
+            {"label": "Tillegg for mindre bestilling", "value": "2,00kr"},
+            {"label": "Vektreservasjon", "value": "3,00kr"},
+            {"label": "Total inkl. MVA", "value": "40,00kr"},
+        ]
+        prepared = self.rpc({"operation": "checkout", "action": "prepare"})
+        pending = self.store.read()["pending_checkout"]
+        self.assertEqual(pending["browser_review"]["amounts"]["other_fees"],
+                         {"Tillegg for mindre bestilling": 2.0, "Vektreservasjon": 3.0})
+        self.checkout_amount_rows[2]["value"] = "3,00kr"
+        self.checkout_amount_rows[3]["value"] = "2,00kr"
+        result = self.rpc({"operation": "checkout", "action": "confirm",
+                           "confirmation_id": prepared["confirmation_id"]}, expect_ok=False)
+        self.assertIn("Muse checkout changed before dispatch", result["error"])
+        self.assertFalse(any(read_json(p)["operation"] in ACTION_OPERATIONS
+                             for p in (self.directory / "requests").glob("*.json")))
+        self.assertEqual(list((self.directory / "consumed").glob("*.json")), [])
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.shop.orders, [])
 
     def test_real_rpc_new_order_and_cancellation_dispatch_once(self):
         prepared = self.rpc({"operation": "checkout", "action": "prepare"})

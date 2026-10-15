@@ -425,6 +425,62 @@ class WeeklyPlannerTests(unittest.TestCase):
         self.assertIn("Cool promptly and refrigerate", html)
         self.assertIn("Reheat the synthetic meal thoroughly", html)
 
+    def test_batch_weekly_advice_counts_eating_days_not_preparations_or_surplus(self):
+        candidates = []
+        for index, (ingredient, facets) in enumerate([
+            ("laks", ["fish", "wholegrain_or_potato"]),
+            ("ferdigkokte linser", ["legume", "wholegrain_or_potato"]),
+        ]):
+            dish = recipe(f"Batch {index}", f"batch-advice-{index}", ingredient=ingredient)
+            dish["portions"] = 4
+            dish["ingredients"][0]["quantity"] = 700 if index == 0 else 400
+            dish["ingredients"].append({"item": "fullkornsris", "quantity": 300,
+                                         "unit": "g", "scalable": True})
+            if index == 0:
+                dish["ingredients"].append({"item": "spinat", "quantity": 200,
+                                             "unit": "g", "scalable": True})
+            saved = self.app.handle({"operation": "recipes", "action": "save",
+                "recipe": dish, "idempotency_key": f"batch-advice-{index}"})["recipe"]
+            facts = explicit_facts(dietary=facets, complete=True, variety=[f"dish-{index}"])
+            facts["batch_guidance"] = {"basis": "Synthetic batch test", "suitability": "suitable",
+                "storage": "Cool promptly; freeze later servings.", "reheating": "Reheat thoroughly."}
+            facts["leafy_green"] = {"source": "explicit",
+                "assessment": "substantial" if index == 0 else "does_not_count",
+                "ingredient_indices": [2] if index == 0 else [], "basis": "Listed spinach mass."}
+            candidates.append({"recipe_ref": {"id": saved["id"], "revision": saved["revision"]},
+                               "facts": facts})
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({"dinner_days": 6, "dishes": 2,
+                "batch_dishes": 2, "meal_mode": "batch", "portions": 1,
+                "cook_days": ["Monday", "Thursday"],
+                "eat_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+                "recurring_batch_accepted": True, "prepared_portion_range": [5, 5]})
+            state["profile"]["diet"].update({"minimum_fish_portions": 3,
+                "minimum_legume_dinners": 3, "minimum_wholegrain_or_potato_dinners": 6,
+                "leafy_green_days": [3, 3], "fish_grams_per_person": [500, 550]})
+        for mode in ("agent", "ranked"):
+            with self.subTest(mode=mode):
+                result = self.plan(self.request(candidates, selection_mode=mode,
+                    dates=[f"2026-09-{day:02d}" for day in range(7, 13)],
+                    strict_targets=["minimum_fish_portions", "minimum_legume_dinners",
+                                    "minimum_wholegrain_or_potato_dinners", "leafy_green_days"]))
+                self.assertEqual(result["status"], "planned")
+                selection = result["selection"]
+                self.assertEqual(len(selection["slots"]), 6)
+                self.assertEqual([row["prepared_portions"] for row in selection["batches"]], [5, 5])
+                reasons = {row["code"]: row for row in selection["plan_reason_contributions"]}
+                for target, expected in (("minimum_fish_portions", 3), ("minimum_legume_dinners", 3),
+                                         ("minimum_wholegrain_or_potato_dinners", 6)):
+                    self.assertEqual(reasons["weekly_target:" + target]["detail"]["positive_evidence"], expected)
+                self.assertEqual(reasons["weekly_target:listed_fish_mass"]["detail"]["listed_grams_per_serving"], 525)
+                self.assertEqual(reasons["weekly_target:leafy_green_days"]["detail"]["counted_dinners"], 3)
+                self.assertEqual(reasons["variety:distinct_facets"]["weight"], 6)
+                self.assertNotIn("variety:monotony", reasons)
+                self.assertEqual(reasons["ingredients:exact_reuse"]["detail"], {"fullkornsris|g": 2})
+                self.assertNotIn("ingredients:monotony", reasons)
+                self.assertEqual(selection["total_score"], sum(row["weight"] for row in reasons.values())
+                    + sum(row["score"] for row in selection["source_slots"]))
+
     def test_explicit_lunch_slots_never_count_as_legacy_dinners(self):
         facts = {
             "values": ["legume"], "vegetable_types": [], "complete": True,
@@ -517,7 +573,7 @@ class WeeklyPlannerTests(unittest.TestCase):
             candidates, dates=["2026-09-07", "2026-09-08"], alternatives=1,
         )
 
-        def order_sensitive_reasons(selected, _profile):
+        def order_sensitive_reasons(selected, _profile, _recurring=None):
             reference_keys = [item["reference_key"] for item in selected]
             return [{
                 "code": "test:order_sensitive",
@@ -772,8 +828,8 @@ class WeeklyPlannerTests(unittest.TestCase):
         plan = self.plan(self.request(self.save_candidates(2)))
         original = self.app._materialize_planner_menu
 
-        def materialize_then_change_profile(handoff, resolved):
-            menu = original(handoff, resolved)
+        def materialize_then_change_profile(handoff, resolved, *, language=None):
+            menu = original(handoff, resolved, language=language)
             with self.store.locked() as state:
                 state["profile"]["cuisine"]["wanted"] = ["Changed concurrently"]
             return menu
@@ -840,8 +896,8 @@ class WeeklyPlannerTests(unittest.TestCase):
         plan = self.plan(self.request(self.save_candidates(2)))
         original = self.app._materialize_planner_menu
 
-        def materialize_then_change_profile(handoff, resolved):
-            menu = original(handoff, resolved)
+        def materialize_then_change_profile(handoff, resolved, *, language=None):
+            menu = original(handoff, resolved, language=language)
             with self.store.locked() as state:
                 state["profile"]["cuisine"]["wanted"] = ["Changed concurrently"]
             return menu
@@ -864,9 +920,9 @@ class WeeklyPlannerTests(unittest.TestCase):
         original = self.app._materialize_planner_menu
         materialize_calls = 0
 
-        def pause_first_materialization(handoff, resolved):
+        def pause_first_materialization(handoff, resolved, *, language=None):
             nonlocal materialize_calls
-            menu = original(handoff, resolved)
+            menu = original(handoff, resolved, language=language)
             materialize_calls += 1
             if materialize_calls == 1:
                 entered.set()
@@ -1167,6 +1223,42 @@ class WeeklyPlannerTests(unittest.TestCase):
             if "fish" in slot["dietary_facets"]["values"]
         )
         self.assertEqual(fish_slot["date"], dates[5])
+
+    def test_bounded_batch_search_preserves_nonmonotone_weekly_advice(self):
+        candidates = []
+        for index in range(12):
+            saved = self.app.handle({"operation": "recipes", "action": "save",
+                "recipe": recipe(f"Choice {index}", f"batch-dp-{index}",
+                                 ingredient="laks" if index in (0, 2) else "gulrot"),
+                "idempotency_key": f"batch-dp-{index}"})["recipe"]
+            candidates.append({"recipe_ref": {"id": saved["id"], "revision": saved["revision"]}})
+        with self.store.locked() as state:
+            state["profile"]["meals"].update({"dinner_days": 7, "dishes": 6,
+                "batch_dishes": 1, "meal_mode": "mixed", "portions": 1,
+                "cook_days": ["Monday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+                "eat_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+                "recurring_batch_accepted": True, "prepared_portion_range": [2, 2]})
+            state["profile"]["diet"].update({"leafy_green_days": [], "fish_grams_per_person": [200, 200]})
+
+        def preferred_positions(candidate, _day, index, _count, _profile):
+            number = int(candidate["recipe"]["name"].split()[-1])
+            fits = number in (0, 1) if index < 2 else number == index
+            return [{"code": "test:position", "weight": 0 if fits else -10000}]
+
+        with mock.patch("planner._slot_reasons", side_effect=preferred_positions):
+            result = self.plan(self.request(candidates,
+                dates=[f"2026-09-{day:02d}" for day in range(7, 14)], alternatives=1))
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["search_strategy"], "bounded_dynamic_programming")
+        selection = result["selection"]
+        self.assertEqual([row["name"] for row in selection["source_slots"]],
+                         ["Choice 1", "Choice 0", "Choice 2", "Choice 3", "Choice 4", "Choice 5"])
+        fish = next(row for row in selection["plan_reason_contributions"]
+                    if row["code"] == "weekly_target:listed_fish_mass")
+        self.assertEqual(fish["detail"]["listed_grams_per_serving"], 200)
+        self.assertEqual(fish["weight"], 8)
+        self.assertEqual(selection["total_score"], sum(row["weight"] for row in selection["plan_reason_contributions"])
+                         + sum(row["score"] for row in selection["source_slots"]))
 
     def test_candidate_day_alternative_and_date_bounds_are_exact(self):
         candidates = self.save_candidates(13)

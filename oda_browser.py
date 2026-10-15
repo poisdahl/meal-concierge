@@ -107,6 +107,7 @@ class OdaBrowserPageMismatchError(HouseholdError):
 
 STORE_URL = "https://oda.com/no/"
 CART_URL = "https://oda.com/no/cart/"
+DELIVERY_URL = "https://oda.com/no/checkout/delivery/"
 CHECKOUT_ENTRY_URL = "https://oda.com/no/checkout/"
 CHECKOUT_MODIFY_URL = "https://oda.com/no/checkout/modify/"
 RECOMMENDATIONS_URL = "https://oda.com/no/checkout/recommendations/"
@@ -133,8 +134,10 @@ ODA_CHECKOUT_AMOUNT_LABELS = {
     "discounts": "Du sparer",
     "discounted_subtotal": "Delsum",
     "bags": "Leveringsemballasje",
+    "deposits": "Pant",
     "delivery_price": "Levering",
     "other_fee": "Tillegg for mindre bestilling",
+    "weight_reservation": "Vektreservasjon",
     "provider_total": "Total inkl. MVA",
 }
 MATHEM_CHECKOUT_AMOUNT_LABELS = {
@@ -147,7 +150,7 @@ MATHEM_CHECKOUT_AMOUNT_LABELS = {
     "provider_total": "Totalt inkl. moms",
 }
 # Observed product discounts and delivery credit are separate rows. Other
-# discounts or deposit rows still require their own verified provider contract.
+# discounts or provider-specific fees require their own verified contract.
 MATHEM_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vara|(?:0|[2-9]|[1-9]\d{1,6}) varor)")
 ODA_CHECKOUT_PRODUCT_LABEL = re.compile(r"(?:1 vare|(?:0|[2-9]|[1-9]\d{1,6}) varer)")
 ODA_CHECKOUT_AMOUNT_KEYS = (
@@ -224,16 +227,18 @@ def _oda_checkout_amounts_minor(value: Any, *, provider: str = "oda") -> dict[st
             if amount is None:
                 result[key] = None
                 continue
-            expected_name = labels["other_fee"]
-            if not isinstance(amount, Mapping) or set(amount) != {expected_name}:
+            expected_names = {labels[key] for key in ("other_fee", "weight_reservation") if key in labels}
+            if not isinstance(amount, Mapping) or not amount or not set(amount) <= expected_names:
                 raise HouseholdError("Oda checkout amounts changed")
-            amount = amount[expected_name]
-            if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-                raise HouseholdError("Oda checkout amounts changed")
-            minor = round(float(amount) * 100)
-            if not math.isfinite(float(amount)) or not math.isclose(float(amount) * 100, minor, abs_tol=1e-7) or minor < 0:
-                raise HouseholdError("Oda checkout amounts changed")
-            result[key] = {expected_name: minor}
+            fees = {}
+            for name, fee in amount.items():
+                if isinstance(fee, bool) or not isinstance(fee, (int, float)) or not math.isfinite(float(fee)):
+                    raise HouseholdError("Oda checkout amounts changed")
+                minor = round(float(fee) * 100)
+                if not math.isclose(float(fee) * 100, minor, abs_tol=1e-7) or minor < 0:
+                    raise HouseholdError("Oda checkout amounts changed")
+                fees[name] = minor
+            result[key] = fees
             continue
         if amount is None:
             result[key] = None
@@ -320,7 +325,9 @@ def _oda_checkout_amount_script(
    delivery_discount:rowState(amountLabels.delivery_discount),
    discounted_subtotal:rowState(amountLabels.discounted_subtotal),
    bags:rowState(amountLabels.bags),
+   deposits:rowState(amountLabels.deposits),
    other_fee:rowState(amountLabels.other_fee),
+   weight_reservation:rowState(amountLabels.weight_reservation),
    provider_total:rowState(amountLabels.provider_total),
  };
  // The current Mathem new-order overview can omit a free delivery row.
@@ -355,18 +362,21 @@ def _oda_checkout_amount_script(
  const itemizedDiscount=itemizedDiscountRows.length?itemizedCandidateTotal:null;
  const productDiscount=states.discounts.state==='value'?states.discounts.value:itemizedDiscount;
  const discountsAgree=states.discounts.state!=='value'||itemizedDiscount===null||states.discounts.value===itemizedDiscount;
+ const feeRows=['other_fee','weight_reservation'].filter(key=>states[key].state==='value');
+ const otherFees=feeRows.length?Object.fromEntries(feeRows.map(key=>[amountLabels[key],states[key].value])):null;
+ const feeTotal=feeRows.reduce((sum,key)=>sum+states[key].value,0);
  const amounts={
    product_subtotal:states.product_subtotal.value,
    delivery_price:states.delivery_price.value,
    discounts:productDiscount===null&&states.delivery_discount.state==='absent'?null:(productDiscount||0)+(states.delivery_discount.value||0),
-   deposits:null,
+   deposits:states.deposits.value,
    bags:states.bags.value,
-   other_fees:states.other_fee.state==='absent'?null:{[amountLabels.other_fee]:states.other_fee.value},
+   other_fees:otherFees,
    provider_total:states.provider_total.value,
    ...(MATHEM_BREAKDOWN?{discount_breakdown:{product_discount:states.discounts.value,delivery_discount:states.delivery_discount.value}}:{}),
  };
- const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state!=='invalid');
- const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.other_fee].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
+ const optionalValid=[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state!=='invalid');
+ const signsValid=required.every(row=>row.value>=0)&&[states.delivery_price,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state!=='value'||row.value>=0)&&[states.discounts,states.delivery_discount].every(row=>row.state!=='value'||row.value<=0);
  const deliveryDiscountValid=states.delivery_discount.state==='absent'||-states.delivery_discount.value===states.delivery_price.value;
  const discountedValid=(RETRY&&states.discounted_subtotal.state==='absent')||states.discounted_subtotal.value===states.product_subtotal.value+(productDiscount||0);
  // On addition retry the overview gross total and the payment calculation are
@@ -374,8 +384,8 @@ def _oda_checkout_amount_script(
  const totalValid=discountsAgree&&(ADDITION_RETRY
    ? (ODA_ADDITION_RETRY
       ? amounts.product_subtotal===ADDITION_GOODS&&Number.isSafeInteger(amounts.provider_total)&&amounts.provider_total>0
-      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.other_fee].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
-   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(states.other_fee.value||0));
+      : amounts.product_subtotal===TOTAL&&itemizedDiscount===null&&[states.delivery_price,states.discounts,states.delivery_discount,states.bags,states.deposits,states.other_fee,states.weight_reservation].every(row=>row.state==='absent'||row.state==='value'&&row.value===0))
+   : amounts.provider_total===amounts.product_subtotal+(amounts.discounts||0)+(amounts.delivery_price||0)+(amounts.bags||0)+(amounts.deposits||0)+feeTotal);
  const amountsValid=required.every(row=>row.state==='value')&&optionalValid&&signsValid&&deliveryDiscountValid&&contained&&discountedValid&&totalValid&&itemizedRowsValid&&unknownRows.length===0&&(ADDITION_RETRY||amounts.provider_total===TOTAL);
  const amountFailures=amountsValid?[]:[
    ...Object.entries(states).filter(([,row])=>row.state==='invalid').map(([key])=>'ambiguous_'+key),
@@ -1079,6 +1089,22 @@ process.exit(process.exitCode||0);
 """
 
 
+def _oda_delivery_restrictions_script():
+    """Only the observed merchant banner establishes a stock-delay explanation."""
+    return r"""(() => {
+        const norm=v=>(v||'').replace(/\s+/g,' ').trim();
+        const visible=x=>{for(let p=x;p;p=p.parentElement){const s=getComputedStyle(p);if(s.display==='none'||s.visibility==='hidden'||s.opacity==='0')return false;}const r=x.getBoundingClientRect();return r.width>0&&r.height>0};
+        const page=location.href===DELIVERY_URL&&!document.querySelector('form[action*="login"],input[type="password"]');
+        const notice=x=>{const t=norm(x.innerText);return t.length<=1000&&/^Noen av varene i handlekurven\b/.test(t)&&t.includes('ikke tilgjengelige før')};
+        // Check the rendered sentence before walking ancestor styles/layout.
+        const warnings=page?[...document.querySelectorAll('*')].filter(notice).filter(visible)
+            .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText)):[];
+        // A positive visible banner is ready evidence. No match alone cannot
+        // distinguish hydration, unsupported markup or an unrestricted cart.
+        return JSON.stringify({ready:page&&warnings.length>0,warnings:[...new Set(warnings)].slice(0,5)});
+    })()""".replace("DELIVERY_URL", json.dumps(DELIVERY_URL))
+
+
 class OdaBrowser:
     checkout_provider = "oda"
     checkout_url = CHECKOUT_URL
@@ -1115,6 +1141,47 @@ class OdaBrowser:
         self.session = f"oda-household-{instance}"
         self._checkout_deadline: float | None = None
         self._cancellation_deadline: float | None = None
+
+    def cart_delivery_restrictions(self, snapshot, *, deadline=None):
+        """Inspect the delivery page without choosing a slot or changing goods."""
+        with self._checkout_operation(deadline, preserve_session=True), self._inspection_tab():
+            address = snapshot["address"]
+            account = self._verify_checkout_account(address["address"])
+            if account != hashlib.sha256(str(address["id"]).encode()).hexdigest():
+                raise HouseholdError("delivery diagnostic account changed")
+            expected = sorted(tuple(row) for row in snapshot["items"])
+            if not expected:
+                raise HouseholdError("delivery diagnostic has no current cart items")
+            self._open(CART_URL)
+            # Reuse the observed ProductRow reader, requiring exact SKU/quantity
+            # evidence here rather than a model's cosmetic identity approval.
+            script = _oda_checkout_surface_script({"total_minor": 0, "delivery_address": address["address"]})
+            for _ in range(20):
+                cart = self._eval(script)
+                items = cart.get("items", [])
+                actual = sorted((str(row.get("product_id", "")), row.get("quantity", 0)) for row in items)
+                if cart.get("url") == CART_URL and cart.get("authenticated") is True and actual == expected and not any(row.get("identity_conflict") for row in items):
+                    break
+                self._settle(0.25)
+            else:
+                raise HouseholdError("delivery diagnostic browser cart is not verified")
+            # Reuse the cart blocker read used before checkout. It only reads
+            # and labels controls; no continuation or merchant action is taken.
+            # A stock notice is not evidence that a delivery date is blocked.
+            stock = self._cart_surface().get("unavailable_message")
+            if stock:
+                return {"cart_stock_notices": [stock]}
+            # The observed stock-delay banner lives on delivery, not on cart.
+            self._open(DELIVERY_URL)
+            for _ in range(20):
+                result = self._eval(_oda_delivery_restrictions_script())
+                warnings = result.get("warnings")
+                if not isinstance(warnings, list) or len(warnings) > 5 or any(not isinstance(v, str) or not v or len(v) > 1000 for v in warnings):
+                    raise HouseholdError("Oda delivery restrictions are unavailable")
+                if result.get("ready") is True:
+                    return {"cart_restrictions": warnings}
+                self._settle(0.25)
+        raise HouseholdError("Oda delivery restriction inspection did not finish rendering")
 
     def _account_reference(self, expected_address: str) -> int:
         value = self._binding_client().call("get_delivery_addresses", {}, deadline=self._checkout_deadline)
@@ -1926,7 +1993,7 @@ class OdaBrowser:
             "unrecognized_amount_row", "original_total_changed",
             *("ambiguous_" + key for key in (
                 "product_subtotal", "delivery_price", "discounts", "delivery_discount",
-                "discounted_subtotal", "bags", "other_fee", "provider_total",
+                "discounted_subtotal", "bags", "deposits", "other_fee", "weight_reservation", "provider_total",
             )),
         }
         for attempt in range(3):
@@ -2067,7 +2134,21 @@ class OdaBrowser:
                     f"{surface['unavailable_message']} "
                     "Remove or replace that item in the cart before preparing checkout again."
                 )
-            raise HouseholdError("Oda cart cannot continue to checkout")
+            reasons = {
+                "wrong_page": "the browser did not reach the store cart",
+                "login_required": "the cart shows a login form",
+                "ambiguous_cart": "more than one cart panel is visible",
+                "ambiguous_continue": "more than one matching cart control is visible",
+                "continue_disabled": "the cart continue button is disabled",
+                "continue_missing": "the cart continue button was not found",
+                "cart_not_ready": "the cart panel did not become ready",
+            }
+            reason = reasons.get(surface.get("reason"), "the cart did not expose one usable continue control")
+            raise HouseholdError(
+                f"{self.checkout_provider.title()} cart cannot continue to checkout: {reason}. "
+                "No payment submission was made by this navigation. Inspect this checkout browser's "
+                "cart and stock notices before preparing checkout again."
+            )
         self._click_action("continue", mouse=True)
         return "continue"
 
@@ -2089,8 +2170,8 @@ class OdaBrowser:
  };
  const storefrontLinkOnly=ALLOW_STOREFRONT_LINK;
  document.querySelectorAll('[data-oda-household-action]').forEach(x=>x.removeAttribute('data-oda-household-action'));
- if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked'});
- if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked'});
+ if(![STORE,CART].includes(location.href))return JSON.stringify({action:'blocked',reason:'wrong_page'});
+ if(document.querySelector('input[type="password"]'))return JSON.stringify({action:'blocked',reason:'login_required'});
  const dialogs=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter(visible);
  for(const root of dialogs){const message=stockMessage(root);if(message)return JSON.stringify({action:'blocked',unavailable_message:message});}
  let roots=[];
@@ -2108,15 +2189,16 @@ class OdaBrowser:
      return full.length===1||(!storefrontLinkOnly&&next.length===1&&new RegExp(CART_CONTENTS,'i').test(text));
    });
  }
- if(roots.length>1)return JSON.stringify({action:'blocked'});
- if(roots.length===0)return JSON.stringify({action:'wait'});
+ if(roots.length>1)return JSON.stringify({action:'blocked',reason:'ambiguous_cart'});
+ if(roots.length===0)return JSON.stringify({action:'wait',reason:'cart_not_ready'});
  const root=roots[0];
- const next=storefrontLinkOnly&&location.href!==CART?[]:[...root.querySelectorAll('button')].filter(visible).filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true').filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+ const matching=storefrontLinkOnly&&location.href!==CART?[]:[...root.querySelectorAll('button')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===CONTINUE_LABEL);
+ const next=matching.filter(x=>!x.disabled&&x.getAttribute('aria-disabled')!=='true');
  const full=[...root.querySelectorAll('a')].filter(visible).filter(x=>norm(x.innerText||x.getAttribute('aria-label')||'')===FULL_CART_LABEL&&x.href===CART);
- if(next.length>1||full.length>1)return JSON.stringify({action:'blocked'});
+ if(next.length>1||full.length>1)return JSON.stringify({action:'blocked',reason:'ambiguous_continue'});
  if(next.length===1){next[0].setAttribute('data-oda-household-action','continue');return JSON.stringify({action:'continue'});}
  if(full.length===1){full[0].setAttribute('data-oda-household-action','full-cart');return JSON.stringify({action:'full_cart'});}
- return JSON.stringify({action:'wait'});
+ return JSON.stringify({action:'wait',reason:matching.length?'continue_disabled':'continue_missing'});
 })()
 """.replace("ALLOW_STOREFRONT_LINK", "true" if mathem else "false")
           .replace("CONTINUE_LABEL", json.dumps("Fortsätt" if mathem else "Fortsett"))

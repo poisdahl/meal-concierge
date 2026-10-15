@@ -59,3 +59,45 @@ class WorkflowContinuationTests(unittest.TestCase):
         result = fixture.app.handle({'operation':action['operation'],**action['arguments']})
         self.assertIn('product_plan',result)
         self.assertEqual(fixture.provider.cart['items'],[])
+
+    def test_purchase_email_continuation_uses_existing_job_and_original_target(self):
+        menu = {'menu_id':'m','revision':1,'digest':'d','phase':'ordered','order_id':'o','dishes':[]}
+        state = {'menu':menu,'profile':deepcopy(DEFAULT_PROFILE)}
+        for status in ('pending', 'claimed', 'sending', 'uncertain'):
+            with self.subTest(status=status):
+                job = {'provider':'oda','order_id':'o','trigger':'after_purchase',
+                       'automation_protocol':4,'status':status}
+                before = deepcopy(job)
+                action = self.action(**state, email_jobs=[job])
+                self.assertEqual(action['operation'], 'email_sender')
+                self.assertEqual(action['arguments'], {
+                    'action':'send_order' if status == 'pending' else 'reconcile_order',
+                    'provider':'oda','order_id':'o'})
+                self.assertEqual(job, before)
+        for status in ('sent', 'cancelled', 'paused'):
+            action = self.action(**state,email_jobs=[{**job,'status':status}])
+            self.assertNotEqual(action['operation'],'email_sender')
+        for changes in ({'provider':'meny'}, {'order_id':'another'}, {'trigger':'delivery_day'}):
+            action = self.action(**state,email_jobs=[{**job,'status':'pending',**changes}])
+            self.assertNotEqual(action['operation'],'email_sender')
+
+    def test_uncertain_checkout_precedes_queued_recipe_email(self):
+        menu = {'menu_id':'m','revision':1,'digest':'d','phase':'ordered','order_id':'o','dishes':[]}
+        action = self.action(menu=menu,profile=deepcopy(DEFAULT_PROFILE),
+                            pending_checkout={'status':'uncertain','confirmation_id':'original'},
+                            email_jobs=[{'provider':'oda','order_id':'o','trigger':'after_purchase',
+                                         'automation_protocol':4,'status':'pending'}])
+        self.assertEqual((action['operation'],action['action']),('checkout','reconcile'))
+        self.assertEqual(action['arguments']['confirmation_id'],'original')
+
+    def test_each_real_delivery_hold_blocks_new_send_but_not_original_reconciliation(self):
+        menu = {'menu_id':'m','revision':1,'digest':'d','phase':'ordered','order_id':'o','dishes':[]}
+        base = {'menu':menu,'profile':deepcopy(DEFAULT_PROFILE)}
+        job = {'provider':'oda','order_id':'o','trigger':'after_purchase',
+               'automation_protocol':4,'status':'pending'}
+        for delivery, extra in (({'paused':True},{}), ({'legacy_email_disabled':True},{}), ({},{'delivery_hold':True})):
+            with self.subTest(delivery=delivery, extra=extra):
+                action = self.action(**base,recipe_delivery=delivery,email_jobs=[{**job,**extra}])
+                self.assertEqual((action['operation'],action['action']),('email','status'))
+                action = self.action(**base,recipe_delivery=delivery,email_jobs=[{**job,**extra,'status':'uncertain'}])
+                self.assertEqual((action['operation'],action['action']),('email_sender','reconcile_order'))

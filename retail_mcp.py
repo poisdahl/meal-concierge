@@ -86,14 +86,15 @@ def retail_delivery_slot_date(value: Any, *, provider: str = "oda") -> str:
         raise HouseholdError("Delivery slot_ref is invalid") from exc
 
 
-def oda_cart_delivery_window(value: Any, *, today: date | None = None) -> dict[str, Any]:
+def oda_cart_delivery_window(value: Any, *, today: date | None = None, allow_unknown_slot_id: bool = False) -> dict[str, Any]:
     """Parse the exact selected-delivery display observed in an Oda cart."""
 
     if not isinstance(value, Mapping):
         raise HouseholdError("Oda selected cart delivery changed")
     slot_id = value.get("slot_id")
     display = value.get("display")
-    if isinstance(slot_id, bool) or not isinstance(slot_id, int) or slot_id < 0:
+    if not (allow_unknown_slot_id and slot_id is None) and (
+            isinstance(slot_id, bool) or not isinstance(slot_id, int) or slot_id < 0):
         raise HouseholdError("Oda selected cart delivery changed")
     if not isinstance(display, str) or len(display.encode("utf-8")) > 200:
         raise HouseholdError("Oda selected cart delivery changed")
@@ -229,6 +230,9 @@ def normalize_retail_delivery_slots(value: Any, *, provider: str = "oda") -> dic
     return {
         "provider": provider,
         "delivery_date": delivery_date.isoformat(),
+        "availability": {"date": delivery_date.isoformat(), "total": len(raw_slots), "selectable": len(references),
+                         "full": sum(row["isFull"] for row in raw_slots),
+                         "unavailable": sum(row["isUnavailable"] for row in raw_slots)},
         "slots": list(references.values()),
     }
 

@@ -355,6 +355,22 @@ class RetailerPublicDetailTests(unittest.TestCase):
                 retail_web_recipe_input(source, "mathem", deadline=time.monotonic())
         fetch.assert_not_called()
 
+    def test_detail_title_ignores_only_surrounding_whitespace(self):
+        from retailer_recipes import retail_web_recipe_input
+        for provider in ("oda", "mathem"):
+            for search_name, page_name in (
+                ("Synthetic dinner", "Synthetic dinner "),
+                (" Synthetic dinner\n", "Synthetic dinner"),
+                ("Synthetic &amp; dinner", " Synthetic & dinner&nbsp;"),
+            ):
+                with self.subTest(provider=provider, search=search_name, page=page_name):
+                    source = self.source(provider)
+                    source["name"] = search_name
+                    page_source = {**source, "name": page_name}
+                    with mock.patch("retailer_recipes._fetch_retail_webpage", return_value=self.fetched(page_source)):
+                        candidate = retail_web_recipe_input(source, provider)
+                    self.assertEqual(candidate["name"], "Synthetic & dinner" if "&" in search_name else "Synthetic dinner")
+
     def test_ambiguous_changed_and_unknown_portions_are_not_materialized(self):
         from copy import deepcopy
         from retailer_recipes import retail_web_recipe_input
