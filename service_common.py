@@ -11,6 +11,7 @@ import re
 import socket
 import struct
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 import unicodedata
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from oda_browser import delivery_signature as oda_delivery_signature
@@ -325,6 +326,10 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
 
     def source(value: Mapping[str, Any]) -> str:
         metadata = value.get("source") if isinstance(value.get("source"), Mapping) else {}
+        try:
+            url = normalize_source_url(metadata.get("url"))
+        except RecipeError:
+            url = None
         publisher = str(metadata.get("publisher") or "").strip()
         if not publisher:
             publisher = {
@@ -332,7 +337,7 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
                 "user": tr("Innsendt oppskrift", "Supplied recipe"),
                 "generated": tr("Generert oppskrift", "Generated recipe"),
                 "oda": "Oda",
-            }.get(metadata.get("kind"), tr("Kilde ikke registrert", "Source not recorded"))
+            }.get(metadata.get("kind"), "")
         source_title = str(metadata.get("title") or value.get("name") or "").strip()
         relationship = str(metadata.get("relationship") or "unknown").casefold()
         labels = {
@@ -344,11 +349,9 @@ def menu_email_html(menu: Mapping[str, Any], *, test: bool = False, image_cids: 
             "unknown": tr('Kilde', 'Source'),
         }
         label = labels.get(relationship, tr('Kilde', 'Source'))
-        try:
-            url = normalize_source_url(metadata.get("url"))
-        except RecipeError:
-            url = None
         text = " – ".join(part for part in (publisher, source_title if (metadata.get("publisher") or metadata.get("title")) and source_title.casefold() != publisher.casefold() else "") if part)
+        if not text:
+            text = urlsplit(url).hostname if url else tr("Kilde ikke registrert", "Source not recorded")
         if relationship == "user_supplied" and publisher.casefold() in {"unknown", "user", "bruker"}:
             text = tr('Innsendt oppskrift', 'Supplied recipe')
         rendered = f'<a href="{escape(url)}">{escape(text)}</a>' if url else escape(text)
