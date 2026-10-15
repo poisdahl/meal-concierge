@@ -3,6 +3,7 @@ from contextlib import ExitStack, contextmanager
 import ctypes
 import errno
 import hashlib
+import json
 import sys
 import fcntl
 import os
@@ -72,6 +73,20 @@ def process_arguments(pid):
     return words, Path(paths[0])
 
 
+def _storeless_process(words, cwd):
+    """Only an explicit local config can explain an omitted browser profile."""
+    for index, word in enumerate(words):
+        value = words[index + 1] if word == '--config' and index + 1 < len(words) else word.removeprefix('--config=') if word.startswith('--config=') else None
+        if value:
+            try:
+                path = Path(value) if Path(value).is_absolute() else cwd.resolve(strict=True) / value
+                settings = json.loads(path.read_text())
+            except (OSError, ValueError, UnicodeError):
+                return False
+            return isinstance(settings, dict) and str(settings.get('provider') or '').casefold() == 'none'
+    return False
+
+
 def assert_no_legacy_service(state, profile, browser_home=None, browser_socket_directory=None, cdp=None, *, resolved_targets=None, browser_uid=None, browser_gid=None):
     """Old services have no lock. Check exact argv/cwd before any data initialization."""
     targets = resolved_targets if resolved_targets is not None else {str(Path(p).resolve()) for p in (state, profile, browser_home, browser_socket_directory) if p}
@@ -88,7 +103,7 @@ def assert_no_legacy_service(state, profile, browser_home=None, browser_socket_d
             continue
         if not all(any(w == flag or w.startswith(flag + '=') for w in words) for flag in ('--state', '--config')):
             continue
-        if not any(w == '--browser-profile' or w.startswith('--browser-profile=') for w in words):
+        if profile is not None and not any(w == '--browser-profile' or w.startswith('--browser-profile=') for w in words) and not _storeless_process(words, cwd):
             raise RuntimeError(f'legacy service PID {pid} has an implicit browser profile; stop it before takeover')
         for index, word in enumerate(words):
             for flag in ('--state', '--browser-profile', '--browser-home', '--browser-socket-directory', '--browser-cdp'):
@@ -108,9 +123,11 @@ def assert_no_legacy_service(state, profile, browser_home=None, browser_socket_d
 @contextmanager
 def ownership(state, profile, browser_home=None, browser_socket_directory=None, cdp=None, browser_uid=None, browser_gid=None):
     state = Path(state).resolve()
-    with effective_owner(browser_uid, browser_gid):
-        profile = Path(profile).resolve()
-        browser_paths = {Path(p).resolve() / '.service-owner.lock' for p in (profile, browser_home, browser_socket_directory) if p}
+    browser_paths = set()
+    if profile is not None:
+        with effective_owner(browser_uid, browser_gid):
+            profile = Path(profile).resolve()
+            browser_paths = {Path(p).resolve() / '.service-owner.lock' for p in (profile, browser_home, browser_socket_directory) if p}
     # A shared/symlinked JSON or database must not evade the directory lock.
     paths = {state / '.service-owner.lock'}
     for name in ('state.json', 'recipes.sqlite3'):
