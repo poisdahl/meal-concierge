@@ -464,7 +464,7 @@ def meal_concierge_recipe_image(
     return CallToolResult(content=content)
 
 
-@server.tool(structured_output=False, description="Translate unfinished workflow into one useful next-step question with a few choices in plain text when a handoff is needed. Continue already-requested work; needs_input may be satisfied by existing answers and ready_to_call is not authorization. Simple reads, declined steps and stop requests need no follow-up. Show the local household name, masked integration state, confirmation policy, schedule, and explicit pending checkout/cancellation/order-change status.")
+@server.tool(structured_output=False, description="Translate unfinished workflow into one useful next-step question with a few choices in plain text when a handoff is needed. Continue already-requested work; needs_input may be satisfied by existing answers and ready_to_call is not authorization. Simple reads, declined steps and stop requests need no follow-up. Show the local household name, masked integration state, confirmation policy, schedule, and explicit pending checkout/cancellation/order-change status. For program-version questions, read build.release_tag and source_modified: report the Meal Concierge release first, disclose local modifications, or say release unknown with source_commit when available. MCP server and store-integration versions are not the program release. Installed identity does not establish whether an update is available.")
 def meal_concierge_status(
     view_offset: Annotated[int, Field(ge=0)] = 0, view_limit: Annotated[int, Field(ge=1, le=20)] = 10,
     view_section: Literal["summary", "issues"] = "summary",

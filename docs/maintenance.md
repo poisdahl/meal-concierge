@@ -97,10 +97,24 @@ direct service `health` and `status` reads expose the same identity. Compare
 tag, and require `build.source_modified=false` for an unmodified release. Checking
 only `git rev-parse HEAD` in a source directory does not verify the running service.
 
-The build does not contain a release tag or a separate program version string.
-Keep the tag-to-commit mapping from release selection and report that alongside
-the service result. A matching runtime identity also does not prove that the
-client reloaded its skill; verify the connection through the host guide.
+`build.release_tag` records the exact stable program tag (`vMAJOR.MINOR.PATCH`)
+at the source commit when staged from Git. If several stable tags point to it,
+the highest numeric version is recorded; recipe and prerelease tags are ignored.
+Report this tag first when asked which Meal Concierge version is running. With
+`source_modified=true`, it identifies the release base **with local changes**.
+A null or missing tag means the release is unknown, not necessarily newer than
+the latest release: archives, older manifests and checkouts without tags cannot
+establish a release. Use a tagged Git checkout for identifiable installations.
+MCP interface and store-integration versions are separate from this program tag.
+A matching runtime identity also does not prove that the client reloaded its
+skill; verify the connection through the host guide.
+
+Installed identity is read locally and does not check for updates. For an
+update-availability request, freshly [select the latest stable program release](runtime.md#choose-a-program-release)
+and compare it with the installed unmodified release. A failed or incomplete
+lookup leaves update availability unknown; an unknown or locally modified build
+cannot establish that an upgrade is needed. A local Git tag does not by itself
+prove publication on GitHub. Checking availability does not install an update.
 
 It contains the packaged source/skill digest, dependency-file digest, pinned
 Python and interface version. A Git commit is included when staging from a Git
