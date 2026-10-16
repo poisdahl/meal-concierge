@@ -43,6 +43,10 @@ class OdaCheckoutMismatchError(HouseholdError):
     """The live checkout surface no longer matches the supplied cart snapshot."""
 
 
+class OdaCheckoutQuoteMismatchError(OdaCheckoutMismatchError):
+    """Only the displayed quote is inconsistent; a fresh preparation may recover."""
+
+
 def _safe_browser_location(value: Any) -> str:
     """Describe one browser location without credentials, query or fragment."""
     if value == "about:blank":
@@ -1871,7 +1875,13 @@ class OdaBrowser:
                 "expected_product_quantity_count": expected["product_count"],
                 "actual_product_quantity_count": actual_product_quantity_count,
             }
-            raise OdaCheckoutMismatchError(
+            quote_only = (result["total_matches"] is False
+                          and all(result[key] is True for key in (
+                              "authenticated", "available", "line_matches", "delivery_matches",
+                              "address_matches", "masked_payment"))
+                          and result["submit_controls"] == 1)
+            error = OdaCheckoutQuoteMismatchError if quote_only else OdaCheckoutMismatchError
+            raise error(
                 "Oda checkout does not match the reviewed cart "
                 + json.dumps(diagnostics, sort_keys=True, separators=(",", ":"))
             )
@@ -2045,7 +2055,10 @@ class OdaBrowser:
             diagnostic = json.dumps({"stage": stage, "failures": failures},
                                     sort_keys=True, separators=(",", ":"))
             if total_drift:
-                raise OdaCheckoutMismatchError("Oda checkout total changed " + diagnostic)
+                error = OdaCheckoutQuoteMismatchError if self.checkout_provider == "oda" else OdaCheckoutMismatchError
+                raise error("Oda checkout total changed " + diagnostic)
+            if self.checkout_provider == "oda" and failures == ["discounted_subtotal"]:
+                raise OdaCheckoutQuoteMismatchError("Oda checkout amount rows cannot be verified " + diagnostic)
             raise HouseholdError("Oda checkout amount rows cannot be verified " + diagnostic)
         raw_amounts = amount_result["amounts"]
         keys = set(ODA_CHECKOUT_AMOUNT_KEYS) | ({"discount_breakdown"} if self.checkout_provider == "mathem" else set())

@@ -431,6 +431,29 @@ class PaymentBrowserTests(unittest.TestCase):
             read(price_drift)
         self.assertIn('"stage":"total"', str(drift.exception))
 
+    def test_stale_subtotal_is_retryable_only_as_a_quote_not_a_payment(self):
+        from oda_browser import OdaBrowser, OdaCheckoutQuoteMismatchError, _oda_checkout_amount_script, CHECKOUT_URL
+        rows = [["2 varer", "100,00 kr"], ["Du sparer", "-10,00 kr"],
+                ["Delsum", "92,60 kr"], ["Levering", "9,00 kr"],
+                ["Leveringsemballasje", "5,00 kr"], ["Total inkl. MVA", "104,00 kr"]]
+        read = _oda_checkout_amount_script(10400, expected_product_count=2)
+        observed = self.evaluate(read, rows=rows)
+        self.assertEqual(observed["result"]["amount_check_failures"], ["discounted_subtotal"])
+        self.assertEqual(observed["clicks"], [])
+        browser = OdaBrowser.__new__(OdaBrowser)
+        browser._eval = lambda script: self.evaluate(script, rows=rows)["result"]
+        with self.assertRaises(OdaCheckoutQuoteMismatchError):
+            browser._read_checkout_amounts(10400, 2)
+        corrected = [*rows[:2], ["Delsum", "90,00 kr"], *rows[3:]]
+        amounts = self.evaluate(read, rows=corrected)["result"]["amounts"]
+        click = _oda_checkout_amount_script(10400, expected_product_count=2,
+                    expected_amounts=amounts, expected_url=CHECKOUT_URL)
+        options = {"selected": 2, "button": "Bekreft og betal 104,00 kr"}
+        self.assertEqual(self.evaluate(click, rows=rows, **options)["clicks"], [])
+        self.assertEqual(self.evaluate(click, rows=corrected, **options)["clicks"], ["PAY"])
+        wrong = [*rows[:2], ["Delsum", "90,01 kr"], *rows[3:]]
+        self.assertEqual(self.evaluate(click, rows=wrong, **options)["clicks"], [])
+
     def test_amount_summary_control_waits_only_for_bounded_readiness(self):
         from core import HouseholdError
         from oda_browser import OdaBrowser

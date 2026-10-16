@@ -2091,6 +2091,8 @@ process.stdout.write(eval(script));
             surface = {**surface, "payment_display": "SECRET_PAYMENT"}
             with self.subTest(label=label), self.assertRaises(OdaCheckoutMismatchError) as raised:
                 review(surface)
+            from oda_browser import OdaCheckoutQuoteMismatchError
+            self.assertEqual(isinstance(raised.exception, OdaCheckoutQuoteMismatchError), label == "total")
             message = str(raised.exception)
             self.assertLess(len(message), 10000)
             diagnostic = json.loads(message[message.index("{"):])
@@ -8086,6 +8088,34 @@ class CartPlanTests(unittest.TestCase):
             self.assertTrue(any(item["product_id"] == "20" for item in result["cart_plan"]["items"]))
             self.assertEqual(sum(tool == "manipulate_cart" for tool, _arguments in provider.calls), 1)
 
+    def test_oda_quote_refresh_rebinds_menu_cart_gate_after_time_advances(self):
+        from oda_browser import OdaCheckoutQuoteMismatchError
+        with tempfile.TemporaryDirectory() as directory:
+            store, provider, browser, application, product_id = self.app(directory, "oda")
+            clock = [ODA_FIXTURE_NOW]
+            application._now = lambda: clock[0]
+            self.sync(application, product_id)
+            stopped = application.handle({"operation": "checkout", "action": "prepare"})
+            application.handle({"menu_ref": application._cart_menu_ref(store.read()["menu"]),
+                "operation": "cart", "action": "reconcile", "decision": "keep_current",
+                "cart_digest": stopped["cart_plan"]["cart_digest"]})
+            original = browser.review_checkout
+            calls = []
+            def stale_once(cart, **kwargs):
+                calls.append(cart)
+                if len(calls) == 1:
+                    clock[0] += timedelta(seconds=1)
+                    raise OdaCheckoutQuoteMismatchError("stale quote")
+                return original(cart, **kwargs)
+            browser.review_checkout = stale_once
+            prepared = application.handle({"operation": "checkout", "action": "prepare"})
+            self.assertEqual(len(calls), 2)
+            pending = store.read()["pending_checkout"]
+            self.assertEqual(pending["status"], "awaiting_confirmation")
+            self.assertEqual(pending["cart_plan"], store.read()["cart_plan"])
+            self.assertEqual(pending["summary"], prepared["summary"])
+            self.assertEqual(browser.checkout_clicks, 0)
+
     def test_oda_prepare_turns_a_browser_cart_race_into_a_new_digest_question(self):
         with tempfile.TemporaryDirectory() as directory:
             store, provider, browser, application, product_id = self.app(directory, "oda")
@@ -10227,6 +10257,66 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(after.get("cart_plan"), before.get("cart_plan"))
         self.assertEqual(self.oda.cart, cart_before)
         self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_quote_refresh_rechecks_full_review_with_latest_total(self):
+        from oda_browser import OdaCheckoutQuoteMismatchError
+        original = self.browser.review_checkout
+        calls = []
+        def changing_quote(cart, **kwargs):
+            calls.append((deepcopy(cart), kwargs["deadline"]))
+            if len(calls) == 1:
+                raise OdaCheckoutQuoteMismatchError("stale discounted subtotal")
+            if len(calls) == 2:
+                self.oda.cart["subtotal"] = 34.98
+                raise OdaCheckoutQuoteMismatchError("packaging quote changed")
+            return original(cart, **kwargs)
+        self.browser.review_checkout = changing_quote
+        prepared = self.app.handle({"operation": "checkout", "action": "prepare"})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len({deadline for _, deadline in calls}), 1)
+        self.assertEqual(calls[-1][0]["subtotal"], 34.98)
+        self.assertEqual(prepared["summary"]["total"], 34.98)
+        pending = self.store.read()["pending_checkout"]
+        self.assertEqual(pending["status"], "awaiting_confirmation")
+        self.assertEqual(pending["summary"]["total"], 34.98)
+        self.assertEqual(self.browser.checkout_clicks, 0)
+        self.assertEqual(self.oda.orders, [])
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_quote_refresh_is_bounded_and_does_not_retry_other_errors(self):
+        from oda_browser import OdaCheckoutQuoteMismatchError
+        for error, attempts in [(OdaCheckoutQuoteMismatchError("stale quote"), 3),
+                                (HouseholdError("unknown summary row"), 1),
+                                (OdaCheckoutMismatchError("identity changed"), 1)]:
+            with self.subTest(error=type(error).__name__):
+                self.browser.review_checkout = mock.Mock(side_effect=error)
+                with self.assertRaises(type(error)):
+                    self.app.handle({"operation": "checkout", "action": "prepare"})
+                self.assertEqual(self.browser.review_checkout.call_count, attempts)
+                self.assertIsNone(self.store.read()["pending_checkout"])
+                self.assertEqual(self.browser.checkout_clicks, 0)
+
+    @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
+    def test_checkout_quote_refresh_refuses_changed_basket_or_delivery(self):
+        from oda_browser import OdaCheckoutQuoteMismatchError
+        original = deepcopy(self.oda.cart)
+        changes = [lambda c: c["items"][0].update(product_id=11),
+                   lambda c: c["items"][0].update(quantity=2),
+                   lambda c: c["delivery"].update(slot_id=71),
+                   lambda c: c.update(deliveryAddress="Another address")]
+        for change in changes:
+            with self.subTest(change=changes.index(change)):
+                self.oda.cart = deepcopy(original)
+                def changed(cart, **kwargs):
+                    change(self.oda.cart)
+                    raise OdaCheckoutQuoteMismatchError("stale quote")
+                self.browser.review_checkout = mock.Mock(side_effect=changed)
+                with self.assertRaisesRegex(HouseholdError, "cart or delivery changed"):
+                    self.app.handle({"operation": "checkout", "action": "prepare"})
+                self.assertEqual(self.browser.review_checkout.call_count, 1)
+                self.assertIsNone(self.store.read()["pending_checkout"])
+                self.assertEqual(self.browser.checkout_clicks, 0)
 
     @mock.patch("service.now", new=lambda: ODA_FIXTURE_NOW)
     def test_checkout_surface_mismatch_diagnostics_do_not_mutate_state_or_click(self):
