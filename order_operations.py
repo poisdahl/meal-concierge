@@ -16,7 +16,7 @@ import time
 from typing import Any, Mapping
 import unicodedata
 from zoneinfo import ZoneInfo
-from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError,
+from oda_browser import (ODA_CHECKOUT_AMOUNT_KEYS, OdaCheckoutMismatchError, OdaCheckoutQuoteMismatchError,
                          RecoveryClickNotDispatchedError,
                          _oda_checkout_amounts_minor,
                          delivery_signature as oda_delivery_signature,
@@ -2977,20 +2977,47 @@ class OrderOperations:
                         allow_recovery=allow_recovery,
                     )
                 else:
-                    try:
-                        review = self.browser.review_checkout(cart, deadline=deadline,
-                            **({"payment": checkout_payment} if self.provider == "oda" else {}),
-                            **({"identity_review": deepcopy(identity_review)} if identity_review is not None else {}))
-                    except OdaCheckoutMismatchError:
-                        refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-                        refreshed_summary = cart_summary(refreshed_cart)
-                        if canonical(refreshed_summary) == canonical(summary):
-                            raise
-                        if isinstance(menu_baseline, Mapping) and not independent_cart:
-                            cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
-                            if cart_gate is not None:
-                                return cart_gate
-                        raise HouseholdError(f"{self.provider.title()} cart or delivery changed while preparing checkout; prepare a new summary")
+                    # Oda can retain an old Delsum while prices/packaging update.
+                    # Only preparation may rebuild a quote, always rechecking the
+                    # complete browser surface and preserving the original basket.
+                    def quote_contents(value):
+                        return canonical({
+                            "items": [{key: item[key] for key in ("product_id", "name", "quantity")}
+                                      for item in value["items"]],
+                            "count": value.get("count"), "delivery": value.get("delivery"),
+                        })
+                    original_contents = quote_contents(summary)
+                    for quote_attempt in range(3):
+                        try:
+                            review = self.browser.review_checkout(cart, deadline=deadline,
+                                **({"payment": checkout_payment} if self.provider == "oda" else {}),
+                                **({"identity_review": deepcopy(identity_review)} if identity_review is not None else {}))
+                            break
+                        except OdaCheckoutQuoteMismatchError:
+                            if self.provider != "oda" or quote_attempt == 2:
+                                raise
+                            refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
+                            refreshed_summary = cart_summary(refreshed_cart)
+                            if quote_contents(refreshed_summary) != original_contents:
+                                raise HouseholdError("Oda cart or delivery changed while refreshing checkout; prepare a new summary")
+                            if isinstance(menu_baseline, Mapping) and not independent_cart:
+                                if canonical(self.store.read().get("cart_plan")) != canonical(cart_plan_baseline):
+                                    raise HouseholdError("cart plan changed while preparing checkout; prepare a new summary")
+                                cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
+                                if cart_gate is not None:
+                                    return cart_gate
+                                cart_plan_baseline = deepcopy(self.store.read().get("cart_plan"))
+                            cart, summary = refreshed_cart, refreshed_summary
+                        except OdaCheckoutMismatchError:
+                            refreshed_cart = self.provider_client.call("get_cart", {}, deadline=deadline)
+                            refreshed_summary = cart_summary(refreshed_cart)
+                            if canonical(refreshed_summary) == canonical(summary):
+                                raise
+                            if isinstance(menu_baseline, Mapping) and not independent_cart:
+                                cart_gate = self._cart_checkout_gate(refreshed_summary, menu_baseline)
+                                if cart_gate is not None:
+                                    return cart_gate
+                            raise HouseholdError(f"{self.provider.title()} cart or delivery changed while preparing checkout; prepare a new summary")
             if self.provider == "meny":
                 reviewed_summary = review.get("summary")
                 if not isinstance(reviewed_summary, Mapping):
