@@ -348,6 +348,7 @@ sys.argv = sys.argv[1:]
         clock = self.home / "fixture-monotonic-offset"
         clock.write_text("0")
         command = list(self.process.args)
+        command[command.index("--provider-transport") + 1] = "browser_cart"
         command[4] = RUNNER.replace("sys.argv = sys.argv[1:]", """
 import time
 from pathlib import Path
