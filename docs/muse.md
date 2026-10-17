@@ -142,8 +142,8 @@ Health remains local. Actual signed-out or changed-account failures remain
 latched, and unresolved native task custody must be reconciled before another
 read. Protected MCP status still does not retry rejected authentication.
 No action permit is consumed. Native `product_search`, `get_order` and
-`order_tracking` reads each have a 180-second bound; other native provider reads
-retain a 110-second bound.
+`order_tracking` reads each have a 180-second bound. Native `get_cart` allows
+240 seconds for a complete cart; other native provider reads retain 110 seconds.
 These bounds include browser-task execution and automatic completion delivery;
 shorter caller deadlines still apply. The `orders.get` RPC wait is 420 seconds
 across clients, leaving 60 seconds beyond its two native order-read bounds.
@@ -154,7 +154,10 @@ five-second plan-building reserve, so two serial catalog reads can finish.
 Ordinary provider preparation retains its 240-second operation budget.
 The `products.prepare` RPC wait is 480 seconds and `products.apply` waits
 660 seconds, beyond the existing 600-second native apply budget. Other product
-and order RPC waits remain 300 seconds and ordinary defaults remain 120 seconds.
+and order RPC waits remain 300 seconds. Explicit and default `cart.get` RPC waits
+are 300 seconds, beyond the existing 240-second cart operation budget; ordinary
+defaults remain 120 seconds. Nested cart reads still share their caller's
+remaining operation budget and do not extend cart-change, apply or checkout limits.
 Publication still
 requires a genuine completed task and facts no more than 30 seconds old. Preserve
 late endings and unknown custody after a timeout; never dispatch another task to replace uncertain work.
@@ -624,7 +627,13 @@ are required. The producer takes literal JSON from the supported browser's
 **automatic result delivery**. A task acceptance receipt is not a completion;
 `list_tasks`' short final-response preview is not the full automatic handoff.
 Do not substitute that preview or a desktop accessibility excerpt for the actual
-received payload. Automatic delivery has no documented completeness guarantee:
+received payload. In the Muse 8 interface, capture the complete literal JSON body
+from Complete Answer in `<browser_task_report>` and retain the completion metadata
+separately. Prepare private capture and producer commands before starting the CLI.
+A verbatim whole-body copy preserves the result; a metadata summary, truncated
+activity preview or reconstructed fields do not. Do not pass the XML wrapper or
+add transport sentinel fields to the exact facts object.
+Automatic delivery has no documented completeness guarantee:
 qualify it with a realistic-sized JSON result, complete row/field counts and
 begin/end sentinels before serving checkout. A small result is insufficient.
 
