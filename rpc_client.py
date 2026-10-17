@@ -49,7 +49,7 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
     if operation == "shopping_list" and arguments.get("action") == "match":
         return rpc_timeout("products", {**arguments, "action": "prepare"})
     order_operation = operation == "orders"
-    cart_change = operation == "cart" and arguments.get("action") != "get"
+    cart_operation = operation == "cart"
     delivery_operation = operation == "delivery"
     if operation in {"checkout", "recipe_pack"}:
         return 660
@@ -64,7 +64,7 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
         return 420
     if operation == "orders" and arguments.get("action") == "get":
         return 420
-    return 300 if order_operation or cart_change or delivery_operation or operation == "products" else 120
+    return 300 if order_operation or cart_operation or delivery_operation or operation == "products" else 120
 
 
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:

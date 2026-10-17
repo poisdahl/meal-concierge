@@ -174,6 +174,7 @@ class NativeReadTests(unittest.TestCase):
 sys.path.insert(0, str(__import__('pathlib').Path(sys.argv[1]).resolve().parents[1]))
 import muse_native_provider
 muse_native_provider.READ_SECONDS = READ_SECONDS_TEST_VALUE
+muse_native_provider.CART_READ_SECONDS = READ_SECONDS_TEST_VALUE
 muse_native_provider.ORDER_READ_SECONDS = READ_SECONDS_TEST_VALUE
 sys.argv = sys.argv[1:]
 """.replace("READ_SECONDS_TEST_VALUE", repr(read_seconds)))
@@ -337,19 +338,77 @@ sys.argv = sys.argv[1:]
         for record in requests:
             seconds = (datetime.fromisoformat(record["expires_at"])
                        - datetime.fromisoformat(record["issued_at"])).total_seconds()
-            expected = 180 if record["payload"]["tool"] in {"product_search", "get_order", "order_tracking"} else 110
+            tool = record["payload"]["tool"]
+            expected = (240 if tool == "get_cart" else
+                        180 if tool in {"product_search", "get_order", "order_tracking"} else 110)
             self.assertGreater(seconds, expected - 1)
             self.assertLessEqual(seconds, expected)
 
-    def test_shorter_caller_deadline_preserves_expired_order_custody(self):
+    def test_slow_full_cart_reaches_cli_with_literal_facts_and_no_action_authority(self):
+        clock = self.home / "fixture-monotonic-offset"
+        clock.write_text("0")
+        command = list(self.process.args)
+        command[4] = RUNNER.replace("sys.argv = sys.argv[1:]", """
+import time
+from pathlib import Path
+clock = Path(sys.argv[sys.argv.index('--home') + 1]) / 'fixture-monotonic-offset'
+real_monotonic = time.monotonic
+time.monotonic = lambda: real_monotonic() + float(clock.read_text())
+sys.argv = sys.argv[1:]
+""")
+        self.process.terminate()
+        self.process.communicate(timeout=5)
+        (self.home / "service.sock").unlink()
+        self.process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        wait_for(lambda: (self.home / "service.sock").exists())
+        self.finite_producer = True
+        original = observation("get_cart", {})
+        original["empty"] = False
+        original["items"] = [
+            {"url": f"https://oda.com/no/products/{30000 + i}-synthetic-item/",
+             "title": f'Synthetic grønt "{i}"', "subtitle": "250 g",
+             "quantity": 1 + i % 3, "price": None if i % 2 else "19,90 kr"}
+            for i in range(53)]
+
+        def delayed_cart(tool, facts):
+            if tool == "get_cart":
+                temporary = clock.with_suffix(".tmp")
+                temporary.write_text("179")
+                temporary.replace(clock)
+                return original
+            return facts
+
+        self.transform = delayed_cart
+        store = StateStore(self.home / "state", muse.load_home(self.home))
+        before = store.read()
+        result = self.rpc({"operation": "cart", "action": "get", "response_view": "full"})
+        self.assertEqual(len(result["items"]), 53)
+        self.assertEqual(result["count"], sum(row["quantity"] for row in original["items"]))
+        self.assertEqual([row["name"] for row in result["items"]],
+                         [row["title"] for row in original["items"]])
+        self.assertIsNone(result["total"])
+        records = [read_json(path) for path in (self.broker / "requests").glob("*.json")
+                   if path not in self.history and read_json(path)["payload"].get("tool") == "get_cart"]
+        self.assertEqual(len(records), 1)
+        name = records[0]["request_id"] + ".json"
+        self.assertEqual(read_json(self.broker / "responses" / name)["facts"], original)
+        self.assertTrue((self.broker / "closed" / name).exists())
+        self.assertFalse((self.broker / "consumed" / name).exists())
+        self.assertEqual(store.read(), before)
+        self.assertEqual((self.home / "muse-client.json").read_bytes(), self.marker)
+        for path, value in self.history.items():
+            self.assertEqual(path.read_bytes(), value)
+
+    def test_shorter_caller_deadline_preserves_expired_read_custody(self):
         self.finite_producer = True
         provider = MuseNativeReadProvider(self.ops, "synthetic-original-task")
         producer = [sys.executable, "-I", "-B", str(ROOT / "muse_browser_producer.py")]
-        for tool in ("get_order", "order_tracking"):
+        for tool in ("get_cart", "get_order", "order_tracking"):
             with self.subTest(tool=tool):
                 self.defer_tool, self.deferred_record = tool, None
                 with self.assertRaisesRegex(HouseholdError, "result is unknown"):
-                    provider.call(tool, {"order_number": "SYNTHETIC-A1"}, deadline=time.monotonic() + 3)
+                    provider.call(tool, {} if tool == "get_cart" else {"order_number": "SYNTHETIC-A1"},
+                                  deadline=time.monotonic() + 3)
                 self.assertIsNotNone(self.deferred_record)
                 record, facts = self.deferred_record
                 seconds = (datetime.fromisoformat(record["expires_at"])
