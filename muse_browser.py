@@ -632,7 +632,8 @@ def checkout_amounts(rows, product_count, expected_total):
     subtotal = observed["product_subtotal"] + observed.get("discounts", 0)
     fee_keys = ("other_fee", "weight_reservation")
     payable = (subtotal + observed.get("delivery_price", 0)
-               + observed.get("bags", 0) + sum(observed.get(key, 0) for key in fee_keys))
+               + observed.get("bags", 0) + observed.get("deposits", 0)
+               + sum(observed.get(key, 0) for key in fee_keys))
     if (observed["discounted_subtotal"] != subtotal
             or observed["provider_total"] != payable
             or payable != expected_total):

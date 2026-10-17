@@ -44,6 +44,29 @@ class NativeAmountTests(unittest.TestCase):
         self.assertEqual(result["discounts"], -29.90)
         self.assertIsNone(result["delivery_price"])
         self.assertIsNone(result["other_fees"])
+        self.assertIsNone(result["deposits"])
+
+    def test_observed_deposit_is_included_without_inventing_absent_fees(self):
+        for amount, total, minor in (("6,00 kr", "1 284,60 kr", 128460),
+                                     ("0,00 kr", "1 278,60 kr", 127860)):
+            with self.subTest(amount=amount):
+                rows = deepcopy(ROWS) + [{"label": "Pant", "value": amount}]
+                rows[4]["value"] = total
+                result = checkout_amounts(rows, 34, minor)
+                self.assertEqual(result["deposits"], (minor - 127860) / 100)
+                self.assertEqual(result["provider_total"], minor / 100)
+                self.assertIsNone(result["delivery_price"])
+                self.assertIsNone(result["other_fees"])
+
+    def test_deposit_cannot_be_ignored_duplicated_negative_or_change_review_total(self):
+        deposit = {"label": "Pant", "value": "6,00 kr"}
+        for extra in ([deposit], [deposit, deposit], [{"label": "Pant", "value": "−6,00 kr"}]):
+            with self.subTest(extra=extra), self.assertRaises(HouseholdError):
+                checkout_amounts(deepcopy(ROWS) + extra, 34, 127860)
+        rows = deepcopy(ROWS) + [deposit]
+        rows[4]["value"] = "1 284,60 kr"
+        with self.assertRaises(HouseholdError):
+            checkout_amounts(rows, 34, 127860)
 
     def test_delivery_and_small_order_fee_belong_to_payable(self):
         rows = deepcopy(ROWS)
