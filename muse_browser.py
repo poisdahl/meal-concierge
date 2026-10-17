@@ -191,7 +191,22 @@ def native_time_lower_bound(reported, value):
     return lower
 
 
-def native_acceptance_child(acceptance):
+def native_acceptance_child(acceptance, *, allow_window_receipt=True):
+    if isinstance(acceptance, Mapping) and acceptance.get("format") == "muse_window_v1":
+        dispatch = acceptance.get("dispatch")
+        receipt = acceptance.get("receipt")
+        if (not allow_window_receipt or set(acceptance) != {"format", "dispatch", "receipt"}
+                or not isinstance(dispatch, Mapping) or set(dispatch) != {"task_id", "profile", "task"}
+                or dispatch["task_id"] != "new" or dispatch["profile"] != "default"
+                or not isinstance(dispatch["task"], str) or not dispatch["task"].strip()
+                or not isinstance(receipt, str)):
+            raise HouseholdError("Muse native window requires its original new-window dispatch")
+        matched = re.fullmatch(
+            r"Started window (browser-task:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\. "
+            r"Its questions and results come back to you as messages\. Do not poll or resend\.", receipt)
+        if matched is None:
+            raise HouseholdError("Muse native window requires its original acceptance text")
+        return matched[1]
     if (not isinstance(acceptance, Mapping) or acceptance.get("ok") is not True
             or acceptance.get("status") != "accepted"
             or not isinstance(acceptance.get("browser_task_id"), str)
@@ -357,7 +372,7 @@ def corrupt_read_ending_fields(directory, record, native_task):
     if (not isinstance(native_task, Mapping) or set(native_task) != {"acceptance", "completion"}
             or not isinstance(native_task["completion"], Mapping)):
         raise HouseholdError("Muse corrupt read requires its actual completed native task")
-    child = native_acceptance_child(native_task["acceptance"])
+    child = native_acceptance_child(native_task["acceptance"], allow_window_receipt=False)
     completion = native_task["completion"]
     completed = completion.get("completed_at_utc")
     if (claim != {"request_digest": digest(record), "task_id": child}

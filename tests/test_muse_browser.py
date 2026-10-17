@@ -21,7 +21,7 @@ from clients import muse
 from muse_browser import (ACTION_OPERATIONS, DELEGATION_OPERATIONS, MuseBrowser,
                           NativeBridge, bind_native_task, checkout_amounts, claim_request,
                           consume_request, digest, durable_publish, end_request,
-                          native_authorization, native_task_binding_required,
+                          native_acceptance_child, native_authorization, native_task_binding_required,
                           original_checkout_completed, process_start, read_json,
                           request_record, respond_request)
 from service import Server
@@ -221,6 +221,50 @@ class NativeTaskBindingTests(NativeFixture):
         response = self.response(record, facts={"dispatch": "clicked_once"})
         response["native_completion"]["browser_task_id"] = child
         return response
+
+    def window_acceptance(self, child):
+        return {"format": "muse_window_v1",
+                "dispatch": {"task_id": "new", "profile": "default", "task": "Synthetic task only"},
+                "receipt": f"Started window {child}. Its questions and results come back to you as messages. Do not poll or resend."}
+
+    def test_new_window_receipt_preserves_original_and_rejects_cross_format_reuse(self):
+        child = "browser-task:" + str(uuid.uuid4())
+        record, _ = self.delegation(bind=False)
+        acceptance = self.window_acceptance(child)
+        bind_native_task(self.directory, record["request_id"], "original-task", acceptance)
+        self.assertEqual(read_json(self.directory / "native-tasks" / (record["request_id"] + ".json"))["acceptance"], acceptance)
+        with self.assertRaises(HouseholdError):
+            respond_request(self.directory, record["request_id"], "original-task", self.completed(record))
+        respond_request(self.directory, record["request_id"], "original-task", self.completed(record, child))
+        with self.bridge.custody():
+            pass
+        other, _ = self.delegation(bind=False)
+        for repeated in (acceptance, {"ok": True, "status": "accepted", "browser_task_id": child}):
+            with self.assertRaises(HouseholdError):
+                bind_native_task(self.directory, other["request_id"], "original-task", repeated)
+        with self.assertRaises(HouseholdError):
+            native_acceptance_child(acceptance, allow_window_receipt=False)
+
+    def test_window_receipt_rejects_ambiguous_text_and_unqualified_dispatch(self):
+        record, _ = self.delegation(bind=False)
+        acceptance = self.window_acceptance("browser-task:" + str(uuid.uuid4()))
+        invalid = [{**acceptance, "receipt": text} for text in (
+            acceptance["receipt"] + "\n", "Accepted " + acceptance["receipt"],
+            acceptance["receipt"].replace("Started window", "Resumed window"),
+            acceptance["receipt"].replace("browser-task:", "window:"), None)]
+        invalid.extend({**acceptance, "dispatch": dispatch} for dispatch in (
+            {**acceptance["dispatch"], "task_id": "existing-window"},
+            {**acceptance["dispatch"], "profile": "different-profile"},
+            {**acceptance["dispatch"], "task": " "},
+            {**acceptance["dispatch"], "url": "https://example.com/"},
+            {"task_id": "new", "task": "Synthetic task"}))
+        invalid.append({**acceptance, "ok": True})
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(HouseholdError):
+                bind_native_task(self.directory, record["request_id"], "original-task", value)
+        self.assertFalse(list((self.directory / "native-tasks").glob("*.json")))
+        with self.assertRaises(HouseholdError), self.bridge.custody():
+            pass
 
     def test_one_admission_and_binding_reject_replacement_and_child_reuse(self):
         record, acceptance = self.delegation()
