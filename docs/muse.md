@@ -414,14 +414,16 @@ Alternatively, explicitly select `--browser-action-mode native_approval` on
 the runner below. This admits **one native task delegation** while the original
 core confirmation is valid. Fresh user authorization of the complete purchase
 review then supplies final financial authority; the old confirmation is an
-admission deadline, not a permit for a delayed click. For a merchant-stored card,
-Muse's installed `~/docs/chat/payments-and-purchases.md` guidance requires an
-explicit human response authorizing submission
-of the exact reviewed order now, for its stated total and observed masked card.
-The native agent must relay that authorization and card selection through the
-same admitted browser task using the installed host's documented approval
-continuation. Do not substitute a generic question answer for a required payment
-approval, or use `wallet_payment` for a merchant-stored card.
+admission deadline, not a permit for a delayed click. Follow Muse's installed
+`~/docs/chat/payments-and-purchases.md`: the user approves payment only in the
+host's native payment approval, through that same admitted browser task.
+Do not reproduce the payment sheet as another chat confirmation or treat a
+conversational answer as payment approval. For a merchant-stored card, use only
+the card approved there; do not use `wallet_payment`. Host approval limits do
+not relax the core's exact reviewed account, goods, quantities, delivery, card
+and payable-total binding. After approval, the same native task performs the
+authorized submission and verifies its result; approval alone is not purchase
+success. Preserve every platform and bank approval gate.
 Card selection or acceptance of review details alone does not authorize submission.
 This mode relies on the installed host workflow and its trusted native producer.
 The benign window probe does not qualify the payment-approval mechanism or a
@@ -588,8 +590,9 @@ exclusively published and fsynced. The producer must:
    quantities, delivery, payment and full payable amount before proposing its
    one final action. `purchase_approval_required:true` requires fresh explicit
    human authorization of that complete purchase review, including the merchant,
-   amount and observed masked card. Retain the actual human-origin response and
-   its connection to the review; an assistant-written assertion is insufficient.
+   amount and observed masked card, through the host's native payment approval.
+   Retain the genuine host approval evidence and its association with this
+   purchase and bound native task; an assistant-written assertion is insufficient.
    A site, network or shell approval is insufficient.
    Stop on a changed business scope and preserve the original attempt rather
    than silently buying a different purchase. Never substitute a conversational
@@ -637,9 +640,9 @@ reply must answer the pending information request, preserve the original
 delegation and freshly recheck its complete scope before any proposal. It cannot
 invent platform approval, consume another permit or retry an attempted effect.
 Every actual browser/platform/bank approval remains enforced separately. Qualifying
-this purchase authorization path requires the actual review-bound human response
-and genuine same-task continuation. A successful purchase alone does not establish
-that authorization workflow.
+this purchase authorization path requires actual native payment approval bound
+to the review and genuine same-task continuation. A successful purchase alone
+does not establish that authorization workflow.
 
 During every CLI operation, including reconciliation, immediately serve each emitted broker
 request before waiting for the CLI's final result. A successful review can emit a
