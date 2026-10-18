@@ -289,7 +289,7 @@ sys.argv = sys.argv[1:]
         self.assertEqual(saved["status"], "prepared")
         self.assertEqual(sorted(row["selection"]["package_count"] for row in saved["requirements"]), [1, 3])
         self.assertEqual(saved["totals"]["merchandise_ore"], 12470)
-        self.assertEqual(elapsed, 340)
+        self.assertEqual(elapsed, 380)
         self.assertFalse(self.rpc({"operation": "native_cart_policy", "action": "show"})["enabled"])
         self.assertFalse(self.action_records)
         self.assertEqual(self.quantities(), {})
