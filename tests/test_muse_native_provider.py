@@ -339,8 +339,8 @@ sys.argv = sys.argv[1:]
             seconds = (datetime.fromisoformat(record["expires_at"])
                        - datetime.fromisoformat(record["issued_at"])).total_seconds()
             tool = record["payload"]["tool"]
-            expected = (240 if tool == "get_cart" else
-                        180 if tool in {"product_search", "get_order", "order_tracking"} else 110)
+            expected = (240 if tool in {"get_cart", "product_search"} else
+                        180 if tool in {"get_order", "order_tracking"} else 110)
             self.assertGreater(seconds, expected - 1)
             self.assertLessEqual(seconds, expected)
 

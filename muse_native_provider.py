@@ -23,7 +23,7 @@ from muse_mcp import oda_operation_lock, private_operation_directory
 READ_SECONDS = 110.0
 CART_READ_SECONDS = 240.0
 ORDER_READ_SECONDS = 180.0
-PRODUCT_SEARCH_SECONDS = 180.0
+PRODUCT_SEARCH_SECONDS = 240.0
 TOOLS = {"product_search", "get_cart", "get_delivery_addresses", "get_orders", "get_order", "order_tracking", "get_delivery_slots"}
 FACTS_COMMON = (
     "Return only one literal JSON object with exactly the listed keys, no prose or extra keys. "
