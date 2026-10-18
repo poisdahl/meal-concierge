@@ -247,8 +247,8 @@ sys.argv = sys.argv[1:]
         def delayed_catalog(tool, facts):
             nonlocal elapsed
             if tool == "product_search":
-                if elapsed < 340:
-                    elapsed += 170
+                if elapsed < 380:
+                    elapsed += 190
                     temporary = clock.with_suffix(".tmp")
                     temporary.write_text(str(elapsed))
                     temporary.replace(clock)
@@ -262,17 +262,23 @@ sys.argv = sys.argv[1:]
         reference = self.prepare_menu(two_ingredients=True, squash_grams=700)
         prepared = self.rpc({"operation": "products", "action": "prepare", "menu_ref": reference,
                              "include_recurring": False, "price_mode": "estimate"})
-        self.assertEqual(elapsed, 340)
+        self.assertEqual(elapsed, 380)
         requirements = prepared["product_plan"]["requirements"]
         self.assertEqual(len(requirements), 2)
         initial_requests = [read_json(path) for path in (self.broker / "requests").glob("*.json")
                             if read_json(path)["payload"].get("tool") == "product_search"]
         self.assertEqual(len(initial_requests), 2)
-        for record in initial_requests:
+        for index, record in enumerate(sorted(initial_requests, key=lambda row: row["issued_at"])):
             seconds = (datetime.fromisoformat(record["expires_at"])
                        - datetime.fromisoformat(record["issued_at"])).total_seconds()
-            self.assertGreater(seconds, 179)
-            self.assertLessEqual(seconds, 180)
+            if index == 0:
+                self.assertGreater(seconds, 239)
+                self.assertLessEqual(seconds, 240)
+            else:
+                # The second read shares the remaining 420-second prepare budget
+                # and its five-second plan-building reserve.
+                self.assertGreater(seconds, 210)
+                self.assertLessEqual(seconds, 225)
             self.assertTrue((self.broker / "closed" / (record["request_id"] + ".json")).exists())
         approvals = [row["observation"]["products"][0]["candidate_approval"] for row in requirements]
         selected = self.rpc({"operation": "products", "action": "prepare",
@@ -283,7 +289,7 @@ sys.argv = sys.argv[1:]
         self.assertEqual(saved["status"], "prepared")
         self.assertEqual(sorted(row["selection"]["package_count"] for row in saved["requirements"]), [1, 3])
         self.assertEqual(saved["totals"]["merchandise_ore"], 12470)
-        self.assertEqual(elapsed, 340)
+        self.assertEqual(elapsed, 380)
         self.assertFalse(self.rpc({"operation": "native_cart_policy", "action": "show"})["enabled"])
         self.assertFalse(self.action_records)
         self.assertEqual(self.quantities(), {})
