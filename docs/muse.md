@@ -390,12 +390,14 @@ admission deadline, not a permit for a delayed click. For a merchant-stored card
 Muse's installed `~/docs/chat/payments-and-purchases.md` guidance requires an
 explicit human response authorizing submission
 of the exact reviewed order now, for its stated total and observed masked card.
-The native agent relays that authorization and card selection through the same
-admitted browser task using `browser.steer_task`, without `wallet_payment`.
+The native agent must relay that authorization and card selection through the
+same admitted browser task using the installed host's documented approval
+continuation. Do not substitute a generic question answer for a required payment
+approval, or use `wallet_payment` for a merchant-stored card.
 Card selection or acceptance of review details alone does not authorize submission.
-This mode relies on that host workflow and its trusted native producer; the host
-guidance does not specify a special purchase-card UI or a machine-verifiable
-approval receipt.
+This mode relies on the installed host workflow and its trusted native producer.
+The benign window probe does not qualify the payment-approval mechanism or a
+machine-verifiable approval receipt.
 It does not require Sentinel to independently authenticate every cart or address
 observation. Configuration and synthetic tests do not demonstrate actual payment.
 Qualify the actual human authorization, same-task continuation and original task
@@ -524,22 +526,35 @@ exclusively published and fsynced. The producer must:
    uncertainty and reconcile the original attempt.
 5. For a `*_delegate`, recheck the live original owner, admission expiry and exact
    review/journal, then run `consume` once **before one initial
-   `browser.spawn_task`** in the existing shared profile. Only a fresh successful
-   consume acknowledgement permits that one spawn. Finding a previously consumed
-   record on resume grants no dispatch authority. A completed read-only review
-   is not the financial task and must not be relabelled as one.
-   Retain the original native success receipt, then run `bind` once with its
-   literal JSON on closed stdin. The observed host success receipt contains
-   `ok:true`, `status:"accepted"` and the actual `browser_task_id`; these are
-   required, while the entire original metadata is retained. Its
-   `execution_state:"not_reported"` is not a running-state attestation and no
-   acceptance timestamp was supplied. A parent-made `{task_id,dispatched_child_id,accepted}`
-   mapping is not the original acceptance. The command derives the request
-   digest, logical anchor and journal binding and durably binds one child. A
-   financial child cannot be reused for another delegation. Do not relay final
-   effect authority before binding is acknowledged. Every subsequent
-   information or approval continuation uses `browser.steer_task` on that same
-   waiting child, with no second consume or spawn.
+   native task dispatch** in the existing shared profile. On the older host this
+   is `browser.spawn_task`; Muse 8 uses `browser.browse` with `task_id:"new"`,
+   `profile:"default"` and the original task text, without a URL argument. Verify
+   the existing window/profile association with the documented read-only window
+   inventory first. Never create or delete a profile to inspect it. Only a fresh
+   successful consume acknowledgement permits that one dispatch. Finding a
+   previously consumed record on resume grants no dispatch authority. A completed
+   read-only review is not the financial task and must not be relabelled as one.
+   Retain the original native success receipt, then run `bind` once on closed
+   stdin. The legacy structured receipt requires `ok:true`, `status:"accepted"`
+   and the actual `browser_task_id`, retaining all original metadata. Its
+   `execution_state:"not_reported"` is not a running-state attestation.
+   For the demonstrated Muse 8 text receipt, supply exactly this adapter wrapper:
+   `{"format":"muse_window_v1","dispatch":{"task_id":"new","profile":"default","task":"<entire original task>"},"receipt":"<entire original dispatch text>"}`.
+   This wrapper records the already performed call; it is not platform-supplied
+   metadata or new dispatch authority. The parser accepts only the literal
+   `Started window browser-task:<UUID>. Its questions and results come back to you as messages. Do not poll or resend.`
+   receipt and the tested dispatch shape. Do not synthesize legacy success fields,
+   reconstruct a lost receipt, or reuse an old window. The command derives the
+   request digest, logical anchor and journal binding and durably binds one child.
+   A financial child cannot be reused for another delegation, including across
+   receipt formats. Do not relay final effect authority before binding is
+   acknowledged. For Muse 8 information questions, continue with `browser.browse`
+   using the same bound window and the actual `answer_to` question ID; never use
+   `task_id:"new"` for continuation. Older hosts may expose `browser.steer_task`.
+   Preserve the host's separate payment-approval mechanism; a benign question test
+   proves continuation and identity only. No second consume or initial dispatch
+   is authorized. Corrupt-read recovery retains its existing structured-receipt
+   contract; the financial window variant does not broaden that recovery path.
    Consumption records delegation, not dispatch or
    payment success. The native task must freshly verify the bound account, items,
    quantities, delivery, payment and full payable amount before proposing its
