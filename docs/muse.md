@@ -323,6 +323,12 @@ that ending and list the current selection before any new request. Selecting an
 already selected and freshly correlated slot is idempotent. Delivery selection
 never adds or removes goods and does not grant purchase authority.
 
+Native delivery selection has one 360-second operation budget, including fresh
+reads, its bounded selection permit and independent readback. The ordinary
+delivery-select RPC waits 420 seconds so it can collect the service result;
+delivery reads retain their 300-second RPC wait. A caller timeout never proves
+the original selection stopped and never authorizes another selection.
+
 Writes start disabled. In the ordinary CLI, inspect
 `{"operation":"native_cart_policy","action":"show"}` and explicitly set
 `enabled:true` with its exact returned `binding_digest`. Enabling performs a
