@@ -10,11 +10,12 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import HouseholdError
 from muse_browser import NativeBridge, claim_request, read_json, native_authorization, durable_publish, digest, validate_response
-from muse_browser_producer import ProducerError, parse_json, publish, validate_native_read
+from muse_browser_producer import ProducerError, parse_json, publish, read_task, validate_native_read
 from muse_native_provider import FACTS_CONTRACTS
 
 
@@ -52,6 +53,20 @@ READ_FACTS = {
 
 
 class InputBoundaryTests(unittest.TestCase):
+    def test_prepared_read_preserves_contract_account_and_deadline_without_observed_facts(self):
+        record = {"request_id": "synthetic", "issued_at": "original-start",
+                  "expires_at": "original-expiry",
+                  "payload": {**READ_PAYLOAD, "accepted_account": READ_FACTS["account"]}}
+        before = deepcopy(record)
+        task = read_task(record)
+        self.assertEqual(json.loads(task.split("\n", 1)[1]), record)
+        self.assertEqual(record, before)
+        for payload in ({**READ_PAYLOAD, "facts_contract": "Return a summary"},
+                        {**READ_PAYLOAD, "tool": "checkout_delegate"},
+                        {**READ_PAYLOAD, "accepted_account": {"url": "https://oda.com/no/", "edit_urls": []}}):
+            with self.subTest(payload=payload), self.assertRaises(HouseholdError):
+                read_task({**record, "payload": payload})
+
     def test_invalid_json_and_nonobjects_have_only_fixed_error_categories(self):
         for data in (b'{"private":"DO-NOT-PRINT","private":1}', b'{"value":1e999}',
                      b'{"value":NaN}', b'{"value":"\\ud800"}', b"\xff", b"[]"):
@@ -145,6 +160,82 @@ class ProducerCLITests(unittest.TestCase):
     def assert_failure(self, result, stage, category):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(result.stderr), {"error": {"stage": stage, "category": category}})
+
+    def claim_read_cli(self, owner_pid=None):
+        return subprocess.run([sys.executable, "-I", "-B", str(PRODUCER), "claim-read",
+            "--directory", str(self.broker), "--task-id", self.bridge.task_id,
+            "--owner-pid", str(os.getpid() if owner_pid is None else owner_pid)],
+            input=b"", capture_output=True, timeout=5)
+
+    def finish_read(self):
+        if not (self.broker / "claims" / (self.key + ".json")).exists():
+            self.assertEqual(self.run_cli("claim").returncode, 0)
+        result = self.run_cli("respond", json.dumps(READ_FACTS).encode())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.worker.join(2)
+        self.assertFalse(self.worker.is_alive())
+
+    def test_claim_read_selects_live_owner_and_delivers_whole_contract_to_real_waiter(self):
+        payload = {**READ_PAYLOAD, "accepted_account": READ_FACTS["account"]}
+        self.request("provider_read", payload)
+        original = read_json(self.broker / "requests" / (self.key + ".json"))
+        expired = {**original, "request_id": str(uuid.uuid4()),
+                   "issued_at": (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+                   "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()}
+        durable_publish(self.broker / "requests" / (expired["request_id"] + ".json"), expired)
+        claimed = self.claim_read_cli()
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        result = json.loads(claimed.stdout)
+        self.assertEqual(result["request_id"], self.key)
+        self.assertEqual(result["request_digest"], digest(original))
+        self.assertEqual(result["expires_at"], original["expires_at"])
+        task_record = json.loads(result["task"].split("\n", 1)[1])
+        self.assertEqual(task_record, {key: original[key] for key in
+                                    ("request_id", "issued_at", "expires_at", "payload")})
+        self.assertIn("No prose", result["task"])
+        self.assert_failure(self.claim_read_cli(), "request", "read_claim_rejected")
+        self.assertFalse((self.broker / "claims" / (expired["request_id"] + ".json")).exists())
+        self.finish_read()
+        self.assertEqual(self.results, [READ_FACTS])
+        self.assertEqual(self.errors, [])
+
+    def test_claim_read_rejects_ambiguous_owner_start_and_incomplete_payload_without_claim(self):
+        self.request("provider_read", READ_PAYLOAD)
+        path = self.broker / "requests" / (self.key + ".json")
+        original = read_json(path)
+        duplicate = {**original, "request_id": str(uuid.uuid4())}
+        other = self.broker / "requests" / (duplicate["request_id"] + ".json")
+        durable_publish(other, duplicate)
+        self.assert_failure(self.claim_read_cli(), "request", "read_claim_rejected")
+        self.assertEqual(list((self.broker / "claims").iterdir()), [])
+        other.unlink()
+        self.assert_failure(self.claim_read_cli(owner_pid=0), "request", "read_claim_rejected")
+        self.assert_failure(self.claim_read_cli(owner_pid=os.getpid() + 1000000), "request", "read_claim_rejected")
+        for changed in ({**original, "owner_start": "0"},
+                        {**original, "operation": "checkout_delegate"},
+                        {**original, "task_id": "other-chain"},
+                        {**original, "payload": {"tool": "get_cart", "arguments": {}}}):
+            path.write_text(json.dumps(changed))
+            self.assert_failure(self.claim_read_cli(), "request", "read_claim_rejected")
+            self.assertEqual(list((self.broker / "claims").iterdir()), [])
+        path.write_text(json.dumps(original))
+        self.finish_read()
+
+    def test_claim_read_does_not_skip_unresolved_prior_custody(self):
+        self.request("provider_read", READ_PAYLOAD)
+        original = read_json(self.broker / "requests" / (self.key + ".json"))
+        old = {**original, "request_id": str(uuid.uuid4()),
+               "issued_at": (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+               "expires_at": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()}
+        request_path = self.broker / "requests" / (old["request_id"] + ".json")
+        claim_path = self.broker / "claims" / request_path.name
+        durable_publish(request_path, old)
+        durable_publish(claim_path, {"request_digest": digest(old), "task_id": self.bridge.task_id})
+        self.assert_failure(self.claim_read_cli(), "request", "read_claim_rejected")
+        self.assertFalse((self.broker / "claims" / (self.key + ".json")).exists())
+        claim_path.unlink()
+        request_path.unlink()
+        self.finish_read()
 
     def test_delegation_cli_requires_original_child_and_preserves_failed_publication_for_ending(self):
         payload = {"authorization": native_authorization(True),
