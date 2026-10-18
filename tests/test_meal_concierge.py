@@ -498,6 +498,8 @@ class CoreTestsBase:
         self.assertEqual(module.rpc_timeout("cart", {"action": "get"}), 300)
         self.assertEqual(module.rpc_timeout("cart", {}), 300)
         self.assertEqual(module.rpc_timeout("delivery", {"action": "list"}), 300)
+        self.assertEqual(module.rpc_timeout("delivery", {"action": "select"}), 420)
+        self.assertEqual(module.rpc_timeout("delivery", {}), 300)
         self.assertEqual(module.rpc_timeout("orders", {"action": "get"}), 420)
         self.assertEqual(module.rpc_timeout("orders", {"action": "list"}), 300)
         self.assertEqual(module.rpc_timeout("orders", {"action": "cancel_confirm"}), 300)
