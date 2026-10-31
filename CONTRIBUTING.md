@@ -104,6 +104,7 @@ everyday use. Maintainer and advanced integration details live separately:
 - [Runtime, ownership and recovery](docs/runtime-reference.md)
 - [Recipe import formats and extraction](docs/recipe-import-reference.md)
 - [Delivery and sender integration](docs/recipe-delivery-reference.md)
+- [Standalone menu planning and PDF batch export](docs/on-demand.md)
 - [Service and workflow contracts](docs/reference.md)
 
 For repeatable checks, use [Local checks](#local-checks). Keep current usage and
