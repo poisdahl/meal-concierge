@@ -12,19 +12,21 @@
 </p>
 
 <p align="center">
-  <a href="#requirements"><img src="assets/icons/oda.png" alt="Oda" title="Oda" width="40" height="40"></a>
-  <a href="#requirements"><img src="assets/icons/mathem.png" alt="Mathem" title="Mathem" width="40" height="40"></a>
-  <a href="#requirements"><img src="assets/icons/meny.png" alt="MENY" title="MENY" width="80" height="40"></a>
+  <a href="#stores-and-payment"><img src="assets/icons/oda.png" alt="Oda" title="Oda" width="40" height="40"></a>
+  <a href="#stores-and-payment"><img src="assets/icons/mathem.png" alt="Mathem" title="Mathem" width="40" height="40"></a>
+  <a href="#stores-and-payment"><img src="assets/icons/meny.png" alt="MENY" title="MENY" width="80" height="40"></a>
 </p>
 
 **Plan meals, save recipes and shop for groceries through your AI agent.**
 
 Use food you already have and shop through **Oda, Mathem or MENY**.
 Meal Concierge keeps your recipes and household preferences between conversations.
+It runs as a background service on the computer hosting your agent, including
+Grok's cloud computer.
 
 [Install](#installation) · [First use](#first-use) ·
 [Update](#update-meal-concierge) · [Recipe collection](#add-or-update-the-recipe-collection) ·
-[User guide](docs/usage.md) · [On-demand recipe PDF](docs/on-demand.md)
+[User guide](docs/usage.md) · [Recipes, PDF and email](docs/recipe-delivery.md)
 
 ## Installation
 
@@ -41,9 +43,18 @@ Use an existing agent on **Linux, Apple Silicon macOS, or Grok's cloud computer*
 | [Claude Code](docs/client-install.md) | CLI or Claude Desktop **Code → Local**, on the service host. |
 | [Grok Bot](docs/grok.md) | Grok's cloud computer. |
 
-See [shared setup](docs/runtime.md#install-and-attach) for host and browser prerequisites.
-
 ### Requirements
+
+- **Python 3.10+ and uv** for installation. The installer manages its own Python
+  environment and dependencies.
+- **Linux** needs a working user systemd service manager; **Apple Silicon macOS**
+  needs a logged-in user's launchd session.
+- **With a store:** agent-browser and Chrome or non-snap Chromium. See
+  [shared setup](docs/runtime.md#what-you-need) for supported versions and host
+  requirements, or [Grok's browser setup](docs/grok.md#browser-and-login) for its
+  native browser option.
+
+### Stores and payment
 
 Use Meal Concierge **without a store** for recipes, inspiration, menus and a
 normal shopping list. No store account or browser is required in this mode.
@@ -55,7 +66,11 @@ own store connection. Delivery also needs an address in its delivery area.
 |---|---|---|
 | Oda | Norway / NOK | Saved card or Vipps. |
 | Mathem | Sweden / SEK | Saved card. |
-| MENY | Norway / NOK | Vipps. |
+| MENY | Norway / NOK | Vipps; home delivery only. |
+
+Vipps checkout needs your Norwegian mobile number in the installation's private
+configuration. Set it locally during store setup, never in chat. Approve payment
+requests in the Vipps app when prompted.
 
 Enter passwords, payment details and required approvals in the trusted store
 or payment interface, never in chat.
@@ -83,7 +98,9 @@ Setup reuses an existing household without upgrading it. See
 
 > Plan four dinners for two, starting Thursday. Use the carrots we already have.
 
-New households start with an **editable Norwegian dietary-guideline preset**.
+On first use, your agent reviews household settings, dietary goals and recipe
+sources. Keep the defaults or describe changes. New households start with an
+**editable Norwegian dietary-guideline preset**.
 
 Meal-plan requests normally create editable saved proposals, with recipe sources
 and adaptations marked.
@@ -91,6 +108,10 @@ and adaptations marked.
 Try these next:
 
 - 🍽️ “Replace Thursday's dinner with something quicker, then show the full recipe.”
+- 📝 “Make a shopping list from this menu.”
+
+With a connected store:
+
 - 🛒 “Show the groceries and estimated cost before changing the cart.”
 - 🧾 “Show my cart and delivery windows, then prepare checkout.”
 
@@ -112,8 +133,10 @@ Search your recipe bank, connected store or the default Norwegian recipe sites
 links, text or supported attachments. See [recipe search](docs/recipe-search.md)
 and [adding recipes](docs/recipe-import.md).
 
-Optional email can deliver recipes after a confirmed menu purchase; PDF support
-varies by client. See [recipe delivery](docs/recipe-delivery.md).
+Ask for a saved menu's recipes whenever you need them; no purchase is required.
+Chat text is the default; PDF and images depend on your agent's support. Optional
+email can also deliver recipes after a confirmed menu purchase. See
+[recipe delivery](docs/recipe-delivery.md).
 
 ## Update Meal Concierge
 
@@ -138,6 +161,9 @@ To update **both program and collection**, replace the last sentence with:
 
 [Program releases](https://github.com/poisdahl/meal-concierge/releases) use tags
 such as **v0.1.2**; `recipes-*` tags belong to the separate collection.
+Choose the highest published stable `vMAJOR.MINOR.PATCH` version, excluding drafts
+and prereleases. GitHub's “Latest” label may point to a recipe collection. Use the
+selected program release's own installer and matching guides.
 
 For a specific version, replace “the latest published stable program release”
 with “program release v0.1.2” (or your chosen published version).
@@ -165,8 +191,9 @@ To add it or synchronize the latest published version, ask:
 > operation, not individual recipe tools. Report the version, result counts and
 > any conflicts or incomplete results.
 
-Collection imports pause the service when idle and restart it afterward. No
-GitHub account or API token is needed. See [import and recovery details](docs/recipe-import.md#add-or-update-the-recipe-collection).
+Your agent downloads and verifies the collection while the service runs, then
+stops it when idle to import and restarts it afterward. No GitHub account or API
+token is needed. See [import and recovery details](docs/recipe-import.md#add-or-update-the-recipe-collection).
 
 ### Remove the recipe collection
 
@@ -184,6 +211,7 @@ For missing tools, login problems or interrupted setup, follow
 [updates and recovery](docs/runtime.md#updates-failures-and-recovery).
 Report unresolved errors in a [GitHub issue](https://github.com/poisdahl/meal-concierge/issues)
 with your agent, operating system, store and an error message stripped of private data.
+Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 Household data is stored in your installation; your configured AI, store and
 recipe services process relevant requests. Product matching does not guarantee
