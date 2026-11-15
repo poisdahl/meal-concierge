@@ -87,14 +87,17 @@ def matches(term, value, *, milk_ambiguity=False):
                     clause = re.split(r'[,;.!?]', prefix[:plant.start()])[-1]
                     if not re.search(r'\b(?:not|ikke|inte|ej)\b|\bnon[- ]*$', clause):
                         continue
+            # The plant word must be a word of its own: "lakris melk" ends in "ris".
             if milk_ambiguity and re.search(
-                r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
-                r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',
+                r'(?<!\w)(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+                r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$',
                 before,
             ):
                 continue
+            # The negation must be a word of its own: "gluten egg" ends in
+            # "uten" and "cappuccino melk" in "no", and neither denies anything.
             if re.search(
-                r'(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)'
+                r'(?<!\w)(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)'
                 r'(?:\s+(?:added|tilsatt|tillsatt|traces? of|spor av|spår av))?\s*$',
                 before,
             ) or re.match(r'[- ]?(?:free|fri|fritt)\b', after):
@@ -147,11 +150,11 @@ def title_positive_match(term, value):
     for match in re.finditer(pattern, normalized_value):
         before = normalized_value[max(0, match.start() - 35):match.start()]
         if normalized_term in {'milk', 'melk', 'mjölk'} and re.search(
-            r'(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
-            r'|(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
+            r'(?<!\w)(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
+            r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
         ):
             continue
-        if re.search(r'(?:without|no|uten|utan)\s*$', before):
+        if re.search(r'(?<!\w)(?:without|no|uten|utan)\s*$', before):
             continue
         return True
     return False
@@ -179,7 +182,8 @@ def assess(profile, item, *, recipe=False):
         rule_evidence = {**evidence, 'product_name': item.get('name', '')}
         present = any(
             not (field == 'product_name' and title_allergen_negated(term, rule_evidence.get(field, '')))
-            and matches(t, rule_evidence.get(field, ''), milk_ambiguity=text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'})
+            # A declared allergen list names allergens: "Soya Melk" there is soy and milk, not soy milk.
+            and matches(t, rule_evidence.get(field, ''), milk_ambiguity=field in {'ingredients', 'product_name'} and text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'})
             for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms
         )
         if not present and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity', 'never_buy'}:
