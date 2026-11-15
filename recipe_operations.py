@@ -225,7 +225,9 @@ class RecipeOperations:
             self.recipes.assets.install_managed(recipe["image"]["asset_id"], managed)
             result = self.recipes.persist_discovery(
                 normalize_recipe(recipe, trusted_store_product_hints=True),
-                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith("import:v1:") else None),
+                # As for convert and accept_estimates: an adaptation keeps its own
+                # identity, or it would be saved under the original's source key.
+                source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith(("import:v1:", "adapt:v1:")) else None),
                 trusted_store_product_hints=True,
             )
             return {**result, "personal_entry_created": False}
@@ -2153,6 +2155,8 @@ class RecipeOperations:
             self.recipes.recover_library_operations()
             self._recipe_operations_recovered = True
         discovery_ref = request.get("discovery_ref")
+        if not isinstance(discovery_ref, str) or not 1 <= len(discovery_ref) <= 500:
+            raise RecipeError("recipes save requires an exact discovery_ref")
         imported_source = False
         adapted_source = False
         try:
