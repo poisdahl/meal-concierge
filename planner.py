@@ -515,6 +515,16 @@ def _preference_reasons(candidate: Mapping[str, Any], day: str, profile: Mapping
                                    {"matched_tags": matched, "unmatched_or_unknown": sorted(requested - tags)}))
     if candidate.get("is_favorite"):
         reasons.append(_reason("recipe:favorite", 4, "current personal favorite"))
+    from core import recipe_source_preference
+    from recipe_selection import source_group
+    group = source_group(recipe, entry_origin=candidate.get("entry_origin"), pack=candidate.get("pack"))
+    preference = recipe_source_preference(profile.get("recipes") or {}, group)
+    if preference != "normal":
+        # A saved household preference between sources. Preferred against
+        # occasional is 8 points: it decides between comparable dishes, and stays
+        # below the 10 points that separate a dish above the cooking-time maximum
+        # from one merely outside the weekday target.
+        reasons.append(_reason("source:" + preference, 4 if preference == "preferred" else -4, {"source_group": group}))
     identities = [_text(item.get("item")) for item in recipe.get("ingredients", []) if not item.get("optional")]
     facets = set(candidate["facts"]["dietary_facets"]["values"])
     if any(_contains_term(identity, WHOLEGRAIN_TERMS) for identity in identities):

@@ -187,6 +187,15 @@ before offering actions; a historical order date alone is not an active order.
    For that request, use profile `overview`, email sender/delivery status and the
    installed library/collection list; show effective values and explain how to
    change them. Translate these short explanations to the user's language.
+   For "which recipe sources are on, and which come first?", answer from
+   `recipe_source_overview` in setup `show` or profile `overview`: one line per
+   source with on/off, its preference and, for the bank, how many recipes it
+   holds. Offer to mark a source preferred or occasional, or switch it off;
+   own recipes and collections share one switch, so say that before turning
+   the bank off.
+   Save that with setup `apply`, `keep_current=false` and
+   `changes.recipe_source_preferences={preferred:[ids],occasional:[ids]}`;
+   a supplied list replaces the saved one, and `[]` clears it.
 2. Read the saved preferences, recent meals and suitable real recipes. Search
    the enabled bank and selected enabled store with useful local food words; for an
    ordinary open-ended plan, compare one bounded candidate page from each before
@@ -199,7 +208,12 @@ before offering actions; a historical order date alone is not an active order.
    active; for discoveries, verify returned cooking readiness and provider fit.
    Choose for dietary fit, practicality and variety, with
    source diversity as a tie-breaker, never a fixed quota. An all-external or
-   all-store plan can be the best fit. Empty results for one narrow query do not mean the catalog
+   all-store plan can be the best fit. Follow the household's saved source
+   preferences, returned as `source_preferences` with each candidate's
+   `source_group`: among recipes that fit comparably, take a preferred source
+   first, and use an occasional source only when the others offer no good fit.
+   The bank page already lists preferred groups first. A dish the user names
+   is not held back by a preference. Empty results for one narrow query do not mean the catalog
    is empty. Selected recipe websites are enabled by default: use a bounded
    search when better coverage or variety would help. For an unusual cuisine,
    specific dish or explicit website request, broader discovery may be more

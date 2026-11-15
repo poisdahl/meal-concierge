@@ -147,6 +147,16 @@ quantities stay visible. Ask to edit, favorite or archive a saved recipe.
 - “Save this recipe and mark it as a favorite.”
 - “Show my favorite vegetarian recipes.”
 - “Use only my saved recipes for this menu.”
+- “Which recipe sources are on, and which do you use first?”
+- “Prefer my own cookbooks, and use the store's recipes only occasionally.”
+
+Recipes come from your own saved recipes, any installed collections, your
+store, recipe websites and two open English-language databases. Each source can
+be switched on or off, and marked as **preferred** (considered first) or
+**occasional** (considered after the others). Everything else is normal. A
+preference decides between comparable dishes; it never overrides your dietary
+rules or a dish you ask for by name. Your own recipes and installed
+collections share one on/off switch.
 
 Store recipes may have store-specific usage restrictions and may not be suitable
 for shopping at another retailer. Source links and credits remain attached.

@@ -35,6 +35,17 @@ STATE_VERSION = 13
 
 RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
+# What a household can prefer or use only occasionally. The bank is split into
+# its own saved recipes and each installed collection; "store" is the selected
+# store's recipes and "web" is recipe-website discovery.
+RECIPE_SOURCE_GROUP = re.compile(r"own|store|themealdb|wikibooks|web|collection:[^\x00-\x1f\x7f]{1,128}")
+
+
+def recipe_source_preference(recipes: Mapping[str, Any], group: str) -> str:
+    """preferred, normal or occasional for one source group of the saved profile."""
+    if group in recipes.get("preferred_sources", ()):
+        return "preferred"
+    return "occasional" if group in recipes.get("occasional_sources", ()) else "normal"
 
 RECURRING_DEFINITION_FIELDS = frozenset({
     "meal_mode",
@@ -131,6 +142,8 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "repeat_cooldown_weeks": 6,
         "sources": deepcopy(DEFAULT_RECIPE_SOURCES),
         "web_search": deepcopy(DEFAULT_WEB_SEARCH),
+        "preferred_sources": [],
+        "occasional_sources": [],
     },
 }
 
@@ -315,6 +328,15 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
             elif any(not isinstance(x, str) or not x.strip() or len(x) > 500 for x in value):
                 raise HouseholdError(f"profile {path} must contain bounded non-empty text")
     check(profile, DEFAULT_PROFILE, "")
+    preferred, occasional = (profile["recipes"][field] for field in ("preferred_sources", "occasional_sources"))
+    for values in (preferred, occasional):
+        if len(set(values)) != len(values) or any(RECIPE_SOURCE_GROUP.fullmatch(value) is None for value in values):
+            raise HouseholdError("recipe source preferences must list distinct sources: own, store, web, themealdb, wikibooks or collection:<pack_id>")
+    if len(preferred) + len(occasional) > 16:
+        # The lists are repeated in every source overview and candidate page.
+        raise HouseholdError("recipe source preferences can name at most 16 sources in total")
+    if set(preferred) & set(occasional):
+        raise HouseholdError("a recipe source cannot be both preferred and occasional")
     pantry = profile["pantry"]
     if not 1 <= pantry["review_interval_days"] <= 366:
         raise HouseholdError("pantry review_interval_days must be from 1 to 366")
@@ -983,6 +1005,9 @@ def _migrate_state(
     if not isinstance(recipe_profile, dict):
         raise HouseholdError("household recipe profile is invalid")
     recipe_profile.setdefault("web_search", deepcopy(DEFAULT_WEB_SEARCH))
+    # Households saved before source preferences existed have none.
+    for field in ("preferred_sources", "occasional_sources"):
+        recipe_profile.setdefault(field, [])
     try:
         validate_web_search(recipe_profile["web_search"])
     except ValueError as exc:

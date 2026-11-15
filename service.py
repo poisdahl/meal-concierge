@@ -733,6 +733,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     "due_recurring_items": self._due_recurring(state, self._household_today(state)),
                     "pantry_review": pantry_review(state["profile"], self._household_today(state)),
                     "recipe_delivery": {key: deepcopy(state["recipe_delivery"][key]) for key in ("preferences", "paused")},
+                    "recipe_source_overview": self._recipe_source_overview(state),
                     "email_recipient": mask_email(state.get("email_recipient")),
                     "checkout_payment": deepcopy(state["checkout_payment"]),
                     "confirmation_policy": self.confirmation_policy,
@@ -868,6 +869,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             },
             "recipe_sources": deepcopy(profile["recipes"]["sources"]),
             "web_search": deepcopy(profile["recipes"]["web_search"]),
+            "recipe_source_overview": self._recipe_source_overview(state),
             "web_search_provider": search_status(self.store.config),
             "payment_note": {
                 "oda": "For new orders, prepare automatically selects the configured existing method. Vipps may require completing a step on the original Oda/Vipps page and approval on your phone. Selecting a method never submits payment. Resolve saved-card ambiguity once with card_last4 in setup.",
@@ -898,7 +900,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         result = {
             "during_preferences": "Choose meals for any dates or number of dinners, batch cooking or a grocery-only order. Weekly automation is optional and starts off. Tell me about dietary needs, cooking time and ingredients to use up.",
             "during_diet": "Explain the actual saved dietary goal and its dietary_guidance. New/reset defaults use a concrete editable Norwegian starter preset with adult whole-diet reference amounts; offer keep/change/remove. Existing customized or cleared goals stay as saved. Another country or eating pattern is welcome; never infer it from the retailer or conversation language.",
-            "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists.",
+            "during_recipe_sources": "Selected Norwegian recipe websites are enabled without needing a search API. Within the setup choices, ask once: May I also search other recipe websites when your request needs wider coverage? Keeping defaults leaves that off. Existing search-provider choices are preserved; optional API setup is only needed when requested or when no suitable host search exists. recipe_source_overview lists every source with whether it is on and its preference. Any source can be marked preferred (considered first) or occasional (considered after the others); the rest stay normal. Own recipes and collections share the bank's one switch.",
             "during_equipment": "At first setup ask: Would you like to record your kitchen equipment? 1. List equipment. 2. Skip for now. Examples: hand blender, blender, food processor or air fryer. Show the current saved equipment and allow corrections. Save explicit answers with profile update meals.equipment, preserving other items unless removal is requested. Skipping leaves equipment unchanged and does not block setup or planning; keeping defaults does not confirm example appliances.",
             "during_pantry": "You can keep a short accepted list of basics such as salt, pepper and cooking oil. Ordinary amounts need no repeated question; we check occasionally during shopping whether anything needs restocking.",
             "after_setup": "Ask for a meal plan, swap any dish, request full ingredients and steps, use ingredients you already have, or explore meals around suitable current store offers. Recipes can arrive after confirmed purchase by your chosen supported channel; email needs a separate connection and consent.",
@@ -939,7 +941,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             raise HouseholdError("setup apply needs keep_current true or false and an optional changes object")
         if keep_current and changes:
             raise HouseholdError("keep_current cannot be combined with setup changes")
-        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "checkout_payment", "web_search"}
+        allowed = {"provider", "confirmation_policy", "people", "portions", "diet", "weekly_menu", "recipe_sources", "recipe_source_preferences", "checkout_payment", "web_search"}
         if not set(changes).issubset(allowed):
             raise HouseholdError("setup changes contain unknown fields")
         requested_provider = str(changes.get("provider") or self.provider).casefold()
@@ -991,6 +993,19 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 if not isinstance(settings, Mapping) or set(settings) - {"enabled", "broad", "sites"}:
                     raise HouseholdError("web_search accepts enabled, broad and sites")
                 profile["recipes"]["web_search"].update(deepcopy(dict(settings)))
+            if "recipe_source_preferences" in changes:
+                preferences = changes["recipe_source_preferences"]
+                if (not isinstance(preferences, Mapping) or not preferences or set(preferences) - {"preferred", "occasional"}
+                        or any(not isinstance(value, list) for value in preferences.values())):
+                    raise HouseholdError("recipe_source_preferences accepts preferred and occasional lists of source ids")
+                # Each supplied list replaces the saved one; a source in neither list is normal.
+                for level, value in preferences.items():
+                    profile["recipes"][level + "_sources"] = deepcopy(value)
+                    other = "occasional" if level == "preferred" else "preferred"
+                    if other not in preferences:
+                        # Moving a source to one level takes it out of the other.
+                        profile["recipes"][other + "_sources"] = [
+                            group for group in profile["recipes"][other + "_sources"] if group not in value]
             validate_profile(profile)
             finalize_recurring_profile_write(
                 previous_profile,

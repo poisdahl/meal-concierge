@@ -79,12 +79,32 @@ def candidate_groups(candidates: list[Mapping[str, Any]]) -> list[list[Mapping[s
     return [members for _aliases, members in groups]
 
 
+def source_group(recipe: Mapping[str, Any], *, entry_origin: str | None = None,
+                 pack: Mapping[str, Any] | None = None) -> str:
+    """The household-facing source a candidate counts under for source preferences.
+
+    A bank entry is the household's own or belongs to an installed collection,
+    wherever it was first found. Anything else is named by where it comes from.
+    """
+    if entry_origin is not None:
+        return f"collection:{pack['pack_id']}" if isinstance(pack, Mapping) and pack.get("pack_id") else "own"
+    from recipes import RecipeError, recipe_source_provider
+    try:
+        if recipe_source_provider(recipe) is not None:
+            return "store"
+    except RecipeError:
+        pass
+    kind = str((recipe.get("source") or {}).get("kind") or "").casefold()
+    return kind if kind in {"themealdb", "wikibooks", "web"} else "own"
+
+
 def compact_candidate(recipe: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
     """Project a loaded version without passing a partial document as a recipe."""
     fields = ("name", "portions", "times", "tags", "categories", "source", "source_provider", "schema_version",
               "recipe_digest", "household_experience", "entry_origin", "is_favorite", "locally_modified", "status")
     result = {key: deepcopy(recipe[key]) for key in fields if key in recipe}
     result.update(deepcopy(dict(reference)))
+    result["source_group"] = source_group(recipe, entry_origin=recipe.get("entry_origin"), pack=recipe.get("pack"))
     result["representation"] = "summary"
     result["detail_fields"] = {"ingredients": "not_loaded", "steps": "not_loaded"}
     result["unknown_fields"] = [key for key in ("portions", "times") if recipe.get(key) is None]
@@ -302,7 +322,9 @@ def shortlist(candidates: list[Mapping[str, Any]], request: Mapping[str, Any], p
     def score(item):
         return sum(reason["weight"] for index, day in enumerate(dates)
                    for reason in _slot_reasons(item, day, index, len(dates), profile))
-    representatives.sort(key=lambda item: (-score(item), item["reference_key"]))
+    # On equal scores a saved recipe goes before a store or web discovery. The
+    # reference key alone put every "discovery_ref" ahead of every "recipe_ref".
+    representatives.sort(key=lambda item: (-score(item), "recipe_ref" not in item["reference"], item["reference_key"]))
     capacity = shortlist_capacity(len(dates))
     return {"candidates": representatives[:capacity], "suitable_count": len(representatives),
             "unknown": unknown, "rejected": rejected, "capacity": capacity,
