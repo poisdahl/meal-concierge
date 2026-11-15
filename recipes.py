@@ -415,22 +415,47 @@ def source_ingredient_identity(
     return _source_ingredient_identity(value, language, require_reviewed=require_reviewed)
 
 
+_ATTACHED_METRIC_UNIT = re.compile(r"^(\s*\d+(?:[.,]\d+)?)(kg|mg|g|ml|cl|dl|l)(?=\s)", re.IGNORECASE)
+# What follows a first amount is another amount of the same line: a joiner or
+# range mark and a number ("+ 2 ss", "og 1 ts", "til 300 g", "- 300g"), or a
+# number with its own unit ("1kg 200g mel"). "2% melk" is neither.
+_SECOND_AMOUNT = re.compile(
+    r"(?:(?:\+|&|[-–—]|(?:pluss?|samt|och|og|and|til|to)\b)\s*(?:\d|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])"
+    r"|\d+(?:[.,]\d+)?\s*(?:kg|mg|g|ml|cl|dl|l|ss|ts|stk)\b)", re.IGNORECASE)
+
+
 def source_ingredient(
     text: str, *, item: str | None = None, measure: str | None = None,
     language: str | None = None, preserve_source_item: bool = False,
+    attached_metric_units: bool = False, numeric_measure: bool = False,
 ) -> dict[str, Any]:
-    """Parse source quantity and use reviewed language-aware semantic identities."""
+    """Parse source quantity and use reviewed language-aware semantic identities.
+
+    attached_metric_units also reads a metric unit written against its number
+    ("600g carrots"), as recipe sites commonly print it. Imported pages and
+    pasted text opt in; the reviewed collection build keeps its own recovery
+    step. numeric_measure marks a measure built from a number in the source data.
+    """
     quantity = unit = None
     if measure is not None:
-        quantity, unit = parse_measure(measure)
-    elif item is None:
+        quantity, unit = parse_measure(measure, numeric=numeric_measure)
+    # Text spanning several lines is more than one ingredient and stays unread.
+    elif item is None and not re.search(r"[\r\n]", text.strip()):
+        # Single spaces also keep the unit patterns below linear on a hostile line.
+        parse_text = " ".join(text.split())
+        if attached_metric_units:
+            parse_text = _ATTACHED_METRIC_UNIT.sub(r"\1 \2", parse_text)
         for candidate in sorted(UNITS, key=len, reverse=True):
             suffix = r"\.?" if candidate in {"stk", "ss", "ts", "pk"} else ""
-            matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", text, re.IGNORECASE)
+            matched = re.fullmatch(r"(.+?)\s+" + re.escape(candidate) + suffix + r"\s+(.+)", parse_text, re.IGNORECASE)
             if matched:
-                quantity, unit = parse_measure(f"{matched[1]} {candidate}")
-                if quantity is not None:
-                    item = matched[2]
+                # Commit only a complete reading. A unit word later in a
+                # descriptive line ("..., ca. 150 g per stk") is not this
+                # line's unit, and "1 dl + 2 ss sugar" is not one dl of
+                # "+ 2 ss sugar"; both stay unresolved for the caller.
+                amount, measured_unit = parse_measure(f"{matched[1]} {candidate}")
+                if amount is not None and not _SECOND_AMOUNT.match(matched[2]):
+                    quantity, unit, item = amount, measured_unit, matched[2]
                     break
     source_item = item or text
     normalized_item, identity_review_required = _source_ingredient_identity(
@@ -456,7 +481,8 @@ def source_yield(text: str) -> tuple[dict[str, Any], float | None]:
         try:
             quantity = quantity_json(read_quantity(matched[1].replace(",", ".")))
             unit = "servings" if serves else matched[2]
-            if unit.casefold() in {"serving", "servings", "portion", "portions", "porsjon", "porsjoner", "people", "persons"}:
+            if unit.casefold() in {"serving", "servings", "portion", "portions", "porsjon", "porsjoner", "portioner",
+                                   "people", "persons", "person", "personer", "pers", "pers."}:
                 portions = float(read_quantity(quantity))
         except ValueError:
             pass
@@ -690,6 +716,10 @@ def _ingredient(
     quantity = _quantity(value.get("quantity"), f"{field}.quantity")
     unit = _bounded_text(value.get("unit"), f"{field}.unit", maximum=40)
     unit = normalized_unit(unit) or None
+    if unit is not None and len(unicodedata.normalize("NFC", unit)) > 40:
+        # Case folding can lengthen text; the stored form must pass the same
+        # NFC-measured limit when it is read back.
+        raise RecipeError(f"{field}.unit is too long")
     scalable = value.get("scalable", quantity is not None)
     if not isinstance(scalable, bool) or (scalable and (quantity is None or unit is None)):
         raise RecipeError(f"{field} scalable quantity requires a positive amount and unit")

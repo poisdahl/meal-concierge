@@ -96,8 +96,12 @@ def quantity_text(value: Any) -> str:
     return str(number.numerator) if number.denominator == 1 else f"{number.numerator}/{number.denominator}"
 
 
-def parse_measure(value: str) -> tuple[dict[str, int] | None, str | None]:
-    """Read an unambiguous source amount and unit without interpreting prose."""
+def parse_measure(value: str, *, numeric: bool = False) -> tuple[dict[str, int] | None, str | None]:
+    """Read an unambiguous source amount and unit without interpreting prose.
+
+    numeric says the amount was a number in the source data, not written text,
+    so its separator can only be a decimal point.
+    """
     value = re.sub(r"(?<=\d)([¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])", r" \1", value)
     text = unicodedata.normalize("NFKC", value).replace("⁄", "/").strip()
     match = re.fullmatch(r"(\d+\s+\d+/\d+|\d+/\d+|\d+(?:[.,]\d+)?)\s*([A-Za-z].*)", text)
@@ -106,6 +110,10 @@ def parse_measure(value: str) -> tuple[dict[str, int] | None, str | None]:
     amount, unit = match.groups()
     unit = normalized_unit(unit)
     if unit not in UNITS:
+        return None, unit
+    if not numeric and re.fullmatch(r"[1-9]\d{0,2}[.,]\d{3}", amount):
+        # "1,200 g" is 1200 g in English and 1.2 g with a decimal comma. Reading
+        # it either way can be wrong by a factor of 1000, so it stays unresolved.
         return None, unit
     try:
         if " " in amount:

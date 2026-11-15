@@ -61,7 +61,13 @@ workflow use the separate boundaries described below.
 
 Both readers return an extraction report with original fields, inert image
 candidates and unsupported fields. `source_candidate` then uses the shared
-schema-2 ingredient/yield parsers. Unknown servings remain unknown; two loaves
+schema-2 ingredient/yield parsers. For these household imports the ingredient
+parser also reads a metric unit written against its number (`600g carrots`),
+and a yield naming persons (`4 personer`) establishes person servings. A bare
+count, container or cup is not an exact amount and stays unresolved until the
+host supplies a labelled estimate. So does a number that could be thousands or
+decimals (`1,200 g`) and a line with two amounts (`1 dl + 2 ss`): neither is
+read as an exact source amount. Unknown servings remain unknown; two loaves
 are not two people. The service must establish trusted source context separately
 before accepting evidence, and must preserve the extraction report when showing
 unresolved fields. There is no legacy-schema fallback when those parsers are

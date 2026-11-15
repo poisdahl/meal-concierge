@@ -531,7 +531,16 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
     yield_value, portions = source_yield(raw["yield_text"])
-    ingredients = [source_ingredient(text, language=raw["language"]) for text in raw["ingredients"]]
+    if portions is None and "; " in raw["yield_text"]:
+        # Recipe plugins commonly publish ["4", "4 servings"]; the labelled entry names the servings.
+        for label in raw["yield_text"].split("; "):
+            labelled, portions = source_yield(label)
+            if portions is not None:
+                yield_value = {**labelled, "original_text": raw["yield_text"]}
+                break
+    # Imported pages, recipe exports and store recipe pages reach this helper,
+    # never the curated collection build.
+    ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.
@@ -543,7 +552,9 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
             if food and unit and quantity:
                 unit_text = (unit["abbreviation"] if unit["useAbbreviation"] else "") or unit["name"]
                 measure = f"{quantity} {unit_text}"
-                ingredient = source_ingredient(text, item=food["name"], measure=measure, language=raw["language"])
+                # Mealie stores the quantity as a number, so "1.125" is one and an eighth.
+                ingredient = source_ingredient(text, item=food["name"], measure=measure, language=raw["language"],
+                                               numeric_measure=True)
                 # The structured native values, rather than potentially stale
                 # originalText/display, are the actual input to this parse.
                 for evidence in ingredient["evidence"].values():
@@ -568,6 +579,46 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
         "portions_evidence": {"basis": "source" if portions is not None else "unknown", "input": portions_input},
         "notes": notes or None, "times": deepcopy(raw["times"]) or None,
     }
+
+
+_FRACTIONS = "¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞"
+
+
+def _whole_quote(text: str, quote: str) -> bool:
+    """True when some occurrence of quote cuts neither a number nor a word.
+
+    "5 dl" also occurs inside "1,5 dl", "500 g" inside "1 500 g", "2 ss" inside
+    "1-2 ss" and "4 porsjoner" inside "14 porsjoner"; such a cut would record a
+    different amount as the source's own. A letter beside a digit is not a
+    cut: pages often glue a list number or heading to the text that follows.
+    """
+    def number(character: str) -> bool:
+        return character.isdigit() or character in _FRACTIONS
+
+    def cut(position: int) -> bool:
+        before, after = text[max(0, position - 4):position], text[position:position + 2]
+        left, right = before[-1:], after[:1]
+        if not left or not right:
+            return False
+        if (left.isalpha() and right.isalpha()) or (number(left) and number(right)):
+            return True
+        # One separator between two numbers on either side of the cut: a decimal
+        # or fraction mark, a range dash, or the single space of "1 500" and "1 1/2".
+        joins = ".,/⁄-–— \u00a0\u2009\u202f"
+        if left in joins and number(right) and number(before[-2:-1]):
+            return True
+        if right in joins and number(left) and number(after[1:2]):
+            return True
+        # A multiplier: "2 x 400 g" is not 400 g.
+        return number(right) and re.search(r"\d\s?[x×]\s?$", before) is not None
+
+    start, tried = text.find(quote), 0
+    while start != -1 and tried < 256:
+        if not cut(start) and not cut(start + len(quote)):
+            return True
+        # A page that repeats the quote hundreds of times is not searched further.
+        start, tried = text.find(quote, start + 1), tried + 1
+    return False
 
 
 def read_transcript(value: Any) -> dict[str, Any]:
@@ -627,6 +678,8 @@ def read_transcript(value: Any) -> dict[str, Any]:
         quote = _text(item.get("quote"), field + " quote", maximum, required=True)
         if quote not in page_text[item["page"]]:
             raise RecipeImportReaderError(f"{field} quote is absent from its supplied page")
+        if not _whole_quote(page_text[item["page"]], quote):
+            raise RecipeImportReaderError(f"{field} quote starts or ends inside a number or word on its supplied page")
         return quote, f"Page {item['page']}: {quote}"
 
     def selected(field, maximum, *, optional=False):
@@ -676,7 +729,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
             ).strip()
             if without_leading_amount != quote.strip():
                 estimated_item = without_leading_amount
-        ingredient = source_ingredient(quote, item=estimated_item, language=language)
+        ingredient = source_ingredient(quote, item=estimated_item, language=language, attached_metric_units=True)
         for evidence in ingredient["evidence"].values():
             evidence["input"] = evidence_input
         if "estimated_amount" in item:
