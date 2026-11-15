@@ -1047,7 +1047,7 @@ def _project_agent_result_once(operation: str, action: str | None, result: dict[
         return _orders_view(action or "list", result, offset, limit, section)
     if operation == "recipes" and action in {None, "search", "discover"} and isinstance(result.get("recipes"), list):
         return _recipe_candidates_view(result)
-    if operation == "recipes" and action in {"get", "resolve", "detail", "adapt"}:
+    if operation == "recipes" and action in {"get", "resolve", "detail", "adapt", "convert"}:
         return _recipe_view(action, result, offset, limit, section)
     return result
 

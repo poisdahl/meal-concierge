@@ -24,7 +24,7 @@ import ssl
 import threading
 import time
 from typing import Any, Iterator, Mapping
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from recipe_import_readers import (
     MAX_EXPORT_BYTES, MAX_RECORD_BYTES, MAX_RECORDS, MAX_WEBPAGE_BYTES, MAX_MEALIE_COVER_BYTES,
@@ -147,6 +147,29 @@ class _PinnedConnection(http.client.HTTPConnection):
             raise RecipeImportSourceError("source DNS or connection is unavailable") from None
 
 
+def _same_site_redirect(requested, response) -> str:
+    """Name where the same site moved the page, so the caller can ask for that address.
+
+    Nothing is followed. Another site, a credential or a non-HTTPS target is not repeated.
+    """
+    location = response.headers.get("Location")
+    if not isinstance(location, str) or not location:
+        return ""
+    try:
+        target = _url(urljoin(requested.geturl(), location), "redirect target")
+        moved = urlsplit(target or "")
+        hosts = {(requested.hostname or "").casefold().removeprefix("www."), (moved.hostname or "").casefold().removeprefix("www.")}
+        if moved.scheme != "https" or moved.port not in {None, 443} or len(hosts) != 1 or target == requested.geturl():
+            return ""
+        # Only a short plain address is repeated: the path is the site's own text,
+        # and a non-ASCII one cannot be read back reliably from the header.
+        if len(target) > 300 or not target.isascii() or not target.isprintable():
+            return ""
+    except (RecipeImportSourceError, RecipeImportReaderError, ValueError):
+        return ""
+    return f"; the same site moved this page to {target}"
+
+
 def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
                authorization: str | None = None,
                search_api_key: str | None = None,
@@ -214,7 +237,9 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
             connection.request("POST", path, body=_wire_json(json_body), headers=headers)
         response = connection.getresponse()
         if 300 <= response.status < 400:
-            raise RecipeImportSourceError("source redirects are forbidden")
+            # Only a plain public page read reports where its own site moved it.
+            plain = configured_origin is None and search_header is None and json_body is None
+            raise RecipeImportSourceError("source redirects are forbidden" + (_same_site_redirect(parsed, response) if plain else ""))
         if response.status != 200:
             raise RecipeImportSourceError(f"source request failed with HTTP {response.status}")
         if response.headers.get("Content-Encoding", "identity").casefold() != "identity":

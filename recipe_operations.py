@@ -22,7 +22,7 @@ from recipe_import_sources import fetch_public_webpage, read_native_recipe, fetc
 from recipe_assets import RecipeAssetError, sanitize_image
 from urllib.error import HTTPError
 from core import HouseholdError
-from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, adapt_recipe_changes, recipe_digest, accept_recipe_estimates
+from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, adapt_recipe_changes, convert_recipe_changes, recipe_digest, accept_recipe_estimates
 from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_problem, recipe_evidence_fields, _evidence_value, normalize_categories, RECIPE_CATEGORIES
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
@@ -3234,26 +3234,34 @@ class RecipeOperations:
             original = snapshot["recipe"]
             if request.get("recipe_digest") != recipe_digest(original) or request.get("source_schema_version") != original["schema_version"]:
                 raise RecipeError("conversion requires the exact source digest and schema version")
-            value = request.get("recipe")
-            if not isinstance(value, Mapping) or value.get("schema_version") != 2:
-                raise RecipeError("client-assisted conversion requires schema_version 2 and explicit quantity evidence")
+            value, changes = request.get("recipe"), request.get("changes")
+            if (value is None) == (changes is None):
+                raise RecipeError("conversion requires exactly one of changes or a complete recipe")
             if (original.get("rights", {}).get("storage_decision") or {}).get("storage") == "link_only":
                 raise RecipeError("link-only imports cannot be converted into full recipes; reassess and reimport")
-            converted = self.recipes.prepare_input({**value, "rights": deepcopy(original["rights"])}, prior=original)
-            original_evidence = recipe_evidence_fields(original)
-            for path, evidence in recipe_evidence_fields(converted).items():
-                if evidence["basis"] == "user" and (evidence != original_evidence.get(path) or _evidence_value(converted, path) != _evidence_value(original, path)):
-                    raise RecipeError("client-assisted conversion cannot assert new user evidence; retain unknown or estimate evidence")
+            if changes is not None:
+                # The service applies these edits itself, so untouched source
+                # amounts keep their evidence and nothing new can be asserted.
+                converted = convert_recipe_changes(changes, prior=original)
+            else:
+                if not isinstance(value, Mapping) or value.get("schema_version") != 2:
+                    raise RecipeError("client-assisted conversion requires schema_version 2 and explicit quantity evidence")
+                converted = self.recipes.prepare_input({**value, "rights": deepcopy(original["rights"])}, prior=original)
+                original_evidence = recipe_evidence_fields(original)
+                for path, evidence in recipe_evidence_fields(converted).items():
+                    if evidence["basis"] == "user" and (evidence != original_evidence.get(path) or _evidence_value(converted, path) != _evidence_value(original, path)):
+                        raise RecipeError("client-assisted conversion cannot assert new user evidence; retain unknown or estimate evidence")
             if canonical(converted["source"]) != canonical(original["source"]):
                 raise RecipeError("conversion must preserve the exact source attribution")
             self._require_recipe_provider(converted)
+            # Read it as the planner will before anything is stored or remembered.
+            scaled = scale_recipe(converted)
             result = self.recipes.persist_discovery(
                 converted,
                 source_identity=(snapshot["source_identity"] if str(snapshot["source_identity"]).startswith(("import:v1:", "adapt:v1:")) else None),
                 trusted_store_product_hints=True,
             )
             self.recipes.remember_discovery_transform(snapshot["discovery_ref"], result["discovery_ref"], "conversion")
-            scaled = scale_recipe(converted)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
             return {**result, "readiness": scaled["readiness"],
                     "shopping_requirements": scaled["shopping_requirements"],

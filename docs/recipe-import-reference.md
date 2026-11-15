@@ -117,6 +117,9 @@ One unauthenticated HTTPS GET returns the shared `read_webpage` envelope:
 Every structured recipe has the offline extraction fields plus `candidate`
 (schema 2) and `source_context`. A text fallback requires the host agent's
 interpretation. Invalid JSON-LD fails explicitly. No embedded URL is fetched.
+Redirects are refused, not followed. When the same site moved the page to
+another HTTPS address (for example its `www` host), the error names that
+address so the caller can request it explicitly.
 
 Public DNS results must all be public addresses. Connections use an already
 validated numeric sockaddr, with TLS chain/hostname verification for the
@@ -355,7 +358,9 @@ does not establish its role. Missing categories map only exact known tag aliases
 unknown roles remain empty. Classification is visible in the preview and saved
 with the same discovery snapshot.
 
-An ingredient may add `estimated_amount: {quantity, unit, assumptions}`; a yield
+An ingredient may add `estimated_amount: {quantity, unit, assumptions}` and, with
+it, `item` naming the ingredient the estimate measures (`1 can chopped tomatoes`
+as 400 g of `chopped tomatoes`); the quote remains the evidence. A yield
 selection may add `estimated_portions: {quantity, assumptions}`. These values
 always remain labeled estimates, independently of the physical yield. Usable
 estimates with stated assumptions can be planned without separate acceptance. The
@@ -363,6 +368,10 @@ input cannot supply evidence, acceptance, rights, provider, managed image or
 trusted source-context assertions. Optional attribution permits only URL,
 publisher, title and author; known store attribution retains effective binding.
 Full private recipe storage does not imply a redistribution license.
+
+After import, [bounded conversion changes](recipe-contract.md#bounded-conversion-changes)
+translate the recipe or fill remaining amounts in one `convert` call, including
+for structured web pages that accept no interpretation.
 
 The result contains the candidate, source/page context, unreadable-page issues
 and selected excerpts. Its source digest is stable for the same ordered pages

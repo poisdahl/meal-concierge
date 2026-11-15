@@ -716,14 +716,26 @@ def read_transcript(value: Any) -> dict[str, Any]:
     def has_dependency(text):
         return any(pattern.search(text) for pattern in dependency_patterns)
     for item in ingredient_excerpts:
-        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount",))
+        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item"))
         if (re.search(r"\b(?:or|eller)\b", quote, re.IGNORECASE)
                 or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", quote, re.UNICODE)):
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
         if has_dependency(quote):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
         estimated_item = None
-        if "estimated_amount" in item:
+        if "item" in item:
+            # The quote stays the evidence; the host names what its estimate measures
+            # ("1 can chopped tomatoes" as 400 g of "chopped tomatoes").
+            if "estimated_amount" not in item:
+                raise RecipeImportReaderError("an ingredient item name applies only with estimated_amount")
+            estimated_item = _text(item["item"], "ingredient item", 300, required=True)
+            # The name is held to the same rules as the quoted line.
+            if (re.search(r"\b(?:or|eller)\b", estimated_item, re.IGNORECASE)
+                    or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", estimated_item, re.UNICODE)):
+                raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
+            if has_dependency(estimated_item):
+                raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        elif "estimated_amount" in item:
             without_leading_amount = re.sub(
                 r"^\s*\d+(?:[.,]\d+)?\s+", "", quote, count=1,
             ).strip()

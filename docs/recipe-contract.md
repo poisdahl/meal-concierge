@@ -283,6 +283,38 @@ source. Repeating the same adaptation deduplicates; later bank edits create
 normal revisions. Schema-1 originals remain readable; adaptation produces schema 2.
 Representation-only conversion remains `convert`.
 
+## Bounded conversion changes
+
+`convert` also accepts `changes` instead of a complete `recipe`, for translating
+an imported recipe and giving unresolved lines an amount. It takes the exact
+`discovery_ref`, `recipe_digest` and `source_schema_version` of a full-storage
+schema-2 discovery. Supported fields are `language`, `name`, `notes`, complete
+`steps`, `estimated_portions={quantity,assumptions}` and
+`ingredients=[{index,item,notes,quantity,unit,assumptions}]` with unique
+zero-based indices. Ingredients cannot be added, removed, split or reordered;
+that is adaptation.
+
+The service applies the edits to its own copy of the source, by position:
+
+- `item` and `notes` rename a line. Its quantity, unit, evidence basis and
+  `original_text` are untouched, so a translated ingredient keeps a source
+  amount. An unread line needs `item` together with its amount.
+- A supplied `quantity`, or a `unit` of another dimension or size, needs
+  `assumptions`. The quantity and unit are then recorded as an estimate that
+  still points at the source line. An exact alias of the same unit (`tbsp` to
+  `ss`) keeps the existing evidence.
+- A renamed or re-measured row loses an estimate acceptance or project review
+  that was given for the row as it was, and its store product hint. Its display
+  text is rebuilt from the edited row.
+- `estimated_portions` is accepted only while servings are unknown and is
+  recorded as an estimate. Known source servings cannot be replaced.
+- Source attribution, relationship, rights and provider binding are copied
+  from the original and cannot be supplied. Stored language variants are
+  dropped because they translated the previous text.
+
+The result is a new frozen discovery, remembered as the conversion of the
+original. A link-only bookmark cannot be converted.
+
 ## Reviewed language variants
 
 A full recipe may have an optional `translations` object with at most eight

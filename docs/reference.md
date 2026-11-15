@@ -1169,7 +1169,9 @@ summary cannot establish readiness. Compact discovery uses `projection=summary`,
 pages enumerate active entries before drafts. Default full discovery remains
 compatible. The `convert` action binds a client-assisted schema-2 recipe to the
 source `discovery_ref`, `recipe_digest` and `source_schema_version`, preserves
-attribution and rejects newly asserted source/user quantity evidence. Exact
+attribution and rejects newly asserted source/user quantity evidence. With
+`changes` instead of `recipe`, the service applies [bounded conversion changes](recipe-contract.md#bounded-conversion-changes)
+itself and keeps untouched source amounts. Exact
 source/version transforms are cached within existing snapshot lifetime/bounds;
 accepted estimates can be reused after restart without creating personal entries. Candidate revisions, frozen discovery
 content digests, the complete bounded recipe-usage history, the complete current

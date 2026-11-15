@@ -1315,6 +1315,118 @@ def adapt_recipe_changes(changes: Any, *, prior: Mapping[str, Any], portions: An
     return normalize_recipe(candidate, trusted_store_product_hints=True)
 
 
+def convert_recipe_changes(changes: Any, *, prior: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply bounded representation changes to a service-owned exact source recipe.
+
+    This is translation and structuring, not a new dish: the source relationship,
+    attribution, rights and snapshot stay as they are. The service edits by
+    position, so an ingredient that is only renamed keeps its untouched source
+    amount and evidence. A quantity or unit supplied here is the caller's reading
+    and is labelled as an estimate with its assumptions; an exact alias of the
+    same unit (tbsp to ss) is a pure relabel and keeps the existing evidence.
+    """
+    from recipe_languages import language_tag
+    original = normalize_recipe(prior, trusted_store_product_hints=True)
+    if original["schema_version"] != 2:
+        raise RecipeError("change-based conversion requires a schema_version 2 source")
+    if original["rights"]["storage"] != "full":
+        raise RecipeError("link_only recipes cannot be converted into full content")
+    allowed = {"language", "name", "notes", "steps", "ingredients", "estimated_portions"}
+    if not isinstance(changes, Mapping) or not changes or set(changes) - allowed:
+        raise RecipeError("conversion changes support only language, name, notes, steps, ingredients and estimated_portions")
+    candidate = deepcopy(original)
+    # A reviewed text variant is bound to the text it translated.
+    candidate.pop("translations", None)
+    if "language" in changes:
+        candidate["language"] = language_tag(changes["language"])
+    for field in ("name", "notes"):
+        if field in changes:
+            candidate[field] = changes[field]
+    if "steps" in changes:
+        candidate["steps"] = changes["steps"]
+    if "estimated_portions" in changes:
+        estimate = changes["estimated_portions"]
+        if original.get("portions") is not None:
+            raise RecipeError("estimated_portions applies only when the source servings are unknown")
+        if not isinstance(estimate, Mapping) or set(estimate) != {"quantity", "assumptions"}:
+            raise RecipeError("estimated_portions requires quantity and assumptions")
+        _finite_positive(estimate["quantity"], "estimated_portions.quantity")
+        try:
+            # The same exact-quantity bounds the scaler will apply to it.
+            candidate["portions"] = float(read_quantity(estimate["quantity"]))
+        except ValueError as exc:
+            raise RecipeError(f"estimated_portions.quantity: {exc}") from exc
+        candidate["portions_evidence"] = {
+            "basis": "estimate",
+            "input": (original.get("yield") or {}).get("original_text") or original["portions_evidence"].get("input"),
+            "assumptions": _bounded_text(estimate["assumptions"], "estimated_portions.assumptions", required=True, maximum=1000),
+        }
+    if "ingredients" in changes:
+        edits = changes["ingredients"]
+        if not isinstance(edits, list) or not edits or len(edits) > len(candidate["ingredients"]):
+            raise RecipeError("conversion ingredients must be a nonempty bounded list")
+        seen = set()
+        for edit in edits:
+            if (not isinstance(edit, Mapping) or set(edit) - {"index", "item", "notes", "quantity", "unit", "assumptions"}
+                    or not set(edit) & {"item", "notes", "quantity", "unit"}):
+                raise RecipeError("conversion ingredient change requires index and item, notes, quantity or unit")
+            index = edit.get("index")
+            if type(index) is not int or not 0 <= index < len(candidate["ingredients"]) or index in seen:
+                raise RecipeError("conversion ingredient index must be unique and in range")
+            seen.add(index)
+            ingredient = candidate["ingredients"][index]
+            source_text = ingredient.get("original_text") or ingredient.get("raw")
+            if ingredient.get("quantity") is None and "item" not in edit and set(edit) & {"quantity", "unit"}:
+                # An unread line still holds its whole source text as the item.
+                raise RecipeError("name the ingredient with item when giving an unread line its amount")
+            if "item" in edit:
+                ingredient["item"] = _bounded_text(edit["item"], f"ingredients[{index}].item", required=True, maximum=300)
+            if "notes" in edit:
+                ingredient["notes"] = edit["notes"]
+            estimated = []
+            other_unit = False
+            if "unit" in edit:
+                previous = UNITS.get(normalized_unit(ingredient.get("unit")))
+                ingredient["unit"] = edit["unit"]
+                other_unit = previous is None or UNITS.get(normalized_unit(edit["unit"])) != previous
+                if other_unit:
+                    estimated.append("unit")
+            if "quantity" in edit:
+                ingredient["quantity"] = edit["quantity"]
+                estimated.append("quantity")
+            elif other_unit and ingredient.get("quantity") is not None:
+                # The same number in another unit is another amount.
+                estimated.append("quantity")
+            if estimated:
+                assumptions = _bounded_text(edit.get("assumptions"), f"ingredients[{index}].assumptions", required=True, maximum=1000)
+                for field in estimated:
+                    ingredient["evidence"][field] = {
+                        "basis": "estimate", "assumptions": assumptions,
+                        # Keep the import's own pointer to the source line (for example its page).
+                        "input": ingredient["evidence"][field].get("input") or source_text,
+                    }
+            if "item" in edit or other_unit:
+                # An acceptance or project review was given for the row as it
+                # was; it does not carry over to a renamed or re-measured one.
+                for evidence in ingredient["evidence"].values():
+                    for marker in ("acceptance", "project_review"):
+                        evidence.pop(marker, None)
+            if set(edit) & {"item", "quantity", "unit"}:
+                measured = ingredient.get("quantity") is not None and bool(normalized_unit(ingredient.get("unit")))
+                if "quantity" in edit or other_unit:
+                    ingredient["scalable"] = measured
+                elif "item" in edit:
+                    # Naming the ingredient settles an identity that awaited review.
+                    ingredient["scalable"] = bool(ingredient.get("scalable")) or (
+                        measured and normalized_unit(ingredient.get("unit")) in UNITS)
+                # The display text is rebuilt from the edited row, and a store's
+                # product suggestion was made for the original line.
+                ingredient["raw"] = None
+                ingredient.pop("amount", None)
+                ingredient.pop("_store_product_hint", None)
+    return normalize_recipe(candidate, trusted_store_product_hints=True)
+
+
 def validate_recipe_image(recipe: Mapping[str, Any], assets: Any, *, prior: Mapping[str, Any] | None = None) -> None:
     """Validate a newly attached cover; existing text remains usable without it."""
     image = recipe.get("image") or {}
@@ -4401,6 +4513,9 @@ class RecipeStore:
             key = self._transform_cache_key(source, kind)
             # This is disposable memo metadata, never a personal entry or binding.
             connection.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", (key, result_ref))
+            # Converting back to earlier content must not leave the two snapshots pointing at each other.
+            connection.execute("DELETE FROM metadata WHERE key=? AND value=?",
+                               (self._transform_cache_key(result, kind), discovery_ref))
             connection.execute("DELETE FROM metadata WHERE key LIKE 'recipe_transform:v1:%' "
                                "AND value NOT IN (SELECT discovery_ref FROM discovery_snapshots)")
             connection.execute("DELETE FROM metadata WHERE key IN (SELECT key FROM metadata "

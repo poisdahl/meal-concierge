@@ -375,7 +375,9 @@ This does not overwrite the source or create a personal bank entry; save
 separately when lasting reuse is wanted. Full schema-2 `recipe` remains available
 for complete adaptations, mutually exclusive with `changes`.
 `convert` converts representation while preserving source facts; it is not a
-way to disguise an adaptation. Never fabricate source evidence, calculation
+way to disguise an adaptation. Its bounded `changes` translate an imported
+recipe into the user's language and give unresolved lines an amount without
+resending the recipe. Never fabricate source evidence, calculation
 provenance or user acceptance. Usable labeled estimates need no separate
 acceptance ceremony; unresolved amounts need a practical estimate/adaptation
 before exact shopping can proceed.
@@ -388,6 +390,8 @@ size, availability and dietary facts. Mathem and MENY have no invented equivalen
 hints. Never invoke native bulk recipe-to-cart expansion without a supported
 preview. Read [recipe sources](references/recipe-sources.md) when importing text,
 photos, PDFs or a complex external source, or checking adaptation provenance.
+When the user pastes a recipe link or recipe text and wants to keep it, follow
+its "A link or text the user pasted" steps through to a saved recipe.
 
 ## Shopping lists
 

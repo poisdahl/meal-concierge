@@ -10,6 +10,12 @@ Give the agent a recipe link, paste the text or attach a supported file:
 
 > Read this recipe, show me the ingredients and portions, then save it when I confirm.
 
+Or simply paste the link or the text and say "save this recipe". The agent reads
+it, translates it to your language and metric measures when needed, and saves it
+in a form you can plan and shop from. Each ingredient keeps its original line.
+Amounts the source states stay marked as source amounts; anything the agent had
+to work out, such as cups, a can or "1 onion", is saved as a labelled estimate.
+
 Check the preview before saving. Before importing text or a URL, the agent must
 record a concrete basis for storing the full recipe privately: your own recipe,
 permission, a verified license or an applicable private-use assessment. Public
