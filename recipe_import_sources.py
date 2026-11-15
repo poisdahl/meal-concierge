@@ -262,7 +262,7 @@ def firecrawl_request(endpoint: str, payload: dict, *, api_key: str | None = Non
         **({"search_api_key": api_key} if api_key is not None else {}))
     try:
         value = json.loads(raw)
-    except (ValueError, UnicodeError) as exc:
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise RecipeImportSourceError("Firecrawl returned invalid JSON") from exc
     if content_type != "application/json" or not isinstance(value, dict) or value.get("success") is not True or not isinstance(value.get("data"), dict):
         raise RecipeImportSourceError("Firecrawl response is unavailable or incompatible")

@@ -56,7 +56,9 @@ _PACKAGE_METADATA = re.compile(
     r"(?:[0-9]{1,3}(?:[.,][0-9]{1,2})?\s*%(?:\s+fett)?|klasse [1-3]|"
     r"(?:lagret i )?[0-9]{1,2}(?:[–-][0-9]{1,2})? (?:måneder|mnd))", re.IGNORECASE,
 )
-_PACKAGE_WORD = r"[^\W\d_]+(?:[.'’/-][^\W\d_]+)*\.?"
+# "/" joins words only through the description pattern below. Allowing it inside a
+# word as well gave every slash two readings and made a failed match exponential.
+_PACKAGE_WORD = r"[^\W\d_]+(?:[.'’-][^\W\d_]+)*\.?"
 _PACKAGE_DESCRIPTION = re.compile(rf"{_PACKAGE_WORD}(?:(?:\s+|\s*/\s*){_PACKAGE_WORD})*")
 # These words change the meaning of a measurement. Unknown names are inert;
 # quantity qualifiers, rates and alternative sizes must never supply capacity.
