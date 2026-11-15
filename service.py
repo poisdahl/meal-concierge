@@ -368,8 +368,10 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         temporary: Path | None = None
         try:
             try:
+                # Non-blocking, so a named pipe placed in the shared inbox is
+                # rejected below instead of holding this open and its locks forever.
                 source_descriptor = os.open(
-                    archive_id, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_descriptor
+                    archive_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=inbox_descriptor
                 )
                 source_info = os.fstat(source_descriptor)
             except OSError as exc:
