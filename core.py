@@ -774,6 +774,7 @@ def _migrate_state(
     original_profile = state.get("profile")
     original_recipes = original_profile.get("recipes") if isinstance(original_profile, dict) else None
     missing_web_settings = not isinstance(original_recipes, dict) or "web_search" not in original_recipes
+    missing_source_switches = not isinstance(original_recipes, dict) or "sources" not in original_recipes
     reviewed_setup = isinstance(state.get("setup"), dict) and state["setup"].get("status") == "complete"
     version = state.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -1049,6 +1050,9 @@ def _migrate_state(
     if isinstance(cooldown, bool) or not isinstance(cooldown, int) or not 0 <= cooldown <= 260:
         raise HouseholdError("repeat cooldown must be an integer from zero to 260 weeks")
     sources = recipe_profile.setdefault("sources", deepcopy(DEFAULT_RECIPE_SOURCES))
+    if missing_source_switches and reviewed_setup:
+        recipe_profile["sources"] = sources = {key: key == "internal" for key in RECIPE_SOURCE_IDS}
+        state["setup"]["status"] = "needs_review"
     if isinstance(sources, dict) and set(sources) == set(RECIPE_SOURCE_IDS) - {"mathem"}:
         sources["mathem"] = False
     if (

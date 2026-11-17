@@ -110,10 +110,12 @@ class SourcePreferenceTests(unittest.TestCase):
     def test_completed_setup_does_not_opt_in_to_new_web_search(self):
         state = self.store.read()
         del state["profile"]["recipes"]["web_search"]
+        del state["profile"]["recipes"]["sources"]
         del state["checkout_payment"]
         self.store.path.write_text(json.dumps(state))
         migrated = StateStore(self.directory, {**self.config, "checkout_payment": {"method": "vipps"}}).read()
         self.assertFalse(migrated["profile"]["recipes"]["web_search"]["enabled"])
+        self.assertEqual([k for k, v in migrated["profile"]["recipes"]["sources"].items() if v], ["internal"])
         self.assertEqual(migrated["setup"]["status"], "needs_review")
         self.assertEqual(migrated["checkout_payment"]["method"], "vipps")
         # A changed or invalid fallback cannot override the persisted choice.
