@@ -764,7 +764,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             paths = request.get("paths")
             if paths is not None and (not isinstance(paths, list) or not all(isinstance(item, str) for item in paths)):
                 raise HouseholdError("reset paths must be strings")
-            return {"profile": self.store.reset_profile(paths)}
+            return self.store.reset_profile(paths, include_previous=True)
         if action == "set_email":
             supplied_email = request.get("email")
             email = supplied_email.strip() if isinstance(supplied_email, str) else ""
