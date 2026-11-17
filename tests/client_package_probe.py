@@ -6,7 +6,8 @@ supplied scratch root and children it starts. It does not use a native manager.
 Client-neutral cart recovery: --prepare ROOT --case cart-recovery, --serve ROOT,
 then --inspect ROOT. Use cli.py with MEAL_CONCIERGE_SOCKET=ROOT/service.sock.
 The opt-in provider loses one reply and stays unreadable until a controlled
-service restart. This models a provider failure; it is not a native-client test.
+service restart. A matching post-restart read still lacks the original provider
+ending, so the pending intent must remain fenced.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import importlib.metadata
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
@@ -200,7 +202,11 @@ def serve(root):
                     pending = json.loads(raw).get("pending_cart_change")
                     expected = {"provider": "mathem", "before": {"10": 1}, "expected": {"10": 2},
                                 "order_change": None, "operations": arguments["operations"]}
-                    if pending != expected or [(row["product_id"], row["quantity"]) for row in cart["items"]] != [(10, 1)]:
+                    if (not isinstance(pending, dict) or set(pending) != set(expected) | {"operation_id", "request_digest"}
+                            or any(pending[key] != value for key, value in expected.items())
+                            or not isinstance(pending["operation_id"], str) or not re.fullmatch(r"[a-f0-9]{32}", pending["operation_id"])
+                            or not isinstance(pending["request_digest"], str) or not re.fullmatch(r"[a-f0-9]{64}", pending["request_digest"])
+                            or [(row["product_id"], row["quantity"]) for row in cart["items"]] != [(10, 1)]):
                         raise HouseholdError("synthetic pre-effect journal/cart mismatch")
                     append(root / "dispatch.jsonl", {"event": "pre_effect", "instance": instance,
                            "pending": pending, "state_sha256": hashlib.sha256(raw).hexdigest()}, durable=True)

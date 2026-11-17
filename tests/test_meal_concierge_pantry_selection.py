@@ -86,9 +86,14 @@ class PantrySelectionTests(unittest.TestCase):
         needs, missing = menu_requirements(menu, ingredient_decisions=decisions)
         self.assertFalse(missing)
         self.assertEqual(needs[0]['quantity']['numerator'], 300)
-        # A subsequent include is an explicit buy choice, not another stock grant.
-        decisions = [{'source': decisions[0]['source'], 'action': 'include'}]
-        self.assertEqual(menu_requirements(menu, ingredient_decisions=decisions)[0][0]['quantity']['numerator'], 800)
+        # Each include buys its own 400 g. The original 500 g pool can still
+        # cover unanswered positions. Answering both positions exhausts that scope.
+        includes = [{'source': decision['source'], 'action': 'include'} for decision in decisions]
+        for answers, buy, stock in ((includes[:1], 400, 400), (includes, 800, 0)):
+            with self.subTest(answers=answers):
+                row = menu_requirements(menu, ingredient_decisions=answers)[0][0]
+                self.assertEqual(row['quantity']['numerator'], buy)
+                self.assertEqual(row['confirmed_pantry_quantity']['numerator'], stock)
 
     def test_incompatible_unknown_units_and_distinct_names_never_reduce_purchase(self):
         ref = self.save('Rismiddag', 'rice')
