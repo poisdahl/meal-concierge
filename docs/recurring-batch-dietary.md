@@ -60,6 +60,18 @@ text remains intact; unqualified dairy ingredients, allergens and traces still
 count, and a negated plant claim grants no exception. Plant wording establishes
 neither allergen absence nor nutritional superiority.
 
+The literal matcher also recognizes a bounded food-name list in recipe
+ingredients and retail fields: milk/melk includes helmelk, lettmelk, kremfløte
+and the named milk-powder/protein/fat/chocolate compounds; egg includes eggs,
+eggeplommer and eggehviter; reke/reker includes shrimp/prawns; a general nut term
+includes valnøtt/valnøtter, while a specific walnut term stays specific. This is
+an explicit lexical list, not generic substring or suffix matching: kyllinglegg,
+bokhvete, muskatnøtt and kokosmelk do not create those conflicts. Nearby literal
+free-from qualifiers retain an unknown result rather than proving suitability.
+Declared allergen/trace evidence still overrides a product-title claim, and
+laktosefri helmelk remains positive milk evidence. An old permission to review
+an unknown item cannot cover a newly identified allergy/never-buy conflict.
+
 Oda's and Mathem's exact numeric product routes resolve only to the same product's canonical
 public URL. The anonymous reader retains the visible ingredient/allergen rows,
 source URL and missing-information limits.
