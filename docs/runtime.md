@@ -227,18 +227,37 @@ host environment. The validated update environment takes precedence and any
 missing entries from the existing service `PATH` are retained, so an npm adapter
 can keep finding Node without discarding previously available helper locations.
 
-After the check passes, inspect active shopping, payment, delivery and email work.
+After the check passes, stage the selected program and its dependencies while
+the current service is available. Keep the returned exact preparation ID:
+
+```sh
+./install.sh prepare-program --home /absolute/data-home
+```
+
+Preparation downloads dependencies and rehearses the candidate's normal JSON and
+recipe-bank migrations on private disposable copies, without stopping or changing
+the installed household. The SQLite copy is coherent within that bank; this is
+not a cross-store backup or proof of future external outcomes. A failed download
+or compatibility check leaves the existing program available. The receipt binds
+the exact staged source/dependency identity and installation baseline. Changed
+candidate bytes or an intervening program update require fresh preparation.
+If the stopped apply is interrupted, retain its markers and follow the existing
+stopped-update recovery procedure from the same pinned checkout.
+
+Inspect active shopping, payment, delivery and email work.
 Wait for it to finish and resolve uncertain results before maintenance. For a
 native installation, retain the same home and run:
 
 ```sh
 ./install.sh stop --home /absolute/data-home
-./install.sh update --home /absolute/data-home
+./install.sh update --home /absolute/data-home --prepared-program PREPARATION_ID
 ./install.sh start --home /absolute/data-home
 ./install.sh attach --home /absolute/data-home
 ```
 
-The update makes an offline backup of state and configuration before migration.
+The prepared update performs no dependency download while stopped. It repeats
+the compatibility rehearsal under the existing offline ownership checks, then
+makes an offline backup of state and configuration before migration.
 It preserves recipes, local edits, favorites, saved menus, settings and existing
 login paths. It does not import or refresh the optional collection. Refresh the
 client package or skill using your agent's guide and start a new conversation.
@@ -246,6 +265,23 @@ Verify the same household and saved data, and compare the
 [running build](maintenance.md#identifying-the-running-build) with the target commit.
 Selecting an older tag is not a supported shortcut for undoing state migrations;
 use the recovery guidance below for an interrupted update.
+
+### Technical status and retained preparation caches
+
+`./install.sh doctor --home /absolute/data-home` reports only manager activity,
+maintenance-marker presence, build identity, current-release binding, browser
+executable presence and socket health. It does not read logs, token files,
+household records, recipients or provider data. For externally managed hosts,
+the reported owner is `externally_managed`; inspect that exact host execution
+separately. A missing installation is reported without creating one.
+
+`./install.sh retention-preview --home /absolute/data-home --older-than-days 30`
+is a dry run for recipe preparation archive caches only. It lists old archives
+bound to a superseded runtime or collection generation; current, irregular and
+unreadable preparations stay protected. Interrupted maintenance blocks the
+preview. It deletes nothing, retains receipts, and does not suggest deleting
+runtime trees, backups or operation evidence. Review the returned exact IDs for
+outstanding owner tasks before requesting any separate cleanup.
 
 ### Recover an interrupted attempt
 
