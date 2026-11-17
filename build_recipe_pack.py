@@ -18,7 +18,7 @@ import time
 import unicodedata
 from urllib.parse import parse_qs, urlsplit
 
-from recipe_curation import SourceMethodExcluded
+from recipe_curation import InvalidSourceMeasure, SourceMethodExcluded
 from recipe_pack_sources import THEMEALDB_POLICY, THEMEALDB_TERMS, SourceHTML, SourceParseError, attribution_links, mealdb_recipe, plain, readiness, wikibooks_recipe
 
 FORMAT = 'meal-concierge-recipes'
@@ -623,7 +623,7 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 if cached_status in {'ready', 'draft'}:
                     if not isinstance(cached.get('recipe'), dict) or not isinstance(cached.get('credit'), dict) or not isinstance(cached.get('reasons'), list) or not isinstance(cached.get('image_status'), str):
                         raise ValueError('incomplete cached recipe')
-                elif cached_status not in {'failed_parse', 'excluded_missing_source_method'}:
+                elif cached_status not in {'failed_parse', 'held_invalid_measurement', 'excluded_missing_source_method'}:
                     raise ValueError('invalid cached status')
                 if cached.get('image_status') == 'invalid_derivative':
                     cached = None
@@ -635,6 +635,10 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
             try:
                 reader = wikibooks_recipe if entry['source'] == 'wikibooks' else mealdb_recipe
                 recipe, credit = reader(entry, payloads.get('rendered', payloads['raw']))
+                for position, row in enumerate(recipe.get('ingredients', []), start=1):
+                    raw = row.get('original_text') or row.get('raw') or ''
+                    if re.search(r'(?<!\d)\d+\s*[/⁄]\s*(?:0+(?![\d.])|/|(?=\s*[A-Za-z]|$))', raw):
+                        raise InvalidSourceMeasure(f'Invalid source fraction on ingredient {position}.')
                 if amendments is not None:
                     from recipe_curation import curate
                     try:
@@ -682,6 +686,10 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
                 if reasons:
                     status = 'draft'
                 cached = {'recipe': recipe, 'status': status, 'reasons': reasons, 'credit': credit, 'image_status': image_status}
+            except InvalidSourceMeasure as exc:
+                cached = {'status': 'held_invalid_measurement', 'reason': str(exc)}
+            except ZeroDivisionError:
+                cached = {'status': 'held_invalid_measurement', 'reason': 'A source measurement has a zero denominator.'}
             except SourceMethodExcluded as exc:
                 cached = {'status': 'excluded_missing_source_method', 'reason': str(exc)}
             except PackBuildError:
@@ -728,6 +736,13 @@ def _build(snapshot: Path, output: Path, *, snapshot_sha256: str, pack_version: 
         coverage.append(base)
         if stop_after is not None and index + 1 >= stop_after:
             return {'complete': False, 'processed': len(coverage), 'cache_reused': reused}
+    held = [row for row in coverage if row['status'] == 'held_invalid_measurement']
+    if held:
+        result = {'complete': False, 'processed': len(coverage), 'held': held,
+                  'source_snapshot_sha256': snapshot_sha256, 'pack_version': pack_version,
+                  'next': 'Resolve each sealed source or supply its explicit reviewed withdrawal before building an authoritative archive.'}
+        write_file(output, 'build-report.json', encoded(result))
+        return result
     if reviewed is not None and reviewed_applied != set(reviewed) - set(withdrawal_reasons):
         missing = ', '.join(sorted(set(reviewed) - set(withdrawal_reasons) - reviewed_applied))
         raise PackBuildError('reviewed amendments were not applied: '+missing)
@@ -845,11 +860,14 @@ def main():
     parser.add_argument('--reviewed-amendments-sha256')
     parser.add_argument('--withdrawals', type=Path, help='cumulative reviewed stable IDs mapped to category/reason, excluding restored IDs')
     args = parser.parse_args()
-    print(json.dumps(build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
+    result = build(args.snapshot, args.output, snapshot_sha256=args.snapshot_sha256, pack_version=args.pack_version,
                            covers_root=args.covers_root, covers_manifest_sha256=args.covers_manifest_sha256,
                            curation=args.curation, curation_sha256=args.curation_sha256,
                            reviewed_amendments=args.reviewed_amendments,
-                           reviewed_amendments_sha256=args.reviewed_amendments_sha256, withdrawals=args.withdrawals), indent=2))
+                           reviewed_amendments_sha256=args.reviewed_amendments_sha256, withdrawals=args.withdrawals)
+    print(json.dumps(result, indent=2))
+    if not result["complete"]:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':
