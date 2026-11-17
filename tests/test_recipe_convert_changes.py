@@ -278,6 +278,11 @@ class ImportConvenienceTests(unittest.TestCase):
         self.assertEqual(result[0]["item"], "smør")
         self.assertEqual(result[0]["original_text"], lines[0])
         self.assertEqual((result[1]["unit"], result[1]["quantity"]), ("stk", {"numerator": 2, "denominator": 1}))
+        for wording in ("Do not reserve the marinade.", "Reserve the marinade if there is any left."):
+            conditional = [wording, steps[1]]
+            example = transcript("\n".join(["1 g salt", *conditional]), ["1 g salt"], conditional, language="en")
+            with self.subTest(wording=wording), self.assertRaisesRegex(RecipeImportReaderError, "cross-meal"):
+                read_transcript(example)
         data["interpretation"]["steps"].pop(0)
         with self.assertRaisesRegex(RecipeImportReaderError, "cross-meal"):
             read_transcript(data)

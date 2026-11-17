@@ -65,6 +65,11 @@ class CollectionReviewTests(unittest.TestCase):
             recipe["translations"]["en"]["notes"] += " https://example.org/plate?token=synthetic-token&portion=2"
             old_binding = source_text_digest(recipe)
             recipe["translations"]["en"]["source_text_digest"] = old_binding
+            # Historical text in another language has no source-custody binding.
+            from copy import deepcopy
+            recipe["translations"]["en-GB"] = deepcopy(recipe["translations"]["en"])
+            old_legacy = source_text_digest(recipe, legacy=True)
+            recipe["translations"]["en-GB"]["source_text_digest"] = old_legacy
             entry = original.save(recipe)
             original.update(entry["id"], 1, bilingual())
             receipt = review(original)
@@ -78,6 +83,10 @@ class CollectionReviewTests(unittest.TestCase):
             with sqlite3.connect(restored.path) as db:
                 rows = [json.loads(row[0]) for row in db.execute(
                     'SELECT document FROM revisions WHERE recipe_id=? ORDER BY revision',(entry['id'],))]
+            from recipe_languages import recipe_presentation
+            self.assertEqual(receipt["items"][0]["translation_bindings"]["en-GB"]["original"], old_legacy)
+            self.assertEqual(rows[0]["translations"]["en-GB"]["source_text_digest"], source_text_digest(rows[0], legacy=True))
+            self.assertNotEqual(recipe_presentation(rows[0], "en-GB")["resolved_language"], "en-GB")
             self.assertEqual(len(rows), 2)
             self.assertIn('https://example.org:443/plate?portion=2', rows[0]['notes'])
             self.assertIn('https://example.org/plate?portion=2', rows[0]['translations']['en']['notes'])

@@ -64,8 +64,10 @@ def _inventory(db, *, apply=False):
             # A redacted derivative can rebind reviewed text only when every
             # prior translation was valid for the exact canonical pre-image.
             normalize_translations(original["translations"], original)
-            old_binding, new_binding = source_text_digest(original), source_text_digest(changed)
+            modern_binding = source_text_digest(original)
             for language, variant in changed["translations"].items():
+                old_binding = original["translations"][language]["source_text_digest"]
+                new_binding = source_text_digest(changed, legacy=old_binding != modern_binding)
                 variant["source_text_digest"] = new_binding
                 bindings[language] = {"original": old_binding, "redacted": new_binding}
             normalize_translations(changed["translations"], changed)

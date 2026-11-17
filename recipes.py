@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from contextlib import closing, contextmanager, nullcontext
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 import hashlib
@@ -117,9 +118,18 @@ def _bounded_text(value: Any, field: str, *, required: bool = False, maximum: in
     return result or None
 
 
+# Scoped to synchronous canonical verification of bytes already in a bank
+# revision or explicitly restored private history. Ordinary saves and updates
+# reject these labels. Other document and identity checks still run.
+_stored_label_review: ContextVar[list[str] | None] = ContextVar("stored_recipe_label_review", default=None)
+
+
 def _single_line(value: Any, field: str, **options) -> str | None:
     if isinstance(value, str) and contains_line_controls(value):
-        raise RecipeError(f"{field} must be single-line text without directional controls")
+        fields = _stored_label_review.get()
+        if fields is None or field.endswith(".url"):
+            raise RecipeError(f"{field} must be single-line text without directional controls")
+        fields.append(field)
     return _bounded_text(value, field, **options)
 
 
@@ -1030,17 +1040,20 @@ def normalize_recipe(
     return result
 
 
-def _stored_recipe_document(value: Any) -> dict[str, Any]:
+def _stored_recipe_document(value: Any, *, review_fields: list[str] | None = None) -> dict[str, Any]:
     try:
         decoded = json.loads(value)
     except (json.JSONDecodeError, TypeError, RecursionError) as exc:
         raise RecipeError("recipe bank is unavailable") from exc
     if not isinstance(decoded, Mapping):
         raise RecipeError("recipe bank is unavailable")
+    token = _stored_label_review.set(review_fields if review_fields is not None else [])
     try:
         normalized = normalize_recipe(decoded, trusted_store_product_hints=True)
     except RecipeError as exc:
         raise RecipeError("recipe bank is unavailable") from exc
+    finally:
+        _stored_label_review.reset(token)
     if _canonical(normalized) != _canonical(decoded):
         raise RecipeError("recipe bank is unavailable")
     return normalized
@@ -1856,7 +1869,7 @@ class RecipeStore:
             connection.execute("""CREATE TABLE pack_deletions (
                 entry_origin TEXT NOT NULL, pack_id TEXT NOT NULL, pack_recipe_id TEXT NOT NULL,
                 source_digest TEXT NOT NULL, deletion_id TEXT NOT NULL,
-                PRIMARY KEY(entry_origin,pack_id,pack_recipe_id))""")
+                PRIMARY KEY(pack_id,pack_recipe_id))""")
             connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
         namespace = connection.execute(
             "SELECT value FROM metadata WHERE key='discovery_namespace'"
@@ -2429,7 +2442,8 @@ class RecipeStore:
         *,
         created: bool | None = None,
     ) -> dict[str, Any]:
-        result = _stored_recipe_document(row["document"])
+        legacy_labels: list[str] = []
+        result = _stored_recipe_document(row["document"], review_fields=legacy_labels)
         result.update({
             "recipe_digest": _hash(result),
             "id": row["id"], "revision": row["revision"], "status": row["status"],
@@ -2440,6 +2454,9 @@ class RecipeStore:
                 "library_id": "builtin", "recipe_id": row["id"], "version": str(row["revision"]),
             },
         })
+        if legacy_labels:
+            result["label_review"] = {"fields": sorted(set(legacy_labels)), "expected_revision": row["revision"],
+                                      "next": "Update this recipe at the indicated revision with corrected single-line labels."}
         favorite = cls._favorite_state(connection, row["id"])
         result.update({key: favorite[key] for key in ("library_id", "is_favorite", "favorite_revision")})
         result.update(cls._entry_metadata(connection, row["id"]))
@@ -4951,8 +4968,8 @@ class RecipeStore:
         try:
             with self._connection(restore=True) as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                if pack and connection.execute("SELECT 1 FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?",
-                                               (entry["entry_origin"], pack["pack_id"], pack["recipe_id"])).fetchone():
+                if pack and connection.execute("SELECT 1 FROM pack_deletions WHERE pack_id=? AND pack_recipe_id=?",
+                                               (pack["pack_id"], pack["recipe_id"])).fetchone():
                     return result("conflict", "previously_deleted_collection_entry")
                 current = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
                 history = connection.execute("SELECT revision,status,document,created_at FROM revisions WHERE recipe_id=? ORDER BY revision", (recipe_id,)).fetchall()
@@ -5130,8 +5147,8 @@ class RecipeStore:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                deleted = connection.execute("SELECT source_digest,deletion_id FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?",
-                                             (entry_origin, pack_id, pack_recipe_id)).fetchone()
+                deleted = connection.execute("SELECT source_digest,deletion_id FROM pack_deletions WHERE pack_id=? AND pack_recipe_id=?",
+                                             (pack_id, pack_recipe_id)).fetchone()
                 if deleted:
                     return {"outcome": "kept_deleted", "deletion_id": deleted["deletion_id"],
                             "source_matches": _hash(source_key(recipe)) == deleted["source_digest"]}
@@ -5737,10 +5754,10 @@ class RecipeStore:
             connection.execute("BEGIN IMMEDIATE")
             if connection.execute("SELECT 1 FROM recipe_entry_metadata WHERE pack_id=? AND pack_recipe_id=?", key[1:]).fetchone():
                 return "conflict"
-            prior = connection.execute("SELECT source_digest,deletion_id FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?", key).fetchone()
+            prior = connection.execute("SELECT entry_origin,source_digest,deletion_id FROM pack_deletions WHERE pack_id=? AND pack_recipe_id=?", key[1:]).fetchone()
             values = (deletion["source_digest"], deletion["deletion_id"])
             if prior:
-                return "unchanged" if tuple(prior) == values else "conflict"
+                return "unchanged" if tuple(prior) == (key[0], *values) else "conflict"
             connection.execute("INSERT INTO pack_deletions VALUES(?,?,?,?,?)", (*key, *values))
             return "created"
 

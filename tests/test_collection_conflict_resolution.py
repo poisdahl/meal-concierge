@@ -79,6 +79,12 @@ class CollectionResolutionTests(unittest.TestCase):
             result = apply_archive(archive, restored.path.parent, "synthetic", expected)
             self.assertEqual((result["status"], result["kept_deleted"]), ("complete", 1))
             identity = result["results"][0]["deletion_id"]
+            changed_origin = restored.import_pack_record(self.recipe, pack_id=self.pack_id, recipe_id="one",
+                                                          version="2", entry_origin="collection")
+            self.assertEqual((changed_origin["outcome"], changed_origin["deletion_id"]), ("kept_deleted", identity))
+            again = Path(temp) / "again.zip"
+            export_private_archive(again, restored)
+            self.assertEqual(restore_private_archive(again, restored)["deletions_unchanged"], 1)
             with self.assertRaises(RecipeError):
                 restored.allow_pack_reintroduction("wrong-pack", "one", identity)
             restored.allow_pack_reintroduction(self.pack_id, "one", identity)

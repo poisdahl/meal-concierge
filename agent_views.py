@@ -999,6 +999,8 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     view["original_portions"] = recipe.get("scaled_from_portions", recipe.get("portions"))
     view["source"] = _fields(recipe.get("source"), ("kind", "publisher", "title", "author", "url",
                                                    "external_id", "relationship", "original"))
+    if recipe.get("label_review"):
+        view["label_review"] = recipe["label_review"]
     view["source_provider"] = recipe.get("source_provider")
     view["rights"] = _fields(recipe.get("rights"), ("storage", "credit", "license", "license_url"))
     if "recipe_digest" not in view:

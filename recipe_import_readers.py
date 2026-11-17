@@ -882,7 +882,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
                              "marinade", checked, flags=re.IGNORECASE)
         if has_dependency(checked):
             raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
-        if re.search(r"\b(?:reserve|set aside|sett av|hold av)\s+(?:(?:some|the|half|litt|halve|av)\s+){0,4}marinad(?:e|en)\b", step, re.IGNORECASE):
+        if re.fullmatch(r"\s*(?:reserve|set aside|sett av|hold av)\s+(?:(?:some|the|half|litt|halve|av)\s+){0,4}marinad(?:e|en)[.!]?\s*", step, re.IGNORECASE):
             reserved_marinade = True
     note_excerpts = selected("notes", 100, optional=True)
     notes = "\n\n".join(excerpt(item, "note", maximum=MAX_TEXT)[0] for item in note_excerpts)

@@ -72,6 +72,37 @@ class RecipeLanguageTests(unittest.TestCase):
         recipe["translations"]["en"]["steps"] = ["Bring to a boil.\nSimmer."]
         self.assertEqual(normalize_recipe(recipe)["translations"]["en"]["steps"], ["Bring to a boil.\nSimmer."])
 
+    def test_legacy_multiline_labels_remain_retrievable_repairable_and_portable(self):
+        import recipes
+        from unittest.mock import patch
+        from recipe_portable import export_private_archive, restore_private_archive
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bank = RecipeStore(root / "bank/recipes.sqlite3", "synthetic")
+            old = bilingual()
+            old["name"] = "Soup\nfor two"
+            old["ingredients"][0]["item"] += "\nshredded"
+            old["translations"]["en"]["name"] += "\nfor two"
+            old["translations"]["en"]["source_text_digest"] = source_text_digest(old, legacy=True)
+            # The prior writer accepted bounded multiline labels, including translated labels.
+            with patch.object(recipes, "_single_line", recipes._bounded_text):
+                identity = bank.save(old)["id"]
+            with self.assertRaisesRegex(RecipeError, "single-line"):
+                bank.save(old)
+            stored = bank.get(identity)
+            self.assertEqual(stored["name"], old["name"])
+            self.assertEqual(stored["label_review"]["expected_revision"], 1)
+            self.assertIn("translation.name", stored["label_review"]["fields"])
+            self.assertEqual(bank.search()[0]["id"], identity)
+            archive = root / "private.zip"
+            export_private_archive(archive, bank)
+            restored = RecipeStore(root / "restored/recipes.sqlite3", "synthetic")
+            restore_private_archive(archive, restored)
+            self.assertEqual(restored.get(identity)["recipe_digest"], stored["recipe_digest"])
+            repaired = restored.update(identity, 1, bilingual())
+            self.assertNotIn("label_review", repaired)
+            self.assertEqual(restored.get(identity, 1)["name"], old["name"])
+
     def test_foreign_identity_and_unbound_legacy_translation_fall_back(self):
         recipe = bilingual()
         recipe['translations']['en']['ingredients'][0]['item'] = '1 kg pork'
