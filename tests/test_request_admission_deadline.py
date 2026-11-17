@@ -53,13 +53,17 @@ class RequestAdmissionTests(unittest.TestCase):
         self.assertEqual(sum(tool == 'manipulate_cart' for tool, _ in self.shop.calls), 1)
 
     def test_queued_menu_and_stock_writes_expire_before_their_inner_owner(self):
+        from test_meal_concierge_recipes import menu
         for operation, action in (('menu', 'clear'), ('menu', 'save'), ('shopping_list', 'record_stock')):
             with self.subTest(operation=operation, action=action):
                 result = {}
+                request = {'operation': operation, 'action': action}
+                if operation == 'menu' and action == 'save':
+                    request['menu'] = menu('2026-W40')
                 self.app.product_plan_lock.acquire()
                 try:
                     worker = threading.Thread(target=lambda: result.update(self.wire({
-                        'operation': operation, 'action': action,
+                        **request,
                         'request_not_after': time.monotonic() + .03})))
                     worker.start()
                     time.sleep(.08)
@@ -69,6 +73,7 @@ class RequestAdmissionTests(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
                 self.assertFalse(result['ok'], result)
                 self.assertIn('expired', result['error'])
+                self.assertIsNone(self.store.read()['menu'])
         self.assertFalse(self.shop.calls)
 
     def test_invalid_deadline_is_rejected_and_never_enters_application(self):
