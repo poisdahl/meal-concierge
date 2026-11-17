@@ -265,7 +265,9 @@ class EmailSender:
                 if bound.get("trigger") != "after_purchase" and (
                         not binding["unattended"] or not self.connections[binding["connection_id"]].get("unattended")):
                     raise ValueError("original sender is not available for unattended execution")
-                claimed = self.rpc("email", action="due", provider=target["provider"], order_id=target["order_id"], scheduler=request.get("scheduler"))
+                claimed = self.rpc("email", action="due", provider=target["provider"], order_id=target["order_id"],
+                                   scheduler=request.get("scheduler"), **({"catch_up_ref": request["catch_up_ref"],
+                                   "delivery_requested": request.get("delivery_requested")} if request.get("catch_up_ref") else {}))
                 if claimed.get("claim") is not True:
                     return claimed
                 record = {"target": target, "binding": binding, "token": claimed["claim_token"], "phase": "before_network"}
