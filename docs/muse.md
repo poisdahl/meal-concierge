@@ -414,9 +414,12 @@ Alternatively, explicitly select `--browser-action-mode native_approval` on
 the runner below. This admits **one native task delegation** while the original
 core confirmation is valid. Fresh user authorization of the complete purchase
 review then supplies final financial authority; the old confirmation is an
-admission deadline, not a permit for a delayed click. Follow Muse's installed
-`~/docs/chat/payments-and-purchases.md`: the user approves payment only in the
-host's native payment approval, through that same admitted browser task.
+admission deadline. Enable this adapter mode only when the installed host's
+`~/docs/chat/payments-and-purchases.md` supports native payment approval for
+the merchant-stored card and the producer can bind that approval to the same
+admitted browser task. If either capability is unavailable, leave checkout
+with the user. Muse describes its human approval prompt for cards on file in
+[its safety documentation](https://muse.ai/blog/security-and-safety-for-ai-agents-our-approach-with-muse).
 Do not reproduce the payment sheet as another chat confirmation or treat a
 conversational answer as payment approval. For a merchant-stored card, use only
 the card approved there; do not use `wallet_payment`. Host approval limits do
