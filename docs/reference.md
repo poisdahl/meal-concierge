@@ -1356,6 +1356,8 @@ TheMealDB uses its official V1 API; a private key can be supplied only through
 attribution, upstream recipe links where supplied, and separate image credits.
 Copyright and trademark notices are retained; API resale requires separate
 permission under the [TheMealDB Terms of Use](https://www.themealdb.com/terms_of_use.php).
+Wikibooks queries filter a bounded category-title browse; they do not translate
+queries or search the complete recipe text. A blank query browses titles.
 Wikibooks Cookbook recipes pass a strict ingredients-plus-procedure gate and
 are stored with CC BY-SA 4.0 attribution, the exact permanent revision URL, a
 content hash and a change statement. Images are never copied. Selected

@@ -284,6 +284,10 @@ class WikibooksSource:
         for member in members:
             title = _text(member.get("title") if isinstance(member, Mapping) else None, maximum=300)
             if title.startswith("Cookbook:") and title not in titles:
+                # cmstartsortkeyprefix is only a lower bound, not a search
+                # filter: a query for "laks" must not return Lamb or Lasagne.
+                if query and query.casefold() not in title.removeprefix("Cookbook:").replace("_", " ").casefold():
+                    continue
                 titles.append(title)
         titles = titles[:min(10, max(4, limit * 2))]
         results = []

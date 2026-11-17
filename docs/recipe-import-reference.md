@@ -20,6 +20,10 @@ recipes. Text fallback returns the bounded page; the host submits `interpretatio
 with page-1 quotes on a second URL read, and the service verifies those quotes
 against the newly fetched text. Caller replacement source text is rejected.
 Native reads use the exact configured `library_recipe_ref`.
+Quote matching accepts NFC-equivalent letters and ignores soft hyphens and
+zero-width spaces inserted by page layout; the supplied source pages still
+determine the import's content digest. Steps and combined notes are bounded to
+4,000 characters, matching stored recipes.
 
 The result contains `recipe`, `recipe_digest`, `discovery_ref`, `import_report`,
 readiness and shopping requirements. Unknown amounts and estimates remain
@@ -42,6 +46,8 @@ update using its `recipe_id`, `expected_revision`, corrected `discovery_ref` and
 a stable idempotency key. The service checks that the frozen discovery belongs
 to that saved source identity and retains its trusted source evidence. Do not
 resend the source recipe as caller-authored JSON to assert new source evidence.
+If you request a separate save after that update, use a new save key: replaying
+the earlier conflict's key returns that original conflict receipt.
 
 Native snapshots retain their exact source revision in existing
 `external_snapshot` metadata. Ordinary get/search never fetches image URLs.
