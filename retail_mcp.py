@@ -26,6 +26,10 @@ from core import HouseholdError, cart_summary, validate_delivery_slot
 from product_observations import _mathem_ore, normalize_retail_product_search, normalize_retail_product_search_batch
 
 
+class RetailPreDispatchError(HouseholdError):
+    """A local stop before entering the retailer transport for this call."""
+
+
 ODA_ENDPOINT = "https://oda.com/mcp"
 SERVER_NAME = "oda-weekly"
 MATHEM_ENDPOINT = "https://www.mathem.se/mcp"
@@ -284,7 +288,7 @@ class RetailMcpClient:
             raise HouseholdError(f"{self.label} tool is missing")
         timeout = 90.0 if deadline is None else deadline - time.monotonic()
         if timeout <= 0:
-            raise HouseholdError(f"{self.label} operation deadline reached")
+            raise RetailPreDispatchError(f"{self.label} operation deadline reached")
         provider_arguments = dict(arguments)
         translated_query = (
             self.provider == "mathem" and tool == "product_search"
@@ -304,7 +308,7 @@ class RetailMcpClient:
 
     def _run(self, tool: str | None, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
         if not self.token_directory.is_dir():
-            raise HouseholdError(f"{self.label} login is required")
+            raise RetailPreDispatchError(f"{self.label} login is required")
         with self._lock():
             try:
                 return asyncio.run(self._run_async(tool, arguments, timeout))
@@ -404,7 +408,7 @@ class RetailMcpClient:
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as exc:
-                raise HouseholdError(f"another {self.label} operation is active") from exc
+                raise RetailPreDispatchError(f"another {self.label} operation is active") from exc
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)

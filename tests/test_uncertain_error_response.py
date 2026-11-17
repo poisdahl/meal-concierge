@@ -14,6 +14,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 from core import HouseholdError, StateStore
 from service import Application, Server
 from test_meal_concierge import CONFIG, FakeBrowser, MutableFakeOda
+from retail_mcp import RetailMcpClient, RetailPreDispatchError
 import cli
 import mcp_server
 import rpc_client
@@ -69,6 +70,35 @@ class UncertainErrorResponseTests(unittest.TestCase):
         result = self.wire({'operation': 'cart', 'action': 'change', 'operations': []})
         self.assertFalse(result['ok'])
         self.assertNotIn('outcome', result)
+
+    def test_proven_local_predispatch_stop_does_not_leave_a_cart_journal(self):
+        original = self.shop.call
+        def stopped(tool, arguments, **kwargs):
+            if tool == 'manipulate_cart':
+                raise RetailPreDispatchError('another synthetic operation is active')
+            return original(tool, arguments, **kwargs)
+        self.shop.call = stopped
+        request = {'operation': 'cart', 'action': 'change',
+                   'operations': [{'product_id': 10, 'quantity': 1}]}
+        failed = self.wire(request)
+        self.assertFalse(failed['ok'])
+        self.assertNotIn('outcome', failed)
+        self.assertFalse(self.store.read().get('pending_cart_change'))
+        self.shop.call = original
+        self.assertTrue(self.wire(request)['ok'])
+
+    def test_local_transport_errors_are_typed_before_entering_async_transport(self):
+        client = RetailMcpClient.__new__(RetailMcpClient)
+        client.label = 'Synthetic'
+        client.provider = 'oda'
+        client.token_directory = Path(self.temp.name) / 'missing'
+        with mock.patch.object(client, '_run_async', side_effect=AssertionError('transport entered')):
+            with self.assertRaises(RetailPreDispatchError):
+                client._run('manipulate_cart', {}, 10)
+            client.token_directory.mkdir()
+            with mock.patch('retail_mcp.fcntl.flock', side_effect=[BlockingIOError(), None]):
+                with self.assertRaises(RetailPreDispatchError):
+                    client._run('manipulate_cart', {}, 10)
 
     def test_checkout_and_cancellation_journals_preserve_outcome(self):
         # Exercise Application's common exception boundary without inventing
