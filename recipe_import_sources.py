@@ -320,8 +320,8 @@ def _firecrawl_page(url: str) -> bytes:
 def fetch_public_webpage(url: str, *, fetch_method: str = "direct") -> dict[str, Any]:
     """Fetch once: structured recipes or bounded text requiring host interpretation.
 
-    Embedded contexts, images and links stay inert. Malformed JSON-LD is an
-    explicit failure, not a reason to silently switch extraction methods.
+    Embedded contexts, images and links stay inert. Malformed JSON-LD returns an
+    explicit structured_error with visible text requiring host interpretation.
     """
     if fetch_method == "firecrawl":
         raw = _firecrawl_page(url)
@@ -332,7 +332,7 @@ def fetch_public_webpage(url: str, *, fetch_method: str = "direct") -> dict[str,
     else:
         raise RecipeImportSourceError("fetch_method must be direct or firecrawl")
     result = read_webpage(raw, source_url=url)
-    result["recipes"] = [_source_result(record, {"kind": "web", "url": url})
+    result["recipes"] = [_source_result(record, {"kind": "web", "url": url, "source_sha256": result["source_sha256"]})
                          for record in result["recipes"]]
     result["fetch_method"] = fetch_method
     return result

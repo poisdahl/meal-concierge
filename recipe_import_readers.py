@@ -194,11 +194,17 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
     if size > MAX_RECORD_BYTES:
         raise RecipeImportReaderError("source recipe is too large")
     unsupported = set(raw) - _SUPPORTED_FIELDS
+    tolerant_metadata = kind == "web" and allow_incomplete
     name = _text(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
     notes = []
     comments = raw.get("comment") or []
+    if tolerant_metadata and isinstance(comments, dict):
+        comments = [comments]
     if not isinstance(comments, list) or len(comments) > 100:
-        raise RecipeImportReaderError("comment must be a bounded list")
+        if not tolerant_metadata:
+            raise RecipeImportReaderError("comment must be a bounded list")
+        unsupported.add("comment")
+        comments = []
     for comment in comments:
         if isinstance(comment, dict) and comment.get("name") == "Author Notes" and _type(comment.get("@type"), "Comment"):
             notes.append(_text(comment.get("text"), "author notes", MAX_TEXT))
@@ -222,7 +228,15 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
         if isinstance(item, dict):
             unsupported.update(f"image.{key}" for key in set(item) - {"@type", "url", "contentUrl"})
             item = item.get("contentUrl") or item.get("url")
-        url = _url(item, "image")
+        try:
+            url = _url(item, "image")
+        except RecipeImportReaderError:
+            if not tolerant_metadata:
+                raise
+            # Media is optional and inert. Do not echo or retain signed,
+            # credential-bearing or relative URLs as managed image candidates.
+            unsupported.add("image")
+            continue
         if not url:
             unsupported.add("image")
         elif url not in image_candidates:
@@ -234,24 +248,44 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
         raise RecipeImportReaderError("recipeCategory must be a bounded text list")
     original_url = _url(raw.get("isBasedOn"), "isBasedOn")
     credit = _text(raw.get("creditText"), "creditText", 300)
+    ingredient_input = raw.get("recipeIngredient")
+    if tolerant_metadata and isinstance(ingredient_input, list):
+        if len(ingredient_input) > 200:
+            raise RecipeImportReaderError("recipeIngredient must contain at most 200 text entries")
+        without_empty = [line for line in ingredient_input if not isinstance(line, str) or line.strip()]
+        if without_empty != ingredient_input:
+            unsupported.add("recipeIngredient.empty")
+        ingredient_input = without_empty
+    identifier = raw.get("identifier")
+    if tolerant_metadata and type(identifier) is int:
+        identifier = str(identifier)  # An exact numeric ID has no culinary units to infer.
+    elif tolerant_metadata and identifier is not None and not isinstance(identifier, str):
+        unsupported.add("identifier")
+        identifier = None
+    times = {}
+    for key, field in (("prep", "prepTime"), ("cook", "cookTime"), ("total", "totalTime")):
+        if raw.get(field):
+            if tolerant_metadata and not isinstance(raw[field], str):
+                unsupported.add(field)  # A bare number cannot establish minutes or seconds.
+                continue
+            times[key] = _text(raw[field], field, 1000)
     extracted = {
         "name": name,
         "language": _text(raw.get("inLanguage"), "inLanguage", 20) or "und",
-        "ingredients": ([] if allow_incomplete and raw.get("recipeIngredient") in (None, "", []) else
-                        _strings(raw.get("recipeIngredient"), "recipeIngredient", 500, 200)),
+        "ingredients": ([] if allow_incomplete and ingredient_input in (None, "", []) else
+                        _strings(ingredient_input, "recipeIngredient", 500, 200)),
         "steps": ([] if allow_incomplete and raw.get("recipeInstructions") in (None, "", []) else
                   _instructions(raw.get("recipeInstructions"), unsupported)),
         "yield_text": _web_yield_text(raw.get("recipeYield")),
         "description": _text(raw.get("description"), "description", MAX_TEXT),
         "notes": _text("\n\n".join(notes), "author notes", MAX_TEXT),
         "tags": [_text(tag, "recipeCategory", 80, required=True) for tag in tags],
-        "times": {key: _text(raw[field], field, 1000) for key, field in
-                  (("prep", "prepTime"), ("cook", "cookTime"), ("total", "totalTime")) if raw.get(field)},
+        "times": times,
         "credit": credit,
         "source": {
             "kind": kind, "publisher": "RecipeSage" if kind == "recipesage" else None,
             "title": name, "author": _text(author, "author", 200) or None,
-            "url": source_url, "external_id": _text(raw.get("identifier"), "identifier", 300) or None,
+            "url": source_url, "external_id": _text(identifier, "identifier", 300) or None,
             "relationship": "user_supplied",
             "original": {"url": original_url, "publisher": credit or None},
         },
@@ -462,12 +496,21 @@ def _decoded_web_prose(value: str) -> str:
 def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
     """Prefer structured recipes, otherwise expose bounded text for host interpretation.
 
-    Malformed structured data fails explicitly; it is not silently downgraded to
-    text. Text has no inferred recipe fields or authority and must be presented
-    as untrusted source content to the calling agent.
+    A structured failure is explicit in the text result. Text has no inferred
+    recipe fields or authority and requires a separate host interpretation.
     """
     raw = _input_text(data, MAX_WEBPAGE_BYTES)
-    recipes = read_webpage_jsonld(raw, source_url=source_url, allow_empty=True, allow_incomplete=True)
+    source_bytes = data.encode("utf-8") if isinstance(data, str) else data
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    structured_error = None
+    try:
+        recipes = read_webpage_jsonld(raw, source_url=source_url, allow_empty=True, allow_incomplete=True)
+    except RecipeImportReaderError:
+        # Do not guess that a malformed script was unrelated, or promote a
+        # partial extraction to a complete recipe. Only visible text survives.
+        recipes = []
+        structured_error = {"code": "structured_recipe_unavailable",
+                            "message": "Structured recipe data could not be read completely; interpret the bounded visible text explicitly."}
     # Classify each advertised record independently. One incomplete sibling
     # must not erase usable structured recipes, and a physical yield remains
     # valid structured evidence even though person portions stay unresolved.
@@ -478,7 +521,7 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
         target.append(record)
     if complete:
         return {"mode": "structured", "recipes": complete, "incomplete_recipes": incomplete,
-                "text": None, "requires_interpretation": False}
+                "source_sha256": source_sha256, "text": None, "requires_interpretation": False}
     parser = _WebpageText(main_only=True)
     parser.feed(raw)
     parser.close()
@@ -508,16 +551,22 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
         if not retained:
             raise RecipeImportReaderError("webpage has no readable recipe text; supply the recipe text or a readable attachment")
         return _text("\n".join(retained), "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
-    record_texts = [{"record_index": index, "text": bounded_text(record_lines(record))}
-                    for index, record in enumerate(incomplete)]
     if len(incomplete) > 1:
-        return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete,
-                "record_texts": record_texts, "text": None, "source_url": _url(source_url, "source_url"),
-                "requires_record_selection": True, "requires_interpretation": True}
-    text = bounded_text([*(record_lines(incomplete[0]) if incomplete else []), *visible_lines])
+        record_values = [record_lines(record) for record in incomplete]
+        if all(record_values):
+            record_texts = [{"record_index": index, "text": bounded_text(lines)}
+                            for index, lines in enumerate(record_values)]
+            return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete,
+                    "record_texts": record_texts, "text": None, "source_url": _url(source_url, "source_url"),
+                    "requires_record_selection": True, "requires_interpretation": True,
+                    "source_sha256": source_sha256}
+        structured_error = {"code": "incomplete_recipe_selection",
+                            "message": "Incomplete structured entries cannot be separated reliably; explicitly interpret the selected visible recipe."}
+    text = bounded_text([*(record_lines(incomplete[0]) if len(incomplete) == 1 else []), *visible_lines])
     return {"mode": "text", "recipes": [], "incomplete_recipes": incomplete, "text": text,
             "source_url": _url(source_url, "source_url"),
-            "requires_interpretation": True}
+            "requires_interpretation": True, "source_sha256": source_sha256,
+            **({"structured_error": structured_error} if structured_error else {})}
 
 
 def source_candidate(record: dict[str, Any]) -> dict[str, Any]:

@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
@@ -115,7 +115,16 @@ class RecipeOperations:
                     result["incomplete_recipes"] = deepcopy(page.get("incomplete_recipes", []))
                     context = {**result["source_context"], "kind": "web", "url": verified_url,
                                "source_mode": "verified_page_text"}
-                    if page.get("incomplete_recipes"):
+                    if page.get("source_sha256"):
+                        context["source_sha256"] = page["source_sha256"]
+                        result["candidate"]["external_snapshot"] = {
+                            "fetched_at": datetime.now(timezone.utc).isoformat(),
+                            "content_hash": page["source_sha256"], "source_revision_id": None,
+                            "permanent_url": verified_url,
+                            "changes": "Host interpreted the verified page's visible text; structured data was not used as recipe evidence."}
+                    if page.get("structured_error"):
+                        result["structured_error"] = deepcopy(page["structured_error"])
+                    if page.get("incomplete_recipes") and not page.get("structured_error"):
                         context["record_index"] = index
                     result["source_context"] = context
                     identity = self._import_identity("public", "web:text:record", [verified_url, index]) if records else self._import_identity("public", "web:text", verified_url)
@@ -169,7 +178,7 @@ class RecipeOperations:
                         "import_report": {"image_status": "omitted", "content_status": "link_only"}}
             scaled = scale_recipe(recipe)
             ready = scaled["readiness"]["scaling_ready"] and all(item.get("scalable") for item in scaled["shopping_requirements"])
-            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes", "encoded_source_text") if key in result}
+            report = {key: deepcopy(result[key]) for key in ("source_context", "unsupported_fields", "image_status", "image_candidates", "source_annotations", "page_issues", "source_excerpts", "source_recipe_count", "incomplete_recipes", "encoded_source_text", "structured_error") if key in result}
             return {**snapshot, "import_report": report, "readiness": scaled["readiness"],
                     "shopping_requirements": scaled["shopping_requirements"], "suggested_status": "active" if ready else "draft",
                     "personal_entry_created": False}

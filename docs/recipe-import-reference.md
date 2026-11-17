@@ -72,7 +72,15 @@ explicitly. These offline readers parse supplied bytes; the service read and hos
 workflow use the separate boundaries described below.
 
 Both readers return an extraction report with original fields, inert image
-candidates and unsupported fields. `source_candidate` then uses the shared
+candidates and unsupported fields. The public webpage preview tolerates empty
+ingredient editor strings and a single comment object. It omits
+invalid/relative/signed optional image URLs and untyped numeric times with an
+`unsupported_fields` entry; it never fetches those URLs or guesses time units.
+Integer source IDs remain exact strings. Missing method text still requires
+host interpretation rather than promoting a step heading to a complete
+instruction.
+
+`source_candidate` uses the shared
 schema-2 ingredient/yield parsers. For these household imports the ingredient
 parser also reads a metric unit written against its number (`600g carrots`),
 and a yield naming persons (`4 personer`) establishes person servings. A bare
@@ -128,7 +136,13 @@ One unauthenticated HTTPS GET returns the shared `read_webpage` envelope:
 `{mode: structured|text, recipes: [...], text, requires_interpretation, ...}`.
 Every structured recipe has the offline extraction fields plus `candidate`
 (schema 2) and `source_context`. A text fallback requires the host agent's
-interpretation. Invalid JSON-LD fails explicitly. No embedded URL is fetched.
+interpretation. If structured extraction fails, the result includes an explicit
+`structured_error`, no structured recipe candidates, and bounded visible text
+for a separate host interpretation. It never treats malformed data as an absent
+recipe or silently saves a partial extraction. The exact fetched bytes are bound
+by `source_sha256`; a host-interpreted preview retains that hash in its frozen
+`external_snapshot`. If visible recipe text is unavailable, supply text or a
+readable attachment. No embedded URL is fetched.
 Redirects are refused, not followed. When the same site moved the page to
 another HTTPS address (for example its `www` host), the error names that
 address so the caller can request it explicitly.
@@ -302,8 +316,9 @@ the canonical image URL/attribution contract.
 The plain HTML fallback preserves paragraph/list/table-cell separation and
 contiguous inline text. It ignores script/style/template and explicitly hidden
 content, supports common omitted head/paragraph/list/table end tags, limits
-nesting to 128 elements and output to 64 KiB, and rejects malformed structured
-JSON-LD instead of silently falling back. It is a text extractor, not a browser
+nesting to 128 elements and output to 64 KiB. Malformed structured JSON-LD is
+reported as `structured_error` when visible text is offered for interpretation.
+The strict offline JSON-LD reader still rejects it. It is a text extractor, not a browser
 renderer: CSS layout, external resources and scripts are not interpreted.
 The host agent must still identify the recipe and report ambiguity or missing
 fields before the shared import/save workflow.
