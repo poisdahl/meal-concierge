@@ -26,6 +26,7 @@ from pathlib import Path
 import re
 import stat
 from typing import Any
+import unicodedata
 from urllib.parse import parse_qsl, urlsplit
 import zipfile
 import zlib
@@ -36,7 +37,7 @@ MAX_WEBPAGE_BYTES = 8 * 1024 * 1024
 MAX_RECORD_BYTES = 1024 * 1024
 MAX_RECORDS = 10_000
 MAX_JSONLD_SCRIPTS = 64
-MAX_TEXT = 8_000
+MAX_TEXT = 4_000  # Match the stored recipe step/notes boundary.
 MAX_MEALIE_COVER_BYTES = 12 * 1024 * 1024
 _CREDENTIAL_KEYS = {
     "access_token", "api_key", "apikey", "authorization", "auth", "token",
@@ -504,6 +505,8 @@ def read_webpage(data: bytes | str, *, source_url: str) -> dict[str, Any]:
                 break
             retained.append(line)
             size += encoded
+        if not retained:
+            raise RecipeImportReaderError("webpage has no readable recipe text; supply the recipe text or a readable attachment")
         return _text("\n".join(retained), "webpage text", MAX_WEBPAGE_TEXT_BYTES, required=True)
     record_texts = [{"record_index": index, "text": bounded_text(record_lines(record))}
                     for index, record in enumerate(incomplete)]
@@ -697,9 +700,15 @@ def read_transcript(value: Any) -> dict[str, Any]:
                 or type(item.get("page")) is not int or item["page"] not in page_text):
             raise RecipeImportReaderError(f"{field} requires an exact transcript page and quote")
         quote = _text(item.get("quote"), field + " quote", maximum, required=True)
-        if quote not in page_text[item["page"]]:
+        # Canonically equivalent letters and invisible line-wrap characters
+        # do not change the quote. Retain the supplied pages for source hashing;
+        # only the comparison and numeric-boundary check use this readable form.
+        def comparable(text):
+            return unicodedata.normalize("NFC", text.replace("\u00ad", "").replace("\u200b", ""))
+        readable_page, readable_quote = comparable(page_text[item["page"]]), comparable(quote)
+        if not readable_quote or readable_quote not in readable_page:
             raise RecipeImportReaderError(f"{field} quote is absent from its supplied page")
-        if not _whole_quote(page_text[item["page"]], quote):
+        if not _whole_quote(readable_page, readable_quote):
             raise RecipeImportReaderError(f"{field} quote starts or ends inside a number or word on its supplied page")
         return quote, f"Page {item['page']}: {quote}"
 
