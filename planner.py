@@ -651,7 +651,7 @@ def _leafy_week(selected: tuple[Mapping[str, Any], ...], profile: Mapping[str, A
     assessments = []
     for candidate in selected:
         components = candidate.get("leafy_components") or [candidate]
-        rows = [_leafy_dinner(component) for component in components]
+        rows = [component.get("_planning_leafy") or _leafy_dinner(component) for component in components]
         grams = sum(row.get("listed_grams_per_serving") or 0 for component, row in zip(components, rows)
                     if not component.get("partial_coverage") and
                     (row.get("assessment") == "substantial" or row.get("source") == "legacy_heuristic"))
@@ -1025,7 +1025,8 @@ def _plan_reasons(
     for candidate in selected:
         identities = {
             (identity, unit)
-            for identity, unit, excluded in _ingredient_identities(candidate["recipe"])
+            for identity, unit, excluded in (candidate["_planning_ingredients"] if "_planning_ingredients" in candidate
+                                              else _ingredient_identities(candidate["recipe"]))
             if not excluded and unit is not None
         }
         for identity, unit in identities:
@@ -1395,6 +1396,11 @@ def plan_week(
                 "status": "fail",
                 "detail": {"same_as_reference_key": ordered[0]["reference_key"]},
             })
+    # These facts depend on one frozen candidate, never on its assigned date or
+    # the selected order. Keep them out of canonical input and public output.
+    for item in prepared:
+        item["_planning_ingredients"] = tuple(_ingredient_identities(item["recipe"]))
+        item["_planning_leafy"] = _leafy_dinner(item)
     if not agent_mode:
         prepared.sort(key=lambda item: item["reference_key"])
     unknown_override_keys = set(checked["cooldown_overrides"]).difference(
@@ -1582,6 +1588,7 @@ def plan_week(
 
     ranked: list[dict[str, Any]] = []
     strict_unknowns: dict[str, dict[str, Any]] = {}
+    strict_statuses = {}
     strict_failures = 0
     for selected in candidate_sequences:
         if len({item["recipe_key"] for item in selected}) != count:
@@ -1592,23 +1599,27 @@ def plan_week(
             continue
         if layout and any(s['batch'] and c.get('supplied_facts', {}).get('batch_guidance', {}).get('suitability') == 'unsuitable' for c, s in zip(selected, layout['sources'])):
             continue
-        evaluated = _eating_candidates(selected, layout)
-        strict = _strict_evaluation(evaluated, checked["strict_targets"], profile)
-        if strict["status"] == "unknown":
+        set_key = tuple(sorted(item["reference_key"] for item in selected))
+        strict = None
+        strict_status = strict_statuses.get(set_key) if not layout else None
+        if strict_status is None:
+            strict = _strict_evaluation(_eating_candidates(selected, layout), checked["strict_targets"], profile)
+            strict_status = strict["status"]
+            if not layout and strict_status in {"pass", "fail"}:
+                strict_statuses[set_key] = strict_status
+        if strict_status == "unknown":
             for item in strict["results"]:
                 if item["status"] == "unknown":
                     strict_unknowns.setdefault(canonical(item), item)
             continue
-        if strict["status"] == "fail":
+        if strict_status == "fail":
             strict_failures += 1
             continue
         tie_break = tuple(item["reference_key"] for item in selected)
         ranked.append({
             "selected": selected,
             "strict": strict,
-            "total_score": sum(
-                reason["weight"] for reason in _plan_reasons(selected, profile, layout)
-            ) + sum(
+            "total_score": sum(reason["weight"] for reason in _plan_reasons(selected, profile, layout)) + sum(
                 slot_scores[(item["reference_key"], index)]
                 for index, item in enumerate(selected)
             ),
@@ -1630,9 +1641,13 @@ def plan_week(
         return {**base_result, "status": status, "issues": issues, "selections": []}
     selections = []
     for rank in ranked:
+        # Only status is order independent. Rebuild winner diagnostics in their
+        # actual order, including active-minute values and leafy assessments.
+        strict = rank["strict"] or _strict_evaluation(
+            _eating_candidates(rank["selected"], layout), checked["strict_targets"], profile)
         selection = _selection(
             rank["selected"], source_dates, profile, input_digest, scope,
-            rank["strict"], checked["portions"], recurring=layout,
+            strict, checked["portions"], recurring=layout,
         )
         if (
             selection["total_score"] != rank["total_score"]
