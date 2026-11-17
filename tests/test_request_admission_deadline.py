@@ -37,14 +37,16 @@ class RequestAdmissionTests(unittest.TestCase):
 
     def test_started_write_finishes_readback_after_admission_deadline(self):
         original = self.shop.call
+        clock = [100.0]
         def slow(tool, arguments, **kwargs):
             if tool == 'manipulate_cart':
-                time.sleep(.08)
+                clock[0] = 1000.0
             return original(tool, arguments, **kwargs)
         self.shop.call = slow
-        result = self.wire({'operation': 'cart', 'action': 'change',
-                            'operations': [{'product_id': 10, 'quantity': 1}],
-                            'request_not_after': time.monotonic() + .03})
+        with mock.patch('service.time.monotonic', side_effect=lambda: clock[0]):
+            result = self.wire({'operation': 'cart', 'action': 'change',
+                                'operations': [{'product_id': 10, 'quantity': 1}],
+                                'request_not_after': 200.0})
         self.assertTrue(result['ok'], result)
         self.assertFalse(self.store.read().get('pending_cart_change'))
         self.assertEqual(sum(tool == 'manipulate_cart' for tool, _ in self.shop.calls), 1)
