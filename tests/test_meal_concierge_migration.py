@@ -512,8 +512,10 @@ class NativeRetirementTests(unittest.TestCase):
                 self.assertNotEqual(saved['portions'], 999)
                 self.assertIsNone(saved['source_provider'])
                 self.assertEqual(saved['schema_version'], 2)
+                self.assertTrue(saved['external_snapshot']['fetched_at'].startswith('20'))
                 self.assertEqual(self.native, before)
                 frozen = migration.Migration(self.app).load(plan['plan_id'])['items'][0]['frozen']
+                self.assertEqual(saved['external_snapshot']['fetched_at'], frozen['source_fetched_at'])
                 identity = frozen['source_context']['identity']
                 self.assertTrue(identity.startswith('import:v1:'))
                 self.assertEqual(self.app.recipes.source_entry(identity)['id'], saved['id'])
