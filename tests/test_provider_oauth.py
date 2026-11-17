@@ -434,7 +434,7 @@ class ProviderOAuthTests(unittest.TestCase):
             processes.append(second)
             second.start()
             blocked = output.get(timeout=15)
-            self.assertEqual(blocked[0:2], ("error", "HouseholdError"))
+            self.assertEqual(blocked[0:2], ("error", "RetailPreDispatchError"))
             self.assertIn("another Oda operation is active", blocked[2])
             self.assertEqual(blocked[3], 0)
             release.set()
