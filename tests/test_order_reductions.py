@@ -139,6 +139,22 @@ class OrderRemovalTests(unittest.TestCase):
         self.assertEqual(result['credit_ore'], 8960)
         self.assertEqual(self.browser.source['eligibility']['total_uncredited_quantity'], 2)
 
+    def test_disappearing_eligibility_row_is_not_proof_of_zero_target(self):
+        prepared = self.prepare(0)
+        self.browser.apply_click = False
+        confirmation_id = prepared["confirmation_id"]
+        self.assertTrue(self.call("remove_confirm", confirmation_id=confirmation_id)["reconciliation_required"])
+        eligibility = self.browser.source["eligibility"]
+        rows = eligibility["items_groups"][0]["items"]
+        missing = rows.pop(0)
+        eligibility["total_uncredited_quantity"] -= missing["uncredited_quantity"]
+        unresolved = self.call("remove_reconcile", confirmation_id=confirmation_id)
+        self.assertTrue(unresolved["reconciliation_required"])
+        self.assertEqual(self.store.read()["order_change"]["status"], "uncertain")
+        rows.append({**missing, "uncredited_quantity": 0})
+        self.assertTrue(self.call("remove_reconcile", confirmation_id=confirmation_id)["removed"])
+        self.assertEqual(self.browser.final_clicks, 1)
+
     def test_uncertain_click_is_reconciled_without_dispatching_again(self):
         prepared = self.prepare(1)
         self.browser.fail_after_click = True
