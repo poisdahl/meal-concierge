@@ -4912,6 +4912,8 @@ class PlanningOperations:
         for batch_index, batch in enumerate(self._meny_cart_batches(operations)):
             try:
                 before = self._cart_provider_call("get_cart", {}, deadline=deadline)
+                if not isinstance(before, Mapping):
+                    raise HouseholdError("MENY returned no cart for the managed batch review")
                 before_live, _names = self._cart_lines(cart_summary(before))
             except (HouseholdError, OSError) as exc:
                 if batch_index:
