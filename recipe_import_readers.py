@@ -610,7 +610,28 @@ def _whole_quote(text: str, quote: str) -> bool:
         if right in joins and number(left) and number(after[1:2]):
             return True
         # A multiplier: "2 x 400 g" is not 400 g.
-        return number(right) and re.search(r"\d\s?[x×]\s?$", before) is not None
+        if number(right):
+            # OCR and pasted text may retain several horizontal spaces around
+            # grouped digits, fraction/range marks or multiplication signs.
+            # Do not cross lines or mistake a list marker ("1. 2 ss") for a decimal.
+            prefix = text[:position]
+            spaces = " \t\u00a0\u2009\u202f"
+            trimmed = prefix.rstrip(spaces)
+            if trimmed != prefix and trimmed and number(trimmed[-1]):
+                return True
+            if trimmed[-1:] in {",", "/", "⁄", "-", "–", "—", "x", "×"}:
+                previous = trimmed[:-1].rstrip(spaces)
+                if previous and number(previous[-1]):
+                    return True
+        if number(left) and right in " \t\u00a0\u2009\u202f":
+            suffix = text[position:].lstrip(" \t\u00a0\u2009\u202f")
+            if suffix and number(suffix[0]):
+                return True
+            if suffix[:1] in {",", "/", "⁄", "-", "–", "—", "x", "×"}:
+                following = suffix[1:].lstrip(" \t\u00a0\u2009\u202f")
+                if following and number(following[0]):
+                    return True
+        return False
 
     start, tried = text.find(quote), 0
     while start != -1 and tried < 256:

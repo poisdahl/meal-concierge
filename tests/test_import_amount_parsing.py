@@ -71,7 +71,8 @@ class UnresolvedLineTests(unittest.TestCase):
                 self.assertIsNone(row["unit"])
                 self.assertEqual(row["item"], text)
         for text in ("1 dl pluss 2 ss sukker", "1 dl & 2 ss sukker", "1 dl samt 2 ss sukker",
-                     "250 g til 300 g sopp", "250 g - 300 g sopp", "250 g – 300 g sopp", "1 kg 200 g mel"):
+                     "250 g til 300 g sopp", "250 g - 300 g sopp", "250 g – 300 g sopp", "1 kg 200 g mel",
+                     "1 dl / 2 dl melk", "1 dl eller 2 dl melk", "1 dl or 2 dl milk", "1 dl | 2 dl milk"):
             with self.subTest(text=text):
                 self.assertIsNone(source_ingredient(text, language="nb")["quantity"])
         for text in ("250g - 300g sopp", "250g til 300g sopp", "1kg 200g mel"):
@@ -170,6 +171,10 @@ class WholeQuoteTests(unittest.TestCase):
                  ("2 ss sukker", "1-2 ss sukker"), ("2 ss sukker", "1–2 ss sukker"),
                  ("2 dl fløte", "1,5-2 dl fløte"), ("400 g tomater", "2 x 400 g tomater"),
                  ("400 g tomater", "2x400 g tomater"), ("4 porsjoner", "2-4 porsjoner"), ("1", "1 500 g"))
+        cases += (("500 g poteter", "1  500 g poteter"), ("500 g poteter", "1\t500 g poteter"),
+                  ("2 ss sukker", "1 / 2 ss sukker"), ("2 ss sukker", "1  -  2 ss sukker"),
+                  ("400 g tomater", "2  x  400 g tomater"), ("1", "1  500 g"),
+                  ("1", "1  / 2 ss"), ("2", "2  x  400 g tomater"))
         for quote, text in cases:
             with self.subTest(quote=quote, text=text):
                 self.assertFalse(_whole_quote("Suppe\n" + text + "\nKok alt.", quote))
