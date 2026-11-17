@@ -3,9 +3,11 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import StateStore
+import planner
 from planner import SAVED_MINIMUM_TARGETS, saved_menu_minimum_evaluation
 from service import Application
 from test_meal_concierge_planner import CONFIG, NoProviderCalls, recipe, explicit_facts
@@ -84,6 +86,27 @@ class RankedMinimumTests(unittest.TestCase):
         self.assertEqual(planned["status"], "no_plan")
         self.assertNotIn("save_ref", planned)
         self.assertIn("minimum_fish_portions", planned["request"]["strict_targets"])
+
+    def test_permutation_search_reuses_candidate_facts_and_keeps_winner_diagnostics_in_order(self):
+        candidates = self.candidates(4)
+        for index, candidate in enumerate(candidates):
+            candidate["facts"] = explicit_facts(active_minutes=15 + index)
+        with self.store.locked() as state:
+            state["profile"]["meals"].update(dinner_days=3, dishes=3)
+            state["profile"]["diet"]["leafy_green_days"] = [0, 3]
+        with patch("planner._ingredient_identities", wraps=planner._ingredient_identities) as identities, \
+                patch("planner._leafy_dinner", wraps=planner._leafy_dinner) as leafy:
+            result = self.plan(candidates, week="2026-W47", dates=["2026-11-16", "2026-11-17", "2026-11-18"],
+                               alternatives=3, strict_targets=["active_minutes"])
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(result["explored_states"], 24)
+        self.assertLessEqual(identities.call_count, 12)
+        self.assertLessEqual(leafy.call_count, 40)
+        by_key = {row["reference_key"]: row["facts"]["active_minutes"]["value"]
+                  for row in result["candidate_evaluations"]}
+        for selection in result["selections"]:
+            active = next(row for row in selection["strict_targets"]["results"] if row["target"] == "active_minutes")
+            self.assertEqual(active["detail"]["values"], [by_key[slot["reference_key"]] for slot in selection["slots"]])
 
 
 if __name__ == "__main__":
