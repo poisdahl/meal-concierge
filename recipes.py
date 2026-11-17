@@ -204,7 +204,7 @@ def normalize_source_url(value: Any, *, version: int = 2, field: str = "source.u
 
 
 def _normalize_recipe_url(value: Any, *, version: int = 2, attribution: bool = False, field: str = "source.url") -> str | None:
-    if value is None or value == "":
+    if value is None or (isinstance(value, str) and not value.strip()):
         return None
     text = _single_line(value, field, maximum=2_048)
     if text is None:
