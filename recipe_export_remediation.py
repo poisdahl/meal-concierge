@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, unquote_plus, urlsplit, urlunsplit
 
 from recipe_import_readers import _CREDENTIAL_KEYS
 from recipe_portable import MAX_RECIPE_BYTES, _regular_file, canonical_bytes, export_private_archive
-from recipes import RecipeError, RecipeStore, source_key
+from recipes import RecipeError, RecipeStore, _stored_recipe_document, source_key
 
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
@@ -60,17 +60,17 @@ def _inventory(db, *, apply=False):
         identity = rid if re.fullmatch(r"rec_[0-9a-f]{24}|[0-9a-f-]{32,36}", rid) else "sha256:" + _digest(rid.encode())
         bindings = {}
         if "translations" in original:
-            from recipe_languages import normalize_translations, source_text_digest
+            from recipe_languages import source_text_digest
             # A redacted derivative can rebind reviewed text only when every
             # prior translation was valid for the exact canonical pre-image.
-            normalize_translations(original["translations"], original)
+            _stored_recipe_document(canonical_bytes(original))
             modern_binding = source_text_digest(original)
             for language, variant in changed["translations"].items():
                 old_binding = original["translations"][language]["source_text_digest"]
                 new_binding = source_text_digest(changed, legacy=old_binding != modern_binding)
                 variant["source_text_digest"] = new_binding
                 bindings[language] = {"original": old_binding, "redacted": new_binding}
-            normalize_translations(changed["translations"], changed)
+            _stored_recipe_document(canonical_bytes(changed))
         details.append({"recipe_id": identity, "translation_bindings": bindings, "revision": revision, "current_revision": head,
                         "original_sha256": _digest(canonical_bytes(original)), "redacted_sha256": _digest(canonical_bytes(changed))})
         if apply:

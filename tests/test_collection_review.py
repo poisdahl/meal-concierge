@@ -70,7 +70,10 @@ class CollectionReviewTests(unittest.TestCase):
             recipe["translations"]["en-GB"] = deepcopy(recipe["translations"]["en"])
             old_legacy = source_text_digest(recipe, legacy=True)
             recipe["translations"]["en-GB"]["source_text_digest"] = old_legacy
-            entry = original.save(recipe)
+            recipe["translations"]["en-GB"]["name"] += "\nfor two"
+            import recipes
+            with patch.object(recipes, "_single_line", recipes._bounded_text):
+                entry = original.save(recipe)
             original.update(entry["id"], 1, bilingual())
             receipt = review(original)
             self.assertEqual(receipt["affected_revisions"], 1)
@@ -84,6 +87,7 @@ class CollectionReviewTests(unittest.TestCase):
                 rows = [json.loads(row[0]) for row in db.execute(
                     'SELECT document FROM revisions WHERE recipe_id=? ORDER BY revision',(entry['id'],))]
             from recipe_languages import recipe_presentation
+            self.assertEqual(rows[0]["translations"]["en-GB"]["name"], recipe["translations"]["en-GB"]["name"])
             self.assertEqual(receipt["items"][0]["translation_bindings"]["en-GB"]["original"], old_legacy)
             self.assertEqual(rows[0]["translations"]["en-GB"]["source_text_digest"], source_text_digest(rows[0], legacy=True))
             self.assertNotEqual(recipe_presentation(rows[0], "en-GB")["resolved_language"], "en-GB")
