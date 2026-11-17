@@ -114,19 +114,31 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
                 if not chunk:
                     break
                 data += chunk
-            response = json.loads(data.split(b"\n", 1)[0])
+            body, terminator, _ = data.partition(b"\n")
+            if not terminator or len(body) > 2 * 1024 * 1024:
+                raise ValueError("incomplete or oversized service reply")
+            response = json.loads(body)
             if not isinstance(response, dict):
                 raise ValueError("expected a response object")
+            if response.get("ok") is False:
+                if not isinstance(response.get("error"), str) or not response["error"].strip() or "result" in response:
+                    raise ValueError("invalid error receipt")
+                if "contract" in response and (type(response["contract"]) is not int or response["contract"] != 1):
+                    raise ValueError("incompatible error contract")
+                if "outcome" in response and response["outcome"] != "unknown":
+                    raise ValueError("invalid outcome")
+                raise ServiceError(response["error"], provider_failure=response.get("provider_failure"),
+                                   outcome=response.get("outcome"))
+            if (response.get("ok") is not True or "error" in response or "outcome" in response
+                    or type(response.get("contract")) is not int or response["contract"] != 1):
+                raise ValueError("incompatible bridge/core contract")
+            if not isinstance(response.get("result"), dict):
+                raise ValueError("invalid or missing service result")
         except (OSError, ValueError, UnicodeError) as exc:
             if merchant_mutation(operation, arguments.get("action")):
                 raise ServiceError("The merchant operation lost its service reply; read and reconcile the original attempt.",
                                    outcome="unknown") from exc
-            raise RuntimeError("meal concierge service returned no valid response") from exc
-    if response.get("ok") is not True:
-        raise ServiceError(str(response.get("error") or "meal concierge operation failed"),
-                           provider_failure=response.get("provider_failure"), outcome=response.get("outcome"))
-    if response.get("contract") != 1:
-        raise ServiceError("incompatible bridge/core contract; upgrade the stopped service before attaching this client")
+            raise ServiceError("meal concierge service returned no valid response or an incompatible bridge/core contract") from exc
     return response["result"]
 
 

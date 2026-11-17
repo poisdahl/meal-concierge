@@ -107,6 +107,18 @@ class UncertainErrorResponseTests(unittest.TestCase):
                 with self.assertRaises(RetailPreDispatchError):
                     client._run('manipulate_cart', {}, .02)
 
+    def test_invalid_postdispatch_receipts_preserve_merchant_uncertainty(self):
+        for receipt in ({}, {"ok": False}, {"ok": False, "error": "error", "contract": 0},
+                        {"ok": True, "contract": 1}, {"ok": True, "contract": True, "result": {}},
+                        {"ok": True, "contract": 2, "result": {}}, {"ok": True, "contract": 1, "result": None},
+                        {"ok": True, "contract": 1, "result": {}, "error": "conflicting"}):
+            with self.subTest(receipt=receipt), mock.patch("rpc_client.socket.socket") as constructor:
+                sock = constructor.return_value.__enter__.return_value
+                sock.recv.side_effect = [b'{"ok":true,"contract":1,"result":{}}\n', json.dumps(receipt).encode() + b"\n"]
+                with self.assertRaises(rpc_client.ServiceError) as caught:
+                    rpc_client.rpc("cart", action="ensure")
+                self.assertTrue(caught.exception.outcome_unknown)
+
     def test_short_transport_contention_spends_the_original_timeout(self):
         client = RetailMcpClient(self.temp.name)
         budgets = []
