@@ -62,7 +62,8 @@ def payload_files(root):
 
 
 def old_identity(release):
-    from build_identity import create
+    from build_identity import create, verify_release_layout
+    verify_release_layout(release)
     value = create(release, release, "source-and-installed-bytes")
     return [value["source_sha256"], value["installed_runtime_sha256"]]
 

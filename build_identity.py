@@ -11,6 +11,16 @@ MANIFEST = 'build-identity.json'
 INTERFACE_VERSION = 1
 
 
+def verify_release_layout(release):
+    # stage_release ships only flat Python modules and these three directories.
+    # An additional importable package or native module changes what Python can load.
+    for entry in release.iterdir():
+        if (entry.is_symlink()
+                or (entry.is_dir() and entry.name not in {'venv', 'skill', '__pycache__'})
+                or entry.suffix.casefold() in {'.so', '.pyd', '.dylib'}):
+            raise RuntimeError('prepared program bytes changed; unexpected release entry')
+
+
 def installed_runtime_digest(release):
     """Bind installed distributions, configuration, entry points and interpreter."""
     venv = Path(release) / 'venv'

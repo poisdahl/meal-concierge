@@ -52,6 +52,15 @@ class MaintenanceTransitionTests(unittest.TestCase):
             self.assertEqual((self.code / "current").resolve(), self.prior.resolve())
             self.assertEqual(reversal.rollback(self.home, self.meta)["status"], "rolled_back")
 
+    def test_previous_release_cannot_gain_a_package_after_rollback_was_armed(self):
+        meta = self.update()
+        unexpected = self.prior / "unexpected_package"
+        unexpected.mkdir()
+        (unexpected / "__init__.py").write_text("# inert fixture")
+        with self.assertRaisesRegex(RuntimeError, "unexpected release entry"):
+            reversal.rollback(self.home, meta)
+        self.assertEqual((self.code / "current").resolve(), self.fixture.release.resolve())
+
     def test_even_an_empty_start_or_changed_state_refuses_rollback(self):
         meta = self.update()
         state = self.fixture.state.path
