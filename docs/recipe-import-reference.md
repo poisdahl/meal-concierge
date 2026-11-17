@@ -735,3 +735,24 @@ This describes the completed authorized sync; it is not a pre-import preview.
 A regular Finder `.DS_Store` directly inside `pack-metadata` is ignored and left
 in place. Unexpected directories, symlinks and other metadata still block
 maintenance with an actionable name in the error.
+
+For a quoted transcript ingredient, `choice` selects one of two named source
+alternatives sharing the same explicit amount and unit, such as `smør` in
+`2 ss olje eller smør`. The original quote remains attached. For a bare integer
+and a recognized whole egg, onion or carrot, set `whole_count=true` to keep the
+piece count. A can with no stated capacity still needs a labeled estimate to
+convert it to mass or volume. A later use of leftover marinade can refer to
+marinade explicitly reserved in an earlier selected step.
+
+URL-only bookmarks show the supplied host as their display label. Legacy schema
+1 retains its historical path-only URL identity. Use schema 2 for new recipes
+where query parameters distinguish recipes. Export checks still apply to every
+revision. A replayed file import reports conflicting implicit keys by record
+and continues with the other records. Supply a fresh `--import-intent` only
+when deliberately starting a new import, and reuse it on retry.
+
+A translated ingredient is displayed only when its complete identity matches
+the canonical one directly or through a reviewed language mapping. Other labels
+fall back to the source item. Quantities come from the canonical recipe. Older
+text-only translation bindings remain readable; review against the source and
+revision to enable translated presentation.

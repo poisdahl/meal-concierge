@@ -156,7 +156,11 @@ def _same_site_redirect(requested, response) -> str:
     if not isinstance(location, str) or not location:
         return ""
     try:
-        target = _url(urljoin(requested.geturl(), location), "redirect target")
+        raw_target = urljoin(requested.geturl(), location)
+        parts = urlsplit(raw_target)
+        if parts.query or parts.fragment:
+            return ""
+        target = _url(raw_target, "redirect target")
         moved = urlsplit(target or "")
         hosts = {(requested.hostname or "").casefold().removeprefix("www."), (moved.hostname or "").casefold().removeprefix("www.")}
         if moved.scheme != "https" or moved.port not in {None, 443} or len(hosts) != 1 or target == requested.geturl():

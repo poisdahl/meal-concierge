@@ -336,6 +336,8 @@ class WebRecipeTests(unittest.TestCase):
             link = self.app.handle({'operation': 'recipes', 'action': 'import', 'source_kind': 'url',
                 'url': 'https://matprat.no/synthetic', 'storage_decision': {'storage': 'link_only'}})
             fetch.assert_not_called()
+            self.assertEqual(link['recipe']['name'], 'Recipe link (matprat.no)')
+            self.assertEqual(link['import_report']['name_basis'], 'supplied_url_host')
             self.assertFalse(link['readiness']['scaling_ready'])
             self.assertEqual(link['shopping_requirements'], [])
             self.assertFalse(link['recipe'].get('ingredients'))

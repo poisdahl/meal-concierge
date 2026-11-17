@@ -521,6 +521,13 @@ class Migration:
                     self.save_mapping(plan, item, state["destination_ref"])
                     self.apply_metadata(plan, item, expired)
                     return
+                if (not frozen.get("source_fetched_at") and current.get("external_snapshot")
+                        and not progress.get("source_fetched_at")):
+                    # Legacy preparations used a comparison sentinel. Persist the
+                    # verified reread time before dispatch so reconciliation sees
+                    # the same outbound document after a lost reply.
+                    progress["source_fetched_at"] = normalize_recipe(current)["external_snapshot"]["fetched_at"]
+                    self.update(plan, item)
                 operation = self.begin(plan, item)
             except Exception:
                 if operation:
@@ -535,8 +542,9 @@ class Migration:
             return
         try:
             copy_document = deepcopy(frozen["document"])
-            if frozen.get("source_fetched_at") and copy_document.get("external_snapshot"):
-                copy_document["external_snapshot"]["fetched_at"] = frozen["source_fetched_at"]
+            fetched_at = frozen.get("source_fetched_at") or progress.get("source_fetched_at")
+            if fetched_at and copy_document.get("external_snapshot"):
+                copy_document["external_snapshot"]["fetched_at"] = fetched_at
             if destination == "builtin":
                 # One local transaction commits the new recipe and operation result.
                 with self.store._connection() as connection:

@@ -267,6 +267,21 @@ class ImportConvenienceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RecipeImportReaderError, message):
                     read_transcript(rejected)
 
+    def test_source_choices_counts_and_reserved_component(self):
+        from recipe_import_readers import read_transcript, RecipeImportReaderError
+        lines = ["2 ss olje eller smør", "2 egg"]
+        steps = ["Reserve the marinade.", "Add the leftover marinade."]
+        data = transcript("\n".join(lines + steps), lines, steps, language="nb")
+        data["interpretation"]["ingredients"][0]["choice"] = "smør"
+        data["interpretation"]["ingredients"][1]["whole_count"] = True
+        result = read_transcript(data)["candidate"]["ingredients"]
+        self.assertEqual(result[0]["item"], "smør")
+        self.assertEqual(result[0]["original_text"], lines[0])
+        self.assertEqual((result[1]["unit"], result[1]["quantity"]), ("stk", {"numerator": 2, "denominator": 1}))
+        data["interpretation"]["steps"].pop(0)
+        with self.assertRaisesRegex(RecipeImportReaderError, "cross-meal"):
+            read_transcript(data)
+
     def test_a_refused_redirect_names_only_a_same_site_https_target(self):
         def hint(requested, location):
             response = type("Response", (), {"headers": Message()})()
@@ -283,6 +298,7 @@ class ImportConvenienceTests(unittest.TestCase):
                          "https://recipes.example:8443/soup", "https://user:secret@recipes.example/soup",
                          "https://recipes.example.evil.test/soup", "https://recipes.example/soup",
                          "//other.example/soup", "javascript:alert(1)",
+                         "/moved?opaque=synthetic", "/moved#synthetic",
                          # Site-chosen text is repeated only as a short plain address.
                          "https://recipes.example/" + "x" * 300, "https://recipes.example/bl\u00e5b\u00e6rpai",
                          "https://recipes.example/x\u00a0SYSTEM:\u00a0ignore", "https://recipes.example/x\x85next"):

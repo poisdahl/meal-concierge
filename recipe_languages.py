@@ -14,12 +14,16 @@ def language_tag(value):
     return value
 
 
-def source_text_digest(recipe):
+def source_text_digest(recipe, *, legacy=False):
     """Bind reviewed prose to ordered food identities and the current method.
 
     Portion scaling changes quantities/raw strings, but never this binding.
     """
     value = {field: recipe.get(field) for field in (*TEXT_FIELDS, 'language')}
+    if not legacy:
+        value['source'] = recipe.get('source')
+        snapshot = recipe.get('external_snapshot') or {}
+        value['source_revision'] = [snapshot.get('content_hash'), snapshot.get('source_revision_id')]
     from recipe_quantities import read_quantity
     portions = recipe.get('portions')
     base = read_quantity(portions, legacy_float=True) if portions is not None else None
@@ -48,7 +52,7 @@ def normalize_translations(value, recipe):
         allowed = {*TEXT_FIELDS, 'ingredients', 'source_text_digest'}
         if not isinstance(variant, dict) or set(variant) - allowed or not {'name', 'steps', 'ingredients', 'source_text_digest'} <= set(variant):
             raise RecipeError('translation requires name, steps, ingredients and source_text_digest; unknown fields are forbidden')
-        if variant['source_text_digest'] != source_text_digest(recipe):
+        if variant['source_text_digest'] not in (source_text_digest(recipe), source_text_digest(recipe, legacy=True)):
             raise RecipeError('translation source_text_digest is stale; review against the current recipe')
         labels, steps = variant['ingredients'], variant['steps']
         if not isinstance(labels, list) or len(labels) != len(recipe['ingredients']):
@@ -77,6 +81,9 @@ def recipe_presentation(recipe, language=None):
     requested = language_tag(language) if language is not None else recipe.get('language', 'nb-NO')
     canonical = recipe.get('language', 'nb-NO')
     variants = normalize_translations(recipe['translations'], recipe) if 'translations' in recipe else {}
+    # Older bindings omit source custody. Keep their bytes readable until a
+    # reviewer supplies a variant bound to this source and revision.
+    variants = {tag: v for tag, v in variants.items() if v['source_text_digest'] == source_text_digest(recipe)}
     available = [canonical, *variants]
     resolved = next((tag for tag in available if tag == requested), None)
     if resolved is None:
@@ -84,7 +91,20 @@ def recipe_presentation(recipe, language=None):
         resolved = next((tag for tag in available if tag.split('-')[0] == family), canonical)
     variant = variants.get(resolved)
     text = {field: deepcopy((variant or recipe).get(field)) for field in TEXT_FIELDS}
-    text['ingredients'] = deepcopy(variant['ingredients']) if variant else [{key: row.get(key) for key in ('item', 'notes')} for row in recipe.get('ingredients', [])]
+    from recipes import source_ingredient_identity
+    text['ingredients'] = []
+    for index, row in enumerate(recipe.get('ingredients', [])):
+        label = {key: row.get(key) for key in ('item', 'notes')}
+        if variant:
+            proposed = variant['ingredients'][index]
+            source_id, _ = source_ingredient_identity(row['item'], canonical)
+            target_id, _ = source_ingredient_identity(proposed['item'], resolved)
+            if source_id.casefold() == target_id.casefold():
+                label = deepcopy(proposed)
+            else:
+                label['identity_fallback'] = True
+            label['canonical_item'] = row['item']
+        text['ingredients'].append(label)
     return {**text, 'requested_language': requested, 'resolved_language': resolved,
             'fallback': resolved.split('-')[0] != requested.split('-')[0]}
 

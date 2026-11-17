@@ -108,6 +108,15 @@ class StructuredFailureTests(unittest.TestCase):
             changed_raw = raw + b"<!-- layout-only change -->"
             with mock.patch("recipe_import_sources._get_bytes", return_value=(changed_raw, "text/html")):
                 changed = app.handle(interpret_request)
+            translated = app.handle({"operation": "recipes", "action": "convert",
+                "discovery_ref": interpreted["discovery_ref"], "recipe_digest": interpreted["recipe_digest"],
+                "source_schema_version": 2, "changes": {"language": "nb", "name": "Linsesuppe",
+                    "ingredients": [{"index": 0, "item": "linser"}], "steps": ["La småkoke."]}})
+            saved = app.handle({"operation": "recipes", "action": "save", "discovery_ref": translated["discovery_ref"],
+                                "idempotency_key": "pasted-url-nb", "status": translated["suggested_status"]})["recipe"]
+            stored = app.recipes.get(saved["id"])
+            self.assertEqual((stored["name"], stored["language"], stored["source"]["url"]), ("Linsesuppe", "nb", URL))
+            self.assertEqual(stored["ingredients"][0]["original_text"], "200 g lentils")
             self.assertNotEqual(changed["discovery_ref"], interpreted["discovery_ref"])
             self.assertEqual(changed["recipe"]["external_snapshot"]["content_hash"], hashlib.sha256(changed_raw).hexdigest())
 
