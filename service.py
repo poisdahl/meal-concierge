@@ -555,6 +555,20 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             else:
                 result = self._handle(request)
         except HouseholdError as exc:
+            # An explicit error response does not prove a previously dispatched
+            # mutation failed. Keep the original journal and expose only the
+            # recovery disposition, never private journal contents.
+            if operation in {"cart", "products", "checkout", "orders", "delivery"}:
+                try:
+                    state = self.store.read()
+                    exc.outcome_unknown = bool(
+                        state.get("pending_cart_change")
+                        or (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES
+                        or (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}
+                        or (state.get("order_change") or {}).get("status") in {"clicking", "uncertain"}
+                    )
+                except (HouseholdError, OSError):
+                    pass
             alternate_oda_email = (
                 request.get("operation") == "email" and request.get("provider") == "oda"
             )
@@ -771,6 +785,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             if not valid_email_address(email):
                 raise HouseholdError("email address is invalid")
             with self.store.locked() as state:
+                binding = state["recipe_delivery"].get("sender_binding")
+                if binding and email != binding["recipient"]:
+                    raise HouseholdError("A recipe email sender is configured. Change its recipient with email_sender configure; existing pending deliveries retain their original recipient.")
                 state["email_recipient"] = email
             return {"email_recipient": mask_email(email)}
         raise HouseholdError("unknown profile action")
@@ -1178,6 +1195,8 @@ class Server:
                 response = {"ok": True, "contract": 1, "result": self.app.handle(request)}
             except (HouseholdError, TypeError, ValueError, OverflowError, UnicodeError, RecursionError) as exc:
                 response = {"ok": False, "error": str(exc)}
+                if isinstance(exc, HouseholdError) and getattr(exc, "outcome_unknown", False) is True:
+                    response["outcome"] = "unknown"
                 if isinstance(exc, MenyBrowserError) and exc.provider_failure:
                     response["provider_failure"] = exc.provider_failure
             try:

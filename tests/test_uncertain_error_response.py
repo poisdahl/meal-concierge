@@ -1,0 +1,113 @@
+"""A lost write response must survive the service, RPC and presentation layers."""
+from copy import deepcopy
+import io
+import json
+from pathlib import Path
+import socket
+import sys
+import tempfile
+import threading
+import unittest
+from unittest import mock
+
+sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
+from core import HouseholdError, StateStore
+from service import Application, Server
+from test_meal_concierge import CONFIG, FakeBrowser, MutableFakeOda
+import cli
+import mcp_server
+import rpc_client
+
+
+class UncertainErrorResponseTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = StateStore(Path(self.temp.name), CONFIG)
+        self.shop = MutableFakeOda()
+        self.app = Application(self.store, self.shop, FakeBrowser())
+
+    def wire(self, request):
+        client, peer = socket.socketpair()
+        server = Server(Path(self.temp.name) / 'unused.sock', 0, 0, self.app)
+        with mock.patch('service.peer_uid', return_value=0):
+            worker = threading.Thread(target=server._serve, args=(peer,))
+            worker.start()
+            try:
+                client.settimeout(3)
+                client.sendall(json.dumps(request).encode() + b'\n')
+                data = b''
+                while b'\n' not in data:
+                    data += client.recv(65536)
+                return json.loads(data)
+            finally:
+                client.close()
+                worker.join(3)
+                self.assertFalse(worker.is_alive())
+
+    def test_dispatched_cart_write_remains_unknown_and_is_not_resent(self):
+        original = self.shop.call
+        writes = []
+        def lost_reply(tool, arguments, **kwargs):
+            result = original(tool, arguments, **kwargs)
+            if tool == 'manipulate_cart':
+                writes.append(deepcopy(arguments))
+                raise HouseholdError('synthetic reply lost after dispatch')
+            return result
+        self.shop.call = lost_reply
+        request = {'operation': 'cart', 'action': 'change',
+                   'operations': [{'product_id': 10, 'quantity': 1}]}
+        failed = self.wire(request)
+        self.assertFalse(failed['ok'])
+        self.assertEqual(failed['outcome'], 'unknown')
+        self.assertIn('pending_cart_change', self.store.read())
+        repeated = self.wire(request)
+        self.assertEqual(repeated['outcome'], 'unknown')
+        self.assertEqual(len(writes), 1)
+
+    def test_predispatch_validation_error_is_still_an_ordinary_rejection(self):
+        result = self.wire({'operation': 'cart', 'action': 'change', 'operations': []})
+        self.assertFalse(result['ok'])
+        self.assertNotIn('outcome', result)
+
+    def test_checkout_and_cancellation_journals_preserve_outcome(self):
+        # Exercise Application's common exception boundary without inventing
+        # provider confirmation evidence or dispatching a checkout.
+        for name in ('pending_checkout', 'pending_cancellation', 'order_change'):
+            for status, unknown in [('awaiting_confirmation', False), ('clicking', True), ('uncertain', True)]:
+                with self.subTest(journal=name, status=status):
+                    state = {name: {'status': status}}
+                    with mock.patch.object(self.store, 'read', return_value=state), \
+                         mock.patch.object(self.app, '_handle', side_effect=HouseholdError('synthetic stop')):
+                        result = self.wire({'operation': 'checkout', 'action': 'confirm'})
+                    self.assertEqual(result.get('outcome') == 'unknown', unknown)
+
+    def test_rpc_and_mcp_and_cli_preserve_unknown_disposition(self):
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def settimeout(self, value): pass
+            def connect(self, value): pass
+            def sendall(self, value): pass
+            def recv(self, count):
+                return b'{"ok":false,"error":"synthetic response lost","outcome":"unknown"}\n'
+        with mock.patch('rpc_client.socket.socket', return_value=Connection()):
+            with self.assertRaises(rpc_client.ServiceError) as raised:
+                rpc_client.rpc('health')
+        error = raised.exception
+        with mock.patch('mcp_server.service_rpc', side_effect=error):
+            result = mcp_server.rpc('cart', action='change')
+        self.assertEqual(result['status'], 'outcome_unknown')
+        self.assertIn('original', result['recovery'])
+        stdin = io.TextIOWrapper(io.BytesIO(b'{"operation":"cart","action":"change"}'))
+        stdout = io.StringIO()
+        with mock.patch('cli.rpc', side_effect=error), mock.patch('sys.stdin', stdin), \
+             mock.patch('sys.stdout', stdout), mock.patch('sys.argv', ['cli.py']):
+            self.assertEqual(cli.main(), 1)
+        self.assertEqual(json.loads(stdout.getvalue())['status'], 'outcome_unknown')
+        with mock.patch('mcp_server.service_rpc', side_effect=rpc_client.ServiceError('invalid request')):
+            self.assertEqual(mcp_server.rpc('cart', action='change')['status'], 'rejected')
+
+
+if __name__ == '__main__':
+    unittest.main()

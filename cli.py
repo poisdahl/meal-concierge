@@ -54,6 +54,7 @@ def main() -> int:
             result = rpc(operation, **request)
     except ServiceError as exc:
         print(json.dumps({'ok': False, 'error': str(exc),
+                          **exc.outcome_fields(),
                           **({'provider_failure': exc.provider_failure} if exc.provider_failure else {})}))
         return 1
     except (OSError, RuntimeError, ValueError) as exc:

@@ -1867,7 +1867,16 @@ class PlanningOperations:
                     if isinstance(usage, dict) and usage.get("status") == "planned":
                         usage["status"] = "cancelled"
                 state["menu"] = None
-                state["cart_plan"] = None
+                # Clearing a menu does not remove its goods from the retailer.
+                # Retain the ownership ledger for a future plan, but discard
+                # all authority to apply the cleared menu's product selection.
+                cart_plan = state.get("cart_plan")
+                if isinstance(cart_plan, dict):
+                    self._clear_persisted_product_plan(cart_plan)
+                    cart_plan["status"] = "needs_input"
+                    cart_plan["approved_cart_digest"] = None
+                    cart_plan["pending_cart_digest"] = cart_plan.get("last_synced_digest")
+                state.pop("product_plan_completion", None)
                 state.pop("managed_product_apply_fence", None)
                 return {"menu": None}
         if action == "save":
@@ -3770,6 +3779,9 @@ class PlanningOperations:
                 )):
                     raise HouseholdError("product_plan_ref replaces menu/planner binding arguments")
                 continuation_record = self._product_plan_record(self.store.read(), continuation_ref)
+                for key in ("ingredient_decisions", "budget_ore", "price_mode"):
+                    if request.get(key) is not None and canonical(request[key]) != canonical(continuation_record[key]):
+                        raise HouseholdError(f"product_plan_ref preserves {key}; prepare the menu again to change it")
                 binding, menu, saved_ref = self._product_binding(**continuation_record.get(
                     "binding_arguments", {"menu_ref": continuation_record["menu_ref"]}))
                 # A preview reference never silently acquires cart authority

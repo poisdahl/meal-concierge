@@ -260,6 +260,7 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
         # A rejected business operation is a usable service response, not an
         # unreachable MCP server. Keep real transport failures as tool errors.
         return {"ok": False, "status": "rejected", "error": str(exc),
+                **exc.outcome_fields(),
                 **({"provider_failure": exc.provider_failure} if exc.provider_failure else {})}
 
 
@@ -619,7 +620,9 @@ def meal_concierge_products(
     }
     arguments = {key: value for key, value in arguments.items() if value is not None}
     if action in {"prepare", "lowest_cost"}:
-        arguments.update(continuation_mode=continuation_mode, price_mode=price_mode or "estimate")
+        arguments["continuation_mode"] = continuation_mode
+        if product_plan_ref is None:
+            arguments["price_mode"] = price_mode or "estimate"
     elif continuation_mode != "extend":
         arguments["continuation_mode"] = continuation_mode
     if action in {"prepare", "get", "lowest_cost"}:

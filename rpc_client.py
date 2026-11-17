@@ -9,11 +9,18 @@ from typing import Any
 
 
 class ServiceError(RuntimeError):
-    """An explicit service rejection, distinct from an uncertain transport loss."""
+    """A service error response, optionally carrying an unresolved write outcome."""
 
-    def __init__(self, message: str, *, provider_failure: Any = None):
+    def __init__(self, message: str, *, provider_failure: Any = None, outcome: Any = None):
         super().__init__(message)
         self.provider_failure = normalize_provider_failure(provider_failure)
+        self.outcome_unknown = outcome == "unknown"
+
+    def outcome_fields(self) -> dict[str, str]:
+        if not self.outcome_unknown:
+            return {}
+        return {"status": "outcome_unknown", "outcome": "unknown",
+                "recovery": "Read status and reconcile the original attempt/ref/key before any further write; do not repeat the mutation."}
 
 
 def normalize_provider_failure(value: Any) -> dict[str, str] | None:
@@ -90,7 +97,7 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
         raise RuntimeError("meal concierge service returned no valid response") from exc
     if response.get("ok") is not True:
         raise ServiceError(str(response.get("error") or "meal concierge operation failed"),
-                           provider_failure=response.get("provider_failure"))
+                           provider_failure=response.get("provider_failure"), outcome=response.get("outcome"))
     if response.get("contract") != 1:
         raise ServiceError("incompatible bridge/core contract; upgrade the stopped service before attaching this client")
     return response["result"]

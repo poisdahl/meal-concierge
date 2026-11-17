@@ -46,6 +46,23 @@ class ProductContinuationTests(unittest.TestCase):
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {
             "week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
 
+    def test_continuation_rejects_changed_context_instead_of_ignoring_it(self):
+        self.save_week()
+        first = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu),
+                             price_mode='exact', budget_ore=50000, include_recurring=False)
+        ref = first['product_plan_ref']
+        calls = len(self.provider.calls)
+        for key, value in [('price_mode', 'estimate'), ('budget_ore', 1),
+                           ('ingredient_decisions', [{'source': first['product_plan']['requirements'][0]['sources'][0],
+                                                     'action': 'have_all'}])]:
+            with self.subTest(field=key), self.assertRaisesRegex(HouseholdError, f'preserves {key}'):
+                self.request(action='prepare', product_plan_ref=ref, **{key: value})
+            self.assertEqual(len(self.provider.calls), calls)
+        # Repeating unchanged context, or omitting it, keeps the original mode.
+        continued = self.request(action='prepare', product_plan_ref=ref, price_mode='exact',
+                                 budget_ore=50000, ingredient_decisions=[])
+        self.assertEqual(continued['product_plan']['price_mode'], 'exact')
+
     def test_failed_search_diagnostics_survive_saved_plan_and_agent_pages(self):
         from meny import MenyBrowserError
 
