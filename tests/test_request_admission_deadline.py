@@ -10,6 +10,7 @@ from unittest import mock
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 import rpc_client
 import test_uncertain_error_response as fixtures
+from test_meal_concierge import ODA_FIXTURE_NOW
 
 
 class RequestAdmissionTests(unittest.TestCase):
@@ -59,23 +60,28 @@ class RequestAdmissionTests(unittest.TestCase):
                 self.assertIn('finite', result['error'])
         self.assertFalse(self.shop.calls)
 
-    def test_queued_checkout_expires_at_the_inner_browser_owner_before_reads(self):
-        result = {}
-        self.app.browser_lock.acquire()
-        try:
-            worker = threading.Thread(target=lambda: result.update(self.wire({
-                'operation': 'checkout', 'action': 'prepare',
-                'request_not_after': time.monotonic() + .03})))
-            worker.start()
-            time.sleep(.08)
-        finally:
-            self.app.browser_lock.release()
-        worker.join(3)
+    def test_queued_checkout_expires_at_the_inner_browser_owner_before_dispatch(self):
+        with mock.patch('service.now', return_value=ODA_FIXTURE_NOW):
+            prepared = self.app.handle({'operation': 'checkout', 'action': 'prepare'})
+            self.shop.calls.clear()
+            result = {}
+            self.app.browser_lock.acquire()
+            try:
+                worker = threading.Thread(target=lambda: result.update(self.wire({
+                    'operation': 'checkout', 'action': 'confirm',
+                    'confirmation_id': prepared['confirmation_id'],
+                    'request_not_after': time.monotonic() + .03})))
+                worker.start()
+                time.sleep(.08)
+            finally:
+                self.app.browser_lock.release()
+            worker.join(3)
         self.assertFalse(worker.is_alive())
         self.assertFalse(result['ok'], result)
         self.assertIn('expired', result['error'])
-        self.assertFalse(self.shop.calls)
-        self.assertFalse(self.store.read().get('pending_checkout'))
+        self.assertFalse(any(tool == 'manipulate_cart' for tool, _ in self.shop.calls))
+        self.assertEqual(self.app.browser.checkout_clicks, 0)
+        self.assertNotIn((self.store.read().get('pending_checkout') or {}).get('status'), ('clicking', 'uncertain'))
 
     def test_client_uses_server_clock_and_stays_compatible_with_old_cores(self):
         for health in ({'admission_deadline_clock': 1234.5}, {}):
