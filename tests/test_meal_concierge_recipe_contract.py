@@ -765,12 +765,14 @@ class RecipeContractTests(unittest.TestCase):
         frozen = self.app.recipes.persist_discovery(recipe)
         accepted = self.app.handle({"operation": "recipes", "action": "accept_estimates", "discovery_ref": frozen["discovery_ref"], "recipe_digest": recipe_digest(recipe), "estimate_fields": ["portions"], "confirmation_statement": ESTIMATE_CONFIRMATION})["recipe"]
         scaled = normalize_recipe(scale_recipe(accepted, 2))
+        self.assertEqual(read_quantity(scaled['ingredients'][0]['quantity']), Fraction(350, 3))
+        self.assertEqual(scaled['ingredients'][0]['amount'], '350/3 g')
         dependency = scaled["ingredients"][0]["evidence"]["quantity"]["calculation"]
         self.assertEqual(dependency["input_portions"], {"numerator": 12, "denominator": 1})
         self.assertEqual(dependency["portions_evidence"], normalize_recipe(accepted)["portions_evidence"])
         self.assertEqual(scaled["portions_evidence"]["calculation"]["input_quantity"], {"numerator": 12, "denominator": 1})
         rendered = menu_email_html({"week": "2026-W40", "dishes": [scaled], "salads": []})
-        self.assertIn("350/3 g mel (godkjent anslag)", rendered)
+        self.assertIn("116 2/3 g mel (godkjent anslag)", rendered)
         rescaled = normalize_recipe(scale_recipe(scaled, 4))
         calculation = rescaled["ingredients"][0]["evidence"]["quantity"]["calculation"]
         self.assertEqual(calculation["input_quantity"], {"numerator": 700, "denominator": 1})
