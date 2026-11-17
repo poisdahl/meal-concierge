@@ -1769,6 +1769,9 @@ class PlanningOperations:
         # journal writes. A held browser lock is safe only for a proven
         # independent menu; linked and unidentified work retains its fence.
         with self.product_plan_lock:
+            # Preparation may run concurrently; only this winning commit owner
+            # admits a queued save before any state or provider mutation.
+            self._admit_request()
             acquired = self.browser_lock.acquire(blocking=False)
             try:
                 with self.store.locked() as state:
