@@ -177,9 +177,11 @@ def handle_shopping_list(app, request):
             merged = {canonical(d['source']): d for d in previous.get('decisions', [])} if previous.get('menu_ref') == reference else {}
             merged.update({canonical(d['source']): deepcopy(d) for d in decisions})
             menu_requirements(mp.shopping_menu(state['menu']), ingredient_decisions=list(merged.values()))
-            state['menu_ingredient_decisions'] = {'menu_ref': reference, 'decisions': list(merged.values())}
-            state.pop('product_plan_completion', None)
-            app._clear_persisted_product_plan(state.get('cart_plan'))
+            updated = {'menu_ref': reference, 'decisions': list(merged.values())}
+            if updated != previous:
+                state['menu_ingredient_decisions'] = updated
+                state.pop('product_plan_completion', None)
+                app._clear_persisted_product_plan(state.get('cart_plan'))
             result = _page(build_list(state), request)
         return {**result, 'recorded': True, 'recorded_sources': len(decisions), 'cart_changed': False}
     if request.get('list_ref') != current['list_ref']:
@@ -219,7 +221,7 @@ def handle_shopping_list(app, request):
     arguments = {'operation': 'products', 'action': 'prepare', 'menu_ref': current['menu_ref'],
                  'include_recurring': False, 'response_view': 'agent', 'price_mode': request.get('price_mode', 'estimate'),
                  'offset': request.get('offset', 0), 'limit': request.get('limit', 8)}
-    for key in ('candidate_approvals', 'product_plan_ref', 'continuation_mode'):
+    for key in ('candidate_approvals', 'product_plan_ref', 'continuation_mode', 'stock_ref'):
         if request.get(key) is not None:
             arguments[key] = request[key]
     try:

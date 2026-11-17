@@ -388,7 +388,7 @@ def _menu_plan_projection(plan: dict[str, Any]) -> dict[str, Any]:
         "work_limits", "discovery", "issues",
     }
     projected = {
-        key: plan[key] for key in ("status", "save_ref")
+        key: plan[key] for key in ("status", "save_ref", "current_menu_ref")
         if key in plan
     }
     if "selection" in plan:

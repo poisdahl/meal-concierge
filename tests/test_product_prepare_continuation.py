@@ -46,6 +46,27 @@ class ProductContinuationTests(unittest.TestCase):
         self.menu = self.app.handle({"operation": "menu", "action": "save", "menu": {
             "week": "2026-W37", "dishes": refs, "salads": []}})["menu"]
 
+    def test_stock_refresh_preserves_only_unaffected_product_approvals(self):
+        self.save_week()
+        ref = self.app._cart_menu_ref(self.menu)
+        initial = self.request(action="prepare", menu_ref=ref, include_recurring=False)
+        reviewed = self.request(action="prepare", product_plan_ref=initial["product_plan_ref"],
+                                candidate_approvals=self.approvals(initial["product_plan"]))
+        stock = self.app.handle({"operation": "shopping_list", "action": "get"})["stock_check"]
+        covered = stock["items"][0]["requirement_id"]
+        updated = self.app.handle({"operation": "shopping_list", "action": "record_stock",
+            "stock_ref": stock["stock_ref"], "stock_answers": [{"requirement_id": covered, "action": "have_all"}]})
+        args = {"action": "prepare", "product_plan_ref": reviewed["product_plan_ref"], "continuation_mode": "refresh_stock"}
+        with self.assertRaisesRegex(HouseholdError, "current stock_ref"):
+            self.request(**args, stock_ref=stock["stock_ref"])
+        fresh = self.request(**args, stock_ref=updated["stock_check"]["stock_ref"])
+        remaining = fresh["product_plan"]["requirements"]
+        self.assertNotIn(covered, [r["requirement_id"] for r in remaining])
+        self.assertTrue(remaining)
+        self.assertTrue(all(r["status"] == "selected" for r in remaining))
+        self.assertNotEqual(reviewed["product_plan_ref"], fresh["product_plan_ref"])
+        self.assertFalse(self.provider.quantities)
+
     def test_continuation_rejects_changed_context_instead_of_ignoring_it(self):
         self.save_week()
         first = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu),

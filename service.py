@@ -212,6 +212,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         self.email_provider_clients = {**dict(email_provider_clients or {}), self.provider: provider_client}
         self.confirmation_policy = str(store.config.get("confirmation_policy") or "fresh").casefold()
         self.browser = provider_client if self.provider == "meny" else browser
+        self._planner_result_cache = None
         self.browser_lock = threading.Lock()
         self.email_automation_profile = str(store.config.get("email_automation_profile") or "").strip()
         self.external_recipe_sources = dict({

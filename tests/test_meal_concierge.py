@@ -8952,6 +8952,24 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(self.oda.calls, [])
         self.assertEqual(self.browser.checkout_clicks, 0)
 
+    def test_renew_manual_review_replaces_expired_id_without_submitting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {**CONFIG, "provider": "meny"})
+            provider = FakeMeny()
+            app = Application(store, provider, self.browser)
+            original = app.handle({"operation": "checkout", "action": "prepare"})["confirmation_id"]
+            with store.locked() as state:
+                state["pending_checkout"]["expires_at"] = "2000-01-01T00:00:00+00:00"
+            renewed = app.handle({"operation": "checkout", "action": "renew_review", "confirmation_id": original})
+            self.assertNotEqual(renewed["confirmation_id"], original)
+            pending = store.read()["pending_checkout"]
+            self.assertEqual(pending["renewed_from"], original)
+            self.assertEqual(pending["status"], "awaiting_confirmation")
+            with self.assertRaisesRegex(HouseholdError, "original manual"):
+                app.handle({"operation": "checkout", "action": "renew_review", "confirmation_id": original})
+            with self.assertRaisesRegex(HouseholdError, "does not match"):
+                app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": original})
+
     def test_expired_checkout_confirmation_is_removed_before_any_provider_call(self):
         started = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as temp:

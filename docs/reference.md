@@ -2342,3 +2342,25 @@ Oda's displayed `Vektreservasjon` is retained as its own entry in `other_fees`.
 The temporary weight reservation contributes to the amount being authorized;
 it is not a promise of the final settled charge. Its presence and exact value
 are frozen with every other checkout amount and checked again before submission.
+
+
+A planned replacement includes `plan.current_menu_ref` from the planning
+snapshot. Send it as `menu_ref` with the chosen `save_ref` as `planner_ref`.
+A concurrent edit still requires refreshing the plan or reviewing the current
+menu. Repeated planning with identical inputs can reuse one in-memory ranking
+result. Candidate versions, profile, history, feedback and the commit-time
+comparison remain part of validation.
+
+For a manual checkout review delayed in chat, call `checkout renew_review`
+with its original `confirmation_id` before trying to confirm. It reads the
+current merchant summary, issues a fresh confirmation, and records the prior
+review ID. Review the returned terms again. A possible dispatch or recovery
+must use its existing reconciliation path. If confirmation already retired an
+expired review, use ordinary checkout preparation.
+
+After recording new pantry answers, use `products prepare` with
+`continuation_mode=refresh_stock`, the original `product_plan_ref` and the new
+`stock_ref`. The service carries forward choices for unchanged requirements,
+drops shared choices if a group member changed, and checks current product
+observations before returning a new review. The superseded reference cannot
+apply the new cart.

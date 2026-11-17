@@ -2470,6 +2470,11 @@ class OrderOperations:
                 str(request["confirmation_id"]),
                 str(request["order_id"]),
             )
+        if action == "renew_review":
+            original = request.get("confirmation_id")
+            if not isinstance(original, str) or not original:
+                raise HouseholdError("review renewal requires the original checkout confirmation_id")
+            return self._checkout_prepare(deadline, renew_confirmation_id=original)
         if action == "prepare" and request.get("recovery"):
             return self._checkout_recovery_prepare(
                 deadline,
@@ -2753,6 +2758,7 @@ class OrderOperations:
         payment_override: Mapping[str, Any] | None = None,
         requested_order_id: str | None = None,
         _switch_confirmation_id: str | None = None,
+        renew_confirmation_id: str | None = None,
         identity_review: Mapping[str, Any] | None = None,
         first_meal_date: str | None = None,
     ) -> dict[str, Any]:
@@ -2805,6 +2811,14 @@ class OrderOperations:
             payment_preference = deepcopy(state["checkout_payment"])
             checkout_payment = deepcopy(payment_preference)
             current_pending = state.get("pending_checkout")
+            if renew_confirmation_id is not None and (
+                    not isinstance(current_pending, Mapping)
+                    or current_pending.get("confirmation_id") != renew_confirmation_id
+                    or current_pending.get("status") != "awaiting_confirmation"
+                    or current_pending.get("recovery") or current_pending.get("occurrence")
+                    or current_pending.get("scheduler_context") or current_pending.get("automatic_checkout")
+                    or current_pending.get("order_change") != state.get("order_change")):
+                raise HouseholdError("renew only the exact original manual, undispatched checkout review")
             inherited_occurrence = (
                 current_pending.get("occurrence")
                 if occurrence is None
@@ -2821,7 +2835,7 @@ class OrderOperations:
                 if isinstance(occurrence_record, dict):
                     occurrence_record["status"] = "started"
                     occurrence_record["at"] = self._now().isoformat()
-            if expired_awaiting_confirmation(current_pending, self._now()):
+            if renew_confirmation_id is None and expired_awaiting_confirmation(current_pending, self._now()):
                 state["pending_checkout"] = None
             if self._unresolved_scheduled_effects(state):
                 raise HouseholdError("reconcile the original scheduled delivery effect before preparing checkout")
@@ -3201,6 +3215,7 @@ class OrderOperations:
                 if state["checkout_payment"] != payment_preference:
                     raise HouseholdError("payment preference changed while preparing checkout; prepare a new summary")
                 state["pending_checkout"] = {
+                    **({"renewed_from": renew_confirmation_id} if renew_confirmation_id else {}),
                     **({"independent_cart": True} if independent_cart else {}),
                     "checkout_payment": checkout_payment,
                     **({"payment_preference": payment_preference} if checkout_payment != payment_preference else {}),
@@ -4628,7 +4643,7 @@ class OrderOperations:
             with self.store.locked() as state:
                 if canonical(state.get("pending_checkout")) == canonical(pending):
                     state["pending_checkout"] = None
-            raise HouseholdError("checkout confirmation expired")
+            raise HouseholdError("checkout confirmation expired; prepare a fresh review before confirming")
         price_review = self._delivery_price_review(pending["summary"], pending.get("order_change"))
         if price_review is not None:
             if price_review != pending["summary"].get("delivery_change"):

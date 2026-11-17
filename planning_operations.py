@@ -1562,9 +1562,18 @@ class PlanningOperations:
         profile = state.get("profile")
         if not isinstance(profile, Mapping):
             raise PlannerError("household profile is invalid")
-        return plan_week(
-            request, profile=profile, candidates=refreshed, history=history, feedback=feedback
-        )
+        # All inputs to the pure ranking function are freshly resolved first,
+        # including history and diet. Cache one result per application so the
+        # save-time CAS can check the same inputs without re-enumerating plans.
+        cache_request = {**request, "candidates": [{"facts": {}, **row} for row in request["candidates"]]}
+        key = mp.digest([PLANNER_VERSION, cache_request, profile, refreshed, history, feedback])
+        cached = self._planner_result_cache
+        if cached is not None and cached[0] == key:
+            return deepcopy(cached[1])
+        result = plan_week(request, profile=profile, candidates=refreshed, history=history, feedback=feedback)
+        if len(canonical(result).encode()) <= MAX_REQUEST:
+            self._planner_result_cache = (key, deepcopy(result))
+        return result
 
     def _plan_menu(
         self, value: Any, *, state: Mapping[str, Any] | None = None,
@@ -1589,6 +1598,8 @@ class PlanningOperations:
                                      for item in collection["candidates"]]
         resolved = self._resolve_planner_candidates(request, snapshot) if collection is None or request["candidates"] else []
         result = self._run_planner(request, resolved, snapshot) if resolved else {"status": "needs_input", "save_handoffs": []}
+        if result.get("save_handoff") and snapshot.get("menu"):
+            result["current_menu_ref"] = mp.menu_ref(snapshot["menu"])
         if collection is not None:
             result["discovery"] = {key: deepcopy(value) for key, value in collection.items() if key not in {"candidates", "unknown", "rejected"}}
             for category in ("unknown", "rejected"):
@@ -2957,6 +2968,26 @@ class PlanningOperations:
             combined[row["requirement_id"]] = deepcopy(dict(row))
         return [combined[key] for key in sorted(combined)]
 
+    def _refresh_product_stock(self, record, menu, state, stock_ref):
+        from stock_check import build_stock_check
+        if not record.get("menu_ref") or build_stock_check(state).get("stock_ref") != stock_ref or not stock_ref:
+            raise HouseholdError("refresh_stock needs the saved menu and its current stock_ref")
+        recorded = state.get("menu_ingredient_decisions") or {}
+        if recorded.get("menu_ref") != record["menu_ref"]:
+            raise HouseholdError("record stock answers for this menu before refreshing products")
+        decisions = {canonical(row["source"]): row for row in record.get("ingredient_decisions") or []}
+        decisions.update({canonical(row["source"]): row for row in recorded["decisions"]})
+        current, _ = exact_menu_requirements(mp.shopping_menu(menu), ingredient_decisions=list(decisions.values()))
+        def scope(row):
+            return [row.get(k) for k in ("item", "quantity", "unit", "sources")]
+        old = {r["requirement_id"]: scope(r) for r in (record.get("snapshot") or {}).get("requirements", [])}
+        unchanged = {r["requirement_id"] for r in current if old.get(r["requirement_id"]) == scope(r)}
+        for group in record["dependent_groups"]:
+            if not unchanged.issuperset(group):
+                unchanged.difference_update(group)
+        approvals = [row for row in record["candidate_approvals"] if row["requirement_id"] in unchanged]
+        return list(decisions.values()), approvals
+
     def _product_plan_record(self, state: Mapping[str, Any], value: Any) -> dict[str, Any]:
         if not isinstance(value, str) or PRODUCT_PLAN_REF_PATTERN.fullmatch(value) is None:
             raise HouseholdError("product_plan_ref must be one exact server-returned reference")
@@ -2996,6 +3027,7 @@ class PlanningOperations:
         binding_arguments: Mapping[str, Any], apply_arguments: Any,
         partial_apply_arguments: Any,
         observation_work: Any = None, validation_work: Any = None,
+        expected_stock_ref: str | None = None,
     ) -> tuple[str, str]:
         record = {
             "kind": "product_plan",
@@ -3023,6 +3055,10 @@ class PlanningOperations:
             menu = state.get("menu")
             if menu_ref is not None and (not isinstance(menu, Mapping) or canonical(mp.menu_ref(menu)) != canonical(menu_ref)):
                 raise HouseholdError("menu changed while preparing product continuation")
+            if expected_stock_ref is not None:
+                from stock_check import build_stock_check
+                if build_stock_check(state).get("stock_ref") != expected_stock_ref:
+                    raise HouseholdError("stock answers changed while refreshing the product review")
             records = state["menu_planning"]["prepared"]
             if replaced_ref is not None:
                 if canonical(records.get(replaced_ref)) != canonical(expected_record):
@@ -3757,9 +3793,11 @@ class PlanningOperations:
                 previous = state.get("menu_ingredient_decisions") or {}
                 merged = {canonical(d["source"]): d for d in previous.get("decisions", [])} if previous.get("menu_ref") == reference else {}
                 merged.update({canonical(d["source"]): deepcopy(d) for d in decisions})
-                state["menu_ingredient_decisions"] = {"menu_ref": deepcopy(reference), "decisions": list(merged.values())}
-                state.pop("product_plan_completion", None)
-                self._clear_persisted_product_plan(state.get("cart_plan"))
+                updated = {"menu_ref": deepcopy(reference), "decisions": list(merged.values())}
+                if updated != previous:
+                    state["menu_ingredient_decisions"] = updated
+                    state.pop("product_plan_completion", None)
+                    self._clear_persisted_product_plan(state.get("cart_plan"))
             return {"recorded": True, "menu_ref": reference, "ingredient_decisions": list(merged.values()),
                     "cart_changed": False, "next": "Use these recorded ingredients for this menu; prepare/apply its updated products for an authorized shop."}
         timeout = (self.products_apply_budget_seconds if action == "apply" else
@@ -3796,6 +3834,12 @@ class PlanningOperations:
             persisted_authority = None
             persisted_dependencies = None
             mode = request.get("continuation_mode", "extend")
+            refresh_stock = mode == "refresh_stock"
+            if refresh_stock and (not continuation_ref or not request.get("stock_ref") or request.get("candidate_approvals")
+                                  or request.get("ingredient_decisions")):
+                raise HouseholdError("refresh_stock requires the original product_plan_ref and current stock_ref alone")
+            if not refresh_stock and request.get("stock_ref") is not None:
+                raise HouseholdError("stock_ref is only used with refresh_stock")
             if continuation_ref is not None:
                 if any(request.get(key) is not None for key in (
                     "menu_ref", "planner_ref", "planner_handoff", "planner_selection_ref",
@@ -3813,13 +3857,16 @@ class PlanningOperations:
                     saved_ref = None
                 approvals = self._merge_product_plan_approvals(
                     continuation_record["candidate_approvals"],
-                    request.get("candidate_approvals") or [], mode,
+                    request.get("candidate_approvals") or [], "extend" if refresh_stock else mode,
                     dependent_groups=continuation_record["dependent_groups"],
                 )
                 include_recurring = continuation_record.get("include_recurring", True)
                 if "include_recurring" in request and request["include_recurring"] != include_recurring:
                     raise HouseholdError("product_plan_ref preserves recurring scope; prepare the menu again to change it")
                 ingredient_decisions = continuation_record["ingredient_decisions"]
+                if refresh_stock:
+                    ingredient_decisions, approvals = self._refresh_product_stock(
+                        continuation_record, menu, self.store.read(), request["stock_ref"])
                 budget_ore = continuation_record["budget_ore"]
                 price_mode = continuation_record["price_mode"]
             else:
@@ -3893,7 +3940,7 @@ class PlanningOperations:
                     budget_ore = request.get("budget_ore")
                     price_mode = request.get("price_mode") or ("estimate" if self.provider in {"oda", "mathem"} else "exact")
             observation_work = (deepcopy(continuation_record.get("observation_work") or {})
-                                if continuation_record is not None and mode != "reset" else {})
+                                if continuation_record is not None and mode not in {"reset", "refresh_stock"} else {})
             plan = self._prepare_products(
                 include_recurring=include_recurring,
                 work=observation_work,
@@ -3924,7 +3971,7 @@ class PlanningOperations:
             # provider observations. Persisted partial approvals are inputs to
             # that refresh above, never unverified output authority.
             retained_approvals = self._continuation_approvals(plan)
-            if continuation_record is not None:
+            if continuation_record is not None and not refresh_stock:
                 if self._product_requirement_scope_digest(plan) != continuation_record["requirement_scope_digest"]:
                     raise HouseholdError("product_plan_ref requirements changed; reset from the exact current menu")
             selection_ref = None
@@ -3994,6 +4041,7 @@ class PlanningOperations:
             stored_binding = binding_arguments if saved_ref is not None else {
                 "planner_ref": self._planner_ref(binding["planner_handoff"])}
             product_plan_ref, selection_digest = self._store_product_plan_record(
+                expected_stock_ref=request.get("stock_ref") if refresh_stock else None,
                 menu_ref=saved_ref, plan=plan, approvals=retained_approvals,
                 ingredient_decisions=plan.get("ingredient_decisions"),
                 budget_ore=plan.get("budget_ore"), price_mode=plan.get("price_mode") or price_mode,

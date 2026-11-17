@@ -55,6 +55,20 @@ class RankedMinimumTests(unittest.TestCase):
         saved = self.app.handle({"operation": "menu", "action": "save", "planner_ref": accepted["save_ref"]})["menu"]
         self.assertEqual(saved_menu_minimum_evaluation(saved, self.store.read()["profile"])["enforced_status"], "pass")
 
+    def test_plan_save_reuses_exact_ranking_and_returns_current_ref(self):
+        from unittest.mock import patch
+        import planning_operations
+        candidates = self.candidates(2)
+        with patch.object(planning_operations, "plan_week", wraps=planning_operations.plan_week) as rank:
+            initial = self.plan(candidates[:1], planning_mode="relative", days=[1])
+            saved = self.app.handle({"operation": "menu", "action": "save", "planner_ref": initial["save_ref"]})["menu"]
+            self.assertEqual(rank.call_count, 1)
+            replacement = self.plan(candidates[1:], planning_mode="relative", days=[1])
+            self.assertEqual(replacement["current_menu_ref"]["digest"], saved["digest"])
+            self.app.handle({"operation": "menu", "action": "save", "planner_ref": replacement["save_ref"],
+                             "menu_ref": replacement["current_menu_ref"]})
+            self.assertEqual(rank.call_count, 2)
+
     def test_short_relative_plan_does_not_promise_to_meet_a_full_week_quota(self):
         candidates = self.candidates(1)
         with self.store.locked() as state:
