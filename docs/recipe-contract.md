@@ -361,3 +361,5 @@ is bound to delivery idempotency; a different choice needs a new request ID.
 Frozen snapshots retain reviewed variants and the resolved language metadata.
 Norwegian and English renderer labels are supported. Hosts choose search queries
 in the store's language independently of recipe display language.
+
+A keyless direct typed save reuses the original intent for that exact normalized recipe and status. Supply a new idempotency key to intentionally create another personal recipe. Source identity still prevents duplicate source copies. An archived discovery save returns the current revision and explicit `restore_arguments`. Restore uses a revision check and returns the last recorded active or draft status. An old archive with no previous visible revision returns to draft.

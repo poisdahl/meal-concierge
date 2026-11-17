@@ -2334,6 +2334,7 @@ class RecipeStore:
             if target is None and existed and metadata and metadata.get("schema_version") in {"6", "7"}:
                 self._backup_before_pack_migration(connection, metadata["schema_version"])
             self._schema(connection)
+            self._ensure_search_index(connection)
             if restore:
                 connection.commit()
                 return connection
@@ -2366,7 +2367,25 @@ class RecipeStore:
     @staticmethod
     def _search_text(recipe: Mapping[str, Any]) -> str:
         source = recipe.get("source") if isinstance(recipe.get("source"), Mapping) else {}
-        return " ".join(_normalized_text(value) for value in [recipe.get("name"), source.get("title"), *(recipe.get("tags") or []), *(recipe.get("categories") or []), source.get("publisher"), source.get("author")] if value)
+        return " ".join(_normalized_text(value) for value in [recipe.get("name"), source.get("title"), *(recipe.get("tags") or []), *(recipe.get("categories") or []), *(row.get("item") for row in recipe.get("ingredients", []) if isinstance(row, Mapping)), source.get("publisher"), source.get("author")] if value)
+
+    def _ensure_search_index(self, connection):
+        # Derived data only. The schema, backfill, triggers and marker commit
+        # together; interruption retries without rewriting documents or history.
+        if connection.execute("SELECT 1 FROM metadata WHERE key='search_index' AND value='2'").fetchone():
+            return
+        for row in connection.execute("SELECT id,document FROM recipes ORDER BY id"):
+            connection.execute("UPDATE recipes SET search_text=? WHERE id=?",
+                               (self._search_text(json.loads(row[1])), row[0]))
+        connection.execute("CREATE VIRTUAL TABLE IF NOT EXISTS recipe_search USING fts5(search_text, tokenize='trigram')")
+        connection.execute("INSERT INTO recipe_search(rowid,search_text) SELECT rowid,search_text FROM recipes")
+        connection.execute("""CREATE TRIGGER recipe_search_insert AFTER INSERT ON recipes BEGIN
+            INSERT INTO recipe_search(rowid,search_text) VALUES(new.rowid,new.search_text); END""")
+        connection.execute("""CREATE TRIGGER recipe_search_delete AFTER DELETE ON recipes BEGIN
+            DELETE FROM recipe_search WHERE rowid=old.rowid; END""")
+        connection.execute("""CREATE TRIGGER recipe_search_update AFTER UPDATE OF search_text ON recipes BEGIN
+            UPDATE recipe_search SET search_text=new.search_text WHERE rowid=new.rowid; END""")
+        connection.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('search_index','2')")
 
     @staticmethod
     def _favorite_state(connection: sqlite3.Connection, recipe_id: str) -> dict[str, Any]:
@@ -5326,6 +5345,7 @@ class RecipeStore:
         status_filter: str | None = None,
         category: str | None = None,
         group_ranks: Mapping[str, int] | None = None,
+        rotation_pivot: str | None = None,
     ) -> list[dict[str, Any]]:
         """group_ranks orders pages by source group first: "own" and
         "collection:<pack_id>" map to a rank (lower first, 1 when unlisted)."""
@@ -5342,8 +5362,19 @@ class RecipeStore:
             raise RecipeError("invalid recipe status filter")
         if category is not None:
             normalize_categories([category])
-        literal = _normalized_text(text).replace("!", "!!").replace("%", "!%").replace("_", "!_")
-        needle = f"%{literal}%"
+        terms = list(dict.fromkeys(_normalized_text(text).split()))
+        if len(terms) > 12 or any("\x00" in term for term in terms):
+            raise RecipeError("recipe search accepts at most twelve bounded text terms")
+        long_terms = [term for term in terms if len(term) >= 3]
+        conditions, parameters = [], []
+        if long_terms:
+            conditions.append("recipes.rowid IN (SELECT rowid FROM recipe_search WHERE recipe_search MATCH ?)")
+            parameters.append(" AND ".join('"' + term.replace('"', '""') + '"' for term in long_terms))
+        for term in terms:
+            if len(term) < 3:
+                conditions.append("instr(search_text, ?) > 0")
+                parameters.append(term)
+        filter_sql = " AND ".join(conditions) or "1"
         status = "" if include_archived else "AND status != 'archived'"
         if status_filter is not None:
             status += " AND status = ?"
@@ -5355,28 +5386,42 @@ class RecipeStore:
         )
         origin_filter = "AND EXISTS (SELECT 1 FROM recipe_entry_metadata m WHERE m.recipe_id=recipes.id AND m.entry_origin=?)" if entry_origin is not None else ""
         category_filter = "AND EXISTS (SELECT 1 FROM json_each(recipes.document, '$.categories') WHERE value=?)" if category is not None else ""
-        group_order, group_values = "", []
+        rank_sql, rank_args = "1", []
         if group_ranks:
             cases = []
             for group, rank in group_ranks.items():
                 if group == "own":
                     cases.append("WHEN m.pack_id IS NULL THEN ?")
-                    group_values.append(rank)
+                    rank_args.append(rank)
                 elif group.startswith("collection:"):
                     cases.append("WHEN m.pack_id = ? THEN ?")
-                    group_values.extend((group.removeprefix("collection:"), rank))
+                    rank_args.extend((group.removeprefix("collection:"), rank))
             if cases:
-                # An entry without origin metadata is the household's own.
-                group_order = (f"COALESCE((SELECT CASE {' '.join(cases)} ELSE 1 END FROM recipe_entry_metadata m "
-                               "WHERE m.recipe_id=recipes.id), ?), ")
-                group_values.append(group_ranks.get("own", 1))
+                rank_sql = (f"COALESCE((SELECT CASE {' '.join(cases)} ELSE 1 END FROM recipe_entry_metadata m "
+                            "WHERE m.recipe_id=recipes.id), ?)")
+                rank_args.append(group_ranks.get("own", 1))
+        filters = f"WHERE {filter_sql} {status} {favorite} {origin_filter} {category_filter}"
+        filter_args = [*parameters, *([status_filter] if status_filter is not None else []),
+                       *([entry_origin] if entry_origin is not None else []), *([category] if category is not None else [])]
+        if rotation_pivot is None:
+            order = f"{rank_sql}, " if rank_args else ""
+            sql = f"SELECT * FROM recipes {filters} ORDER BY {order}updated_at DESC,id LIMIT ? OFFSET ?"
+            args = [*filter_args, *rank_args]
+        else:
+            if re.fullmatch(r"rec_[0-9a-f]{24}", rotation_pivot) is None:
+                raise RecipeError("invalid bank rotation pivot")
+            # Three preferred, two normal and one occasional per cycle if all
+            # three tiers have enough matches. Rotate inside each tier.
+            sql = f"""WITH matches AS (SELECT id,{rank_sql} AS tier FROM recipes {filters}),
+                numbered AS (SELECT id,tier,row_number() OVER
+                  (PARTITION BY tier ORDER BY (id < ?),id) - 1 AS seq FROM matches)
+                SELECT recipes.* FROM numbered JOIN recipes USING(id)
+                ORDER BY seq / (3-tier), tier, seq LIMIT ? OFFSET ?"""
+            args = [*rank_args, *filter_args, rotation_pivot]
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN")
-                rows = connection.execute(
-                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} {category_filter} ORDER BY {group_order}updated_at DESC, id LIMIT ? OFFSET ?",
-                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), *([category] if category is not None else []), *group_values, limit, offset),
-                ).fetchall()
+                rows = connection.execute(sql, (*args, limit, offset)).fetchall()
                 return [self._record(connection, row) for row in rows]
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
@@ -5792,32 +5837,41 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def archive(self, recipe_id: Any, expected_revision: Any = None, *, idempotency_key: Any = None) -> dict[str, Any]:
+    def archive(self, recipe_id: Any, expected_revision: Any = None, *, idempotency_key: Any = None, restore: bool = False) -> dict[str, Any]:
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
         if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
             raise RecipeError("expected_revision must be a positive integer")
+        action = "restore" if restore else "archive"
         key = self._idempotency_key(idempotency_key)
         request_hash = _hash({"recipe_id": recipe_id, "expected_revision": expected_revision})
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                if existing := self._idem(connection, key, "archive", request_hash):
+                if existing := self._idem(connection, key, action, request_hash):
                     return existing
                 current = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
                 if current is None:
                     raise RecipeError("recipe was not found")
                 if current["revision"] != expected_revision:
                     raise RecipeError(f"recipe revision conflict; current revision is {current['revision']}")
-                if current["status"] == "archived":
+                if current["status"] != "archived" and restore:
+                    raise RecipeError("restore requires the current archived revision")
+                if current["status"] == "archived" and not restore:
                     result = self._record(connection, current, created=False)
                     result["idempotent"] = True
                 else:
+                    next_status = "archived"
+                    if restore:
+                        prior = connection.execute("SELECT status FROM revisions WHERE recipe_id=? AND status IN ('active','draft') "
+                                                   "ORDER BY revision DESC LIMIT 1", (recipe_id,)).fetchone()
+                        # Legacy imported archives with no earlier status need review.
+                        next_status = prior["status"] if prior else "draft"
                     revision = current["revision"] + 1
                     updated_at = _now()
-                    connection.execute("UPDATE recipes SET revision=?, status='archived', updated_at=? WHERE id=?", (revision, updated_at, recipe_id))
-                    connection.execute("INSERT INTO revisions VALUES(?,?,?,?,?)", (recipe_id, revision, "archived", current["document"], updated_at))
+                    connection.execute("UPDATE recipes SET revision=?, status=?, updated_at=? WHERE id=?", (revision, next_status, updated_at, recipe_id))
+                    connection.execute("INSERT INTO revisions VALUES(?,?,?,?,?)", (recipe_id, revision, next_status, current["document"], updated_at))
                     result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone(), created=False)
-                self._store_idem(connection, key, "archive", request_hash, result)
+                self._store_idem(connection, key, action, request_hash, result)
                 return result
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc

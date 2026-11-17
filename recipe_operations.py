@@ -520,7 +520,7 @@ class RecipeOperations:
         deadline = time.monotonic() + 8
         while examined < MAX_INTERNAL_DISCOVERY_ROWS and len(results) < limit and time.monotonic() < deadline:
             size = min(20, MAX_INTERNAL_DISCOVERY_ROWS - examined)
-            rows = self.recipes.search(query, limit=size, offset=offset, include_archived=False, group_ranks=ranks)
+            rows = self.recipes.search(query, limit=size, offset=offset, status_filter="active", group_ranks=ranks)
             consumed = 0
             for row in rows:
                 if time.monotonic() >= deadline:
@@ -570,22 +570,22 @@ class RecipeOperations:
     def _discovery_identities(recipe: Mapping[str, Any]) -> set[str]:
         return source_identities(recipe) or {"exact-content:" + hashlib.sha256(canonical(recipe).encode()).hexdigest()}
 
-    def _selection_page(self, source, query, cursor, limit, deadline, group_ranks=None):
+    def _selection_page(self, source, query, cursor, limit, deadline, group_ranks=None, rotation_pivot=None):
         """Use local cursors and the observed Oda/Mathem page/hasMore contract."""
         if time.monotonic() >= deadline:
             raise TimeoutError("recipe search deadline exceeded")
         if source == "internal":
             cursor = cursor or {"status": "active", "offset": 0}
             if (not isinstance(cursor, Mapping) or set(cursor) != {"status", "offset"}
-                    or cursor["status"] not in {"active", "draft"}
+                    or cursor["status"] not in ({"active"} if rotation_pivot else {"active", "draft"})
                     or type(cursor["offset"]) is not int or cursor["offset"] < 0):
                 raise RecipeError("invalid local recipe cursor")
             rows = self.recipes.search(query, limit=limit + 1, offset=cursor["offset"],
-                                       status_filter=cursor["status"], group_ranks=group_ranks)
+                                       status_filter=cursor["status"], group_ranks=group_ranks, rotation_pivot=rotation_pivot)
             more = len(rows) > limit
             next_cursor = ({"status": cursor["status"], "offset": cursor["offset"] + limit}
                            if more else {"status": "draft", "offset": 0}
-                           if cursor["status"] == "active" else None)
+                           if cursor["status"] == "active" and rotation_pivot is None else None)
             return {"candidates": [compact_candidate(row, {"recipe_ref": {"id": row["id"], "revision": row["revision"]}})
                                    for row in rows[:limit]],
                     "next_cursor": next_cursor, "exhausted": next_cursor is None}
@@ -653,6 +653,7 @@ class RecipeOperations:
         return {"recipes": page["candidates"], "next_cursor": page.get("next_cursor"),
                 "sources": [{"source": source, "status": page.get("status", "ready" if page["candidates"] else "empty" if page.get("exhausted") else "search_limit")}],
                 "exhausted": page.get("exhausted", False), "projection": "summary",
+                **({"bank_status_scope": "active and draft for browsing; ranked planning uses active revisions only"} if source == "internal" else {}),
                 # Present on every page so the choice between sources follows the household's saved wish.
                 **({"source_preferences": preferences} if (preferences := self._source_preferences(recipes)) else {})}
 
@@ -716,9 +717,15 @@ class RecipeOperations:
         web_active = effective_settings["enabled"] and (effective_settings["broad"] or any(site["enabled"] for site in effective_settings["sites"]))
         queries["web"] = [""] if web_active else None
         group_ranks = self._bank_group_ranks(state["profile"]["recipes"])
+        # Same request and usage history give the same window. A different
+        # planning week or saved meal history rotates uniformly distributed bank
+        # IDs within each source preference tier, preserving bounded pagination.
+        rotation = {"dates": request["dates"], "week": request.get("week"),
+                    "menus": sorted((state.get("recipe_usage") or {}).keys())}
+        pivot = "rec_" + hashlib.sha256(canonical(rotation).encode()).hexdigest()[:24]
         def fetch_page(source, query, cursor, limit, deadline):
             if source != "web":
-                return self._selection_page(source, query, cursor, limit, deadline, group_ranks)
+                return self._selection_page(source, query, cursor, limit, deadline, group_ranks, pivot)
             return {"candidates": web_candidates or [], "next_cursor": None, "exhausted": False,
                     "status": "search_limit" if web_result and web_result["status"] == "completed" else "unavailable"}
         def resolve(summary, deadline):
@@ -743,6 +750,8 @@ class RecipeOperations:
             return candidate
         result = collect_candidates(source_queries=queries, fetch_page=fetch_page,
                                     resolve=resolve, request=request, profile=state["profile"])
+        bank_status = next(item for item in result["sources"] if item["source"] == "internal")
+        bank_status.update(bank_status_scope="active", retrieval_order="rotating source-priority tiers")
         web_status = next(item for item in result["sources"] if item["source"] == "web")
         web_status["host_search_status"] = web_result["status"] if web_result else "not_run" if web_active else "disabled"
         return result
@@ -839,6 +848,7 @@ class RecipeOperations:
                 if source == "internal":
                     internal_page = values
                     details = {key: values[key] for key in ("examined", "exhausted")}
+                    details["bank_status_scope"] = "active"
                     values = values["recipes"]
                 if not isinstance(values, list):
                     raise HouseholdError("recipe source result is invalid")
@@ -1399,8 +1409,16 @@ class RecipeOperations:
         returned["recipe_key"] = library_recipe_key(reference)
         return reference, returned
 
-    @staticmethod
-    def _library_operation_response(operation: Mapping[str, Any]) -> dict[str, Any]:
+    def _current_builtin_save(self, response, recipe_id):
+        current = self.recipes.get(recipe_id)
+        if current["status"] == "archived":
+            response.update(saved=False, status="archived", current_status="archived",
+                            restore_arguments={"action": "restore", "recipe_id": current["id"],
+                                               "expected_revision": current["revision"]},
+                            next="This recipe is archived. Restore this revision only on explicit request.")
+        return response
+
+    def _library_operation_response(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         result = {
             "saved": operation.get("status") == "confirmed",
             "library_id": operation.get("library_id"),
@@ -1409,6 +1427,9 @@ class RecipeOperations:
         }
         if operation.get("library_recipe_ref") is not None:
             result["library_recipe_ref"] = deepcopy(operation["library_recipe_ref"])
+        if (result["saved"] and result["library_id"] == "builtin"
+                and isinstance(result.get("library_recipe_ref"), Mapping)):
+            self._current_builtin_save(result, result["library_recipe_ref"]["recipe_id"])
         if operation.get("error_code") is not None:
             result["error_code"] = operation["error_code"]
         if operation.get("error") is not None:
@@ -3886,11 +3907,14 @@ class RecipeOperations:
                 raise RecipeLibraryError("external recipe create requires an exact discovery_ref")
             value = self.recipes.prepare_input(request.get("recipe"))
             self._require_recipe_provider(value)
-            return {
-                "saved": True,
-                "library_id": "builtin",
-                "recipe": self.recipes.save(value, status=status, idempotency_key=key),
-            }
+            if key is None or key == "":
+                # Keyless direct saves are one implicit request for these exact
+                # normalized bytes and status. A new explicit key signals a
+                # separate creation intent. Source-identity constraints still apply.
+                key = "direct-save:v1:" + hashlib.sha256(canonical({"recipe": value, "status": status}).encode()).hexdigest()
+            saved = self.recipes.save(value, status=status, idempotency_key=key)
+            return self._current_builtin_save({"saved": True, "library_id": "builtin", "recipe": saved},
+                                              saved["id"])
         if action == "import_recovery":
             return self._import_recovery(request)
         if action == "archive_prepare":
@@ -3931,13 +3955,13 @@ class RecipeOperations:
                 recipe_id, expected, value, status=request.get("status"),
                 idempotency_key=key, trusted_store_product_hints=True,
             )}
-        if action == "archive":
+        if action in {"archive", "restore"}:
             if request.get("library_id") not in {None, "builtin"}:
                 raise RecipeLibraryError("external recipe lifecycle is not implemented")
             recipe_id = str(request.get("recipe_id") or "")
             expected = request.get("expected_revision")
             key = request.get("idempotency_key")
-            return {"recipe": self.recipes.archive(recipe_id, expected, idempotency_key=key)}
+            return {"recipe": self.recipes.archive(recipe_id, expected, idempotency_key=key, restore=action == "restore")}
         if action in {"mark_cooked", "mark_not_cooked"}:
             if request.get("slot_id") is not None:
                 return self._mark_slot(request)

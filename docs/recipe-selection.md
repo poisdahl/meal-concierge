@@ -76,8 +76,7 @@ Known publisher/opaque source IDs and identity-preserving URLs join source
 families, including saved and web versions. Tracking parameters and observed
 retailer URL aliases do not split families; unknown identity and revision query
 parameters remain significant. Similar titles or ingredient names do not join
-families. Exact versions and local edits survive. Ready saved versions take
-precedence within a family, but a draft cannot hide a usable web version.
+families. Exact versions and local edits survive. Ready versions come first within a family. Source priority and then saved status decide between equally usable versions.
 Known family usage blockers are combined without rewriting history. The
 request-local history index reads retained menu/order documents, then exact
 local bank/discovery references where necessary. It never scans the catalog,
@@ -92,6 +91,20 @@ never-used ranking bonus. Application applies this at candidate resolution and
 save-time revalidation. Known recorded usage remains visible even when other
 historical source identities are unresolved. Explicit feedback is applied before
 shortlisting and refreshed through the same family keys before planning.
+
+Ranked planning draws only from active bank entries and active exact revisions.
+Its bank window rotates within each source tier based on the planning dates and
+saved menu history. Identical inputs reproduce the same proposal. When all tiers
+have entries, each retrieval cycle examines three preferred, two normal and one
+occasional entries. Enabled sources remain candidates under every preference.
+Eligibility and dietary constraints apply before ranking. Equal scores use
+source priority, then saved status, then exact reference. An unsaved v6 proposal
+must be regenerated; saved menus retain their snapshots and assessments.
+
+A retained original from one explicitly bound retailer with no secondary
+attribution can be excluded from a different retailer's original-only family.
+Missing references, user records without attribution, and cross-publisher
+aliases keep coverage partial. The work-limit outcome applies to every family.
 
 The shortlist is bounded by `math.perm(candidate_count, days) <= 250000`, as well
 as the existing 12-candidate maximum. For seven days nine candidates fit
@@ -112,7 +125,7 @@ establish meal completeness. Explicitly requested other meals use menu
 Unknown/non-scalable ingredient measures remain visible in saved menus with
 `scaling_ready=false`, and products remain unresolved without invented amounts.
 
-Planner version `weekly-menu-v6` adds attributed leafy-green assessment to
+Planner version `weekly-menu-v7` retains attributed leafy-green assessment to
 category-aware dinner selection and retains exact recipe-tag matches for
 `cuisine.wanted`/`flavours`, personal favorites, documented English/Norwegian
 food-category matches for `diet.prioritise`, and a weekly range in
