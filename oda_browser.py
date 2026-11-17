@@ -1119,7 +1119,7 @@ def _oda_delivery_restrictions_script():
             .filter(x=>![...x.children].some(c=>visible(c)&&notice(c))).map(x=>norm(x.innerText)):[];
         // A positive visible banner is ready evidence. No match alone cannot
         // distinguish hydration, unsupported markup or an unrestricted cart.
-        const picker=page&&document.readyState==="complete"&&[...document.querySelectorAll('main input[type="radio"], main button')].some(e=>visible(e)&&!e.disabled&&/\b(?:[01]?\d|2[0-3]):[0-5]\d\s*[-–]\s*(?:[01]?\d|2[0-4]):[0-5]\d\b/.test(norm(e.labels?.[0]?.innerText||e.innerText)));
+        const picker=page&&document.readyState==="complete"&&[...document.querySelectorAll('main input[type="radio"], main button')].some(e=>visible(e)&&!e.disabled&&/\b(?:[01]?\d|2[0-3]):[0-5]\d\s*[-–]\s*(?:(?:[01]?\d|2[0-3]):[0-5]\d|24:00)\b/.test(norm(e.labels?.[0]?.innerText||e.innerText)));
         return JSON.stringify({ready:page&&(warnings.length>0||picker),warnings:[...new Set(warnings)].slice(0,5)});
     })()""".replace("DELIVERY_URL", json.dumps(DELIVERY_URL))
 

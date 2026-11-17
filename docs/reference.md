@@ -2375,9 +2375,10 @@ Delivery list retains per-date full/unavailable/selectable counts. If any checke
 date has no selectable slots, Oda inspects `/no/checkout/delivery/` in a separate
 inspection tab under the browser lock, only without pending cart, checkout,
 cancellation or order changes. The browser account and exact cart must match the
-provider, including an explicitly requested address. The reader waits for the
-observed visible stock-delay banner; absent/loading/unrecognized evidence stays
-`restriction_status=unknown`, never proof of unrestricted delivery. This optional
+provider, including an explicitly requested address. A visible stock-delay banner gives
+`restriction_status=observed`. A fully loaded delivery page with a visible, enabled
+time-window control and no such banner gives `not_observed` for that inspection.
+Loading pages and unrecognized controls give `unknown`. This optional
 read cannot choose delivery, change goods or pay. Failure preserves the slot
 response; a changed cart/address instead marks `availability_stale=true` and
 requires a fresh list. Dates outside the requested range remain unverified.
