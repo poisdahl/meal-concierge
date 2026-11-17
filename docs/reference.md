@@ -2066,7 +2066,7 @@ excludes delivery and cart fees. Checkout always reads the final provider total.
 A complete product review includes menu requirements and the due standing
 goods unless the request specifies `include_recurring=false`. Each included
 occurrence must match one current observed SKU, availability, quantity and price.
-Read `recurring_issues` separately from menu ingredient issues. For a saved
+Follow `recurring_review_arguments` and `recurring_issues_arguments` to page the due items and their issues separately from menu ingredients. For a saved
 menu, pass its exact `menu_ref`, `recurring_review_ref` and `occurrence_ref` to
 `recurring review_occurrence`. Select `decision=include`, `skip` or `substitute`
 and supply an exact replacement SKU, name and package count for a substitution. Prepare the

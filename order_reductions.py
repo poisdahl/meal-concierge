@@ -303,7 +303,7 @@ def _reconcile(app, pending, deadline):
     observed = {pid: row["uncredited_quantity"] for pid, row in _items(current["eligibility"], app.provider).items()}
     # Read the independently account-bound target lines. Unrelated lines,
     # delivery fees and discounts do not establish the amount refunded.
-    quantities_match = all(observed.get(item["product_id"], 0) == item["quantity"] for item in pending["items"])
+    quantities_match = all(observed.get(item["product_id"]) == item["quantity"] for item in pending["items"])
     summary = current["details"]["summary"]
     total = money_cents(summary["gross_amount"])
     matched = quantities_match and _delivery(current, app.provider) == _delivery(before, app.provider)
@@ -426,19 +426,34 @@ def orders_remove(app, request):
         fresh_cart = cart_summary(app.provider_client.call("get_cart", {}, deadline=deadline))
         if fresh_cart != current["cart"]:
             raise HouseholdError("Cart changed while preparing the removal confirmation")
-        _control(app.browser, pending, "confirm", click=False)
         with app.store.locked() as state:
             _guard(state, pending)
             state["order_change"]["status"] = "clicking"
             pending = deepcopy(state["order_change"])
+        # This validation only tags a control. Failure here is authoritative
+        # local proof that the click-capable browser call was never entered.
+        try:
+            _control(app.browser, pending, "confirm", click=False)
+        except HouseholdError:
+            with app.store.locked() as state:
+                _guard(state, pending)
+                result = {**_view(pending), "status": "not_dispatched", "removed": False,
+                          "confirmation_required": False, "retry_allowed": False,
+                          "next": "Prepare the order removal again with a new intent key."}
+                app._store_protected_result(state, token, "order_reduction", result,
+                                            target_id=pending["order_id"], intent_signature=_digest(pending["items"]))
+                state["order_change"] = None
+            return result
         try:
             app.browser._invoke("click", '[data-meal-remove-control="true"]')
             app.browser._settle(.25)
             return _reconcile(app, pending, deadline)
         except Exception:
-            with app.store.locked() as state:
-                if state.get("order_change") == pending:
-                    state["order_change"]["status"] = "uncertain"
             error = HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click")
             error.outcome_unknown = True
-            raise error from None
+            try:
+                with app.store.locked() as state:
+                    if state.get("order_change") == pending:
+                        state["order_change"]["status"] = "uncertain"
+            finally:
+                raise error from None

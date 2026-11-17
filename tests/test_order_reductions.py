@@ -161,6 +161,20 @@ class OrderRemovalTests(unittest.TestCase):
         self.assertTrue(self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])["idempotent"])
         self.assertEqual(self.browser.final_clicks, 1)
 
+    def test_stopped_final_read_retires_original_key_without_a_click(self):
+        prepared = self.prepare(1)
+        original = self.browser._eval
+        def lost_control(script):
+            if "order-removal-ui" in script and self.store.read()["order_change"]["status"] == "clicking":
+                raise HouseholdError("synthetic final control disappeared before click invocation")
+            return original(script)
+        self.browser._eval = lost_control
+        result = self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(result["status"], "not_dispatched")
+        self.assertEqual(self.prepare(1), {**result, "idempotent": True})
+        self.assertEqual(self.browser.final_clicks, 0)
+        self.assertIsNone(self.store.read()["order_change"])
+
     def test_unapplied_uncertain_click_remains_protected(self):
         prepared = self.prepare(1)
         self.browser.apply_click = False
