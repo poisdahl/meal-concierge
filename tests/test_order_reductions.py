@@ -149,6 +149,18 @@ class OrderRemovalTests(unittest.TestCase):
         self.assertTrue(result['removed'])
         self.assertEqual(self.browser.final_clicks, 1)
 
+    def test_delivered_bound_order_retires_uncertain_removal_without_claiming_credit(self):
+        prepared = self.prepare(1)
+        self.browser.apply_click = False
+        self.assertTrue(self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])["reconciliation_required"])
+        self.provider.tracking = "delivered"
+        terminal = self.call("remove_reconcile", confirmation_id=prepared["confirmation_id"])
+        self.assertEqual(terminal["status"], "delivered")
+        self.assertIsNone(terminal["removed"])
+        self.assertFalse(terminal["retry_allowed"])
+        self.assertTrue(self.call("remove_confirm", confirmation_id=prepared["confirmation_id"])["idempotent"])
+        self.assertEqual(self.browser.final_clicks, 1)
+
     def test_unapplied_uncertain_click_remains_protected(self):
         prepared = self.prepare(1)
         self.browser.apply_click = False

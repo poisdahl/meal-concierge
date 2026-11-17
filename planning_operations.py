@@ -3664,14 +3664,14 @@ class PlanningOperations:
             selected_refs=selected_refs,
         )
 
-        if include_recurring and snapshot["recurring_items"] and reference:
-            self._review_recurring_products(plan, snapshot, read_deadline, work)
+        if include_recurring and snapshot["recurring_items"]:
+            self._review_recurring_products(plan, snapshot, read_deadline, work, preview_binding=binding if not reference else None)
         return plan
 
-    def _review_recurring_products(self, plan, state, deadline, work):
+    def _review_recurring_products(self, plan, state, deadline, work, *, preview_binding=None):
         from dietary_assessment import assess
         from product_planner import _practical_packages
-        scope, rows = self._menu_recurring_scope(state)
+        scope, rows = self._menu_recurring_scope(state, preview_binding=preview_binding)
         if not rows:
             return
         reviewed, problems = [], []
@@ -4411,7 +4411,7 @@ class PlanningOperations:
                     "requirements": requirements,
                     "_expected_menu_ref": expected_menu_ref,
                     "_before_cart_write": final_partial_prewrite_check,
-                    "_include_recurring": False,
+                    "_include_recurring": False, "_reviewed_product_digest": expected_digest,
                 }, deadline)
                 if cart_result.get("synced") is not True:
                     return {
@@ -4577,6 +4577,7 @@ class PlanningOperations:
                     and not (self.store.read().get("cart_plan") or {}).get("supplemental_quantities")):
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref,
                     "_include_recurring": include_recurring, "_reviewed_recurring_scope": supplied.get("recurring_review_ref"),
+                "_reviewed_product_digest": supplied["product_plan_digest"],
                     "_allow_empty_requirements": True, "_before_cart_write": final_product_prewrite_check,
                     "_expected_product_context": context, "_restore_missing_cart_digest": restore_digest if restore else None}, deadline)
                 if not cart_result.get("synced"):
@@ -4635,6 +4636,7 @@ class PlanningOperations:
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
                 "_include_recurring": include_recurring, "_reviewed_recurring_scope": supplied.get("recurring_review_ref"),
+                "_reviewed_product_digest": supplied["product_plan_digest"],
                 "_allow_empty_requirements": True,
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
@@ -4982,13 +4984,13 @@ class PlanningOperations:
                 )
         plan["added_quantities"] = retained
 
-    def _dispatch_managed_cart(self, operations, before, target, menu_ref, deadline):
+    def _dispatch_managed_cart(self, operations, before, target, menu_ref, deadline, *, plan_digest=None):
         # The native adapter durably binds its individual delegation requests.
         # Ordinary MCP has no per-line completion identity or ownership receipt.
         if callable(getattr(self.provider_client, "validate_cart_reconciliation", None)):
             return self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
         pending = {"operation_id": secrets.token_hex(16), "provider": self.provider,
-                   "managed_menu": deepcopy(menu_ref), "before": deepcopy(before),
+                   "managed_menu": deepcopy(menu_ref), "product_plan_digest": plan_digest, "before": deepcopy(before),
                    "expected": deepcopy(target), "operations": deepcopy(operations), "order_change": None}
         with self.store.locked() as state:
             if (state.get("pending_cart_change") or state.get("pending_checkout")
@@ -5195,7 +5197,8 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline)
+                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline,
+                                                plan_digest=request.get("_reviewed_product_digest"))
             except RetailPreDispatchError:
                 raise
             except HouseholdError as exc:
@@ -5389,7 +5392,8 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline)
+                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline,
+                                                plan_digest=request.get("_reviewed_product_digest"))
             except RetailPreDispatchError:
                 raise
             except HouseholdError as exc:

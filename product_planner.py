@@ -944,7 +944,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
         return None
     size = _package_quantity(package, requirement['unit'])
     required = _read_fraction(requirement['quantity'], positive=True)
-    coverage = count * size if size is not None and 'shared_package' not in approval else None
+    measured = size is not None and not re.search(r'\b(?:drained|avrent)\b', requirement.get('item', ''), re.I)
+    coverage = count * size if measured and 'shared_package' not in approval else None
     if 'max_excess' in approval and (coverage is None or coverage - required > _read_fraction(approval['max_excess'])):
         return None
     if size is not None and count * size < required:
