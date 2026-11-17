@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sys
 from typing import Any, Callable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 from web_recipes import DEFAULT_WEB_SEARCH, validate_web_search
@@ -433,6 +434,12 @@ def recurring_schedule(value: Any, today: date) -> dict[str, Any]:
     return result
 
 
+def _flush_drive_cache(descriptor: int) -> None:
+    """Darwin fsync only reaches the drive queue; require its full barrier."""
+    if sys.platform == "darwin":
+        fcntl.fcntl(descriptor, fcntl.F_FULLFSYNC)
+
+
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     try:
         encoded = (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n").encode()
@@ -441,16 +448,14 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        try:
-            offset = 0
-            while offset < len(encoded):
-                written = os.write(descriptor, encoded[offset:])
-                if written <= 0:
-                    raise OSError("state write made no progress")
-                offset += written
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError("state write made no progress")
+            offset += written
+        os.fsync(descriptor)
+        _flush_drive_cache(descriptor)
         # The file sync does not persist the directory entry changed by rename.
         # Linux and macOS support directory fsync; do not silently continue if
         # the filesystem rejects it. Open before replace so an open failure
@@ -461,6 +466,10 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
             # If this fails, replacement may already be visible. Propagate the
             # error without restoring old state or allowing external dispatch.
             os.fsync(directory)
+            # Flush the device again after the rename's directory metadata.
+            # Keep the same regular-file descriptor; directories need not
+            # support F_FULLFSYNC. Unsupported barriers are errors, not success.
+            _flush_drive_cache(descriptor)
         finally:
             os.close(directory)
     except BaseException:
@@ -469,6 +478,8 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+    finally:
+        os.close(descriptor)
 
 
 def _normalized_identity(value: Any) -> str:

@@ -84,7 +84,10 @@ are checked against the native Unix limit before staging. Use shorter explicit
 | `runtime.json` | Exact installation paths, owner and selected/previous code release |
 
 Household JSON commits sync the temporary file, atomically replace the destination,
-then sync its parent directory before reporting success. Directory open or sync
+then sync its parent directory before reporting success. On macOS, regular-file
+`F_FULLFSYNC` barriers run before replacement and again after the directory sync
+using the same still-open file descriptor, so drive-cache writes are flushed in
+that order. Unsupported or failed barriers are errors. Directory open or sync
 errors are propagated, including on filesystems that do not support directory
 sync. An error after replacement can leave the new journal visible: it does not
 mean the old state survived or that an external action is safe to repeat. Preserve
