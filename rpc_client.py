@@ -77,6 +77,18 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
     return 300 if order_operation or cart_operation or delivery_operation or operation == "products" else 120
 
 
+def merchant_mutation(operation, action):
+    """Operations whose missing reply can hide a retailer-side effect."""
+    actions = {
+        "cart": {"change", "apply", "set", "update", "clear", "ensure", "sync", "reconcile", "weekly"},
+        "products": {"apply"},
+        "delivery": {"select"},
+        "orders": {"cancel_confirm", "cancel_submit", "remove_confirm", "change_begin", "change_abort"},
+        "checkout": {"confirm", "submit", "auto", "switch_payment", "authenticate", "abort_payment"},
+    }
+    return isinstance(operation, str) and isinstance(action, str) and action in actions.get(operation, ())
+
+
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     # Probe before dispatch: a pre-contract core must never receive a mutation.
     admission_clock = None
@@ -93,17 +105,23 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(rpc_timeout(operation, arguments))
         connection.connect(str(SOCKET))
-        connection.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
-        data = b""
-        while b"\n" not in data and len(data) <= 2 * 1024 * 1024:
-            chunk = connection.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    try:
-        response = json.loads(data.split(b"\n", 1)[0])
-    except (json.JSONDecodeError, IndexError) as exc:
-        raise RuntimeError("meal concierge service returned no valid response") from exc
+        frame = (json.dumps(request, ensure_ascii=False) + "\n").encode()
+        try:
+            connection.sendall(frame)
+            data = b""
+            while b"\n" not in data and len(data) <= 2 * 1024 * 1024:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            response = json.loads(data.split(b"\n", 1)[0])
+            if not isinstance(response, dict):
+                raise ValueError("expected a response object")
+        except (OSError, ValueError, UnicodeError) as exc:
+            if merchant_mutation(operation, arguments.get("action")):
+                raise ServiceError("The merchant operation lost its service reply; read and reconcile the original attempt.",
+                                   outcome="unknown") from exc
+            raise RuntimeError("meal concierge service returned no valid response") from exc
     if response.get("ok") is not True:
         raise ServiceError(str(response.get("error") or "meal concierge operation failed"),
                            provider_failure=response.get("provider_failure"), outcome=response.get("outcome"))

@@ -1215,6 +1215,40 @@ RPC_FRAME_TIMEOUT = 10.0
 RPC_WRITE_TIMEOUT = 10.0
 
 
+def _unrepresentable_response(request, response, reason):
+    from rpc_client import merchant_mutation
+    fallback = {"ok": False, "error": reason}
+    if response.get("outcome") == "unknown":
+        fallback["outcome"] = "unknown"
+    result = response.get("result")
+    if (not isinstance(request, Mapping) or not response.get("ok")
+            or not merchant_mutation(request.get("operation"), request.get("action"))):
+        return fallback
+    if not isinstance(result, Mapping):
+        return {**fallback, "outcome": "unknown"}
+    # Carry only bounded service-owned identities and outcome flags. Never
+    # turn a large successful write or an uncertain dispatch into a rejection.
+    summary = {k: result[k] for k in ("confirmed", "cancelled", "removed", "applied", "partial_applied",
+               "cleared", "ensured", "synced", "stopped", "awaiting_user_payment", "outcome_unknown",
+               "cart_write_pending", "cart_reconciliation_required", "retry_allowed") if type(result.get(k)) is bool}
+    for k in ("operation_id", "confirmation_id", "order_id", "product_plan_digest", "partial_product_plan_digest"):
+        value = result.get(k)
+        if isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9_.:-]{1,160}", value):
+            summary[k] = value
+    menu = result.get("menu_ref")
+    if (isinstance(menu, Mapping) and isinstance(menu.get("menu_id"), str)
+            and re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", menu["menu_id"])
+            and type(menu.get("revision")) is int and 0 < menu["revision"] < 2 ** 63
+            and isinstance(menu.get("digest"), str) and re.fullmatch(r"[a-f0-9]{64}", menu["digest"])):
+        summary["menu_ref"] = {k: menu[k] for k in ("menu_id", "revision", "digest")}
+    if not any(summary.get(k) for k in ("confirmed", "cancelled", "removed", "applied", "cleared",
+               "ensured", "synced", "stopped", "awaiting_user_payment", "outcome_unknown", "cart_write_pending")):
+        return {**fallback, "outcome": "unknown"}
+    summary["details_omitted"] = True
+    summary["next"] = "Read the current result for this original attempt before any further write."
+    return {"ok": True, "contract": 1, "result": summary}
+
+
 class Server:
     def __init__(self, path: Path, group: int, allowed_uid: int, app: Application):
         self.path = path
@@ -1276,6 +1310,7 @@ class Server:
                 connection.settimeout(None)
             except OSError:
                 return
+            request = None
             try:
                 line, separator, _remainder = data.partition(b"\n")
                 if not separator or len(line) > MAX_REQUEST:
@@ -1305,9 +1340,9 @@ class Server:
             try:
                 encoded = (json.dumps(response, ensure_ascii=True, allow_nan=False) + "\n").encode()
                 if len(encoded) > MAX_REQUEST:
-                    encoded = (json.dumps({"ok": False, "error": "response exceeds the meal concierge size limit"}) + "\n").encode()
-            except (TypeError, ValueError, UnicodeError):
-                encoded = (json.dumps({"ok": False, "error": "response contains an invalid JSON value"}) + "\n").encode()
+                    encoded = (json.dumps(_unrepresentable_response(request, response, "response exceeds the meal concierge size limit")) + "\n").encode()
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                encoded = (json.dumps(_unrepresentable_response(request, response, "response contains an invalid JSON value")) + "\n").encode()
             try:
                 connection.settimeout(RPC_WRITE_TIMEOUT)
                 connection.sendall(encoded)
