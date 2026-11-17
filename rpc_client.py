@@ -77,6 +77,18 @@ def rpc_timeout(operation: str, arguments: dict[str, Any]) -> int:
     return 300 if order_operation or cart_operation or delivery_operation or operation == "products" else 120
 
 
+def merchant_mutation(operation, action):
+    """Operations whose missing reply can hide a retailer-side effect."""
+    actions = {
+        "cart": {"change", "apply", "set", "update", "clear", "ensure", "sync", "reconcile", "weekly"},
+        "products": {"apply"},
+        "delivery": {"select"},
+        "orders": {"cancel_confirm", "cancel_submit", "remove_confirm", "change_begin", "change_abort"},
+        "checkout": {"confirm", "submit", "auto", "switch_payment", "authenticate", "abort_payment"},
+    }
+    return isinstance(operation, str) and isinstance(action, str) and action in actions.get(operation, ())
+
+
 def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     # Probe before dispatch: a pre-contract core must never receive a mutation.
     admission_clock = None
@@ -93,22 +105,40 @@ def rpc(operation: str, **arguments: Any) -> dict[str, Any]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(rpc_timeout(operation, arguments))
         connection.connect(str(SOCKET))
-        connection.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode())
-        data = b""
-        while b"\n" not in data and len(data) <= 2 * 1024 * 1024:
-            chunk = connection.recv(65536)
-            if not chunk:
-                break
-            data += chunk
-    try:
-        response = json.loads(data.split(b"\n", 1)[0])
-    except (json.JSONDecodeError, IndexError) as exc:
-        raise RuntimeError("meal concierge service returned no valid response") from exc
-    if response.get("ok") is not True:
-        raise ServiceError(str(response.get("error") or "meal concierge operation failed"),
-                           provider_failure=response.get("provider_failure"), outcome=response.get("outcome"))
-    if response.get("contract") != 1:
-        raise ServiceError("incompatible bridge/core contract; upgrade the stopped service before attaching this client")
+        frame = (json.dumps(request, ensure_ascii=False) + "\n").encode()
+        try:
+            connection.sendall(frame)
+            data = b""
+            while b"\n" not in data and len(data) <= 2 * 1024 * 1024:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            body, terminator, _ = data.partition(b"\n")
+            if not terminator or len(body) > 2 * 1024 * 1024:
+                raise ValueError("incomplete or oversized service reply")
+            response = json.loads(body)
+            if not isinstance(response, dict):
+                raise ValueError("expected a response object")
+            if response.get("ok") is False:
+                if not isinstance(response.get("error"), str) or not response["error"].strip() or "result" in response:
+                    raise ValueError("invalid error receipt")
+                if "contract" in response and (type(response["contract"]) is not int or response["contract"] != 1):
+                    raise ValueError("incompatible error contract")
+                if "outcome" in response and response["outcome"] != "unknown":
+                    raise ValueError("invalid outcome")
+                raise ServiceError(response["error"], provider_failure=response.get("provider_failure"),
+                                   outcome=response.get("outcome"))
+            if (response.get("ok") is not True or "error" in response or "outcome" in response
+                    or type(response.get("contract")) is not int or response["contract"] != 1):
+                raise ValueError("incompatible bridge/core contract")
+            if not isinstance(response.get("result"), dict):
+                raise ValueError("invalid or missing service result")
+        except (OSError, ValueError, UnicodeError) as exc:
+            if merchant_mutation(operation, arguments.get("action")):
+                raise ServiceError("The merchant operation lost its service reply; read and reconcile the original attempt.",
+                                   outcome="unknown") from exc
+            raise ServiceError("meal concierge service returned no valid response or an incompatible bridge/core contract") from exc
     return response["result"]
 
 

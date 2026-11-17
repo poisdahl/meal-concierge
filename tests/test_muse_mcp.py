@@ -359,7 +359,7 @@ class CoreTests(Fixture):
         muse.initialize(home,'oda','Synthetic protected Muse',credential_name='custom.synthetic-oda',operation_directory=self.operations)
         return home
 
-    def test_lost_write_ack_persists_journal_and_restart_reconciles_without_resend(self):
+    def test_lost_write_ack_persists_journal_and_restart_cannot_infer_an_ending(self):
         home = self.make_home()
         settings = muse.load_home(home)
         store = StateStore(home/'state',settings)
@@ -375,9 +375,9 @@ class CoreTests(Fixture):
         self.assertEqual(self.changes,1)
         self.mode = 'json'
         reopened = muse.ProtectedMuseApplication(StateStore(home/'state',settings),self.client(),None,external_recipe_sources={})
-        result = reopened.handle({'operation':'cart','action':'reconcile_change'})
-        self.assertTrue(result['reconciled'])
-        self.assertFalse(store.read().get('pending_cart_change'))
+        with self.assertRaisesRegex(HouseholdError, 'still uncertain'):
+            reopened.handle({'operation':'cart','action':'reconcile_change'})
+        self.assertTrue(store.read().get('pending_cart_change'))
         self.assertEqual(self.cart,{'9212':1})
         self.assertEqual(self.changes,1)
 

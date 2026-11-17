@@ -485,9 +485,11 @@ raise SystemExit(client.main())
         def partial(frame):
             if frame["operation"] == "manipulate_cart":
                 self.assertEqual(frame["expected_quantities"], {PRODUCT: 1, milk: 1})
-                quantities[milk] = 1
-                self.writes += 1
-                return None  # Milk happened; the whole two-unit batch was not acknowledged.
+                # The host finishes both clicks. An independent cart edit then
+                # removes one product before the verification read.
+                reply = host(frame)
+                quantities.pop(PRODUCT)
+                return reply
             return host(frame)
         code, first = finish(apply, partial)
         self.assertEqual(code, 0, first)
@@ -535,8 +537,10 @@ raise SystemExit(client.main())
             self.assertFalse(restored["result"]["applied"])
             self.assertIsNotNone(self.state().get("pending_cart_change"))
             code, recovered = self.call({"operation": "cart", "action": "reconcile_change"}, host=host)
-            self.assertEqual(code, 0, recovered)
+            self.assertEqual(code, 1, recovered)
+            self.assertIn("pending_cart_change", self.state())
             self.assertEqual(self.writes, 2)
+            return
         else:
             self.assertTrue(restored["result"]["applied"])
         self.assertIsNone(self.state().get("pending_cart_change"))
@@ -570,7 +574,7 @@ raise SystemExit(client.main())
         self.assertEqual(code, 1, blocked)
         self.assertEqual((self.files(), self.frames), (before, frames))
 
-    def test_clear_lost_complete_final_batch_reply_recovers_without_dispatch(self):
+    def test_clear_lost_final_batch_reply_stays_fenced_with_empty_cart(self):
         self.assertEqual(self.call(self.managed_request())[0], 0)
         request = self.clear_request()
         def lose_final(frame):
@@ -1117,7 +1121,8 @@ raise SystemExit(client.main())
         self.assertEqual(before, self.files())
         self.assertEqual(self.writes, 1)
         code, result = self.call({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(code, 0, result)
+        self.assertEqual(code, 1, result)
+        self.assertIn("pending_cart_change", self.state())
         self.assertEqual(self.writes, 1)
 
     def test_shared_target_lock_stops_native_calls(self):
@@ -1238,7 +1243,8 @@ raise SystemExit(client.main())
         self.assertEqual(self.writes, 1)
         self.assertIn("pending_cart_change", self.state())
         code, result = self.call({"operation": "cart", "action": "reconcile_change"})
-        self.assertEqual(code, 0, result)
+        self.assertEqual(code, 1, result)
+        self.assertIn("pending_cart_change", self.state())
         self.assertEqual(self.writes, 1)
 
     def test_read_first_policy_enables_original_household_without_rebinding(self):
@@ -1283,7 +1289,7 @@ raise SystemExit(client.main())
     def test_disabled_policy_preserves_pending_reconciliation_and_cached_ending(self):
         def lose_write(frame):
             reply = self.host(frame)
-            return None if frame["operation"] == "manipulate_cart" else reply
+            return None if frame["operation"] == "get_cart" and self.writes else reply
         command_id = str(uuid.uuid4())
         code, uncertain = self.call(self.ensure(), command_id, lose_write)
         self.assertEqual(code, 1, uncertain)

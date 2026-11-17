@@ -118,9 +118,10 @@ class WeeklyFlowTests(unittest.TestCase):
         self.app = Application(self.store, self.provider, self.browser)
         with self.assertRaises(HouseholdError):
             self.app.handle({'operation': 'cart', 'action': 'clear', 'cart_digest': read['cart_digest']})
-        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})['reconciled'])
+        with self.assertRaisesRegex(HouseholdError, 'still uncertain'):
+            self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})
         self.assertEqual(len(dispatches), 1)
-        self.assertNotIn('cart_plan', self.store.read())
+        self.assertIn('pending_cart_change', self.store.read())
         self.assertEqual(self.provider.cart['items'], [])
 
     def recurring(self, product='10'):

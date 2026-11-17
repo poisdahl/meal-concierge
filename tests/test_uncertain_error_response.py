@@ -107,6 +107,18 @@ class UncertainErrorResponseTests(unittest.TestCase):
                 with self.assertRaises(RetailPreDispatchError):
                     client._run('manipulate_cart', {}, .02)
 
+    def test_invalid_postdispatch_receipts_preserve_merchant_uncertainty(self):
+        for receipt in ({}, {"ok": False}, {"ok": False, "error": "error", "contract": 0},
+                        {"ok": True, "contract": 1}, {"ok": True, "contract": True, "result": {}},
+                        {"ok": True, "contract": 2, "result": {}}, {"ok": True, "contract": 1, "result": None},
+                        {"ok": True, "contract": 1, "result": {}, "error": "conflicting"}):
+            with self.subTest(receipt=receipt), mock.patch("rpc_client.socket.socket") as constructor:
+                sock = constructor.return_value.__enter__.return_value
+                sock.recv.side_effect = [b'{"ok":true,"contract":1,"result":{}}\n', json.dumps(receipt).encode() + b"\n"]
+                with self.assertRaises(rpc_client.ServiceError) as caught:
+                    rpc_client.rpc("cart", action="ensure")
+                self.assertTrue(caught.exception.outcome_unknown)
+
     def test_short_transport_contention_spends_the_original_timeout(self):
         client = RetailMcpClient(self.temp.name)
         budgets = []
@@ -145,6 +157,36 @@ class UncertainErrorResponseTests(unittest.TestCase):
                          mock.patch.object(self.app, '_handle', side_effect=HouseholdError('synthetic stop')):
                         result = self.wire({'operation': 'checkout', 'action': 'confirm'})
                     self.assertNotIn('outcome', result)  # Unrelated state is never evidence of this call.
+
+    def test_socket_fallback_preserves_completed_and_uncertain_commerce_outcomes(self):
+        cases = [
+            ({"operation": "checkout", "action": "confirm"}, {"confirmed": True, "order_id": "order-1",
+                "confirmation_id": "token-1", "detail": "x" * 8000}),
+            ({"operation": "products", "action": "apply"}, {"applied": False, "outcome_unknown": True,
+                "operation_id": "original-1", "detail": float("nan")}),
+        ]
+        for request, payload in cases:
+            with self.subTest(request=request), mock.patch.object(self.app, "handle", return_value=payload), \
+                    mock.patch("service.MAX_REQUEST", 1024):
+                result = self.wire(request)["result"]
+                for key, value in payload.items():
+                    if key != "detail":
+                        self.assertEqual(result[key], value)
+                self.assertNotIn("detail", result)
+                self.assertTrue(result["details_omitted"])
+        with mock.patch.object(self.app, "handle", return_value={"detail": "x" * 8000}), mock.patch("service.MAX_REQUEST", 1024):
+            self.assertEqual(self.wire({"operation":"cart", "action":"change"})["outcome"], "unknown")
+            self.assertNotIn("outcome", self.wire({"operation":"cart", "action":"get"}))
+
+    def test_rpc_after_send_eof_marks_only_possible_merchant_mutation(self):
+        for action, expected in (("change", rpc_client.ServiceError), ("get", RuntimeError)):
+            with self.subTest(action=action), mock.patch("rpc_client.socket.socket") as connection:
+                sock = connection.return_value.__enter__.return_value
+                sock.recv.side_effect = [b'{"ok":true,"contract":1,"result":{}}\n', b""]
+                with self.assertRaises(expected) as raised:
+                    rpc_client.rpc("cart", action=action)
+                self.assertEqual(getattr(raised.exception, "outcome_unknown", False), action == "change")
+                self.assertEqual(sock.sendall.call_count, 2)  # Health plus the one original request.
 
     def test_rpc_and_mcp_and_cli_preserve_unknown_disposition(self):
         class Connection:

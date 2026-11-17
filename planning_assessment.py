@@ -93,7 +93,7 @@ def workflow_status(state, *, now=None):
     jobs = [j for j in state.get("email_jobs", []) if j.get("order_id") == order_id and j.get("provider") == state["provider"]] if order_id else []
     next_action = {"operation": "menu", "action": "plan", "reason": "Prepare a menu."}
     if state.get("pending_cart_change"):
-        next_action = {"operation": "cart", "action": "reconcile_change", "reason": "Read back the pending grocery top-up before any further write; never repeat an uncertain delta."}
+        next_action = {"operation": "cart", "action": "reconcile_change", "reason": "Reconcile the original cart operation before any further write. Recovery requires its terminal response and a bound cart readback."}
     elif pending:
         child = pending.get("recovery")
         attempt = current_review(pending)

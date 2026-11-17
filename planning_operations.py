@@ -4912,6 +4912,15 @@ class PlanningOperations:
             if before_live != acknowledged:
                 raise HouseholdError("MENY cart changed between bounded batches")
             expected = self._quantities_after_operations(before_live, batch)
+            if getattr(self.provider_client, "owns_managed_cart_journal", False):
+                # The native host installs its command-bound intent before it
+                # emits the request and checks the matching response and cart.
+                changed = self._cart_provider_call("manipulate_cart", {"operations": batch}, deadline=deadline)
+                if self._cart_lines(cart_summary(changed))[0] != expected:
+                    raise HouseholdError("native MENY cart changed between bounded batches")
+                acknowledged.clear()
+                acknowledged.update(expected)
+                continue
             pending = {
                 "operation_id": operation_id, "provider": self.provider, "managed_menu": deepcopy(menu_ref),
                 "product_plan_digest": plan_digest, "before": original, "expected": expected,
@@ -5826,7 +5835,8 @@ class PlanningOperations:
         for key in set(original["added_quantities"]) | set(managed["initial"]) | set(verified):
             quantity = min(max(0, original["added_quantities"].get(key, 0)
                                + verified.get(key, 0) - managed["initial"].get(key, 0)),
-                           max(0, live.get(key, 0) - supplements.get(key, 0)))
+                           max(0, live.get(key, 0) - supplements.get(key, 0)
+                               - original.get("baseline_quantities", {}).get(key, 0)))
             if quantity:
                 added[key] = quantity
         return added, supplements
@@ -5884,13 +5894,15 @@ class PlanningOperations:
                 "menu_ref": deepcopy(managed["menu_ref"]), "started_at": self._now().isoformat()}
             state.pop("pending_cart_change")
 
-    def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any]) -> None:
+    def _complete_cart_write(self, pending: Mapping[str, Any], cart: Mapping[str, Any], *, review_discrepancy=False):
         quantities, names = self._cart_lines(cart_contents(cart))
+        native_ending = None
         if pending.get("native_cart_binding"):
             validate = getattr(self.provider_client, "validate_cart_reconciliation", None)
             if not callable(validate):
                 raise HouseholdError("reconcile this original native cart journal through its bound native adapter")
-            if validate(pending, self.store) == "not_dispatched":
+            native_ending = validate(pending, self.store)
+            if native_ending == "not_dispatched":
                 if quantities != pending["before"]:
                     raise HouseholdError("cart changed after native refusal; preserve its original journal")
                 if not pending.get("native_managed"):
@@ -5899,9 +5911,11 @@ class PlanningOperations:
                             raise HouseholdError("original native cart intent changed during refusal reconciliation")
                         state.pop("pending_cart_change")
                     return
+        stopped_prefix = pending.get("stopped_before_next_click") is True
+        finished = pending.get("dispatch_finished") is True
         if pending.get("managed_menu"):
-            if not pending.get("dispatch_finished") and quantities != pending["expected"]:
-                raise HouseholdError("cart dispatch remains uncertain; use reconcile_change to read the original target without resending")
+            if not finished and not (stopped_prefix and quantities == pending["expected"]):
+                raise HouseholdError("cart dispatch remains uncertain; the original batch needs terminal evidence before another write")
             with self.store.locked() as state:
                 plan = state.get("cart_plan") or {}
                 if state.get("pending_cart_change") != pending or plan.get("menu_ref") != pending["managed_menu"]:
@@ -5914,10 +5928,34 @@ class PlanningOperations:
                 self._finish_managed_cart_journal(state, pending, "observed_review_required")
             return
         if pending.get("native_managed"):
+            managed = pending["native_managed"]
+            verified_batch = managed.get("verified") == pending["expected"]
+            if not (finished or verified_batch or native_ending in {"ended", "not_dispatched"}):
+                raise HouseholdError("original native cart batch has no terminal acknowledgement")
             self._complete_native_managed_write(pending, quantities, names)
             return
-        if quantities != pending["expected"] and not pending.get("dispatch_finished"):
-            raise HouseholdError("cart write is still uncertain; reconcile_change only reads and never resends")
+        if not (finished or stopped_prefix or native_ending == "ended"):
+            raise HouseholdError("cart write is still uncertain; a matching cart cannot prove the original dispatch ended")
+        if quantities != pending["expected"] and (stopped_prefix or pending.get("operation_id") or native_ending == "ended"):
+            if not review_discrepancy or not finished or native_ending or stopped_prefix:
+                raise HouseholdError("original cart quantities remain unverified; reconcile_change only reads and never resends")
+            # The specific invocation has ended. A different cart cannot prove
+            # which item changes it made, or authorize attaching them to an order.
+            with self.store.locked() as state:
+                if state.get("pending_cart_change") != pending or state.get("order_change") != pending.get("order_change"):
+                    raise HouseholdError("original cart intent changed during readback")
+                plan = state.get("cart_plan")
+                if isinstance(plan, dict) and not pending.get("order_change"):
+                    self._clear_persisted_product_plan(plan)
+                    self._set_cart_needs_input(plan, quantities, names)
+                    state.pop("product_plan_completion", None)
+                state.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {
+                    "provider": self.provider, "request_digest": pending["request_digest"],
+                    "status": "completed_with_cart_drift", "observed_digest": self._cart_digest(quantities)}
+                state.pop("pending_cart_change")
+            return {"reconciled": False, "cart_write_pending": False, "status": "needs_input",
+                    "operation_id": pending["operation_id"], "cart_digest": self._cart_digest(quantities),
+                    "next": "Review the observed cart and the original intended quantities. The completed batch has no verified line attribution."}
         with self.store.locked() as state:
             if canonical(state.get("pending_cart_change")) != canonical(pending):
                 raise HouseholdError("pending cart change changed during readback")
@@ -6015,9 +6053,11 @@ class PlanningOperations:
                     self.browser.verify_order_change(change.get("order_id"), change.get("code"), deadline=deadline)
                 try:
                     cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-                    self._complete_cart_write(pending, cart)
+                    review = self._complete_cart_write(pending, cart, review_discrepancy=True)
+                    if review is not None:
+                        return {**review, "cart": cart}
                 except (HouseholdError, OSError) as exc:
-                    error = HouseholdError("The original cart write is still uncertain. Use reconcile_change without resending.")
+                    error = HouseholdError("The original cart write is still uncertain. Use reconcile_change with the original dispatch ending and bound readback; never resend based on cart quantities.")
                     error.outcome_unknown = True
                     raise error from exc
                 return {"reconciled": True, "cart_write_pending": False, "cart": cart,
@@ -6157,7 +6197,7 @@ class PlanningOperations:
                     for item in exc.applied_operations:
                         key = str(item["productId"])
                         acknowledged[key] = acknowledged.get(key, 0) + item["quantity"]
-                    pending = {**pending, "expected": {key: value for key, value in acknowledged.items() if value}, "dispatch_finished": not exc.applied_operations}
+                    pending = {**pending, "expected": {key: value for key, value in acknowledged.items() if value}, "stopped_before_next_click": True}
                     with self.store.locked() as locked:
                         locked["pending_cart_change"] = deepcopy(pending)
                     try:
@@ -6175,6 +6215,12 @@ class PlanningOperations:
                     exc.outcome_unknown = True
                     raise
                 try:
+                    if not pending.get("native_cart_binding"):
+                        with self.store.locked() as locked:
+                            if locked.get("pending_cart_change") != pending:
+                                raise HouseholdError("original cart operation changed after dispatch")
+                            pending = {**pending, "dispatch_finished": True}
+                            locked["pending_cart_change"] = deepcopy(pending)
                     if self.provider == "meny":
                         self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
                     cart = self.provider_client.call("get_cart", {}, deadline=deadline)
