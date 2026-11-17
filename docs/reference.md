@@ -2123,8 +2123,14 @@ A managed Oda or Mathem write retains its original operation identity, menu
 revision, exact deltas and expected cart. When the response is uncertain,
 `cart reconcile_change` reads the original operation without dispatching it
 again. The transport can positively identify a local refusal before the cart
-tool was entered. A timeout, generic merchant error or unchanged cart leaves a
-possibly dispatched write pending. If a completed batch has visible partial
+tool was entered. A timeout or generic merchant error leaves the original
+operation pending even if another edit later produces the expected cart. An
+operation-bound ending and matching readback are required to release that
+write. The retail MCP cart tool returns the resulting grouped cart, as described
+in the [Oda tool manifest](https://oda.com/mcp/manifest/). Queue acknowledgements
+leave the operation pending. A terminal response received by the service before a caller disconnects
+is recorded and can be reconciled after restart. A lost provider response
+requires a terminal receipt from the original provider invocation. If a completed batch has visible partial
 additions with ambiguous ownership, `ownership_review.maximum_adoptable`
 shows the bounded quantities the owner may choose to assign to the menu.
 Use `cart reconcile` with the exact digest, `keep_current` and approved
@@ -2307,10 +2313,13 @@ Provider explanations: [Oda additions](https://hjelp.oda.com/no/article/100639),
 
 Each supplemental cart write is journalled before dispatch; MENY uses bounded
 verified batches. An interrupted write blocks later writes and checkout across
-restart. `cart reconcile_change` only reads and closes the journal when the exact
-expected quantities are observed; it never sends the delta again. A native MENY
-stop proven to precede every click can close after reading the preserved cart;
-a partial batch still requires the exact result of its earlier clicks. Workflow status
+restart. `cart reconcile_change` reads without dispatch. A recorded terminal
+response and matching quantities verify the intended result. A different cart
+after a recorded terminal response requires review before attribution. If the
+provider response was lost, the original invocation needs terminal evidence
+even when another edit produced the expected cart. A verified MENY stop before
+its first click releases the fence. A stopped prefix requires readback of the
+earlier acknowledged clicks. Workflow status
 surfaces this recovery step. A changed Oda/Mathem addition cart must be reviewed and
 rebound; `orders change_abort(retain_cart=true)` preserves its goods.
 

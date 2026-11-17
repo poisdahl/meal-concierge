@@ -2289,10 +2289,10 @@ class ProductRuntimeTests(unittest.TestCase):
                 app.handle({"operation": "cart", "action": "reconcile_change"})
             self.assertEqual(store.read()["pending_cart_change"], journal)
             original("manipulate_cart", attempted[1])
-            result = app.handle({"operation": "cart", "action": "reconcile_change"})
-            self.assertTrue(result["reconciled"])
-            self.assertFalse(store.read().get("pending_cart_change"))
-            self.assertEqual(store.read()["cart_plan"]["added_quantities"], {reference: 2})
+            with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+                app.handle({"operation": "cart", "action": "reconcile_change"})
+            self.assertEqual(store.read()["pending_cart_change"], journal)
+            self.assertEqual(journal["acknowledged"], {reference: 2})
             self.assertEqual(len(attempted), 2)
 
     def test_meny_apply_stops_remaining_batches_on_intermediate_cart_change(self):

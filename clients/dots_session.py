@@ -235,6 +235,8 @@ def cart_policy(store, config, request):
 
 
 class NativeHost:
+    owns_managed_cart_journal = True
+
     def __init__(self, store, config, reader, command_id, deadline, request=None):
         self.store, self.config, self.reader = store, config, reader
         self.command_id, self.deadline = command_id, deadline
@@ -420,6 +422,12 @@ class NativeHost:
                 raise HouseholdError("native cart dispatch ending is unknown; reconcile without resend")
             if not managed:
                 return result
+            with self.store.locked() as state:
+                pending = state.get("pending_cart_change") or {}
+                if ((pending.get("native_managed") or {}).get("command_id") != self.command_id
+                        or pending.get("operations") != operations):
+                    raise HouseholdError("original native cart batch changed after acknowledgement")
+                pending["dispatch_finished"] = True
             cart = self.call("get_cart", {}, deadline=deadline)
             live = self.app._cart_lines(cart_summary(cart))[0]
             self.app._verify_native_managed_batch(self.command_id, live)

@@ -290,8 +290,10 @@ Use `error` instead of `result` on failure. `verify_new_cart` requires actual
 complete current DOM snapshot validated by `normalize_cart_snapshot` in
 `meny.py`, including root/control/count/total/delivery facts; missing values
 cannot be inferred. `manipulate_cart` requires `{"dispatched":true}` only
-after the exact bounded batch was dispatched. That reply is not completion:
-the core performs a fresh readback before clearing its pending journal.
+after the host has finished the exact bounded batch with no further clicks in
+flight. The core records that operation-bound reply and reads the cart before
+clearing its pending journal. Losing the host reply leaves the original write
+fenced even when fresh quantities match.
 
 `product_search` requires one first-page query and size 5. Its result must
 include the exact `query`, `page:1`, `requested_size:5`,

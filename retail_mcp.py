@@ -24,7 +24,7 @@ import time
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
-from core import HouseholdError, cart_summary, validate_delivery_slot
+from core import HouseholdError, cart_contents, cart_summary, validate_delivery_slot
 from product_observations import _mathem_ore, normalize_retail_product_search, normalize_retail_product_search_batch
 
 
@@ -425,6 +425,20 @@ class RetailMcpClient:
     def _normalize_result(self, tool, arguments, value):
         if not isinstance(value, dict):
             raise HouseholdError(f"{self.label} returned no structured result")
+        if tool == "manipulate_cart":
+            # Both retail manifests return an updated grouped cart. A transport
+            # admission or bare success flag cannot establish that ending.
+            cart = value.get("result") if set(value) == {"result"} else value
+            if (not isinstance(cart, dict) or not isinstance(cart.get("groups"), list)
+                    or type(cart.get("productQuantityCount")) is not int
+                    or not isinstance(cart.get("totalGrossAmount"), str)
+                    or any(key in cart for key in ("status", "queued", "pending", "accepted", "success", "error"))):
+                raise HouseholdError("retailer cart operation returned no concluded cart")
+            lines = cart_contents(cart)["items"]
+            if (cart["productQuantityCount"] != sum(row["quantity"] for row in lines)
+                    or any(not row["product_id"].isdecimal() for row in lines)):
+                raise HouseholdError("retailer cart result has inconsistent product quantities")
+            return cart
         if tool == "get_delivery_slots":
             return normalize_retail_delivery_slots(value, provider=self.provider)
         if tool == "product_search":

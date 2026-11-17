@@ -1319,8 +1319,9 @@ class MathemFlowTests(unittest.TestCase):
             self.app.handle({'operation': 'cart', 'action': 'change', 'operations': [{'productId': 10, 'quantity': 1}]})
         with self.assertRaisesRegex(HouseholdError, 'reconcile_change'):
             self.app.handle({'operation': 'checkout', 'action': 'prepare'})
-        self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})
-        self.assertIsNone(self.store.read().get('pending_cart_change'))
+        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+            self.app.handle({'operation': 'cart', 'action': 'reconcile_change'})
+        self.assertIsNotNone(self.store.read().get('pending_cart_change'))
         self.assertEqual(sum(tool == 'manipulate_cart' for tool, _ in self.shop.calls), 1)
 
     def test_protected_actions_never_use_oda_browser_or_create_attempts(self):
@@ -1691,13 +1692,13 @@ class CompactProductApplyTests(unittest.TestCase):
         restarted = Application(StateStore(self.store.path.parent, {
             'instance': 'test', 'household': 'Test', 'profile_overrides': {}}), self.shop, object())
         result = restarted.handle(self.arguments)
-        self.assertTrue(result['cart_reconciliation_required'])
-        kept = restarted.handle({'operation': 'cart', 'action': 'reconcile',
-            'menu_ref': self.arguments['menu_ref'], 'cart_digest': result['cart_plan']['cart_digest'],
-            'decision': 'keep_current'})
-        self.assertTrue(kept['reconciled'])
-        result = restarted.handle(self.arguments)
-        self.assertTrue(result['applied'])
+        self.assertTrue(result["outcome_unknown"])
+        journal = restarted.store.read()["pending_cart_change"]
+        self.assertEqual(journal["operation_id"], result["operation_id"])
+        with self.assertRaisesRegex(HouseholdError, "still uncertain"):
+            restarted.handle({"operation": "cart", "action": "reconcile_change"})
+        self.assertEqual(restarted.store.read()["pending_cart_change"], journal)
+        self.assertTrue(restarted.handle(self.arguments)["outcome_unknown"])
         self.assertEqual([name for name, _ in self.shop.calls].count('manipulate_cart'), 1)
         self.assertEqual(self.shop.cart['items'][0]['quantity'], 1)
 
@@ -2007,8 +2008,17 @@ class MathemGuardedCheckoutTests(unittest.TestCase):
         self.assertEqual(self.store.read()['order_change']['binding'], binding)
         self.app._cart({'action': 'ensure', 'requirements': [{'product_id': 4694, 'product_name': 'Pasta Fusilli', 'quantity': 1}]})
         self.assertNotIn('manipulate_cart', [name for name, _ in self.shop.calls])
-        self.shop.fail_after_write = True
-        with self.assertRaises(HouseholdError):
+        original = self.shop.call
+        completed = False
+        def lose_readback(tool, arguments, **kwargs):
+            nonlocal completed
+            if completed and tool == "get_cart":
+                raise HouseholdError("acknowledged addition readback lost")
+            value = original(tool, arguments, **kwargs)
+            if tool == "manipulate_cart":
+                completed = True
+            return value
+        with mock.patch.object(self.shop, "call", side_effect=lose_readback), self.assertRaises(HouseholdError):
             self.app._cart({'action': 'ensure', 'requirements': [{'product_id': 4694, 'product_name': 'Pasta Fusilli', 'quantity': 2}]})
         with self.assertRaisesRegex(HouseholdError, 'reconcile_change'):
             self.app._orders({'action': 'change_abort', 'order_id': '123456', 'retain_cart': True})
