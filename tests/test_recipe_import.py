@@ -2343,7 +2343,7 @@ class PrivatePortableTests(unittest.TestCase):
         with self.assertRaises(FileExistsError): self.export()
         self.assertEqual(self.output.read_bytes(),original)
 
-    def test_collection_origin_uses_private_schema_two_and_restores(self):
+    def test_collection_origin_with_status_provenance_uses_schema_three_and_restores(self):
         with self.store._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
@@ -2351,7 +2351,7 @@ class PrivatePortableTests(unittest.TestCase):
                 (self.identity,),
             )
         manifest = self.export()
-        self.assertEqual(manifest["private_schema_version"], 2)
+        self.assertEqual(manifest["private_schema_version"], 3)
         with open_private_archive(self.output) as archive:
             archive.verify()
             entries = {group["entry"]["id"]: group for group in archive.recipe_entries()}
@@ -2450,9 +2450,9 @@ class PrivatePortableTests(unittest.TestCase):
     def test_wrong_household_schema_wal_and_inconsistent_head(self):
         with self.assertRaises(RecipeError): export_private_archive(self.output,RecipeStore(self.store.path,'other'))
         connection=sqlite3.connect(self.store.path)
-        connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'"); connection.commit()
+        connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'"); connection.commit()
         with self.assertRaises(RecipeError): self.export()
-        connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
         connection.execute("UPDATE recipes SET updated_at='different' WHERE id=?",(self.identity,)); connection.commit()
         with self.assertRaises(RecipeError): self.export()
         connection.execute('PRAGMA journal_mode=WAL'); connection.close()

@@ -1771,7 +1771,7 @@ class RecipeStore:
                 "INSERT INTO metadata(key, value) VALUES('schema_version', '1')"
             )
             version = "1"
-        if version not in {"1", "2", "3", "4", "5", "6"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
             raise RecipeError("recipe bank schema is newer than this meal concierge")
         row = connection.execute("SELECT value FROM metadata WHERE key='household'").fetchone()
         if row is None:
@@ -1803,6 +1803,16 @@ class RecipeStore:
                 UNIQUE(pack_id, pack_recipe_id))""")
             connection.execute("INSERT INTO recipe_entry_metadata(recipe_id, entry_origin) SELECT id, 'unknown' FROM recipes")
             connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'")
+            version = "6"
+        if version == "6":
+            # Existing revisions do not distinguish a publisher status change
+            # from a local one. Leave them unclaimed and preserve their old
+            # conservative interpretation on the first subsequent import.
+            connection.execute("""CREATE TABLE recipe_pack_status (
+                recipe_id TEXT PRIMARY KEY REFERENCES recipes(id) ON DELETE CASCADE,
+                applied_revision INTEGER NOT NULL CHECK(applied_revision >= 1),
+                local_status INTEGER NOT NULL CHECK(local_status IN (0, 1)))""")
+            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
         namespace = connection.execute(
             "SELECT value FROM metadata WHERE key='discovery_namespace'"
         ).fetchone()
@@ -2173,7 +2183,7 @@ class RecipeStore:
             connection.execute("BEGIN IMMEDIATE")
             metadata = self._metadata(connection)
             if restore and existed:
-                if metadata is None or metadata.get("household") != self.household or metadata.get("schema_version") != "6":
+                if metadata is None or metadata.get("household") != self.household or metadata.get("schema_version") != "7":
                     raise RecipeError("private restore requires the current household bank schema")
                 # Restoring private recipes must not migrate or expire unrelated
                 # operations, discoveries, mappings or household metadata.
@@ -2182,7 +2192,7 @@ class RecipeStore:
             if metadata is not None:
                 if metadata.get("household") not in {None, self.household}:
                     raise RecipeError("recipe bank belongs to a different household")
-                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5", "6"}:
+                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5", "6", "7"}:
                     raise RecipeError("recipe bank schema is newer than this meal concierge")
             recipes_exist = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recipes'"
@@ -4804,6 +4814,8 @@ class RecipeStore:
         metadata = (entry["entry_origin"], *(pack[key] for key in ("pack_id", "recipe_id", "version", "baseline_hash"))) if pack else (entry["entry_origin"], None, None, None, None)
         desired_history = [(row["revision"], row["status"], _canonical(row["document"]), row["created_at"]) for row in revisions]
         desired_favorite = [("builtin", int(favorite["is_favorite"]), favorite["favorite_revision"], favorite["created_at"], favorite["updated_at"])] if favorite else []
+        provenance = pack.get("status_provenance") if pack else None
+        desired_provenance = (provenance["applied_revision"], int(provenance["local_status"])) if provenance else None
         def result(outcome, reason=None):
             return {"outcome": outcome, "recipe_id": recipe_id, **({"reason": reason} if reason else {})}
         try:
@@ -4813,15 +4825,18 @@ class RecipeStore:
                 history = connection.execute("SELECT revision,status,document,created_at FROM revisions WHERE recipe_id=? ORDER BY revision", (recipe_id,)).fetchall()
                 origin = connection.execute("SELECT entry_origin,pack_id,pack_recipe_id,pack_version,baseline_hash FROM recipe_entry_metadata WHERE recipe_id=?", (recipe_id,)).fetchone()
                 favorites = connection.execute("SELECT library_id,is_favorite,favorite_revision,created_at,updated_at FROM recipe_favorites WHERE recipe_id=?", (recipe_id,)).fetchall()
+                status_provenance = connection.execute(
+                    "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?", (recipe_id,)).fetchone()
                 if current is not None:
                     fields = ("revision", "status", "source_key", "created_at", "updated_at", "created_via")
                     equal = (all(current[key] == entry[key] for key in fields)
                              and _stored_recipe_document(current["document"]) == recipe
                              and [tuple(row) for row in history] == desired_history
                              and origin is not None and tuple(origin) == metadata
-                             and [tuple(row) for row in favorites] == desired_favorite)
+                             and [tuple(row) for row in favorites] == desired_favorite
+                             and (tuple(status_provenance) if status_provenance else None) == desired_provenance)
                     return result("unchanged") if equal else result("conflict", "local_entry_differs")
-                if history or origin is not None or favorites:
+                if history or origin is not None or favorites or status_provenance:
                     return result("conflict", "local_identity_rows_exist")
                 if entry["source_key"] is not None and connection.execute("SELECT 1 FROM recipes WHERE source_key=?", (entry["source_key"],)).fetchone():
                     return result("conflict", "source_identity_exists")
@@ -4856,6 +4871,8 @@ class RecipeStore:
                     entry["created_at"], entry["updated_at"], entry["created_via"]))
                 connection.executemany("INSERT INTO revisions VALUES(?,?,?,?,?)", [(recipe_id, *row) for row in desired_history])
                 connection.execute("INSERT INTO recipe_entry_metadata VALUES(?,?,?,?,?,?)", (recipe_id, *metadata))
+                if desired_provenance:
+                    connection.execute("INSERT INTO recipe_pack_status VALUES(?,?,?)", (recipe_id, *desired_provenance))
                 if favorite:
                     connection.execute("INSERT INTO recipe_favorites VALUES(?,?,?,?,?,?)", ("builtin", recipe_id, *desired_favorite[0][1:]))
                 return result("created")
@@ -4995,12 +5012,24 @@ class RecipeStore:
                         )
                     if existing["content_hash"] != existing["baseline_hash"]:
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
-                    # A same-content status transition in history is a durable
-                    # local decision, including after any number of pack upgrades.
+                    provenance = connection.execute(
+                        "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?",
+                        (existing["id"],)).fetchone()
+                    # Only changes after the last successful importer revision
+                    # can establish new local intent. Legacy history is ambiguous
+                    # and keeps the prior conservative treatment.
+                    since = provenance["applied_revision"] if provenance else 0
                     history = list(connection.execute(
-                        "SELECT revision,status,document FROM revisions WHERE recipe_id=? ORDER BY revision", (existing["id"],)))
-                    local_status = any(old["status"] != new["status"] and old["document"] == new["document"]
-                                       for old, new in zip(history, history[1:]))
+                        "SELECT revision,status,document FROM revisions WHERE recipe_id=? AND revision>=? ORDER BY revision",
+                        (existing["id"], since)))
+                    local_status = bool(provenance and provenance["local_status"]) or any(
+                        old["status"] != new["status"]
+                        and (provenance is not None or old["document"] == new["document"])
+                        for old, new in zip(history, history[1:]))
+                    def remember_status(revision):
+                        connection.execute(
+                            "INSERT OR REPLACE INTO recipe_pack_status VALUES(?,?,?)",
+                            (existing["id"], revision, int(local_status)))
                     if content_hash == existing["baseline_hash"]:
                         next_status = (existing["status"] if local_status or existing["status"] == "archived"
                                        else "active" if status == "ready" else "draft")
@@ -5016,6 +5045,7 @@ class RecipeStore:
                             )
                         connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?", (version, existing["id"]))
                         result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (existing["id"],)).fetchone(), created=False)
+                        remember_status(result["revision"])
                         return {"outcome": "updated" if existing["status"] != next_status else "unchanged", "recipe": result}
                     next_status = existing["status"] if local_status or existing["status"] == "archived" else ("active" if status == "ready" else "draft")
                     validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(existing["document"]))
@@ -5028,6 +5058,7 @@ class RecipeStore:
                         (revision, next_status, recipe["name"], self._search_text(recipe), source_key(recipe), content_fingerprint(recipe), content_hash, _canonical(recipe), updated_at, existing["id"]))
                     connection.execute("INSERT INTO revisions VALUES(?,?,?,?,?)", (existing["id"], revision, next_status, _canonical(recipe), updated_at))
                     connection.execute("UPDATE recipe_entry_metadata SET pack_version=?,baseline_hash=? WHERE recipe_id=?", (version, content_hash, existing["id"]))
+                    remember_status(revision)
                     result = self._record(connection, connection.execute("SELECT * FROM recipes WHERE id=?", (existing["id"],)).fetchone(), created=False)
                     return {"outcome": "updated", "recipe": result}
                 identity = source_key(recipe)
@@ -5039,6 +5070,7 @@ class RecipeStore:
                     "UPDATE recipe_entry_metadata SET entry_origin=?, pack_id=?, pack_recipe_id=?, pack_version=?, baseline_hash=? WHERE recipe_id=?",
                     (entry_origin, pack_id, pack_recipe_id, version, content_hash, result["id"]),
                 )
+                connection.execute("INSERT INTO recipe_pack_status VALUES(?,?,0)", (result["id"], result["revision"]))
                 result.update(self._entry_metadata(connection, result["id"]))
                 return {"outcome": "created", "recipe": result}
         except sqlite3.Error as exc:

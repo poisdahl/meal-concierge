@@ -443,7 +443,7 @@ def _private_manifest(value: Any) -> dict:
     if (not isinstance(value, dict) or set(value) != fields or value["format"] != FORMAT
             or type(value["format_version"]) is not int or value["format_version"] != FORMAT_VERSION
             or value["kind"] != "private" or type(value["private_schema_version"]) is not int
-            or value["private_schema_version"] not in {1, 2}):
+            or value["private_schema_version"] not in {1, 2, 3}):
         raise RecipeError("unsupported private recipe format")
     for field, maximum in (("recipes_count", MAX_IMPORT_RECORDS), ("records_count", MAX_PRIVATE_RECORDS)):
         if type(value[field]) is not int or not 0 <= value[field] <= maximum:
@@ -491,12 +491,21 @@ def _private_entry(value: Any) -> dict:
         _private_text(value["source_key"], "source_key", 4096)
     pack = value["pack"]
     if value["entry_origin"] in {"bundled", "collection"}:
-        if not isinstance(pack, dict) or set(pack) != {"pack_id", "recipe_id", "version", "baseline_hash"}:
+        if not isinstance(pack, dict) or set(pack) not in (
+                {"pack_id", "recipe_id", "version", "baseline_hash"},
+                {"pack_id", "recipe_id", "version", "baseline_hash", "status_provenance"}):
             raise RecipeError("private bundled origin is incomplete")
         for field in ("pack_id", "recipe_id", "version"):
             _private_identity(pack[field], field, 256 if field == "recipe_id" else 128)
         if not isinstance(pack["baseline_hash"], str) or not _DIGEST.fullmatch(pack["baseline_hash"]):
             raise RecipeError("private pack baseline is invalid")
+        if "status_provenance" in pack:
+            provenance = pack["status_provenance"]
+            if (not isinstance(provenance, dict) or set(provenance) != {"applied_revision", "local_status"}
+                    or type(provenance["applied_revision"]) is not int
+                    or not 1 <= provenance["applied_revision"] <= value["revision"]
+                    or type(provenance["local_status"]) is not bool):
+                raise RecipeError("private pack status provenance is invalid")
     elif pack is not None:
         raise RecipeError("private non-pack recipe cannot have pack metadata")
     favorite = value["favorite"]
@@ -583,6 +592,9 @@ class PrivatePortableArchive(PortableArchive):
                     or revisions[-1]["created_at"] != entry["updated_at"]
                     or revisions[0]["created_at"] != entry["created_at"]):
                 raise RecipeError("private recipe head/history differs")
+            provenance = (entry["pack"] or {}).get("status_provenance")
+            if provenance and not any(row["revision"] == provenance["applied_revision"] for row in revisions):
+                raise RecipeError("private pack status provenance revision is missing")
             return {"entry": entry, "revisions": revisions}
 
         for row, row_size in self._rows():
@@ -595,6 +607,9 @@ class PrivatePortableArchive(PortableArchive):
                     and entry["entry_origin"] == "collection"
                 ):
                     raise RecipeError("private schema 1 cannot contain collection origin")
+                if (self.manifest["private_schema_version"] < 3
+                        and entry["pack"] and "status_provenance" in entry["pack"]):
+                    raise RecipeError("pack status provenance requires private schema 3")
                 if entry["id"] in identities:
                     raise RecipeError("private recipe identity is duplicated")
                 identities.add(entry["id"])
@@ -749,7 +764,7 @@ def restore_private_archive(path: Path | str, store) -> dict:
 def export_private_archive(destination: Path | str, store) -> dict:
     """Export one coherent read-only recipe snapshot under caller offline locks.
 
-    The exact household and schema 6 are checked locally and never exported.
+    The exact household and supported bank schema are checked locally and never exported.
     SQLite WAL mode is rejected: a read-only SQLite connection can otherwise
     create source-side shared-memory files. No checkpoint, migration, cleanup or
     RecipeStore connection helper is used. Temporary files stay beneath the
@@ -781,14 +796,19 @@ def export_private_archive(destination: Path | str, store) -> dict:
                 connection.execute("PRAGMA query_only=ON")
                 connection.execute("BEGIN")
                 metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
-                if metadata != {"household": store.household, "schema_version": "6"}:
+                if (metadata.get("household") != store.household
+                        or metadata.get("schema_version") not in {"6", "7"}):
                     raise RecipeError("private export household/schema differs")
                 for table, maximum in (("recipes", MAX_IMPORT_RECORDS), ("revisions", MAX_PRIVATE_RECORDS)):
                     if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > maximum:
                         raise RecipeError("private recipe snapshot is oversized")
                     if connection.execute(f"SELECT 1 FROM {table} WHERE typeof(document) != 'text' OR length(CAST(document AS BLOB)) > ? LIMIT 1", (MAX_RECIPE_BYTES,)).fetchone():
                         raise RecipeError("private stored recipe document is invalid or oversized")
-                for table in ("revisions", "recipe_entry_metadata", "recipe_favorites"):
+                has_status_provenance = metadata["schema_version"] == "7"
+                tables = ("revisions", "recipe_entry_metadata", "recipe_favorites")
+                if has_status_provenance:
+                    tables += ("recipe_pack_status",)
+                for table in tables:
                     if connection.execute(f"SELECT 1 FROM {table} t LEFT JOIN recipes r ON r.id=t.recipe_id WHERE r.id IS NULL LIMIT 1").fetchone():
                         raise RecipeError("private recipe snapshot contains orphan rows")
                 with files["records.jsonl"].open("xb") as records:
@@ -799,10 +819,17 @@ def export_private_archive(destination: Path | str, store) -> dict:
                         if origin is None:
                             raise RecipeError("private recipe origin metadata is missing")
                         if origin["entry_origin"] == "collection":
-                            private_schema_version = 2
+                            private_schema_version = max(private_schema_version, 2)
                         pack = None
                         if any(origin[key] is not None for key in ("pack_id", "pack_recipe_id", "pack_version", "baseline_hash")):
                             pack = {"pack_id": origin["pack_id"], "recipe_id": origin["pack_recipe_id"], "version": origin["pack_version"], "baseline_hash": origin["baseline_hash"]}
+                            provenance = (connection.execute(
+                                "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?",
+                                (identity,)).fetchone() if has_status_provenance else None)
+                            if provenance:
+                                pack["status_provenance"] = {"applied_revision": provenance["applied_revision"],
+                                                             "local_status": bool(provenance["local_status"])}
+                                private_schema_version = 3
                         favorite = connection.execute("SELECT library_id,is_favorite,favorite_revision,created_at,updated_at FROM recipe_favorites WHERE recipe_id=?", (identity,)).fetchall()
                         if len(favorite) > 1 or (favorite and (favorite[0]["library_id"] != "builtin" or favorite[0]["is_favorite"] not in (0, 1))):
                             raise RecipeError("private favorite state is invalid")

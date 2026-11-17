@@ -310,7 +310,7 @@ def _retirement_inventory(state_directory: Path, library_ids: list[str], househo
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
-            if metadata.get("household") != household or metadata.get("schema_version") not in {"1", "2", "3", "4", "5", "6"}:
+            if metadata.get("household") != household or metadata.get("schema_version") not in {"1", "2", "3", "4", "5", "6", "7"}:
                 raise RecipeLibraryError("retirement inventory household or schema differs")
             version = int(metadata["schema_version"])
             for library, values in counts.items():
