@@ -678,3 +678,10 @@ revision: their existing conservative local-intent interpretation is retained.
 The first successful import records provenance for subsequent changes. This does
 not automatically repair previously ambiguous local/publisher decisions. Older
 runtimes reject schema 7; use the pre-update installation backup for a rollback.
+
+Collection withdrawal reports include the removed recipe's saved name and whether
+it was a favorite, in addition to stable identities and the publisher's reason.
+This describes the completed authorized sync; it is not a pre-import preview.
+A regular Finder `.DS_Store` directly inside `pack-metadata` is ignored and left
+in place. Unexpected directories, symlinks and other metadata still block
+maintenance with an actionable name in the error.

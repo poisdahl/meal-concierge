@@ -1110,8 +1110,10 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
             return {"directories": [], "empty_directories": [], "assets": set()}
         descriptors.append(metadata)
         for name in sorted(os.listdir(metadata)):
+            if name == ".DS_Store" and stat.S_ISREG(os.stat(name, dir_fd=metadata, follow_symlinks=False).st_mode):
+                continue  # Finder metadata is neither a collection directory nor owned collection data.
             if not _PACK_METADATA_DIRECTORY.fullmatch(name):
-                raise RecipeError("retained recipe collection metadata has an invalid directory")
+                raise RecipeError(f"retained recipe collection metadata has an invalid directory: {name[:120]!r}")
             directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=metadata)
             descriptors.append(directory)
             entries = sorted(os.listdir(directory))
@@ -1531,12 +1533,15 @@ def apply_archive(
                     report["deleted_favorites"] = sum(item["was_favorite"] for item in deleted)
                     report["deleted_locally_modified"] = sum(item["locally_modified"] for item in deleted)
                     results.extend({"recipe_id": item["recipe_id"], "outcome": "deleted",
+                                    "name": item["name"],
                                     "bank_recipe_id": item["bank_recipe_id"],
                                     "was_favorite": item["was_favorite"],
                                     "locally_modified": item["locally_modified"],
                                     "withdrawal": archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})}
                                    for item in deleted)
-                    report["withdrawals"] = [{"recipe_id": item["recipe_id"], **archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})} for item in deleted[:20]]
+                    report["withdrawals"] = [{"recipe_id": item["recipe_id"], "name": item["name"],
+                                              "was_favorite": item["was_favorite"],
+                                              **archive.manifest.get("withdrawals", {}).get(item["recipe_id"], {"category": "unspecified", "reason": "Not included in this collection version; publisher supplied no reason."})} for item in deleted[:20]]
                     report["withdrawals_truncated"] = len(deleted) > 20
                     _report_bytes(directory, "status.json", canonical_bytes(report))
             except (RecipeError, RecipeAssetError) as exc:
