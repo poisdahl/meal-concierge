@@ -1125,6 +1125,59 @@ def _pack_metadata_inventory(state: Path, pack_id: str) -> dict[str, Any]:
             os.close(descriptor)
 
 
+_COLLECTION_NAMES: dict[str, tuple[list, dict[str, str]]] = {}
+
+
+def installed_collection_names(state_directory: Path | str) -> dict[str, str]:
+    """Display names of installed collections, for presentation only.
+
+    A collection whose retained manifest cannot be read is simply left out, and
+    its pack_id is shown instead. Nothing here decides what may be imported.
+    """
+    try:
+        root = os.open(Path(state_directory) / "pack-metadata", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        manifests = []
+        for name in sorted(os.listdir(root))[:256]:
+            if not _PACK_METADATA_DIRECTORY.fullmatch(name):
+                continue
+            try:
+                info = os.stat(f"{name}/manifest.json", dir_fd=root, follow_symlinks=False)
+            except OSError:
+                continue
+            manifests.append((name, info.st_mtime_ns, info.st_size))
+        # Manifests list every file of a collection; read them again only when one changed.
+        cached = _COLLECTION_NAMES.get(str(state_directory))
+        if cached is not None and cached[0] == manifests:
+            return dict(cached[1])
+        newest: dict[str, tuple] = {}
+        for name, modified, _size in manifests:
+            try:
+                directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+            except OSError:
+                continue
+            try:
+                manifest = _manifest(_json(_read_regular_at(directory, "manifest.json", MAX_MANIFEST_BYTES)))
+                # Several versions can be retained; the latest revision names the collection.
+                version = (manifest.get("pack_revision") or 0, modified)
+                if version >= newest.get(manifest["pack_id"], ((-1, -1), ""))[0]:
+                    newest[manifest["pack_id"]] = (version, manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME))
+            except (OSError, RecipeError, ValueError, KeyError, TypeError):
+                continue
+            finally:
+                os.close(directory)
+        names = {pack_id: label for pack_id, (_version, label) in newest.items()}
+        _COLLECTION_NAMES.clear()
+        _COLLECTION_NAMES[str(state_directory)] = (manifests, dict(names))
+        return names
+    except OSError:
+        return {}
+    finally:
+        os.close(root)
+
+
 def _validate_local_collection_update(
     state: Path, manifest: Mapping, *, existing_records: int,
 ) -> None:

@@ -5022,7 +5022,10 @@ class RecipeStore:
         offset: int = 0,
         status_filter: str | None = None,
         category: str | None = None,
+        group_ranks: Mapping[str, int] | None = None,
     ) -> list[dict[str, Any]]:
+        """group_ranks orders pages by source group first: "own" and
+        "collection:<pack_id>" map to a rank (lower first, 1 when unlisted)."""
         text = _bounded_text(query, "query", maximum=200) or ""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
             raise RecipeError("limit must be between one and 50")
@@ -5049,16 +5052,45 @@ class RecipeStore:
         )
         origin_filter = "AND EXISTS (SELECT 1 FROM recipe_entry_metadata m WHERE m.recipe_id=recipes.id AND m.entry_origin=?)" if entry_origin is not None else ""
         category_filter = "AND EXISTS (SELECT 1 FROM json_each(recipes.document, '$.categories') WHERE value=?)" if category is not None else ""
+        group_order, group_values = "", []
+        if group_ranks:
+            cases = []
+            for group, rank in group_ranks.items():
+                if group == "own":
+                    cases.append("WHEN m.pack_id IS NULL THEN ?")
+                    group_values.append(rank)
+                elif group.startswith("collection:"):
+                    cases.append("WHEN m.pack_id = ? THEN ?")
+                    group_values.extend((group.removeprefix("collection:"), rank))
+            if cases:
+                # An entry without origin metadata is the household's own.
+                group_order = (f"COALESCE((SELECT CASE {' '.join(cases)} ELSE 1 END FROM recipe_entry_metadata m "
+                               "WHERE m.recipe_id=recipes.id), ?), ")
+                group_values.append(group_ranks.get("own", 1))
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN")
                 rows = connection.execute(
-                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} {category_filter} ORDER BY updated_at DESC, id LIMIT ? OFFSET ?",
-                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), *([category] if category is not None else []), limit, offset),
+                    f"SELECT * FROM recipes WHERE (lower(name) LIKE ? ESCAPE '!' OR search_text LIKE ? ESCAPE '!') {status} {favorite} {origin_filter} {category_filter} ORDER BY {group_order}updated_at DESC, id LIMIT ? OFFSET ?",
+                    (needle, needle, *([status_filter] if status_filter is not None else []), *([entry_origin] if entry_origin is not None else []), *([category] if category is not None else []), *group_values, limit, offset),
                 ).fetchall()
                 return [self._record(connection, row) for row in rows]
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
+
+    def entry_group_counts(self) -> dict[str, int]:
+        """Recipes that are not archived, per source group of the bank."""
+        if not self.path.exists():
+            return {}  # Showing settings does not create an empty bank.
+        try:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "SELECT m.pack_id AS pack_id, COUNT(*) AS recipes FROM recipes r "
+                    "LEFT JOIN recipe_entry_metadata m ON m.recipe_id=r.id "
+                    "WHERE r.status != 'archived' GROUP BY m.pack_id").fetchall()
+        except sqlite3.Error as exc:
+            raise RecipeError("recipe bank is unavailable") from exc
+        return {("own" if row["pack_id"] is None else f"collection:{row['pack_id']}"): row["recipes"] for row in rows}
 
     def favorite_discovery(self, discovery_ref: Any, *, idempotency_key: Any, provider: str) -> dict[str, Any]:
         """One local transaction saves the exact snapshot and its favorite intent."""

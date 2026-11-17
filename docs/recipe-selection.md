@@ -14,6 +14,8 @@ It reads exact full recipes before choosing. Disabled/unavailable sources and
 explicit user recipe choices do not require extra searches. Dietary fit, practical
 suitability and variety take priority; source diversity is a tie-breaker, not a
 quota. A suitable plan may therefore use recipes from a single source.
+[Source preferences](#source-preferences) decide between sources when recipes
+fit comparably.
 The host applies the actual saved dietary text; free-text guidelines are not
 automatically enforced by the ranking score or recipe-readiness checks.
 Send `selection_mode="agent"`, chronological dates and ordered exact references
@@ -172,6 +174,54 @@ expired details are not reused. Conversion action `convert` requires
 quantity evidence. Usable estimates remain visibly estimated and need no separate approval for
 planning; optional personal acceptance uses the exact `accept_estimates` operation. Accepted conversions remain reachable on the next
 automatic request. No personal save/favorite or additional model service occurs.
+
+## Source preferences
+
+A household can mark a recipe source as `preferred` or `occasional`; every
+other source is normal. The setting is `profile.recipes.preferred_sources` and
+`occasional_sources`, two lists of source groups:
+
+| Group | Recipes |
+|---|---|
+| `own` | The household's own saved recipes in the bank. |
+| `collection:<pack_id>` | One installed collection in the bank. |
+| `store` | The selected store's recipes. |
+| `web` | Recipes found through recipe-website discovery. |
+| `themealdb`, `wikibooks` | The two open English-language databases. |
+
+A group can be in one list only, and the two lists hold at most 16 groups in
+total. Preferences do not switch anything on or off; `recipes.sources` and
+`recipes.web_search` still do that, and the household's own recipes and its
+collections share the bank's one switch (`internal`). Setup `show`/`apply`
+and profile `overview` return `recipe_source_overview`: one row per source
+with `id`, `label`, `enabled`, `preference`, the bank groups' recipe counts
+(null when the bank cannot be read) and the enabled websites. Change preferences with setup `apply` and
+`changes.recipe_source_preferences={preferred:[...],occasional:[...]}`; a
+supplied list replaces the saved one and a source moved to one level leaves
+the other.
+
+Where preferences apply:
+
+- Bank pages (`projection=summary`, `source=internal`, and the automatic
+  collector) list preferred groups first and occasional groups last, then by
+  most recently updated as before. With no preference saved the order is
+  unchanged.
+- Candidate summaries carry `source_group`, and `source_preference` when it is
+  not normal. Discovery results repeat the saved lists as `source_preferences`
+  so the host model can follow them in `agent` mode.
+- In `ranked` mode a preferred source adds 4 points per meal and an occasional
+  source subtracts 4. This is a nudge between comparable dishes, not a filter:
+  a dietary deviation (−30) outweighs it, and preferred against occasional
+  (8 points) stays below the 10 points that separate a dish above the
+  cooking-time maximum from one merely outside the weekday target. A recipe
+  from an occasional source that fits the evening better can still win.
+- Full cross-source discovery asks every enabled source for the same share and
+  lists preferred sources first and occasional sources last, so the occasional
+  ones are what the overall limit cuts.
+
+The shortlist no longer drops every saved recipe in favour of store or web
+discoveries when scores are equal. Preferences never override hard dietary
+rules, cooldown, source binding or an explicit recipe choice.
 
 ## Request-scoped available ingredients
 

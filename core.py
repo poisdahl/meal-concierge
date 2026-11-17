@@ -31,10 +31,34 @@ class CancellationPreconditionError(HouseholdError):
     """Cancellation stopped before the final provider control was dispatched."""
 
 
-STATE_VERSION = 13
+STATE_VERSION = 14
 
 RECIPE_SOURCE_IDS = ("internal", "oda", "meny", "mathem", "themealdb", "wikibooks")
 DEFAULT_RECIPE_SOURCES = {source: source != "mathem" for source in RECIPE_SOURCE_IDS}
+# What a household can prefer or use only occasionally. The bank is split into
+# its own saved recipes and each installed collection; "store" is the selected
+# store's recipes and "web" is recipe-website discovery.
+RECIPE_SOURCE_GROUP = re.compile(r"own|store|themealdb|wikibooks|web|collection:[^\x00-\x1f\x7f]{1,128}")
+
+
+def recipe_source_preference(recipes: Mapping[str, Any], group: str) -> str:
+    """preferred, normal or occasional for one source group of the saved profile."""
+    if group in recipes.get("preferred_sources", ()):
+        return "preferred"
+    return "occasional" if group in recipes.get("occasional_sources", ()) else "normal"
+
+
+def _validate_recipe_source_preferences(recipes: Mapping[str, Any]) -> None:
+    preferred, occasional = (recipes.get(field) for field in ("preferred_sources", "occasional_sources"))
+    for values in (preferred, occasional):
+        if (not isinstance(values, list) or len(values) > 16
+                or any(not isinstance(value, str) or RECIPE_SOURCE_GROUP.fullmatch(value) is None for value in values)
+                or len(set(values)) != len(values)):
+            raise HouseholdError("recipe source preferences must list distinct sources: own, store, web, themealdb, wikibooks or collection:<pack_id>")
+    if len(preferred) + len(occasional) > 16:
+        raise HouseholdError("recipe source preferences can name at most 16 sources in total")
+    if set(preferred) & set(occasional):
+        raise HouseholdError("a recipe source cannot be both preferred and occasional")
 
 RECURRING_DEFINITION_FIELDS = frozenset({
     "meal_mode",
@@ -131,6 +155,8 @@ DEFAULT_PROFILE: dict[str, Any] = {
         "repeat_cooldown_weeks": 6,
         "sources": deepcopy(DEFAULT_RECIPE_SOURCES),
         "web_search": deepcopy(DEFAULT_WEB_SEARCH),
+        "preferred_sources": [],
+        "occasional_sources": [],
     },
 }
 
@@ -315,6 +341,7 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
             elif any(not isinstance(x, str) or not x.strip() or len(x) > 500 for x in value):
                 raise HouseholdError(f"profile {path} must contain bounded non-empty text")
     check(profile, DEFAULT_PROFILE, "")
+    _validate_recipe_source_preferences(profile["recipes"])
     pantry = profile["pantry"]
     if not 1 <= pantry["review_interval_days"] <= 366:
         raise HouseholdError("pantry review_interval_days must be from 1 to 366")
@@ -731,11 +758,12 @@ def _migrate_state(
     before_v11: Callable[[Mapping[str, Any]], None] | None = None,
     before_v12: Callable[[Mapping[str, Any]], None] | None = None,
     before_v13: Callable[[Mapping[str, Any]], None] | None = None,
+    before_v14: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
     version = state.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HouseholdError("household state version is invalid")
-    if version > 13:
+    if version > STATE_VERSION:
         raise HouseholdError("household state is newer than this meal concierge")
     if version >= 6 and "favorites" in state:
         raise HouseholdError("household state contains the retired favorites key")
@@ -913,6 +941,17 @@ def _migrate_state(
             before_v13(state)
         planning["prepared"] = {}
         state["version"] = 13
+    if state["version"] == 13:
+        if before_v14 is not None:
+            before_v14(state)
+        profile = state.get("profile")
+        recipes = profile.get("recipes") if isinstance(profile, Mapping) else None
+        if not isinstance(recipes, dict):
+            raise HouseholdError("household recipe profile is invalid")
+        for field in ("preferred_sources", "occasional_sources"):
+            recipes.setdefault(field, [])
+        _validate_recipe_source_preferences(recipes)
+        state["version"] = 14
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
     state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
@@ -983,6 +1022,7 @@ def _migrate_state(
     if not isinstance(recipe_profile, dict):
         raise HouseholdError("household recipe profile is invalid")
     recipe_profile.setdefault("web_search", deepcopy(DEFAULT_WEB_SEARCH))
+    _validate_recipe_source_preferences(recipe_profile)
     try:
         validate_web_search(recipe_profile["web_search"])
     except ValueError as exc:
@@ -1128,6 +1168,12 @@ class StateStore:
                     if not backup.exists():
                         _atomic_json(backup, value)
 
+            def backup_v13(value: Mapping[str, Any]) -> None:
+                if source_version == 13:
+                    backup = self.directory / "state-v13.backup.json"
+                    if not backup.exists():
+                        _atomic_json(backup, value)
+
             _migrate_state(
                 state,
                 self.config,
@@ -1139,6 +1185,7 @@ class StateStore:
                 before_v11=backup_v10,
                 before_v12=backup_v11,
                 before_v13=backup_v12,
+                before_v14=backup_v13,
             )
             state_household = state.get("household")
             configured_household = str(self.config["household"])

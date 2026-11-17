@@ -27,6 +27,7 @@ from recipes import bind_recipe_source, recipe_source_provider, recipe_provider_
 from recipe_libraries import CAPABILITY_NAMES, WRITE_CAPABILITIES, MAX_LIBRARY_RECIPE_KEY, RecipeLibraryAdapter, RecipeLibraryDefiniteError, RecipeLibraryError, RecipeLibraryExternalMissingError, RecipeLibraryFavoriteConflictError, RecipeLibraryLabelConflictError, RecipeLibraryUncertainError, RecipeLibraryUpdateConflictError, library_recipe_key, library_recipe_key_aliases, normalize_label_name, validate_library_id, validate_library_label_ref, validate_library_recipe_ref, verified_capabilities
 from recipe_selection import compact_candidate, source_identities, collect_candidates, context_queries
 from recipe_sources import SOURCE_IDS, provider_recipe_candidates, validate_source_settings
+from core import recipe_source_preference
 from web_recipes import search_plan, search_digest, url_enabled, storage_decision, effective_search_settings
 from service_common import (
     LIBRARY_SEARCH_CURSOR_PREFIX,
@@ -449,11 +450,60 @@ class RecipeOperations:
         while len(requests) > 200:
             requests.pop(next(iter(requests)))
 
+    @staticmethod
+    def _bank_group_ranks(recipes: Mapping[str, Any]) -> dict[str, int]:
+        """Page order for the bank: preferred groups first, occasional ones last."""
+        ranks = {group: 0 for group in recipes.get("preferred_sources", ())}
+        ranks.update({group: 2 for group in recipes.get("occasional_sources", ())})
+        return {group: rank for group, rank in ranks.items() if group == "own" or group.startswith("collection:")}
+
+    @staticmethod
+    def _source_preferences(recipes: Mapping[str, Any]) -> dict[str, list[str]]:
+        return {level: list(recipes.get(field, ())) for level, field in
+                (("preferred", "preferred_sources"), ("occasional", "occasional_sources")) if recipes.get(field)}
+
+    def _recipe_source_overview(self, state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """One row per source a household can switch or prefer, in the order it is used."""
+        from recipe_portable import installed_collection_names
+        recipes = state["profile"]["recipes"]
+        sources, web = recipes["sources"], recipes["web_search"]
+        try:
+            counts = self.recipes.entry_group_counts()
+        except RecipeError:
+            counts = None  # Settings stay readable when the recipe bank is not.
+        names = installed_collection_names(self.store.directory)
+        # Own recipes and collections share the bank's one switch.
+        rows = [{"id": "own", "label": "Your own saved recipes", "kind": "bank", "enabled": sources["internal"],
+                 "switch": "internal", "recipes": None if counts is None else counts.get("own", 0)}]
+        listed = [*recipes["preferred_sources"], *recipes["occasional_sources"]]
+        for group in sorted({*(group for group in counts or () if group != "own"),
+                             *(group for group in listed if group.startswith("collection:"))}):
+            pack_id = group.removeprefix("collection:")
+            rows.append({"id": group, "label": names.get(pack_id, pack_id), "kind": "collection",
+                         "enabled": sources["internal"], "switch": "internal",
+                         "recipes": None if counts is None else counts.get(group, 0),
+                         "installed": None if counts is None else group in counts})
+        if self.provider in {"oda", "meny", "mathem"}:
+            rows.append({"id": "store", "label": f"{self.provider.upper()} recipes", "kind": "store",
+                         "enabled": sources[self.provider], "switch": self.provider})
+        for source, label in (("themealdb", "TheMealDB"), ("wikibooks", "Wikibooks Cookbook")):
+            rows.append({"id": source, "label": label, "kind": "open_database", "language": "en",
+                         "enabled": sources[source], "switch": source})
+        rows.append({"id": "web", "label": "Recipe websites", "kind": "web", "enabled": web["enabled"],
+                     "sites": [site["name"] for site in web["sites"] if site["enabled"]],
+                     "sites_off": [site["name"] for site in web["sites"] if not site["enabled"]],
+                     "other_websites": "allowed when needed" if web["broad"] else "only on request"})
+        for row in rows:
+            row["preference"] = recipe_source_preference(recipes, row["id"])
+        order = {"preferred": 0, "normal": 1, "occasional": 2}
+        return sorted(rows, key=lambda row: (not row["enabled"], order[row["preference"]]))
+
     def _internal_recipe_candidates(
         self, query: str, limit: int, state: Mapping[str, Any], week: str,
     ) -> list[dict[str, Any]]:
         results = []
-        for row in self.recipes.search(query, limit=limit, include_archived=False):
+        ranks = self._bank_group_ranks(state["profile"]["recipes"])
+        for row in self.recipes.search(query, limit=limit, include_archived=False, group_ranks=ranks):
             recipe = self.recipes.get(row["id"], row["revision"])
             for field in ("library_id", "is_favorite", "favorite_revision"):
                 recipe.pop(field, None)
@@ -490,7 +540,7 @@ class RecipeOperations:
     def _discovery_identities(recipe: Mapping[str, Any]) -> set[str]:
         return source_identities(recipe) or {"exact-content:" + hashlib.sha256(canonical(recipe).encode()).hexdigest()}
 
-    def _selection_page(self, source, query, cursor, limit, deadline):
+    def _selection_page(self, source, query, cursor, limit, deadline, group_ranks=None):
         """Use local cursors and the observed Oda/Mathem page/hasMore contract."""
         if time.monotonic() >= deadline:
             raise TimeoutError("recipe search deadline exceeded")
@@ -501,7 +551,7 @@ class RecipeOperations:
                     or type(cursor["offset"]) is not int or cursor["offset"] < 0):
                 raise RecipeError("invalid local recipe cursor")
             rows = self.recipes.search(query, limit=limit + 1, offset=cursor["offset"],
-                                       status_filter=cursor["status"])
+                                       status_filter=cursor["status"], group_ranks=group_ranks)
             more = len(rows) > limit
             next_cursor = ({"status": cursor["status"], "offset": cursor["offset"] + limit}
                            if more else {"status": "draft", "offset": 0}
@@ -552,8 +602,10 @@ class RecipeOperations:
         limit = bounded_limit(request.get("limit"), default=20)
         if limit > 20:
             raise RecipeError("compact discovery limit is at most 20")
+        recipes = state["profile"]["recipes"]
         try:
-            page = self._selection_page(source, query, request.get("cursor"), limit, time.monotonic() + 10)
+            page = self._selection_page(source, query, request.get("cursor"), limit, time.monotonic() + 10,
+                                        self._bank_group_ranks(recipes))
         except _InvalidRecipeCursor:
             raise
         except TimeoutError:
@@ -564,9 +616,15 @@ class RecipeOperations:
             if source == "internal":
                 raise
             page = {"candidates": [], "status": "unavailable"}
+        for candidate in page["candidates"]:
+            preference = recipe_source_preference(recipes, candidate["source_group"])
+            if preference != "normal":
+                candidate["source_preference"] = preference
         return {"recipes": page["candidates"], "next_cursor": page.get("next_cursor"),
                 "sources": [{"source": source, "status": page.get("status", "ready" if page["candidates"] else "empty" if page.get("exhausted") else "search_limit")}],
-                "exhausted": page.get("exhausted", False), "projection": "summary"}
+                "exhausted": page.get("exhausted", False), "projection": "summary",
+                # Present on every page so the choice between sources follows the household's saved wish.
+                **({"source_preferences": preferences} if (preferences := self._source_preferences(recipes)) else {})}
 
     def _cached_recipe_conversion(self, reference):
         seen = set()
@@ -627,9 +685,10 @@ class RecipeOperations:
         history = self._planner_history_index(state)
         web_active = effective_settings["enabled"] and (effective_settings["broad"] or any(site["enabled"] for site in effective_settings["sites"]))
         queries["web"] = [""] if web_active else None
+        group_ranks = self._bank_group_ranks(state["profile"]["recipes"])
         def fetch_page(source, query, cursor, limit, deadline):
             if source != "web":
-                return self._selection_page(source, query, cursor, limit, deadline)
+                return self._selection_page(source, query, cursor, limit, deadline, group_ranks)
             return {"candidates": web_candidates or [], "next_cursor": None, "exhausted": False,
                     "status": "search_limit" if web_result and web_result["status"] == "completed" else "unavailable"}
         def resolve(summary, deadline):
@@ -680,6 +739,16 @@ class RecipeOperations:
         if not enabled:
             raise HouseholdError("no recipe sources are enabled")
         per_source = min(5, max(1, math.ceil(total_limit / len(enabled))))
+        recipe_profile = state["profile"]["recipes"]
+        # Every source is asked for the same share. A preferred source is listed
+        # first in each round and an occasional one last, so the occasional
+        # ones are what the overall limit cuts.
+        preference = {source: recipe_source_preference(recipe_profile, "store" if source == self.provider else source)
+                      for source in SOURCE_IDS if source != "internal"}
+        bank_ranks = self._bank_group_ranks(recipe_profile).values()
+        order = {source: ("preferred", "normal", "occasional").index(preference[source]) for source in preference}
+        order["internal"] = 0 if 0 in bank_ranks else 1
+        source_order = sorted(SOURCE_IDS, key=order.__getitem__)
         busy = bool(state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change"))
         tasks: dict[str, Any] = {}
         for source in enabled:
@@ -723,10 +792,13 @@ class RecipeOperations:
                 statuses.append({"source": source, "enabled": True, "status": status, "count": len(by_source[source])})
             except (HouseholdError, OSError, ValueError, TypeError, RecursionError):
                 statuses.append({"source": source, "enabled": True, "status": "unavailable", "count": 0})
+        for status in statuses:
+            if status["enabled"] and status["status"] != "ineligible" and preference.get(status["source"], "normal") != "normal":
+                status["preference"] = preference[status["source"]]
         results = []
         seen = set()
         for index in range(per_source):
-            for source in SOURCE_IDS:
+            for source in source_order:
                 values = by_source[source]
                 if index >= len(values):
                     continue
@@ -755,6 +827,7 @@ class RecipeOperations:
             "recipes": results,
             "sources": statuses,
             "balanced_limit_per_source": per_source,
+            **({"source_preferences": preferences} if (preferences := self._source_preferences(recipe_profile)) else {}),
         }
 
     def _library_capabilities(self, library_id: str) -> dict[str, Any]:

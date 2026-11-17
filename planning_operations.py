@@ -22,7 +22,7 @@ from core import HouseholdError, cart_contents, cart_summary
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
-from recipe_selection import history_source_index, family_history_usage, compact_candidate
+from recipe_selection import history_source_index, family_history_usage, compact_candidate, source_group
 from planner import _validate_request, normalize_candidate_facts
 from planner import MAX_CANDIDATES, MAX_HISTORY_RECORDS, PLANNER_VERSION, PlannerError, plan_week, saved_menu_minimum_evaluation
 from product_planner import normalize_available_ingredients
@@ -1499,7 +1499,7 @@ class PlanningOperations:
                 # carry retailer-detail evidence that ordinary client recipe
                 # input is never allowed to assert.
                 recipe = normalize_recipe(stored, trusted_store_product_hints=True)
-                metadata = {field: deepcopy(stored[field]) for field in ("is_favorite", "entry_origin", "locally_modified") if field in stored}
+                metadata = {field: deepcopy(stored[field]) for field in ("is_favorite", "entry_origin", "pack", "locally_modified") if field in stored}
             else:
                 snapshot = self.recipes.resolve_discovery(reference["discovery_ref"])
                 recipe = snapshot["recipe"]
@@ -1589,7 +1589,10 @@ class PlanningOperations:
         if collection is not None:
             result["discovery"] = {key: deepcopy(value) for key, value in collection.items() if key not in {"candidates", "unknown", "rejected"}}
             for category in ("unknown", "rejected"):
-                result["discovery"][category] = [{**compact_candidate(item["recipe"], item["reference"]), "recipe_digest": item["content_digest"], "hard_constraints": item["hard_constraints"]}
+                result["discovery"][category] = [{**compact_candidate(item["recipe"], item["reference"]),
+                                                   # The normalized recipe has no bank metadata; the candidate does.
+                                                   "source_group": source_group(item["recipe"], entry_origin=item.get("entry_origin"), pack=item.get("pack")),
+                                                   "recipe_digest": item["content_digest"], "hard_constraints": item["hard_constraints"]}
                                                   for item in collection[category]]
         result["household_experience"] = [
             {"reference": deepcopy(candidate["reference"]), "summary": summary}

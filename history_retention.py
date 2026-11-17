@@ -9,6 +9,8 @@ import hashlib
 import json
 import re
 
+from core import STATE_VERSION
+
 
 PATHS = (
     ('recipe_usage',),
@@ -73,7 +75,7 @@ def snapshot_activity(state):
     Startup and offline preview verify their content fingerprints. Existing
     history keys need no copy/hash for an unrelated native state transaction.
     """
-    if state.get('version') != 13:
+    if state.get('version') != STATE_VERSION:
         return None
     try:
         groups = records(state)
@@ -89,7 +91,7 @@ def track_changes(state, *, before=None, now=None):
     Comparing content also detects edits made outside the current StateStore.
     Legacy records do not inherit an assumed last event from their menu date.
     """
-    if state.get('version') != 13:
+    if state.get('version') != STATE_VERSION:
         raise ValueError('update the runtime/state before history maintenance')
     observed = (now or datetime.now(timezone.utc)).isoformat()
     previous = clocks(state)
@@ -169,7 +171,7 @@ def latest_date(value):
 
 
 def plan(state, *, today=None):
-    if state.get('version') != 13:
+    if state.get('version') != STATE_VERSION:
         raise ValueError('update the runtime/state before history maintenance')
     today = today or datetime.now(timezone.utc).date()
     cooldown = state['profile']['recipes']['repeat_cooldown_weeks']
@@ -248,7 +250,7 @@ def archive(state, preview):
 
 
 def recover(state, document, *, now=None):
-    if state.get('version') != 13:
+    if state.get('version') != STATE_VERSION:
         raise ValueError('update the runtime/state before history maintenance')
     body = {key: value for key, value in document.items() if key != 'sha256'}
     if document.get('sha256') != digest(body) or body.get('format') != 'meal-concierge-history' or body.get('version') != 1:
