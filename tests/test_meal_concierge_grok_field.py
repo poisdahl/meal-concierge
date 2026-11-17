@@ -181,22 +181,30 @@ class GrokFieldProductFlowTests(unittest.TestCase):
 
     def test_exact_price_path_uses_declared_count_and_obeys_quantity_limit(self):
         self.retailer.deposit_known = True
-        plan = self.prepare()
+        plan = self.prepare(price_mode="exact")
         self.assertEqual(plan["status"], "prepared", plan["unresolved_requirements"])
         self.assertEqual(plan["totals"]["package_count"], 15)
         self.assertEqual(plan["totals"]["total_payable_ore"], 15000)
         self.retailer.labels["Pitabrød"] = "Maks 1 til nedsatt pris, 5 stk, 400 g"
-        plan = self.prepare()
+        plan = self.prepare(price_mode="exact")
         self.assertEqual(plan["status"], "needs_input")
         row = next(row for row in plan["unresolved_requirements"] if row["item"] == "Pitabrød")
         self.assertEqual(row["candidate_diagnostics"][0]["reason"], "package_limit_exceeded")
         self.assertEqual(self.retailer.writes, [])
 
     def test_unknown_deposit_is_distinct_from_package_and_unit_problems(self):
-        plan = self.prepare()
+        plan = self.prepare(price_mode="exact")
         self.assertEqual(plan["status"], "needs_input")
         for row in plan["unresolved_requirements"]:
             self.assertEqual(row["candidate_diagnostics"][0]["reason"], "deposit_unobserved")
+        # The default merchandise estimate may select these reviewed products,
+        # while keeping the unobserved deposit and final payable total unknown.
+        estimate = self.prepare()
+        self.assertEqual((estimate["price_mode"], estimate["status"]), ("estimate", "prepared"))
+        self.assertEqual(estimate["totals"]["merchandise_ore"], 15000)
+        self.assertIsNone(estimate["totals"]["mandatory_deposit_ore"])
+        self.assertIsNone(estimate["totals"]["total_payable_ore"])
+        self.assertEqual(self.retailer.writes, [])
         self.retailer.labels["Kyllingfilet"] = "Naturell, 200 ml"
         self.retailer.labels["Agurk"] = "Norge, ca. 1 stk"
         plan = self.prepare(price_mode="estimate")

@@ -1616,7 +1616,7 @@ class CompactProductApplyTests(unittest.TestCase):
         self.assertEqual(len(self.shop.calls), before)
         with self.assertRaises(HouseholdError):
             self.app.handle({**self.arguments, 'menu_ref': {**self.arguments['menu_ref'], 'digest': 'b' * 64}})
-        for change in ({'candidate_approvals': []}, {'budget_ore': 1}, {'price_mode': 'estimate'}):
+        for change in ({'candidate_approvals': []}, {'budget_ore': 1}, {'price_mode': 'exact'}):
             with self.subTest(change=change):
                 self.assertFalse(self.app.handle({**self.arguments, **change})['applied'])
         self.shop.search_prices, self.shop.search_count = [1000, 900], 1
