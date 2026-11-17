@@ -880,6 +880,13 @@ def program_baseline(meta):
 
 def candidate_identity(release):
     from build_identity import create, read
+    # stage_release ships only flat Python modules and these three directories.
+    # An additional importable package or native module changes what Python can load.
+    for entry in release.iterdir():
+        if (entry.is_symlink()
+                or (entry.is_dir() and entry.name not in {'venv', 'skill', '__pycache__'})
+                or entry.suffix.casefold() in {'.so', '.pyd', '.dylib'}):
+            raise RuntimeError('prepared program bytes changed; unexpected release entry')
     recorded = read(release)
     actual = create(release, release, PYTHON)
     if (recorded.get('identity_status') != 'recorded' or recorded.get('python') != PYTHON

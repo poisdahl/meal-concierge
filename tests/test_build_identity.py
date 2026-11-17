@@ -94,6 +94,17 @@ class BuildIdentityTests(unittest.TestCase):
             (release/'synthetic_module.py').write_text('answer = 7\n')
             install.write_json(release/identity.MANIFEST, identity.create(release,release,install.PYTHON))
             before = install.candidate_identity(release)
+            unexpected = release / "fixture_package"
+            unexpected.mkdir()
+            (unexpected / "__init__.py").write_text("# inert package fixture")
+            with self.assertRaisesRegex(RuntimeError, "unexpected release entry"):
+                install.candidate_identity(release)
+            shutil.rmtree(unexpected)
+            module = release / "fixture_module.so"
+            module.write_bytes(b"inert file, never loaded")
+            with self.assertRaisesRegex(RuntimeError, "unexpected release entry"):
+                install.candidate_identity(release)
+            module.unlink()
             subprocess.run([python, '-I', '-c',
                 'import sys; sys.path.insert(0, sys.argv[1]); import synthetic_module; assert sys.dont_write_bytecode',
                 str(release)], check=True)
