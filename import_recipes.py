@@ -120,7 +120,28 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", choices=("active", "draft"))
     parser.add_argument("--backup", type=Path, help="write a verified SQLite backup before a committed import")
+    private_mode.add_argument("--allow-pack-reintroduction", nargs=3, metavar=("PACK_ID", "ENTRY_ID", "DELETION_ID"),
+                              help="allow the exact deleted entry to be created by a subsequent explicit pack import")
+    private_mode.add_argument("--preview-private-url-remediation", action="store_true")
+    parser.add_argument("--redact-reviewed-urls", metavar="REVIEW", help="write a credential-redacted export copy using the exact preview and a fresh --backup")
     args = parser.parse_args()
+    if args.preview_private_url_remediation or args.redact_reviewed_urls:
+        if (not args.installation_home or any((args.path, args.image, args.import_root, args.dry_run, args.status))
+                or args.redact_reviewed_urls and (not args.export_private or not args.backup)
+                or args.preview_private_url_remediation and args.backup):
+            parser.error("review requires --installation-home; redacted export also requires --export-private and --backup")
+        from recipe_export_remediation import review, export_reviewed
+        with _offline_store(args) as store:
+            receipt = (review(store) if args.preview_private_url_remediation else
+                       export_reviewed(store, args.export_private, args.redact_reviewed_urls, args.backup))
+        print(json.dumps(receipt, sort_keys=True))
+        return
+    if args.allow_pack_reintroduction is not None:
+        if (args.installation_home is None or any((args.path, args.image, args.import_root, args.backup, args.dry_run, args.status))):
+            parser.error("reintroduction requires a stopped --installation-home and the exact deletion receipt")
+        with _offline_store(args) as store:
+            print(json.dumps(store.allow_pack_reintroduction(*args.allow_pack_reintroduction)))
+        return
     if args.export_private is not None or args.restore_private is not None:
         operation = "export" if args.export_private is not None else "restore"
         if (args.installation_home is None or args.path is not None or args.image is not None

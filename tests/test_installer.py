@@ -1059,7 +1059,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(old['library_recipe_ref']['version'], '1')
         self.assertEqual(json.loads((state / 'state.json').read_text())['version'], 14)
         with sqlite3.connect(state / 'recipes.sqlite3') as db:
-            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '7')
+            self.assertEqual(dict(db.execute('select key,value from metadata'))['schema_version'], '8')
             self.assertEqual(db.execute('select response_json from idempotency where key=?', ('v1-key',)).fetchone()[0], '{"id":"rec_v1"}')
         (state / 'recipes.sqlite3').write_bytes(b'broken database')
         with self.assertRaises(subprocess.CalledProcessError):

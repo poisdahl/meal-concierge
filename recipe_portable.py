@@ -440,10 +440,28 @@ def _write_archive(destination, manifest, files, validate_manifest, opener) -> d
 
 def _private_manifest(value: Any) -> dict:
     fields = {"format", "format_version", "kind", "private_schema_version", "recipes_count", "records_count", "files"}
+    if isinstance(value, dict) and value.get("private_schema_version") == 4:
+        fields.add("pack_deletions")
+        rows = value.get("pack_deletions")
+        if not isinstance(rows, list) or len(rows) > MAX_IMPORT_RECORDS:
+            raise RecipeError("private deletion inventory exceeds its bound")
+        seen = set()
+        for row in rows:
+            required = {"entry_origin", "pack_id", "pack_recipe_id", "source_digest", "deletion_id"}
+            if (not isinstance(row, dict) or set(row) != required
+                    or row["entry_origin"] not in ("bundled", "collection")
+                    or not isinstance(row["source_digest"], str) or not _DIGEST.fullmatch(row["source_digest"])
+                    or not isinstance(row["deletion_id"], str) or not re.fullmatch(r"[0-9a-f]{32}", row["deletion_id"])):
+                raise RecipeError("private collection deletion is invalid")
+            key = (_private_identity(row["pack_id"], "pack_id", 128),
+                   _private_identity(row["pack_recipe_id"], "pack_recipe_id", 256))
+            if key in seen:
+                raise RecipeError("private collection deletion is duplicated")
+            seen.add(key)
     if (not isinstance(value, dict) or set(value) != fields or value["format"] != FORMAT
             or type(value["format_version"]) is not int or value["format_version"] != FORMAT_VERSION
             or value["kind"] != "private" or type(value["private_schema_version"]) is not int
-            or value["private_schema_version"] not in {1, 2, 3}):
+            or value["private_schema_version"] not in {1, 2, 3, 4}):
         raise RecipeError("unsupported private recipe format")
     for field, maximum in (("recipes_count", MAX_IMPORT_RECORDS), ("records_count", MAX_PRIVATE_RECORDS)):
         if type(value[field]) is not int or not 0 <= value[field] <= maximum:
@@ -464,7 +482,7 @@ def _private_text(value: Any, field: str, maximum: int = 200) -> str:
     try:
         source_text(value, "private recipe text", maximum)
     except RecipeImportReaderError as exc:
-        raise RecipeError("private recipe text contains an unsafe URL") from exc
+        raise RecipeError("private recipe text contains an unsafe URL; run --preview-private-url-remediation with the stopped installation") from exc
     return value
 
 
@@ -543,7 +561,7 @@ def _private_revision(value: Any) -> dict:
             try:
                 source_text(child, "private recipe text", len(child))
             except RecipeImportReaderError as exc:
-                raise RecipeError("private recipe text contains an unsafe URL") from exc
+                raise RecipeError("private recipe text contains an unsafe URL; run --preview-private-url-remediation with the stopped installation") from exc
     return value
 
 
@@ -581,7 +599,8 @@ class PrivatePortableArchive(PortableArchive):
         Revisions stay in increasing original-number order; gaps are preserved.
         Call verify() completely before applying any group to a destination.
         """
-        identities, source_keys, pack_keys = set(), set(), set()
+        identities, source_keys = set(), set()
+        pack_keys = {(row["pack_id"], row["pack_recipe_id"]) for row in self.manifest.get("pack_deletions", [])}
         entry = None
         revisions = []
         size = 0
@@ -717,6 +736,13 @@ def _restore_private_entries(archive: PrivatePortableArchive, store, archive_dig
             results.append(result)
 
     try:
+        for row in archive.manifest.get("pack_deletions", []):
+            outcome = store.restore_pack_deletion(row)
+            report["deletions_" + outcome] = report.get("deletions_" + outcome, 0) + 1
+            if outcome == "conflict":
+                report["conflicts"] += 1
+                remember({"pack_recipe_id": row["pack_recipe_id"], "outcome": "conflict",
+                          "reason": "local_entry_or_deletion_preserved"})
         for group in archive.recipe_entries():
             current = group["entry"]["id"]
             assets = {row["document"]["image"]["asset_id"] for row in group["revisions"]
@@ -797,14 +823,17 @@ def export_private_archive(destination: Path | str, store) -> dict:
                 connection.execute("BEGIN")
                 metadata = dict(connection.execute("SELECT key,value FROM metadata WHERE key IN ('household','schema_version')"))
                 if (metadata.get("household") != store.household
-                        or metadata.get("schema_version") not in {"6", "7"}):
+                        or metadata.get("schema_version") not in {"6", "7", "8"}):
                     raise RecipeError("private export household/schema differs")
                 for table, maximum in (("recipes", MAX_IMPORT_RECORDS), ("revisions", MAX_PRIVATE_RECORDS)):
                     if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > maximum:
                         raise RecipeError("private recipe snapshot is oversized")
                     if connection.execute(f"SELECT 1 FROM {table} WHERE typeof(document) != 'text' OR length(CAST(document AS BLOB)) > ? LIMIT 1", (MAX_RECIPE_BYTES,)).fetchone():
                         raise RecipeError("private stored recipe document is invalid or oversized")
-                has_status_provenance = metadata["schema_version"] == "7"
+                has_status_provenance = metadata["schema_version"] in {"7", "8"}
+                deletions = ([dict(row) for row in connection.execute(
+                    "SELECT * FROM pack_deletions ORDER BY entry_origin,pack_id,pack_recipe_id LIMIT ?",
+                    (MAX_IMPORT_RECORDS + 1,))] if metadata["schema_version"] == "8" else [])
                 tables = ("revisions", "recipe_entry_metadata", "recipe_favorites")
                 if has_status_provenance:
                     tables += ("recipe_pack_status",)
@@ -891,7 +920,8 @@ def export_private_archive(destination: Path | str, store) -> dict:
             finally:
                 connection.close()
             return write_private_archive(output, {"format": FORMAT, "format_version": FORMAT_VERSION,
-                "kind": "private", "private_schema_version": private_schema_version, **counts}, files)
+                "kind": "private", "private_schema_version": 4 if deletions else private_schema_version,
+                **({"pack_deletions": deletions} if deletions else {}), **counts}, files)
     except sqlite3.Error as exc:
         raise RecipeError("private recipe snapshot is unavailable") from exc
 
@@ -1515,6 +1545,42 @@ def resolve_archive_conflict(path, state_directory, household, expected_descript
             disposition=disposition)
 
 
+def withdrawal_preview(path, state_directory, household, expected):
+    """Compare one verified archive to one coherent, read-only bank snapshot."""
+    rows = []
+    with _verified_archive(path, expected) as archive:
+        origin = "collection" if archive.manifest["kind"] == LOCAL_PACK_KIND else "bundled"
+        bank = Path(state_directory) / "recipes.sqlite3"
+        if archive.manifest.get("membership_mode") == AUTHORITATIVE_MEMBERSHIP and (bank.exists() or bank.is_symlink()):
+            with _regular_file(bank) as handle:
+                if handle.read(20)[18:20] != b"\x01\x01":
+                    raise RecipeError("withdrawal preview requires a regular rollback-journal bank")
+            present = {record["recipe_id"] for record in archive.records()}
+            from contextlib import closing
+            with closing(sqlite3.connect(bank.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA query_only=ON")
+                db.execute("BEGIN")
+                owner = db.execute("SELECT value FROM metadata WHERE key='household'").fetchone()
+                if not owner or owner[0] != household:
+                    raise RecipeError("withdrawal preview household differs")
+                for row in db.execute("""SELECT m.pack_recipe_id AS recipe_id,r.id,r.name,r.revision,
+                        r.content_hash,m.baseline_hash,coalesce(f.is_favorite,0) AS favorite,
+                        coalesce(f.favorite_revision,0) AS favorite_revision
+                    FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id
+                    LEFT JOIN recipe_favorites f ON f.library_id='builtin' AND f.recipe_id=r.id
+                    WHERE m.pack_id=? AND m.entry_origin=? ORDER BY m.pack_recipe_id""",
+                        (archive.manifest["pack_id"], origin)):
+                    if row["recipe_id"] not in present:
+                        rows.append(dict(row))
+    binding = hashlib.sha256(canonical_bytes([expected["sha256"], household, rows])).hexdigest()
+    return {"review": binding, "count": len(rows), "favorites": sum(row["favorite"] for row in rows),
+            "locally_modified": sum(row["content_hash"] != row["baseline_hash"] for row in rows),
+            "items": [{"recipe_id": row["recipe_id"], "name": row["name"], "favorite": bool(row["favorite"]),
+                       "locally_modified": row["content_hash"] != row["baseline_hash"]} for row in rows[:20]],
+            "truncated": len(rows) > 20}
+
+
 def apply_archive(
     path: Path | str,
     state_directory: Path | str,
@@ -1571,7 +1637,7 @@ def apply_archive(
                       "display_name": archive.manifest.get("display_name", DEFAULT_COLLECTION_DISPLAY_NAME),
                       "membership_mode": archive.manifest.get("membership_mode", "merge"),
                       "total": checked["records_count"], "processed": 0, "created": 0,
-                      "updated": 0, "unchanged": 0, "deleted": 0,
+                      "updated": 0, "unchanged": 0, "kept_deleted": 0, "deleted": 0,
                       "deleted_favorites": 0, "deleted_locally_modified": 0,
                       "conflicts": 0, "failed": 0,
                       "report_directory": relative}
@@ -1592,11 +1658,14 @@ def apply_archive(
                         recipe_id=current, version=archive.manifest["pack_version"],
                         status=record["status"], entry_origin=entry_origin,
                         archive_sha256=expected_descriptor['sha256'])
-                    category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
+                    category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts", "kept_deleted": "kept_deleted"}[outcome["outcome"]]
                     report[category] += 1
                     report["processed"] += 1
-                    result = {"recipe_id": current, "outcome": outcome["outcome"],
-                              "bank_recipe_ref": outcome["recipe"]["library_recipe_ref"]}
+                    result = {"recipe_id": current, "outcome": outcome["outcome"]}
+                    if outcome["outcome"] == "kept_deleted":
+                        result.update(deletion_id=outcome["deletion_id"], source_matches=outcome["source_matches"])
+                    else:
+                        result["bank_recipe_ref"] = outcome["recipe"]["library_recipe_ref"]
                     if outcome.get("reason"):
                         result["reason"] = outcome["reason"]
                     if outcome.get('resolution'):

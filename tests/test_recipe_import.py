@@ -2453,9 +2453,9 @@ class PrivatePortableTests(unittest.TestCase):
     def test_wrong_household_schema_wal_and_inconsistent_head(self):
         with self.assertRaises(RecipeError): export_private_archive(self.output,RecipeStore(self.store.path,'other'))
         connection=sqlite3.connect(self.store.path)
-        connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'"); connection.commit()
+        connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'"); connection.commit()
         with self.assertRaises(RecipeError): self.export()
-        connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+        connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
         connection.execute("UPDATE recipes SET updated_at='different' WHERE id=?",(self.identity,)); connection.commit()
         with self.assertRaises(RecipeError): self.export()
         connection.execute('PRAGMA journal_mode=WAL'); connection.close()

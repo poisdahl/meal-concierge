@@ -63,6 +63,29 @@ class CollectionResolutionTests(unittest.TestCase):
         newer, descriptor = self.pack('3')
         self.assertEqual(apply_archive(newer, self.state, 'synthetic', descriptor)['conflicts'], 1)
 
+    def test_deleted_collection_entry_survives_future_import_and_private_restore(self):
+        before = self.root / "before.zip"
+        export_private_archive(before, self.store)
+        self.store.delete(self.local["id"], self.local["revision"])
+        after = self.root / "after.zip"
+        self.assertEqual(export_private_archive(after, self.store)["private_schema_version"], 4)
+        with tempfile.TemporaryDirectory() as temp:
+            restored = RecipeStore(Path(temp) / "recipes.sqlite3", "synthetic")
+            self.assertEqual(restore_private_archive(after, restored)["deletions_created"], 1)
+            self.assertEqual(restore_private_archive(after, restored)["deletions_unchanged"], 1)
+            self.assertEqual(restore_private_archive(before, restored)["conflicts"], 1)
+            restored.delete_absent_pack_records(pack_id=self.pack_id, present_recipe_ids=[])
+            archive, expected = self.pack()
+            result = apply_archive(archive, restored.path.parent, "synthetic", expected)
+            self.assertEqual((result["status"], result["kept_deleted"]), ("complete", 1))
+            identity = result["results"][0]["deletion_id"]
+            with self.assertRaises(RecipeError):
+                restored.allow_pack_reintroduction("wrong-pack", "one", identity)
+            restored.allow_pack_reintroduction(self.pack_id, "one", identity)
+            self.assertEqual(apply_archive(archive, restored.path.parent, "synthetic", expected)["created"], 1)
+            self.assertEqual(restore_private_archive(after, restored)["conflicts"], 1)
+            self.assertEqual(len(restored.search()), 1)
+
     def test_later_local_edit_invalidates_keep_local_and_stale_review_cannot_resolve(self):
         archive, expected = self.pack()
         self.resolve(archive, expected, 'keep_local')

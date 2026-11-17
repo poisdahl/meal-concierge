@@ -731,7 +731,42 @@ runtimes reject schema 7; use the pre-update installation backup for a rollback.
 
 Collection withdrawal reports include the removed recipe's saved name and whether
 it was a favorite, in addition to stable identities and the publisher's reason.
-This describes the completed authorized sync; it is not a pre-import preview.
+Prepare the publisher archive first. Its withdrawal preview reports names,
+favorite and edit counts, bounded details and a review ID. Supply
+`--withdrawal-review REVIEW` with the exact prepared import when entries would
+be removed. The stopped installer recomputes the affected revisions and favorite
+state before applying the archive. For a local authoritative collection, use
+`inspect-recipe-pack` to obtain the review and supply the normal digest and
+removal authorization as well.
 A regular Finder `.DS_Store` directly inside `pack-metadata` is ignored and left
 in place. Unexpected directories, symlinks and other metadata still block
 maintenance with an actionable name in the error.
+
+Bank schema 8 retains explicit household deletions of collection entries. An
+ordinary sync, a new publisher revision or a withdrawal preserves the deletion.
+The import reports `kept_deleted` and a deletion ID. To intentionally allow a
+specific entry to return, use the stopped installation and import again.
+
+```sh
+python import_recipes.py --installation-home HOME --allow-pack-reintroduction PACK_ID ENTRY_ID DELETION_ID
+```
+
+Private archive schema 4 carries these deletions when present. A restore that
+finds a different deletion or a current entry reports a conflict and preserves
+the local choice. Older private formats remain readable. Direct upgrades from
+bank schemas 6 and 7 retain a verified private pre-migration SQLite backup.
+
+An unsafe historical URL can be reviewed with
+`import_recipes.py --installation-home HOME --preview-private-url-remediation`.
+The diagnostic identifies the recipe and revision using safe identifiers and
+hashes. It shows no URL values. After reviewing the transformation, use
+
+```sh
+python import_recipes.py --installation-home HOME --export-private NEW_ARCHIVE --redact-reviewed-urls REVIEW --backup NEW_PRIVATE_DB
+```
+
+The reviewed derivative removes recognized credential parameters from URLs
+while preserving other parameters, original recipe and revision identities,
+attribution and history. The supplied backup retains the original bank. The
+working bank and frozen operation records keep their original bytes. The
+ordinary full archive verifier checks the completed derivative.
