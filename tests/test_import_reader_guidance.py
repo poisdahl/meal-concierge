@@ -8,13 +8,15 @@ from unittest import mock
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).resolve().parent)]
 from recipe_import_readers import RecipeImportReaderError, read_transcript, read_webpage, read_webpage_jsonld
 from recipe_sources import WikibooksSource
-from test_recipe_convert_changes import transcript
 from test_meal_concierge_recipes import full_recipe
 
 
 class SourceQuoteNormalizationTests(unittest.TestCase):
     def source(self, text, ingredient, step="Simmer."):
-        return transcript(text, [ingredient], [step], language="en")
+        return {"kind": "pasted_text", "pages": [{"page": 1, "text": text}],
+                "interpretation": {"name": "Soup", "language": "en",
+                    "ingredients": [{"page": 1, "quote": ingredient}],
+                    "steps": [{"page": 1, "quote": step}]}}
 
     def test_soft_hyphens_zero_width_spaces_and_nfd_do_not_hide_normal_quotes(self):
         for text, quote in (("Soup\n200 g gul\u00adrøtter\nSimmer.", "200 g gulrøtter"),
