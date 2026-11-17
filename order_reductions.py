@@ -137,7 +137,7 @@ def _source_script(order_id, provider="oda"):
 def _ui_script(order_id, items, stage, product_id=None, provider="oda"):
     """Tag exactly one observed native control; never dispatch merchant actions in JS."""
     spec = _spec(provider)
-    return r"""(() => {
+    script = r"""(() => {
       // order-removal-ui
       const orderId = ORDER_ID, items = ITEMS, stage = STAGE, productId = PRODUCT_ID, spec = SPEC;
       const norm = x => String(x || '').replace(/\s+/g,' ').trim();
@@ -184,7 +184,12 @@ def _ui_script(order_id, items, stage, product_id=None, provider="oda"):
         return tag(all('button',dialogs[0]).filter(e=>norm(e.textContent)===spec.button));
       }
       return answer(false);
-    })()""".replace("ORDER_ID", json.dumps(order_id)).replace("ITEMS", json.dumps(items)).replace("STAGE", json.dumps(stage)).replace("PRODUCT_ID", json.dumps(product_id)).replace("SPEC", json.dumps(spec, ensure_ascii=False))
+    })()"""
+    # One pass: an inserted product name such as "SPECIAL K" is never searched
+    # for a later placeholder.
+    values = {"ORDER_ID": json.dumps(order_id), "ITEMS": json.dumps(items), "STAGE": json.dumps(stage),
+              "PRODUCT_ID": json.dumps(product_id), "SPEC": json.dumps(spec, ensure_ascii=False)}
+    return re.sub("ORDER_ID|PRODUCT_ID|ITEMS|STAGE|SPEC", lambda match: values[match[0]], script)
 
 
 def _control(browser, pending, stage, product_id=None, *, click=True):
