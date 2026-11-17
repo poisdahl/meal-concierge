@@ -59,6 +59,19 @@ class RecipeLanguageTests(unittest.TestCase):
         self.assertTrue(presentation['fallback'])
         self.assertEqual(presentation['resolved_language'], 'nb-NO')
 
+    def test_single_line_translation_labels_and_stored_variant_fallback(self):
+        for field in ("name", "item"):
+            recipe = bilingual()
+            variant = recipe["translations"]["en"]
+            target = variant if field == "name" else variant["ingredients"][0]
+            target[field] += "\u202e"
+            with self.assertRaisesRegex(RecipeError, "single-line"):
+                normalize_recipe(recipe)
+            self.assertEqual(recipe_presentation(recipe, "en")["resolved_language"], "nb-NO")
+        recipe = bilingual()
+        recipe["translations"]["en"]["steps"] = ["Bring to a boil.\nSimmer."]
+        self.assertEqual(normalize_recipe(recipe)["translations"]["en"]["steps"], ["Bring to a boil.\nSimmer."])
+
     def test_foreign_identity_and_unbound_legacy_translation_fall_back(self):
         recipe = bilingual()
         recipe['translations']['en']['ingredients'][0]['item'] = '1 kg pork'

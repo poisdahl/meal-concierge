@@ -427,6 +427,19 @@ class EmailSchedulerTests(unittest.TestCase):
         self.assertFalse(self.call("due", scheduler=invocation, delivery_requested=True,
                                    catch_up_ref=fresh["catch_up_ref"])["send"])
 
+    def test_legacy_delivery_moved_to_today_requires_schedule_update_before_claim(self):
+        tomorrow = self.app._household_today(self.store.read()).toordinal() + 1
+        from datetime import date
+        later = self.call("schedule", delivery_date=date.fromordinal(tomorrow).isoformat())
+        self.app.handle({"operation": "email", **later["automation_ack"]})
+        moved = self.call("due")
+        self.assertEqual(moved["reason"], "delivery moved")
+        self.assertTrue(moved["automation_update_required"])
+        self.assertNotIn("claim_token", moved)
+        self.assertEqual(self.store.read()["email_jobs"][0]["status"], "pending")
+        self.app.handle({"operation": "email", **moved["automation_ack"]})
+        self.assertTrue(self.call("due")["claim"])
+
     def test_active_delivery_changes_cannot_use_legacy_ack(self):
         for moved_by_provider in (False, True):
             with self.subTest(moved_by_provider=moved_by_provider):

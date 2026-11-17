@@ -39,7 +39,7 @@ def source_text_digest(recipe, *, legacy=False):
 
 
 def normalize_translations(value, recipe):
-    from recipes import RecipeError, _bounded_text
+    from recipes import RecipeError, _bounded_text, _single_line
     if not isinstance(value, dict) or not 1 <= len(value) <= 8:
         raise RecipeError('translations must contain one to eight language variants')
     if recipe['rights']['storage'] != 'full':
@@ -66,12 +66,13 @@ def normalize_translations(value, recipe):
             if not isinstance(label, dict) or set(label) - {'item', 'notes'} or 'item' not in label:
                 raise RecipeError('translation ingredient requires item and optional notes only')
             normalized['ingredients'].append({
-                'item': _bounded_text(label['item'], 'translation ingredient.item', required=True, maximum=300),
+                'item': _single_line(label['item'], 'translation ingredient.item', required=True, maximum=300),
                 'notes': _bounded_text(label.get('notes'), 'translation ingredient.notes', required=bool(original.get('notes')), maximum=500),
             })
-        for field in ('name', 'notes', 'storage', 'reheating'):
+        normalized['name'] = _single_line(variant.get('name'), 'translation.name', required=True, maximum=300)
+        for field in ('notes', 'storage', 'reheating'):
             normalized[field] = _bounded_text(variant.get(field), 'translation.' + field,
-                                               required=field == 'name' or bool(recipe.get(field)), maximum=300 if field == 'name' else 4000 if field == 'notes' else 1000)
+                                               required=bool(recipe.get(field)), maximum=4000 if field == 'notes' else 1000)
         result[language] = normalized
     return result
 
@@ -80,7 +81,14 @@ def recipe_presentation(recipe, language=None):
     """Return separate display text without changing identity, evidence or queries."""
     requested = language_tag(language) if language is not None else recipe.get('language', 'nb-NO')
     canonical = recipe.get('language', 'nb-NO')
-    variants = normalize_translations(recipe['translations'], recipe) if 'translations' in recipe else {}
+    from recipes import RecipeError
+    variants = {}
+    for tag, stored in (recipe.get('translations') or {}).items():
+        try:
+            variants.update(normalize_translations({tag: stored}, recipe))
+        except RecipeError:
+            # A previously stored variant can fail a newer label or digest check.
+            continue
     # Older bindings omit source custody. Keep their bytes readable until a
     # reviewer supplies a variant bound to this source and revision.
     variants = {tag: v for tag, v in variants.items() if v['source_text_digest'] == source_text_digest(recipe)}

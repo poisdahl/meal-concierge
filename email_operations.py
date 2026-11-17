@@ -780,7 +780,7 @@ class EmailOperations:
                         raise HouseholdError("the reviewed missed delivery has changed")
                     elif delivery == job["delivery_date"] and delivery > local_today:
                         return {"send": False, "reason": "delivery date has not arrived", "delivery_date": delivery}
-                    elif delivery != local_today or ("scheduler" in job and delivery != job["delivery_date"]):
+                    elif delivery != job["delivery_date"]:
                         job["delivery_date"] = delivery
                         job["automation_protocol"] = 0
                         if "scheduler" in job:
