@@ -14,10 +14,20 @@ from pathlib import Path
 import re
 import secrets
 import sys
+import unicodedata
 from typing import Any, Callable, Iterator, Mapping
 from zoneinfo import ZoneInfo
 from web_recipes import DEFAULT_WEB_SEARCH, validate_web_search
 from dietary_guidance import NORWEGIAN_PRESET
+
+
+def contains_line_controls(value: str) -> bool:
+    """Controls that cannot be part of a single-line name or identifier."""
+    return any(
+        unicodedata.category(ch) in {"Cc", "Cs", "Zl", "Zp"}
+        or unicodedata.bidirectional(ch) in {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+        for ch in value
+    )
 
 
 class HouseholdError(RuntimeError):

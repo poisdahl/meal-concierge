@@ -298,6 +298,14 @@ def page(raw):
 
 
 class ReaderTests(unittest.TestCase):
+    def test_source_labels_reject_controls_and_source_prose_keeps_lines(self):
+        recipe = recipesage_fixture()
+        recipe.update(name="Brød", description="Første linje.\nAndre linje.")
+        self.assertEqual(read_one(recipe)["extracted"]["description"], recipe["description"])
+        for label in ("Brød\u2028loaf", "Brød\u202eloaf"):
+            with self.subTest(label=label), self.assertRaisesRegex(RecipeImportReaderError, "single-line"):
+                read_one(dict(recipe, name=label))
+
     def test_actual_export_shape_preserves_text_and_reports_losses(self):
         record = read_one()
         raw = record["extracted"]

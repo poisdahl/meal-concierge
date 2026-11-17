@@ -332,7 +332,8 @@ async def sdk_checks(root, process):
         assert menu_schema["$defs"]["PreparedReplan"]["properties"]["source"]["$ref"].endswith("/MenuRef")
         assert product_schema["properties"]["planner_selection_ref"]["anyOf"][0]["$ref"].endswith("/PlannerSelectionRef")
         assert product_schema["properties"]["planner_ref"]["anyOf"][0]["$ref"].endswith("/PlannerSaveRef")
-        assert product_schema["properties"]["continuation_mode"]["enum"] == ["extend", "replace", "reset"]
+        assert product_schema["properties"]["continuation_mode"]["enum"] == ["extend", "replace", "reset", "refresh_stock"]
+        assert product_schema["properties"]["stock_ref"]["anyOf"][0]["type"] == "string"
         assert product_schema["properties"]["product_plan_ref"]["anyOf"][0]["type"] == "string"
         assert product_schema["properties"]["candidate_approvals"]["anyOf"][0]["maxItems"] == 64
         stock_schema = product_schema["$defs"]["IngredientDecision"]

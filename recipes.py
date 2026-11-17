@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping
 import unicodedata
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from core import HouseholdError
+from core import HouseholdError, contains_line_controls
 from recipe_quantities import UNITS, normalized_unit, parse_measure, quantity_json, quantity_text, read_quantity
 from recipe_libraries import (
     RecipeLibraryError,
@@ -118,11 +118,7 @@ def _bounded_text(value: Any, field: str, *, required: bool = False, maximum: in
 
 
 def _single_line(value: Any, field: str, **options) -> str | None:
-    if isinstance(value, str) and any(
-        unicodedata.category(ch) in {"Cc", "Zl", "Zp"}
-        or unicodedata.bidirectional(ch) in {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
-        for ch in value
-    ):
+    if isinstance(value, str) and contains_line_controls(value):
         raise RecipeError(f"{field} must be single-line text without directional controls")
     return _bounded_text(value, field, **options)
 

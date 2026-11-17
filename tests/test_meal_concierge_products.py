@@ -122,6 +122,12 @@ def prepared(menu_value: dict, candidates: list[dict], *, max_excess: dict | Non
 
 
 class ProductObservationTests(unittest.TestCase):
+    def test_retailer_product_name_is_a_single_line(self):
+        for name in ("Grønne\nbønner", "Grønne\u202ebønner"):
+            batch = {"query": "bønner", "hasMore": False, "products": [{"id": 700011, "name": name}]}
+            with self.subTest(name=name), self.assertRaisesRegex(HouseholdError, "product observation text"):
+                normalize_retail_product_search({"result": [batch]}, observed_at=OBSERVED_AT)
+
     def test_meny_onion_label_preserves_piece_count_and_total_mass(self):
         self.assertEqual(parse_package("Gul 2stk 450g Strømpe", provider="meny"), {
             "quantity": {"numerator": 450, "denominator": 1},

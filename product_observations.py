@@ -10,7 +10,7 @@ import re
 from typing import Any, Hashable, Mapping
 import unicodedata
 
-from core import HouseholdError
+from core import HouseholdError, contains_line_controls
 
 
 MAX_PRODUCTS = 20
@@ -94,7 +94,7 @@ def _bounded_text(value: Any, *, required: bool = False, maximum: int = MAX_TEXT
         if required:
             raise HouseholdError("product observation text is missing")
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or contains_line_controls(value):
         raise HouseholdError("product observation text is invalid")
     text = " ".join(unicodedata.normalize("NFC", value).split())
     if (required and not text) or len(text.encode("utf-8")) > maximum:

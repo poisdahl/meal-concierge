@@ -31,6 +31,8 @@ from urllib.parse import parse_qsl, urlsplit
 import zipfile
 import zlib
 
+from core import contains_line_controls
+
 
 MAX_EXPORT_BYTES = 64 * 1024 * 1024
 MAX_WEBPAGE_BYTES = 8 * 1024 * 1024
@@ -123,6 +125,12 @@ def _text(value: Any, field: str, maximum: int, *, required: bool = False) -> st
     return value
 
 
+def _label(value: Any, field: str, maximum: int, *, required: bool = False) -> str:
+    if isinstance(value, str) and contains_line_controls(value):
+        raise RecipeImportReaderError(f"{field} must be single-line text without directional controls")
+    return _text(value, field, maximum, required=required)
+
+
 def _url(value: Any, field: str) -> str | None:
     if value in (None, ""):
         return None
@@ -167,7 +175,7 @@ def _instructions(value: Any, unsupported: set[str], depth: int = 0) -> list[str
             result.append(_text(item, "recipeInstructions", MAX_TEXT, required=True))
         elif isinstance(item, dict) and _type(item.get("@type"), "HowToSection"):
             unsupported.update(f"recipeInstructions.{key}" for key in set(item) - {"@type", "name", "itemListElement"})
-            name = _text(item.get("name"), "section name", 500)
+            name = _label(item.get("name"), "section name", 500)
             if name:
                 result.append(f"[{name}]")
             if item.get("itemListElement") is not None:
@@ -195,7 +203,7 @@ def _extract(raw: Any, *, kind: str, source_url: str | None, allow_incomplete: b
         raise RecipeImportReaderError("source recipe is too large")
     unsupported = set(raw) - _SUPPORTED_FIELDS
     tolerant_metadata = kind == "web" and allow_incomplete
-    name = _text(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
+    name = _label(raw.get("name"), "name", 300, required=not (allow_incomplete and raw.get("name") is None))
     notes = []
     comments = raw.get("comment") or []
     if tolerant_metadata and isinstance(comments, dict):
@@ -893,7 +901,7 @@ def read_transcript(value: Any) -> dict[str, Any]:
             portions_evidence = {"basis": "estimate", "input": evidence_input, "assumptions": assumptions}
     tags = selected("tags", 50, optional=True)
     tags = [_text(tag, "tag", 80, required=True) for tag in tags]
-    name = _text(interpretation.get("name"), "name", 300, required=True)
+    name = _label(interpretation.get("name"), "name", 300, required=True)
     categories = interpretation.get("categories")
     if categories is not None:
         if not isinstance(categories, list):
@@ -1053,7 +1061,7 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
         for value in _mealie_list(raw.get(field), field, 50):
             tag = _mealie_names(value, field)
             unsupported.update(f"{field}.{key}" for key in set(tag) - {"name"})
-            name = _text(tag.get("name"), f"Mealie {field} name", 80, required=True)
+            name = _label(tag.get("name"), f"Mealie {field} name", 80, required=True)
             if name not in tags:
                 tags.append(name)
     if len(tags) > 50:
@@ -1063,7 +1071,7 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
     yield_label = _text(raw.get("recipeYield"), "Mealie recipeYield", 500)
     yield_text = f"{yield_quantity} {yield_label}".strip() if yield_quantity else yield_label
     yield_text = _text(yield_text, "Mealie complete yield", 500)
-    name = _text(raw.get("name"), "Mealie name", 300, required=True)
+    name = _label(raw.get("name"), "Mealie name", 300, required=True)
     if isinstance(raw.get("orgURL"), str):
         try:
             raw["orgURL"].encode("utf-8")
