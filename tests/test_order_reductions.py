@@ -253,7 +253,7 @@ class OrderRemovalTests(unittest.TestCase):
             self.prepare(1)
         self.assertEqual(self.browser.final_clicks, 0)
 
-    def test_wrong_credit_is_not_reported_as_completed(self):
+    def test_unrelated_total_change_does_not_hide_completed_target_quantity(self):
         prepared = self.prepare(1)
         original = self.browser._invoke
         def altered(*args):
@@ -263,8 +263,9 @@ class OrderRemovalTests(unittest.TestCase):
             return result
         self.browser._invoke = altered
         result = self.call('remove_confirm', confirmation_id=prepared['confirmation_id'])
-        self.assertTrue(result['reconciliation_required'])
-        self.assertFalse(result['removed'])
+        self.assertTrue(result['removed'])
+        self.assertNotEqual(result['order_total_change_ore'], result['expected_credit_ore'])
+        self.assertEqual(result['payment_resolution']['refund'], 'unknown')
 
     def test_provider_currency_is_bound_before_review(self):
         wrong = 'SEK' if self.provider_name == 'oda' else 'NOK'

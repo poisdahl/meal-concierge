@@ -76,8 +76,8 @@ class MenuStockCheckTests(unittest.TestCase):
         saved = state['menu_ingredient_decisions']['decisions']
         self.assertEqual(len(saved), 3)
         supplied = [{'source': {'collection': 'dishes', 'recipe_index': 0, 'ingredient_index': 0}, 'action': 'include'}]
-        effective, _ = effective_ingredient_decisions(state, state['menu'], supplied)
-        self.assertEqual(next(d for d in effective if d['source'] == supplied[0]['source'])['action'], 'have_all')
+        with self.assertRaisesRegex(HouseholdError, 'stock_ref'):
+            effective_ingredient_decisions(state, state['menu'], supplied)
         before = self.store.path.read_bytes()
         with self.assertRaisesRegex(HouseholdError, 'changed'):
             self.answer(listing, [{'requirement_id': oil['requirement_id'], 'action': 'include'}])

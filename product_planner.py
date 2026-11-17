@@ -265,7 +265,6 @@ def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decis
             stock[stock_identity] = {"quantity": _fraction_json(amount), "unit": stock_unit}
         else:
             existing["quantity"] = _fraction_json(_read_fraction(existing["quantity"]) + amount)
-    explicit_stock = set()
     decisions = ingredient_decisions or []
     if not isinstance(decisions, list) or len(decisions) > 512:
         raise HouseholdError("ingredient_decisions must be a bounded list")
@@ -311,7 +310,6 @@ def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decis
                 action = decision.get("action") if decision else None
                 if decision:
                     used.add(canonical(position))
-                    explicit_stock.add(_aggregation_identity(identity))
                 # Plain cooking water is a preparation input, not inferred stock.
                 # An explicit include still permits a requested water purchase.
                 if identity in {'water', 'vann', 'tap water', 'springvann', 'kranvann'} and action != 'include':
@@ -358,6 +356,7 @@ def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decis
                     "quantity_fraction": Fraction(0),
                     "gross_fraction": Fraction(0),
                     "pantry_fraction": Fraction(0),
+                    "unanswered_fraction": Fraction(0),
                     "sources": [],
                     "product_hints": [],
                 })
@@ -365,6 +364,8 @@ def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decis
                     requirement["identity"] = aggregate_identity
                     requirement["item"] = aggregate_identity
                 requirement["quantity_fraction"] += exact_quantity
+                if decision is None:
+                    requirement["unanswered_fraction"] += exact_quantity
                 requirement["gross_fraction"] += gross_quantity
                 requirement["pantry_fraction"] += pantry_quantity
                 requirement["sources"].append(position)
@@ -376,14 +377,15 @@ def menu_requirements(menu: Any, *, maximum: int | None = None, ingredient_decis
                     requirement["product_hints"].append(deepcopy(dict(hint)))
     requirements = []
     for (aggregate_identity, unit), value in sorted(aggregated.items(), key=lambda pair: (pair[0][0].encode("utf-8"), pair[0][1])):
-        # Explicit source-position decisions replace this ingredient's request
-        # stock, rather than counting the same household assertion a second time.
+        # Source decisions bind only their positions. Count previously declared
+        # stock once, against unanswered needs with the same physical unit.
         supplied = stock.get(aggregate_identity)
-        if supplied and aggregate_identity not in explicit_stock:
+        if supplied:
             amount = _positive_fraction(supplied.get("quantity"))
             stock_unit = _UNITS.get(_normalized_unit(supplied.get("unit")))
             if amount is not None and stock_unit is not None and stock_unit[0] == unit:
-                used_stock = min(value["quantity_fraction"], amount * stock_unit[1])
+                remaining_stock = max(Fraction(0), amount * stock_unit[1] - value["pantry_fraction"])
+                used_stock = min(value["unanswered_fraction"], remaining_stock)
                 value["quantity_fraction"] -= used_stock
                 value["pantry_fraction"] += used_stock
         if value["quantity_fraction"] == 0:
@@ -941,7 +943,11 @@ def _practical_packages(requirement, observation, approval, price_mode):
             or count > product.get('package_limit', {}).get('count', MAX_PACKAGES_PER_REQUIREMENT)):
         return None
     size = _package_quantity(package, requirement['unit'])
-    if size is not None and count * size < _read_fraction(requirement['quantity'], positive=True):
+    required = _read_fraction(requirement['quantity'], positive=True)
+    coverage = count * size if size is not None and 'shared_package' not in approval else None
+    if 'max_excess' in approval and (coverage is None or coverage - required > _read_fraction(approval['max_excess'])):
+        return None
+    if size is not None and count * size < required:
         return None  # Even the full observed package cannot cover this amount.
     options = product.get('purchase_options', [])
     if not options:
@@ -981,7 +987,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
                          **amounts}],
             'coverage_status': 'practical_estimate', 'quantity_basis': approval['quantity_basis'],
             'observed_package': deepcopy(package),
-            'observed_package_description': product.get('display', {}).get('package'), 'coverage': None,
+            'observed_package_description': product.get('display', {}).get('package'),
+            'coverage': _fraction_json(coverage) if coverage is not None else None,
             'required': deepcopy(requirement['quantity']), 'unit': requirement['unit'],
             'excess_score': None, 'package_count': count,
             **({'quantity_warnings': warnings} if warnings else {}), **amounts}
@@ -1077,6 +1084,28 @@ def build_product_plan(
             planned.append(item)
             continue
         if approval is None:
+            from dietary_assessment import assess
+            choices = []
+            hints = {str(h.get("product_ref")) for h in requirement.get("product_hints", []) if h.get("provider") == provider}
+            for product in safe_observation["products"]:
+                if (product.get("availability") != "available" or nonfood_candidate(product)
+                        or any(f["blocked"] for f in assess(dietary_profile or {"diet": hard_constraints}, product))):
+                    continue
+                size = _package_quantity(product.get("package"), requirement["unit"])
+                if size is None:
+                    continue
+                count = math.ceil(_read_fraction(requirement["quantity"]) / size)
+                if not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT:
+                    continue
+                choice = product["candidate_approval"]
+                selection = _practical_packages(requirement, safe_observation,
+                    {**choice, "package_count": count, "quantity_basis": "observed covering package"}, price_mode)
+                if selection:
+                    choices.append((str(product["product_ref"]) not in hints, selection["merchandise_ore"],
+                        str(product["product_ref"]), choice))
+            if choices:
+                _, _, _, proposal = min(choices, key=lambda candidate: candidate[:3])
+                item["suggested_candidate_approval"] = {**proposal, "search_query": safe_observation["query"]}
             unresolved.append({"requirement_id": requirement_id, "item": requirement["item"], "reason": "exact_candidate_scope_needs_selection"})
             item["status"] = "needs_input"
             planned.append(item)
@@ -1131,10 +1160,10 @@ def build_product_plan(
             selection["surplus_quantity"] = None if selection["coverage"] is None else _fraction_json(_read_fraction(selection["coverage"]) - _read_fraction(selection["required"]))
             if (selection["coverage"] is not None
                     and _read_fraction(selection["coverage"]) > 2 * _read_fraction(selection["required"])):
-                selection["quantity_warnings"] = [{"reason": "oversized_package",
+                selection.setdefault("quantity_warnings", []).append({"reason": "oversized_package",
                     "required": deepcopy(selection["required"]), "coverage": deepcopy(selection["coverage"]),
                     "unit": selection["unit"],
-                    "next": "Review smaller suitable packs or explain how the surplus will be used; the required quantity is not increased."}]
+                    "next": "Review smaller suitable packs or explain how the surplus will be used; the required quantity is not increased."})
         planned.append(item)
     planned_by_id = {item.get("requirement_id"): item for item in planned}
     allocated_refs: set[str | int] = set()
@@ -1396,6 +1425,12 @@ def build_product_plan(
             "excess_score": None if estimated_coverage else _fraction_json(excess),
             "package_count": packages,
         }
+        if budget_ore is not None:
+            plan["merchandise_budget_review"] = {
+                "policy": "advisory_estimate", "merchandise_ore": merchandise,
+                "comparison": "above" if merchandise > budget_ore else "at" if merchandise == budget_ore else "below",
+                "payable_verified": payable_known and not estimated_merchandise,
+            }
         plan["budget_status"] = (
             "not_set" if budget_ore is None
             else "exceeded" if exact_floor_exceeded

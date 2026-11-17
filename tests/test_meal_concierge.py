@@ -1269,7 +1269,7 @@ const {script, rows}=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const paragraph=(innerText,hidden=false)=>({innerText,hidden,
  getBoundingClientRect:()=>({width:20,height:10})});
 const inputs=rows.map(row=>{
- const root={getAttribute:()=>null,innerText:'Antall '+row.title+' '+row.subtitle,
+ const root={getAttribute:()=>null,getBoundingClientRect:()=>({width:20,height:10}),innerText:'Antall '+row.title+' '+row.subtitle,
   querySelectorAll:s=>s==='p'?[paragraph('Hidden recommendation',true),
    paragraph(row.title),paragraph(row.subtitle),paragraph('100,00 kr /kg')]:[]};
  return {value:String(row.quantity),closest:s=>s==='li,article'?root:null,
@@ -2469,10 +2469,8 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
         self.assertEqual(opened, [CART_URL, "advanced"])
         self.assertEqual(events, [
             ("open", CART_URL),
-            ("sleep", 12),
             ("invoke", ("reload",)),
             ("invoke", ("snapshot",)),
-            ("sleep", 5),
             ("eval",),
         ])
         self.assertEqual(invoked, [("reload",), ("snapshot",)])
@@ -2527,14 +2525,11 @@ class CoreTests(CoreTestsBase, unittest.TestCase):
             events,
             [
                 ("open", CART_URL),
-                ("sleep", 12),
                 ("invoke", ("reload",)),
                 ("invoke", ("snapshot",)),
-                ("sleep", 5),
                 *(("eval",), ("sleep", 1)) * 5,
                 ("invoke", ("reload",)),
                 ("invoke", ("snapshot",)),
-                ("sleep", 5),
                 ("eval",),
                 ("advanced",),
             ],
@@ -2873,8 +2868,8 @@ process.stdout.write(eval(input.script));
         with mock.patch("oda_browser.time.sleep", side_effect=lambda seconds: (sleeps.append(seconds), events.append(("sleep", seconds)))):
             browser._advance_checkout_path()
 
-        self.assertEqual(sleeps, [10])
-        self.assertEqual(events, [("sleep", 10), ("eval",)])
+        self.assertEqual(sleeps, [])
+        self.assertEqual(events, [("eval",)])
         self.assertIn(json.dumps(CHECKOUT_ENTRY_URL), scripts[0])
         self.assertNotIn("startsWith('/no/checkout/')", scripts[0])
         self.assertNotIn(".click()", scripts[0])
@@ -2910,22 +2905,18 @@ process.stdout.write(eval(input.script));
             browser._advance_checkout_path()
 
         self.assertEqual(actions, [("new-order", False), ("payment", False), ("recommendations", False)])
-        self.assertEqual(sleeps, [10, 10, 0.5, 10, 0.5, 10, 0.5])
+        self.assertEqual(sleeps, [0.5, 0.5, 0.5])
         self.assertEqual(events, [
-            ("sleep", 10),
             ("eval", "new_order"),
             ("click", "new-order"),
-            ("sleep", 10),
             ("eval", "new_order"),
             ("sleep", 0.5),
             ("eval", "payment"),
             ("click", "payment"),
-            ("sleep", 10),
             ("eval", "payment"),
             ("sleep", 0.5),
             ("eval", "recommendations"),
             ("click", "recommendations"),
-            ("sleep", 10),
             ("eval", "recommendations"),
             ("sleep", 0.5),
             ("eval", "ready"),
@@ -2980,9 +2971,9 @@ const main=node('main');main.querySelectorAll=s=>s==='input[type="radio"]'?radio
 const submit=node('submit','Bekreft og betal 246,40 kr');
 const card=node('card');card.checked=true;
 const cardLabel=node('card-label','•••• 1111');cardLabel.contains=x=>x===card;cardLabel.querySelectorAll=()=>[card];card.labels=[cardLabel];
-const document={body:{innerText:c.unavailable?'utsolgt':''},
+const document={body:{innerText:c.unrelatedStockWord?'utsolgt':''},
  querySelector:s=>s==='main'?(c.noMain?null:main):(c.login?{}:null),
- querySelectorAll:s=>s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
+ querySelectorAll:s=>s==='[role="alert"],[role="alertdialog"]'&&c.unavailable?[node('alert','utsolgt')]:s==='[role="dialog"]'?(c.dialog?[node('dialog')]:[]):s==='button'?[submit]:s==='input[type="radio"]'?[card]:[]};
 const location=new URL(c.url||'https://oda.com/no/checkout/modify/');
 const getComputedStyle=x=>({display:x.hidden?'none':'block',visibility:'visible'});
 process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked}));
@@ -3125,7 +3116,7 @@ process.stdout.write(JSON.stringify(JSON.parse(eval(script))));
                 browser._advance_checkout_path()
 
         self.assertEqual(len(evaluations), 30)
-        self.assertEqual(sleeps, [10] + [0.5] * 30)
+        self.assertEqual(sleeps, [0.5] * 30)
 
     def test_oda_vipps_rechecks_the_exact_control_after_the_durable_fence(self):
         browser = OdaBrowser.__new__(OdaBrowser)
@@ -8931,7 +8922,7 @@ class FlowTests(unittest.TestCase):
                 state["pending_checkout"]["expires_at"] = (started + timedelta(seconds=1)).isoformat()
 
             with (
-                mock.patch("service.now", side_effect=[started, started, started + timedelta(seconds=2)]),
+                mock.patch("service.now", side_effect=[started, started, *[started + timedelta(seconds=2)] * 3]),
                 self.assertRaisesRegex(CheckoutPreconditionError, "expired before the final click"),
             ):
                 app.handle({
@@ -10626,7 +10617,7 @@ class FlowTests(unittest.TestCase):
         with self.store.locked() as state:
             state["pending_checkout"]["expires_at"] = (started + timedelta(seconds=1)).isoformat()
         with (
-            mock.patch("service.now", side_effect=[started, started + timedelta(seconds=2)]),
+            mock.patch("service.now", side_effect=[started, *[started + timedelta(seconds=2)] * 3]),
             self.assertRaisesRegex(CheckoutPreconditionError, "expired before the final click"),
         ):
             self.app.handle({"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]})
@@ -10766,7 +10757,7 @@ class FlowTests(unittest.TestCase):
         with self.store.locked() as state:
             state["pending_cancellation"]["expires_at"] = (started + timedelta(seconds=1)).isoformat()
         with (
-            mock.patch("service.now", side_effect=[started, started + timedelta(seconds=2)]),
+            mock.patch("service.now", side_effect=[started, *[started + timedelta(seconds=2)] * 3]),
             self.assertRaisesRegex(CancellationPreconditionError, "expired before the final click"),
         ):
             self.app.handle({
