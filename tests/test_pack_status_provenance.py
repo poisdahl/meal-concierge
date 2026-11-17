@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from recipe_portable import export_private_archive, restore_private_archive
-from recipes import RecipeStore, normalize_recipe
+from recipes import RecipeError, RecipeStore, normalize_recipe
 
 
 class PackStatusTests(unittest.TestCase):
@@ -83,6 +83,24 @@ class PackStatusTests(unittest.TestCase):
             self.assertEqual(connection.execute('SELECT count(*) FROM recipe_pack_status').fetchone()[0], 0)
         replacement = self.apply(2)
         self.assertNotEqual(saved['id'], replacement['id'])
+
+    def test_export_rejects_corrupt_provenance_instead_of_casting_it(self):
+        self.apply(1)
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute('PRAGMA ignore_check_constraints=ON')
+            connection.execute('UPDATE recipe_pack_status SET local_status=2')
+        output = self.root / 'corrupt.zip'
+        with self.assertRaisesRegex(RecipeError, 'status provenance is invalid'):
+            export_private_archive(output, self.store)
+        self.assertFalse(output.exists())
+
+    def test_export_rejects_provenance_on_an_unrelated_user_recipe(self):
+        self.apply(1)
+        user = self.store.save({**self.recipe, 'name': 'Unrelated user recipe'})
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute('INSERT INTO recipe_pack_status VALUES(?,1,0)', (user['id'],))
+        with self.assertRaisesRegex(RecipeError, 'no pack origin'):
+            export_private_archive(self.root / 'corrupt.zip', self.store)
 
 
 if __name__ == '__main__':

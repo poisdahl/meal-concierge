@@ -811,6 +811,12 @@ def export_private_archive(destination: Path | str, store) -> dict:
                 for table in tables:
                     if connection.execute(f"SELECT 1 FROM {table} t LEFT JOIN recipes r ON r.id=t.recipe_id WHERE r.id IS NULL LIMIT 1").fetchone():
                         raise RecipeError("private recipe snapshot contains orphan rows")
+                if has_status_provenance and connection.execute("""
+                        SELECT 1 FROM recipe_pack_status p
+                        LEFT JOIN recipe_entry_metadata m ON m.recipe_id=p.recipe_id
+                        WHERE m.entry_origin IS NULL OR m.entry_origin NOT IN ('bundled','collection')
+                        LIMIT 1""").fetchone():
+                    raise RecipeError("private pack status provenance has no pack origin")
                 with files["records.jsonl"].open("xb") as records:
                     os.chmod(files["records.jsonl"], 0o600)
                     for current in connection.execute("SELECT id,revision,status,source_key,document,created_at,updated_at,created_via FROM recipes ORDER BY id"):
@@ -827,6 +833,10 @@ def export_private_archive(destination: Path | str, store) -> dict:
                                 "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?",
                                 (identity,)).fetchone() if has_status_provenance else None)
                             if provenance:
+                                if (type(provenance["applied_revision"]) is not int
+                                        or type(provenance["local_status"]) is not int
+                                        or provenance["local_status"] not in (0, 1)):
+                                    raise RecipeError("private pack status provenance is invalid")
                                 pack["status_provenance"] = {"applied_revision": provenance["applied_revision"],
                                                              "local_status": bool(provenance["local_status"])}
                                 private_schema_version = 3
