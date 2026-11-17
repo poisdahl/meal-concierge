@@ -769,7 +769,12 @@ def _status_view(result: dict[str, Any], offset: int, limit: int, section: str) 
     view.update(_fields(result, ("household", "configuration_status", "menu_phase", "menu_id",
                                  "cart_plan_status", "pending_checkout_status", "pending_cancellation_status",
                                  "order_change_status", "confirmation_policy", "auto_checkout", "currency", "build", "capacity_warnings")))
+    # The service states why a store is unavailable in "message"; without it the
+    # agent can only say that the store does not work.
     view["integration"] = _fields(result.get("integration"), ("status", "provider", "reason"))
+    message = (result.get("integration") or {}).get("message")
+    if isinstance(message, str) and message:
+        view["integration"]["message"] = _display_text(message, 400)
     server = (result.get("integration") or {}).get("server")
     if isinstance(server, dict):
         view["integration"]["server"] = _fields(server, ("name", "version"))

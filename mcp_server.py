@@ -317,7 +317,7 @@ def _stage_local_recipe_pack(source_file: str | None) -> dict[str, Any]:
         try:
             try:
                 source_descriptor = os.open(
-                    source_file, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=source_directory
+                    source_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_directory
                 )
                 source_info = os.fstat(source_descriptor)
             except OSError as exc:
@@ -366,7 +366,7 @@ def _stage_local_recipe_pack(source_file: str | None) -> dict[str, Any]:
             try:
                 os.link(temporary, inbox / archive_id, follow_symlinks=False)
             except FileExistsError:
-                existing_descriptor = os.open(inbox / archive_id, os.O_RDONLY | os.O_NOFOLLOW)
+                existing_descriptor = os.open(inbox / archive_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 try:
                     existing_info = os.fstat(existing_descriptor)
                     if (
