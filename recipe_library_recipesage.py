@@ -1383,10 +1383,10 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
                 candidate["schema_version"] = 2
                 candidate["source"]["original"] = {"url": source.get("url"), "publisher": _body(raw.get("source"), "recipe source", 300) or None}
                 if rights["storage"] == "full":
-                    candidate["ingredients"] = [
-                        source_ingredient(text, language=candidate["language"])
-                        for text in candidate["ingredients"]
-                    ]
+                    from recipes import source_ingredient_sections
+                    candidate["ingredients"], empty_sections = source_ingredient_sections(
+                        candidate["ingredients"], language=candidate["language"])
+                    candidate["notes"] = "\n\n".join(part for part in (candidate["notes"], *empty_sections) if part) or None
                     yield_text = _body(raw.get("yield"), "recipe yield", 500)
                     candidate["yield"], candidate["portions"] = source_yield(yield_text)
                     candidate["portions_evidence"] = {"basis": "source" if candidate["portions"] is not None else "unknown", "input": yield_text or None}

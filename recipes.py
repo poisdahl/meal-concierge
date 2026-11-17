@@ -473,6 +473,34 @@ def source_ingredient(
             "evidence": {"quantity": deepcopy(evidence), "unit": unit_evidence}}
 
 
+def source_ingredient_sections(
+    lines: list[str], *, language: str | None = None, attached_metric_units: bool = False,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep RecipeSage's bracketed component headings out of shopping goods.
+
+    Each following ingredient keeps its exact section heading in notes. Empty
+    or trailing sections have no ingredient to annotate and go to recipe notes.
+    Ingredient source lines and their amount evidence remain unchanged.
+    """
+    ingredients, empty_sections = [], []
+    section = None
+    section_unused = False
+    for text in lines:
+        if re.fullmatch(r"\[[^\[\]\r\n]+\]", text):
+            if section_unused:
+                empty_sections.append(section)
+            section, section_unused = text, True
+            continue
+        ingredient = source_ingredient(text, language=language, attached_metric_units=attached_metric_units)
+        if section is not None:
+            ingredient["notes"] = section
+        ingredients.append(ingredient)
+        section_unused = False
+    if section_unused:
+        empty_sections.append(section)
+    return ingredients, empty_sections
+
+
 def source_yield(text: str) -> tuple[dict[str, Any], float | None]:
     quantity = unit = portions = None
     serves = re.fullmatch(r"\s*(?:serves|(?:antall\s+)?porsjoner)(?:\s*:\s*|\s+)(\d+(?:[.,]\d+)?)\s*", text, re.IGNORECASE)

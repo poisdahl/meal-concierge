@@ -578,7 +578,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
     them. Input is an internal result of one of the read_* functions above.
     """
     try:
-        from recipes import source_ingredient, source_yield, categories_from_tags
+        from recipes import source_ingredient, source_ingredient_sections, source_yield, categories_from_tags
     except ImportError as exc:
         raise RecipeImportReaderError("shared schema-2 source parsers are not installed") from exc
     raw = record["extracted"]
@@ -592,7 +592,12 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
                 break
     # Imported pages, recipe exports and store recipe pages reach this helper,
     # never the curated collection build.
-    ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
+    empty_sections = []
+    if raw["source"]["kind"] == "recipesage":
+        ingredients, empty_sections = source_ingredient_sections(raw["ingredients"], language=raw["language"],
+                                                               attached_metric_units=True)
+    else:
+        ingredients = [source_ingredient(text, language=raw["language"], attached_metric_units=True) for text in raw["ingredients"]]
     portions_input = raw["yield_text"] or None
     if raw["source"]["kind"] == "mealie":
         # Mealie explicitly stores person servings independently from yield.
@@ -619,7 +624,7 @@ def source_candidate(record: dict[str, Any]) -> dict[str, Any]:
                 ingredient = source_ingredient(text, language=raw["language"])
             ingredient["notes"] = detail["note"] or None
             ingredients.append(ingredient)
-    notes = "\n\n".join(part for part in (raw["description"], raw["notes"]) if part)
+    notes = "\n\n".join(part for part in (raw["description"], raw["notes"], *empty_sections) if part)
     _text(notes, "combined recipe notes", MAX_TEXT)
     return {
         "schema_version": 2, "name": raw["name"], "language": raw["language"],
@@ -976,6 +981,9 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
                 detail["quantity"] or "", (detail["unit"] or {}).get("name", ""),
                 (detail["food"] or {}).get("name", ""), detail["note"],
             ) if value)
+        if not text and not detail["title"]:
+            unsupported.add("recipeIngredient.empty")
+            continue
         ingredients.append(_text(text, "Mealie ingredient text", 500, required=True))
         details.append(detail)
         if detail["title"]:
@@ -1013,7 +1021,18 @@ def read_mealie_json(data: bytes | str) -> dict[str, Any]:
     yield_text = f"{yield_quantity} {yield_label}".strip() if yield_quantity else yield_label
     yield_text = _text(yield_text, "Mealie complete yield", 500)
     name = _text(raw.get("name"), "Mealie name", 300, required=True)
-    original_url = _url(raw.get("orgURL"), "orgURL")
+    if isinstance(raw.get("orgURL"), str):
+        try:
+            raw["orgURL"].encode("utf-8")
+        except UnicodeError as exc:
+            raise RecipeImportReaderError("Mealie orgURL contains invalid Unicode") from exc
+    try:
+        original_url = _url(raw.get("orgURL"), "orgURL")
+    except RecipeImportReaderError:
+        if isinstance(raw.get("orgURL"), str) and raw["orgURL"].strip().casefold().startswith(("http://", "https://")):
+            raise  # Preserve the native import's credential-bearing URL rejection.
+        original_url = None
+        unsupported.add("orgURL")  # Optional provenance text is not a usable URL.
     return {
         "extracted": {
             "name": name, "language": "und", "ingredients": ingredients,
