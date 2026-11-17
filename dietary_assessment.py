@@ -9,6 +9,26 @@ from core import HouseholdError
 
 KINDS = {'allergy', 'sensitivity', 'preference', 'never_buy', 'allergy_or_sensitivity'}
 
+# Literal food names only, not a stemmer, substring rule or clinical taxonomy.
+# A specific term stays specific: a walnut rule does not become a general nut rule.
+_MILK_NAMES = ('milk', 'melk', 'mjölk', 'helmelk', 'lettmelk', 'skummetmelk',
+               'kremfløte', 'matfløte', 'melkepulver', 'melkeprotein', 'melkefett', 'melkesjokolade')
+_WALNUT_NAMES = ('valnøtt', 'valnøtter', 'walnut', 'walnuts')
+_EGG_NAMES = ('egg', 'eggs', 'ägg', 'eggeplomme', 'eggeplommer', 'eggehvite', 'eggehviter', 'eggepulver')
+_SHRIMP_NAMES = ('reke', 'reker', 'shrimp', 'shrimps', 'prawn', 'prawns')
+LITERAL_EQUIVALENTS = {
+    **{term: _MILK_NAMES for term in ('milk', 'melk', 'mjölk')},
+    **{term: ('nøtt', 'nøtter', 'nut', 'nuts', *_WALNUT_NAMES) for term in ('nøtt', 'nøtter', 'nut', 'nuts')},
+    **{term: _WALNUT_NAMES for term in _WALNUT_NAMES},
+    **{term: _EGG_NAMES for term in ('egg', 'eggs', 'ägg')},
+    **{term: _SHRIMP_NAMES for term in _SHRIMP_NAMES},
+}
+_FREE_PREFIXES = {
+    **{term: r'(?<!\w)(?:melkefri|mjölkfri|milk[- ]free)(?!\w)' for term in ('milk', 'melk', 'mjölk')},
+    **{term: r'(?<!\w)(?:eggfri|äggfri|egg[- ]free)(?!\w)' for term in ('egg', 'eggs', 'ägg')},
+    **{term: r'(?<!\w)(?:nøttefri|nut[- ]free)(?!\w)' for term in ('nøtt', 'nøtter', 'nut', 'nuts')},
+}
+
 
 def text(value):
     return ' '.join(unicodedata.normalize('NFC', str(value)).casefold().split())
@@ -67,13 +87,15 @@ def observation(raw):
     return result
 
 
-def matches(term, value, *, milk_ambiguity=False):
+def matches(term, value, *, milk_ambiguity=False, free_prefix=None):
     values = value if isinstance(value, list) else [value]
     for part in values:
         normalized = text(part)
         for match in re.finditer(r'(?<!\w)' + re.escape(text(term)) + r'(?!\w)', normalized):
             before = normalized[max(0, match.start() - 35):match.start()]
             after = normalized[match.end():match.end() + 12]
+            if free_prefix and re.search(free_prefix + r'\s*$', before):
+                continue  # A qualified alternative is not positive evidence of the named food.
             # An explicitly plant-qualified dairy alternative is not positive
             # evidence of cream itself. Other matches/label fields still count;
             # this does not establish allergen absence or nutritional suitability.
@@ -149,6 +171,8 @@ def title_positive_match(term, value):
         return False
     for match in re.finditer(pattern, normalized_value):
         before = normalized_value[max(0, match.start() - 35):match.start()]
+        if (prefix := _FREE_PREFIXES.get(normalized_term)) and re.search(prefix + r'\s*$', before):
+            continue
         if normalized_term in {'milk', 'melk', 'mjölk'} and re.search(
             r'(?<!\w)(?:oat|almond|soy|soya|coconut|rice)(?:[- ]*based)?[- ]*$'
             r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
@@ -170,7 +194,7 @@ def assess(profile, item, *, recipe=False):
                    'red meat': ['beef', 'pork', 'lamb', 'storfe', 'svin', 'lam', 'oksekjøtt'],
                    'white rice': ['white rice', 'hvit ris', 'vit ris'],
                    'dry whole legumes': ['dried beans', 'dry beans', 'dried chickpeas', 'dry chickpeas', 'dried lentils', 'dry lentils', 'dried peas', 'dry peas', 'tørre bønner', 'tørkede bønner', 'tørkede kikerter', 'tørre kikerter', 'tørkede linser', 'tørre linser', 'tørkede erter', 'tørre erter']}
-        terms = aliases.get(text(term), [term])
+        terms = list(dict.fromkeys([*aliases.get(text(term), [term]), *LITERAL_EQUIVALENTS.get(text(term), ())]))
         # This packaging category appears in retail names without the rule's
         # optional category noun. Keep matching and negation checks literal.
         if re.fullmatch(r'boil[- ]in[- ]bag(?: produkter| products)?', text(term)):
@@ -183,7 +207,9 @@ def assess(profile, item, *, recipe=False):
         present = any(
             not (field == 'product_name' and title_allergen_negated(term, rule_evidence.get(field, '')))
             # A declared allergen list names allergens: "Soya Melk" there is soy and milk, not soy milk.
-            and matches(t, rule_evidence.get(field, ''), milk_ambiguity=field in {'ingredients', 'product_name'} and text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'})
+            and matches(t, rule_evidence.get(field, ''),
+                        milk_ambiguity=field in {'ingredients', 'product_name'} and text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'},
+                        free_prefix=_FREE_PREFIXES.get(text(term)) if field in {'ingredients', 'product_name'} else None)
             for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms
         )
         if not present and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity', 'never_buy'}:
