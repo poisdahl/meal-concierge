@@ -713,7 +713,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         ):
             raise HouseholdError("No store is connected. Use shopping_list for a general list; connect a store for product matching or ordering.")
         email_due_requires_meny = (
-            operation == "email" and action in {"due", "reconcile"}
+            operation == "email" and action in {"due", "review_catch_up", "reconcile"}
             and (request.get("provider") is None or request.get("provider") == "meny")
         )
         meny_read = self.provider == "meny" and (

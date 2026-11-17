@@ -13,7 +13,6 @@ import logging
 import os
 from pathlib import Path
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -30,7 +29,7 @@ from mcp.shared.auth import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from core import HouseholdError
+from core import HouseholdError, _atomic_json
 
 
 def require_https(value) -> None:
@@ -41,18 +40,7 @@ def require_https(value) -> None:
 
 def private_json(path: Path, value: dict) -> None:
     """Publish one durable private record; never truncate the previous value."""
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".oauth-", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(value, stream, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        sync_directory(path.parent)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    _atomic_json(path, value)
 
 
 def sync_directory(path: Path) -> None:
@@ -101,6 +89,10 @@ class ProviderTokenStorage:
             raise HouseholdError(f"{self.label} login transaction is invalid") from None
         for path, field in ((self.meta_path, "metadata"), (self.client_path, "client"), (self.tokens_path, "tokens")):
             private_json(path, pending[field])
+        if pending.get("kind") in ("refresh", "authorization_code"):
+            private_json(self.directory / f"{self.server_name}.last-exchange.json", {
+                "exchange_id": str(uuid.UUID(pending["exchange_id"])), "kind": pending["kind"],
+                "outcome": "published"})
         self.transaction_path.unlink()
         sync_directory(self.directory)
 
@@ -133,8 +125,11 @@ class ProviderTokenStorage:
         token_data = tokens.model_dump(mode="json", exclude_none=True)
         if tokens.expires_in is not None:
             token_data["expires_at"] = time.time() + tokens.expires_in
+        pending = self.read(self.transaction_path)
+        if not pending or pending.get("status") != "pending":
+            raise HouseholdError(f"{self.label} original token exchange is missing")
         private_json(self.transaction_path, {
-            "status": "ready", "tokens": token_data,
+            **{k: pending[k] for k in ("exchange_id", "kind") if k in pending}, "status": "ready", "tokens": token_data,
             "client": client.model_dump(mode="json", exclude_none=True), "metadata": metadata,
         })
         self.recover()
