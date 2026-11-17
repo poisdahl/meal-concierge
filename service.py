@@ -319,6 +319,12 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
         if not acquired:
             raise HouseholdError("provider browser deadline reached")
         try:
+            admission_deadline = _REQUEST_ADMISSION_DEADLINE.get()
+            if admission_deadline is not None and time.monotonic() >= admission_deadline:
+                raise HouseholdError("request expired while waiting for provider ownership; no new provider operation was started")
+            # The provider owner is now held. Preserve this admitted operation's
+            # journal/reconciliation even when its original caller leaves.
+            _REQUEST_ADMISSION_DEADLINE.set(None)
             if not allow_pending_cart and self.store.read().get("pending_cart_change"):
                 raise HouseholdError("reconcile_change before using the provider; a cart write is uncertain")
             yield
@@ -521,9 +527,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             deadline = _REQUEST_ADMISSION_DEADLINE.get()
             if deadline is not None and time.monotonic() >= deadline:
                 raise HouseholdError("request expired while waiting for service ownership; no new operation was started")
-            # Admission is now complete. Nested calls and reconciliation for a
-            # started operation must finish even if the original caller leaves.
-            token = _REQUEST_ADMISSION_DEADLINE.set(None)
+            # Commerce paths take the browser owner inside _handle. Keep their
+            # admission pending until that final domain lock has been acquired.
+            # Other operations are admitted under their outer domain lock.
+            pending = deadline if operation in {"cart", "products", "checkout", "orders", "delivery"} else None
+            token = _REQUEST_ADMISSION_DEADLINE.set(pending)
             try:
                 return self._handle(request)
             finally:

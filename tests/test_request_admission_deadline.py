@@ -59,6 +59,24 @@ class RequestAdmissionTests(unittest.TestCase):
                 self.assertIn('finite', result['error'])
         self.assertFalse(self.shop.calls)
 
+    def test_queued_checkout_expires_at_the_inner_browser_owner_before_reads(self):
+        result = {}
+        self.app.browser_lock.acquire()
+        try:
+            worker = threading.Thread(target=lambda: result.update(self.wire({
+                'operation': 'checkout', 'action': 'prepare',
+                'request_not_after': time.monotonic() + .03})))
+            worker.start()
+            time.sleep(.08)
+        finally:
+            self.app.browser_lock.release()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(result['ok'], result)
+        self.assertIn('expired', result['error'])
+        self.assertFalse(self.shop.calls)
+        self.assertFalse(self.store.read().get('pending_checkout'))
+
     def test_client_uses_server_clock_and_stays_compatible_with_old_cores(self):
         for health in ({'admission_deadline_clock': 1234.5}, {}):
             with self.subTest(health=health):
