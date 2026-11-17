@@ -915,9 +915,13 @@ def _orders_view(action: str, result: dict[str, Any], offset: int, limit: int, s
     return view
 
 
-def _recipe_ingredient(item: Any, index: int, *, provenance: bool = False) -> dict[str, Any]:
+def _recipe_ingredient(item: Any, index: int, *, provenance: bool = False, language: str | None = None) -> dict[str, Any]:
     value = {"index": index, **_fields(item, ("item", "quantity", "unit", "amount", "original_text",
                                               "optional", "pantry", "notes"))}
+    from recipe_quantities import display_amount
+    shown = display_amount(item.get("quantity"), item.get("unit"), language) if isinstance(item, dict) else None
+    if shown is not None:
+        value["display_amount"] = shown
     evidence = item.get("evidence") if isinstance(item, dict) else None
     if isinstance(evidence, dict):
         fields = ("basis", "input", "assumptions", "conversion", "calculation", "acceptance", "project_review") if provenance else ("basis", "assumptions")
@@ -994,7 +998,8 @@ def _recipe_view(action: str, result: dict[str, Any], offset: int, limit: int, s
         view["recipe_digest"] = recipe.get("recipe_digest")
     if action != "adapt":
         view["original_digest"] = view["recipe_digest"]
-    ingredients = [_recipe_ingredient(item, index, provenance=section == "provenance")
+    language = (recipe.get("presentation") or {}).get("resolved_language") or recipe.get("language")
+    ingredients = [_recipe_ingredient(item, index, provenance=section == "provenance", language=language)
                    for index, item in enumerate(recipe.get("ingredients", []))]
     steps = [{"index": index, "text": step}
              for index, step in enumerate(recipe.get("steps", []))]

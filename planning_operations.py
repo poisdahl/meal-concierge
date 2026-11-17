@@ -3107,6 +3107,12 @@ class PlanningOperations:
 
     @staticmethod
     def _product_page_options(request: Mapping[str, Any]) -> tuple[int, int, str]:
+        if request.get("language") is not None:
+            from recipe_languages import language_tag
+            try:
+                language_tag(request["language"])
+            except RecipeError as exc:
+                raise HouseholdError(str(exc)) from exc
         offset = request.get("offset") if request.get("offset") is not None else 0
         limit = request.get("limit") if request.get("limit") is not None else 8
         section = request.get("section") if request.get("section") is not None else "requirements"
@@ -3179,7 +3185,13 @@ class PlanningOperations:
         # requirement or remove a candidate to squeeze in another row.
         for row in rows[offset:offset + limit]:
             proposed = deepcopy(page)
-            proposed[section].append(deepcopy(row))
+            shown = deepcopy(row)
+            if section == "requirements":
+                from recipe_quantities import display_amount
+                amount = display_amount(shown.get("quantity"), shown.get("unit"), request.get("language"))
+                if amount is not None:
+                    shown["display_amount"] = amount
+            proposed[section].append(shown)
             rule_indexes = set()
             for displayed in proposed.get("requirements", []):
                 products = displayed.get("candidates", []) + displayed.get("selection", {}).get("products", [])
