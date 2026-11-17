@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 import hashlib
@@ -1813,7 +1813,7 @@ class RecipeStore:
                 "INSERT INTO metadata(key, value) VALUES('schema_version', '1')"
             )
             version = "1"
-        if version not in {"1", "2", "3", "4", "5", "6", "7"}:
+        if version not in {"1", "2", "3", "4", "5", "6", "7", "8"}:
             raise RecipeError("recipe bank schema is newer than this meal concierge")
         row = connection.execute("SELECT value FROM metadata WHERE key='household'").fetchone()
         if row is None:
@@ -1855,6 +1855,13 @@ class RecipeStore:
                 applied_revision INTEGER NOT NULL CHECK(applied_revision >= 1),
                 local_status INTEGER NOT NULL CHECK(local_status IN (0, 1)))""")
             connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            version = "7"
+        if version == "7":
+            connection.execute("""CREATE TABLE pack_deletions (
+                entry_origin TEXT NOT NULL, pack_id TEXT NOT NULL, pack_recipe_id TEXT NOT NULL,
+                source_digest TEXT NOT NULL, deletion_id TEXT NOT NULL,
+                PRIMARY KEY(entry_origin,pack_id,pack_recipe_id))""")
+            connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
         namespace = connection.execute(
             "SELECT value FROM metadata WHERE key='discovery_namespace'"
         ).fetchone()
@@ -2210,6 +2217,43 @@ class RecipeStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _backup_before_pack_migration(self, connection, version):
+        """Pin the entire prior bank, including identities and uncertain operations."""
+        backup = self.path.with_name(f"recipes-v{version}.backup.sqlite3")
+        def fingerprint(db):
+            total = hashlib.sha256()
+            for statement in db.iterdump():
+                total.update(statement.encode() + b"\x00")
+            return total.digest()
+        def validate(path):
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise RecipeError("pre-migration recipe backup must be a private regular file")
+            with closing(sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True)) as prior:
+                if prior.execute("PRAGMA quick_check").fetchone() != ("ok",) or fingerprint(prior) != fingerprint(connection):
+                    raise RecipeError("pre-migration recipe backup differs from the current bank")
+        if backup.exists() or backup.is_symlink():
+            validate(backup)
+            return
+        descriptor, name = tempfile.mkstemp(dir=self.path.parent, prefix=".recipe-migration-")
+        os.close(descriptor)
+        temporary = Path(name)
+        try:
+            with closing(sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True)) as src:
+                with closing(sqlite3.connect(str(temporary))) as dest:
+                    src.backup(dest)
+            validate(temporary)
+            with temporary.open("rb") as source:
+                os.fsync(source.fileno())
+            os.link(temporary, backup, follow_symlinks=False)
+            directory = os.open(backup.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _connect(self, target: str | None = None, *, restore: bool = False) -> sqlite3.Connection:
         if target is None:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2225,7 +2269,7 @@ class RecipeStore:
             connection.execute("BEGIN IMMEDIATE")
             metadata = self._metadata(connection)
             if restore and existed:
-                if metadata is None or metadata.get("household") != self.household or metadata.get("schema_version") != "7":
+                if metadata is None or metadata.get("household") != self.household or metadata.get("schema_version") != "8":
                     raise RecipeError("private restore requires the current household bank schema")
                 # Restoring private recipes must not migrate or expire unrelated
                 # operations, discoveries, mappings or household metadata.
@@ -2234,7 +2278,7 @@ class RecipeStore:
             if metadata is not None:
                 if metadata.get("household") not in {None, self.household}:
                     raise RecipeError("recipe bank belongs to a different household")
-                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5", "6", "7"}:
+                if metadata.get("schema_version") not in {None, "1", "2", "3", "4", "5", "6", "7", "8"}:
                     raise RecipeError("recipe bank schema is newer than this meal concierge")
             recipes_exist = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='recipes'"
@@ -2287,6 +2331,8 @@ class RecipeStore:
                                       "discovery_bindings", "library_operations", "library_mappings",
                                       "library_connection_controls", "recipe_favorites"))):
                 self._backup_v4(connection)
+            if target is None and existed and metadata and metadata.get("schema_version") in {"6", "7"}:
+                self._backup_before_pack_migration(connection, metadata["schema_version"])
             self._schema(connection)
             if restore:
                 connection.commit()
@@ -4890,6 +4936,9 @@ class RecipeStore:
         try:
             with self._connection(restore=True) as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                if pack and connection.execute("SELECT 1 FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?",
+                                               (entry["entry_origin"], pack["pack_id"], pack["recipe_id"])).fetchone():
+                    return result("conflict", "previously_deleted_collection_entry")
                 current = connection.execute("SELECT * FROM recipes WHERE id=?", (recipe_id,)).fetchone()
                 history = connection.execute("SELECT revision,status,document,created_at FROM revisions WHERE recipe_id=? ORDER BY revision", (recipe_id,)).fetchall()
                 origin = connection.execute("SELECT entry_origin,pack_id,pack_recipe_id,pack_version,baseline_hash FROM recipe_entry_metadata WHERE recipe_id=?", (recipe_id,)).fetchone()
@@ -5066,6 +5115,11 @@ class RecipeStore:
         try:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                deleted = connection.execute("SELECT source_digest,deletion_id FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?",
+                                             (entry_origin, pack_id, pack_recipe_id)).fetchone()
+                if deleted:
+                    return {"outcome": "kept_deleted", "deletion_id": deleted["deletion_id"],
+                            "source_matches": _hash(source_key(recipe)) == deleted["source_digest"]}
                 existing = connection.execute(
                     "SELECT r.*, m.baseline_hash, m.entry_origin AS pack_entry_origin "
                     "FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id "
@@ -5636,6 +5690,28 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank compaction failed") from exc
 
+    def restore_pack_deletion(self, deletion):
+        key = tuple(deletion[field] for field in ("entry_origin", "pack_id", "pack_recipe_id"))
+        with self._connection(restore=True) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("SELECT 1 FROM recipe_entry_metadata WHERE pack_id=? AND pack_recipe_id=?", key[1:]).fetchone():
+                return "conflict"
+            prior = connection.execute("SELECT source_digest,deletion_id FROM pack_deletions WHERE entry_origin=? AND pack_id=? AND pack_recipe_id=?", key).fetchone()
+            values = (deletion["source_digest"], deletion["deletion_id"])
+            if prior:
+                return "unchanged" if tuple(prior) == values else "conflict"
+            connection.execute("INSERT INTO pack_deletions VALUES(?,?,?,?,?)", (*key, *values))
+            return "created"
+
+    def allow_pack_reintroduction(self, pack_id, pack_recipe_id, deletion_id):
+        """Explicitly forget one exact deletion. A separate pack import creates it."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if connection.execute("DELETE FROM pack_deletions WHERE pack_id=? AND pack_recipe_id=? AND deletion_id=?",
+                                  (pack_id, pack_recipe_id, deletion_id)).rowcount != 1:
+                raise RecipeError("collection deletion changed or does not match the reviewed identity")
+        return {"reintroduction_allowed": True}
+
     def delete(self, recipe_id: Any, expected_revision: Any) -> dict[str, Any]:
         """Permanently remove one exact built-in recipe and its local identity metadata."""
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
@@ -5651,6 +5727,12 @@ class RecipeStore:
                     raise RecipeError("recipe was not found")
                 if current["revision"] != expected_revision:
                     raise RecipeError(f"recipe revision conflict; current revision is {current['revision']}")
+                pack = connection.execute("""SELECT m.entry_origin,m.pack_id,m.pack_recipe_id,r.source_key
+                    FROM recipe_entry_metadata m JOIN recipes r ON r.id=m.recipe_id
+                    WHERE m.recipe_id=? AND m.entry_origin IN ('bundled','collection')""", (recipe_id,)).fetchone()
+                if pack:
+                    connection.execute("INSERT INTO pack_deletions VALUES(?,?,?,?,?)",
+                                       (*tuple(pack)[:3], _hash(pack["source_key"]), secrets.token_hex(16)))
                 self._tombstone_recipe_idempotency(connection, {recipe_id})
                 self._delete_recipe_rows(connection, recipe_id)
                 return {"library_id": "builtin", "recipe_id": recipe_id, "deleted": True}

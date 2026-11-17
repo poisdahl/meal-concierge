@@ -1513,7 +1513,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v2_bank(newer, full_recipe("Newer", external_id="newer"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")
@@ -1649,7 +1649,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v3_bank(newer, full_recipe("Future v5", external_id="future-v5"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='99' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")

@@ -69,6 +69,7 @@ class PackStatusTests(unittest.TestCase):
         saved = self.apply(1)
         saved = self.apply(2, 'draft')
         with sqlite3.connect(self.store.path) as connection:
+            connection.execute("DROP TABLE pack_deletions")
             connection.execute('DROP TABLE recipe_pack_status')
             connection.execute("UPDATE metadata SET value='6' WHERE key='schema_version'")
         before = self.store.get(saved['id'])
