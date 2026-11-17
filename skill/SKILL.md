@@ -702,6 +702,12 @@ household preference is Vipps. This choice applies only to the reviewed change;
 Oda/Vipps delivery-only payment remains unsupported.
 Mathem amounts are SEK; Oda and MENY amounts are NOK.
 
+Review product selection's `quantity_warnings`: look for a smaller suitable
+pack or explain a concrete use for surplus before applying it. Extra packages
+must have a current household need; a lower unit price alone is not a reason
+to buy them. Estimate-mode merchandise comparisons do not establish final
+payable totals, deposits or delivery fees.
+
 ## Recipes, delivery and ongoing use
 
 In the first message presenting a saved plan, give dish names, short descriptions,

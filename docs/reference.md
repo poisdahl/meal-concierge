@@ -331,6 +331,20 @@ unresolved cart, checkout, cancellation or order-change journal remains. MCP and
 CLI expose `status: "outcome_unknown"`; read status and reconcile the original
 attempt before another write. The error does not clear or retry that journal.
 
+Oda and Mathem preparation defaults to estimate mode through the service as
+well as MCP. Within an explicitly approved scope, known regular single-product
+covering packs can be compared by dietary fit and merchandise cost even when
+deposits are unknown. Every scoped candidate must be observable; final payable
+costs remain unknown. Fixed coverage over twice the need and explicitly chosen
+extra packages carry `quantity_warnings` for the agent to review, without
+changing the canonical need or inventing stock.
+
+Current clients use the health probe's service monotonic clock to attach an
+admission deadline. A request that expires while waiting for a service operation
+lock is rejected before it starts. Once admitted, journal writes and required
+reconciliation finish even if the caller disconnects; a timeout never proves
+that an admitted mutation failed. Older clients retain their existing protocol.
+
 New installations use `"confirmation_policy": "fresh"`: Hermes prepares the
 exact checkout or cancellation summary and asks once before dispatch. An owner
 who wants a standing authorization can set the private config to

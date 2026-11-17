@@ -3110,6 +3110,7 @@ class PlanningOperations:
                     "observed_package_description", "surplus_quantity", "package_count",
                     "merchandise_ore", "mandatory_deposit_ore", "total_payable_ore",
                     "shared_package_allocation", "counts_toward_cart_and_totals",
+                    "quantity_warnings",
                 ) if key in selection}
                 row["selection"]["products"] = [product(value) for value in selection.get("products", [])]
             row["issues"] = [deepcopy(issue) for issue in issues
@@ -3884,7 +3885,7 @@ class PlanningOperations:
                 else:
                     ingredient_decisions = request.get("ingredient_decisions")
                     budget_ore = request.get("budget_ore")
-                    price_mode = request.get("price_mode") or "exact"
+                    price_mode = request.get("price_mode") or ("estimate" if self.provider in {"oda", "mathem"} else "exact")
             observation_work = (deepcopy(continuation_record.get("observation_work") or {})
                                 if continuation_record is not None and mode != "reset" else {})
             plan = self._prepare_products(
