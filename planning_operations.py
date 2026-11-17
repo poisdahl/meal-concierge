@@ -799,10 +799,12 @@ class PlanningOperations:
         carried_locks = [s["slot_id"] for s in successor["slots"] if s["slot_id"] in set(previous_locks) | set(supplied["locked_slot_ids"])]
         planning["locks"][mp.lock_key(successor)] = carried_locks
         planning["applied"][supplied["replan_digest"]] = mp.menu_ref(successor)
+        from stock_check import transfer_stock_answers
+        stock_transfer = transfer_stock_answers(state, current, successor)
         state["menu"] = successor
         if not preserve_cart_plan:
             self._clear_persisted_product_plan(state.get("cart_plan"))
-        return {"menu": deepcopy(successor), "shopping_comparison": deepcopy(supplied["shopping_comparison"])}
+        return {"menu": deepcopy(successor), "shopping_comparison": deepcopy(supplied["shopping_comparison"]), **stock_transfer}
 
     def _add_slot(self, request):
         """Append one explicitly requested meal, retaining the exact current plan."""
@@ -3176,6 +3178,7 @@ class PlanningOperations:
         page["next"] = (
             "Read further pages with products get and this product_plan_ref; continue prepare with only new or changed candidate_approvals. "
             "Before selecting staple purchases, resolve one combined whole-menu stock check using current user answers or explicit standing instructions; record stock/buy decisions and do not repeat answered questions. "
+            "shopping_list get returns the bounded whole-menu stock_check; record_stock accepts its current stock_ref and explicit answers by requirement_id. "
             + ("Save the exact planner selection, then prepare its menu_ref before cart apply."
                if page["preview"] else "Apply only the reviewed returned arguments with an explicit cart-change request."
               )

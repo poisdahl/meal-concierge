@@ -56,6 +56,24 @@ Changed quantities reopen checked rows; a new independent menu starts fresh
 checks. Personal extras remain until you remove them. Explicit replanning keeps
 unchanged checks within the same shopping task.
 
+The list also returns one `stock_check` for the whole menu, with grouped total
+needs, the remaining amount, pantry/optional flags and recorded-answer status.
+Its counts cover every item; follow its bounded pages before asking one combined
+stock question. Answer through `shopping_list record_stock` with the current
+`stock_ref` and `stock_answers` by `requirement_id`: `have_all`, `have_quantity`,
+`include`, or `omit` for optional ingredients. A partial answer is the total stock
+available for that ingredient, allocated once across dishes, not an additional
+amount on top of an earlier answer. Unknown optional amounts remain unresolved
+unless explicitly covered or omitted. Saved answers take precedence over older
+preparation requests.
+
+An edit carries answers only for the same stable preparation source with an
+unchanged recipe snapshot and shopping amount. Changed, removed or historical
+sources are reported as `stock_answers_dropped` and need a new answer; unrelated
+menus and legacy preparations without stable source identity inherit none.
+Recording stock is local and changes no retailer cart or purchase. After changing
+stock, prepare a fresh product review for the current menu before applying it.
+
 Ask explicitly for product suggestions from the connected Oda, Mathem or MENY
 catalog to tailor the menu ingredients to that store. A store connection is
 required, but you do not have to order: you can use the suggestions when shopping
