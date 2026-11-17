@@ -1381,7 +1381,7 @@ class RecipeSageAdapter(RecipeLibraryAdapter):
         try:
             if stored is None:
                 candidate["schema_version"] = 2
-                candidate["source"]["original"] = {"url": raw.get("url") or None, "publisher": _body(raw.get("source"), "recipe source", 300) or None}
+                candidate["source"]["original"] = {"url": source.get("url"), "publisher": _body(raw.get("source"), "recipe source", 300) or None}
                 if rights["storage"] == "full":
                     candidate["ingredients"] = [
                         source_ingredient(text, language=candidate["language"])

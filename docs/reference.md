@@ -763,7 +763,7 @@ in command arguments, state, SQLite, logs, MCP traffic, fixtures or Git. After
 the provider-specific adapter is installed, use the interactive local helper:
 
 ```sh
-meal_concierge_home="${MEAL_CONCIERGE_HOME:-${HERMES_HOME:-$HOME/.hermes}/meal-concierge}"
+meal_concierge_home="${MEAL_CONCIERGE_HOME:-$HOME/.local/share/meal-concierge}"
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
   add --library-id family-mealie --provider mealie --base-url https://recipes.example --read-only
 python3 recipe_library_setup.py --config "$meal_concierge_home/config.json" --home "$meal_concierge_home" \
