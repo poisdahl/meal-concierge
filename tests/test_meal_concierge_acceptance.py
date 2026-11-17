@@ -649,6 +649,26 @@ class GroceryTopupTests(unittest.TestCase):
             client._change_cart({"operations": [{"productId": flow_fixture.MENY_PRODUCT, "quantity": 1}]})
         self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
 
+    def test_changed_cart_before_first_managed_batch_requests_fresh_review_without_dispatch(self):
+        store, provider, _browser, app, product = self.household("meny")
+        original = app._cart_provider_call
+        reads = []
+        def changed(tool, arguments, *, deadline):
+            self.assertEqual(tool, "get_cart")
+            reads.append(tool)
+            if len(reads) == 3:
+                provider._mutate_cart({"operations": [{"productId": product, "quantity": 1}]})
+            if len(reads) > 3:
+                raise HouseholdError("later inspection unavailable")
+            return original(tool, arguments, deadline=deadline)
+        app._cart_provider_call = changed
+        result = flow_fixture.CartPlanTests.sync(app, product, 6)
+        self.assertEqual(result["reason"], "cart_changed_before_first_batch")
+        self.assertEqual(result["status"], "needs_input")
+        self.assertFalse(result["cart_write_pending"])
+        self.assertFalse(store.read().get("pending_cart_change"))
+        self.assertEqual(len(reads), 3)
+
     def test_managed_meny_typed_stop_records_only_earlier_completed_batches(self):
         from retail_mcp import RetailPreDispatchError
         for stop_at in (1, 2):

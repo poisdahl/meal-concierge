@@ -61,6 +61,10 @@ class _ManagedCartReadUnavailable(RetailPreDispatchError):
     """The first managed batch stopped on its own read, before journal or dispatch."""
 
 
+class _FirstBatchCartChanged(RetailPreDispatchError):
+    """The observed cart changed after review, before any managed batch."""
+
+
 class PlanningOperations:
     products_prepare_budget_seconds = PRODUCT_OPERATION_TIMEOUT
 
@@ -4905,16 +4909,18 @@ class PlanningOperations:
     def _apply_meny_cart_batches(self, operations, acknowledged, *, deadline, menu_ref, plan_digest):
         operation_id = secrets.token_hex(16)
         original = dict(acknowledged)
-        for batch in self._meny_cart_batches(operations):
+        for batch_index, batch in enumerate(self._meny_cart_batches(operations)):
             try:
                 before = self._cart_provider_call("get_cart", {}, deadline=deadline)
+                before_live, _names = self._cart_lines(cart_summary(before))
             except (HouseholdError, OSError) as exc:
-                if acknowledged != original:
+                if batch_index:
                     raise MenyCartStoppedError("Prior MENY batches completed; no next batch was dispatched") from exc
                 raise _ManagedCartReadUnavailable("MENY cart read failed before the first managed batch was dispatched") from exc
-            before_live, _names = self._cart_lines(cart_summary(before))
             if before_live != acknowledged:
-                raise HouseholdError("MENY cart changed between bounded batches")
+                if batch_index:
+                    raise MenyCartStoppedError("MENY cart changed after an acknowledged batch")
+                raise _FirstBatchCartChanged("The cart changed before dispatch. Read the current cart and review its differences.")
             expected = self._quantities_after_operations(before_live, batch)
             if getattr(self.provider_client, "owns_managed_cart_journal", False):
                 # The native host installs its command-bound intent before it
@@ -4936,7 +4942,9 @@ class PlanningOperations:
                 if (previous and (previous.get("operation_id") != operation_id or not previous.get("dispatch_finished"))
                         or state.get("pending_checkout") or state.get("pending_cancellation") or state.get("order_change")
                         or self._cart_menu_ref(state.get("menu")) != menu_ref):
-                    raise HouseholdError("MENY cart ownership or menu changed before batch")
+                    if batch_index:
+                        raise MenyCartStoppedError("MENY cart ownership or menu changed after an acknowledged batch")
+                    raise RetailPreDispatchError("MENY cart ownership or menu changed before dispatch")
                 state["pending_cart_change"] = deepcopy(pending)
             try:
                 changed = self._cart_provider_call("manipulate_cart", {"operations": batch}, deadline=deadline)
@@ -5336,6 +5344,9 @@ class PlanningOperations:
                 else:
                     self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline,
                                                 plan_digest=request.get("_reviewed_product_digest"))
+            except _FirstBatchCartChanged as exc:
+                return {"synced": False, "status": "needs_input", "cart_write_pending": False,
+                        "reason": "cart_changed_before_first_batch", "next": str(exc)}
             except _ManagedCartReadUnavailable:
                 if not request.get("_reviewed_product_digest"):
                     raise
