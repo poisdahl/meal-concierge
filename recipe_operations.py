@@ -2384,11 +2384,13 @@ class RecipeOperations:
                     return response
                 reference = saved["library_recipe_ref"]
             except RecipeError:
-                failed = self.recipes.finish_library_create(
+                self.recipes.finish_library_create(
                     operation["operation_id"], "failed",
                     error_code="builtin_rejected", error="built-in recipe save was rejected",
                 )
-                return self._library_operation_response(failed)
+                # A local rejection rolls the recipe transaction back. Keep its
+                # actual diagnostic and allow an explicit repaired retry.
+                raise
             try:
                 confirmed = self.recipes.finish_library_create(
                     operation["operation_id"], "confirmed", library_recipe_ref=reference
@@ -3830,7 +3832,21 @@ class RecipeOperations:
             recipe_id = str(request.get("recipe_id") or "")
             expected = request.get("expected_revision")
             prior = self.recipes.get(recipe_id, expected)
-            value = self.recipes.prepare_input(request.get("recipe"), prior=prior)
+            if request.get("discovery_ref") is not None:
+                if request.get("recipe") is not None:
+                    raise RecipeError("update requires a recipe or an exact discovery_ref, not both")
+                snapshot = self.recipes.resolve_discovery(request["discovery_ref"])
+                identity = snapshot["source_identity"]
+                existing = self.recipes.source_entry(identity)
+                if (not str(identity).startswith(("import:v1:", "adapt:v1:"))
+                        or existing is None or existing["id"] != recipe_id):
+                    raise RecipeError("update discovery must have the exact saved source identity")
+                # Only the service's frozen source read can establish new source
+                # evidence. Caller-authored updates still use prepare_input.
+                value = snapshot["recipe"]
+                self._require_recipe_provider(value)
+            else:
+                value = self.recipes.prepare_input(request.get("recipe"), prior=prior)
             key = request.get("idempotency_key")
             return {"recipe": self.recipes.update(
                 recipe_id, expected, value, status=request.get("status"),
