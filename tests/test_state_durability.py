@@ -51,6 +51,56 @@ class AtomicStateDurabilityTests(unittest.TestCase):
                 core._atomic_json(self.path, {"generation": 2})
         self.assert_state(1)
 
+    def test_darwin_full_barriers_bracket_rename_and_directory_sync_on_the_same_file(self):
+        events, full_descriptors = [], []
+        original_sync, original_replace = os.fsync, os.replace
+        def sync(descriptor):
+            events.append("directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file")
+            original_sync(descriptor)
+        def rename(source, target):
+            events.append("replace")
+            original_replace(source, target)
+        def full_sync(descriptor, command):
+            self.assertEqual(command, 51)
+            self.assertTrue(stat.S_ISREG(os.fstat(descriptor).st_mode))
+            full_descriptors.append(descriptor)
+            events.append("full")
+            return 0
+        with mock.patch.object(core.sys, "platform", "darwin"), \
+                mock.patch.object(core.fcntl, "F_FULLFSYNC", 51, create=True), \
+                mock.patch.object(core.fcntl, "fcntl", side_effect=full_sync), \
+                mock.patch.object(os, "fsync", side_effect=sync), mock.patch.object(os, "replace", side_effect=rename):
+            core._atomic_json(self.path, {"generation": 2})
+        self.assertEqual(events, ["file", "full", "replace", "directory", "full"])
+        self.assertEqual(len(set(full_descriptors)), 1)
+        self.assert_state(2)
+
+    def test_linux_does_not_request_a_darwin_full_barrier(self):
+        with mock.patch.object(core.sys, "platform", "linux"), mock.patch.object(core.fcntl, "fcntl") as full_sync:
+            core._atomic_json(self.path, {"generation": 2})
+        full_sync.assert_not_called()
+        self.assert_state(2)
+
+    def test_darwin_full_barrier_failure_never_reports_a_successful_commit(self):
+        for failing_barrier, expected_generation in ((1, 1), (2, 2)):
+            with self.subTest(failing_barrier=failing_barrier):
+                core._atomic_json(self.path, {"generation": 1})
+                calls = 0
+                def full_sync(_descriptor, _command):
+                    nonlocal calls
+                    calls += 1
+                    if calls == failing_barrier:
+                        raise OSError("full barrier unsupported or failed")
+                    return 0
+                with mock.patch.object(core.sys, "platform", "darwin"), \
+                        mock.patch.object(core.fcntl, "F_FULLFSYNC", 51, create=True), \
+                        mock.patch.object(core.fcntl, "fcntl", side_effect=full_sync), \
+                        mock.patch.object(os, "close", wraps=os.close) as close:
+                    with self.assertRaisesRegex(OSError, "full barrier unsupported or failed"):
+                        core._atomic_json(self.path, {"generation": 2})
+                self.assertEqual(close.call_count, 1 if failing_barrier == 1 else 2)
+                self.assert_state(expected_generation)
+
     def test_directory_open_failure_preserves_old_state(self):
         original_open = os.open
 
@@ -87,6 +137,30 @@ class AtomicStateDurabilityTests(unittest.TestCase):
 
 
 class CheckoutStateDurabilityTests(unittest.TestCase):
+    def test_failed_post_rename_full_barrier_prevents_checkout_dispatch_and_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = {**CONFIG, "provider": "meny"}
+            store = core.StateStore(Path(temp), config)
+            provider = FakeMeny()
+            app = Application(store, provider, provider)
+            prepared = app.handle({"operation": "checkout", "action": "prepare"})
+            request = {"operation": "checkout", "action": "confirm", "confirmation_id": prepared["confirmation_id"]}
+            original = core._flush_drive_cache
+            def full_sync(descriptor):
+                pending = json.loads(store.path.read_text()).get("pending_checkout") or {}
+                if pending.get("status") == "clicking":
+                    raise OSError("checkout full barrier failed")
+                original(descriptor)
+            with mock.patch.object(core, "_flush_drive_cache", side_effect=full_sync):
+                with self.assertRaisesRegex(OSError, "checkout full barrier failed"):
+                    app.handle(request)
+            self.assertEqual(provider.checkout_clicks, 0)
+            restarted = Application(core.StateStore(Path(temp), config), provider, provider)
+            self.assertEqual(restarted.store.read()["pending_checkout"]["status"], "clicking")
+            with self.assertRaisesRegex(core.HouseholdError, "no fresh checkout confirmation"):
+                restarted.handle(request)
+            self.assertEqual(provider.checkout_clicks, 0)
+
     def test_directory_sync_failures_do_not_dispatch_or_replay_checkout(self):
         for failing_status, expected_clicks in (("clicking", 0), ("awaiting_user_payment", 1)):
             with self.subTest(failing_status=failing_status), tempfile.TemporaryDirectory() as temp:
