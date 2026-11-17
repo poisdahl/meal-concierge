@@ -28,7 +28,7 @@ jobs:
       - name: Install pinned test dependencies in an unseeded environment
         run: |
           python -m venv --without-pip "$RUNNER_TEMP/meal-concierge-tests"
-          python -m pip --python "$RUNNER_TEMP/meal-concierge-tests/bin/python" install -r tests/mcp-requirements.txt
+          python -m pip --python "$RUNNER_TEMP/meal-concierge-tests/bin/python" install --require-hashes --only-binary=:all: -r runtime-requirements.txt
       - name: Synthetic regression suite
         run: '"$RUNNER_TEMP/meal-concierge-tests/bin/python" -I -B -m unittest discover -s tests -p "test_*.py"'
       - name: Real MCP transport with synthetic store
@@ -48,7 +48,7 @@ jobs:
       - name: Install pinned test dependencies in an unseeded environment
         run: |
           python -m venv --without-pip "$RUNNER_TEMP/meal-concierge-tests"
-          python -m pip --python "$RUNNER_TEMP/meal-concierge-tests/bin/python" install -r tests/mcp-requirements.txt
+          python -m pip --python "$RUNNER_TEMP/meal-concierge-tests/bin/python" install --require-hashes --only-binary=:all: -r runtime-requirements.txt
       - name: Synthetic installer and browser platform boundaries
         run: |
           "$RUNNER_TEMP/meal-concierge-tests/bin/python" -I -B -m unittest discover -s tests -p 'test_installer.py'

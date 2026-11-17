@@ -156,7 +156,7 @@ class CollectionResolutionTests(unittest.TestCase):
         install.write_json(home / 'runtime.json', meta)
         directory = home / 'recipe-preparations' / expected['sha256']; directory.mkdir(parents=True)
         shutil.copyfile(archive, directory / 'archive.zip')
-        install.write_json(directory / 'receipt.json', {'format': 1, 'expected': expected,
+        install.write_json(directory / 'receipt.json', {'format': install.RECIPE_PREPARATION_VERSION, 'expected': expected,
             'release': str(release), 'state': str(self.state.resolve()), 'baseline': None})
         argv = ['install.py', 'resolve-recipe-conflict', '--home', str(home), '--prepared', expected['sha256'],
                 '--pack-recipe-id', 'one', '--expected-revision', str(self.local['revision']), '--resolution', 'keep_local']

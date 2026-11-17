@@ -269,22 +269,43 @@ Verify the same household and saved data, and compare the
 Selecting an older tag is not a supported shortcut for undoing state migrations;
 use the recovery guidance below for an interrupted update.
 
-### Technical status and retained preparation caches
+### Technical status, rollback and retention
 
-`./install.sh doctor --home /absolute/data-home` reports only manager activity,
-maintenance-marker presence, build identity, current-release binding, browser
-executable presence and socket health. It does not read logs, token files,
-household records, recipients or provider data. For externally managed hosts,
-the reported owner is `externally_managed`; inspect that exact host execution
-separately. A missing installation is reported without creating one.
+The installer verifies each downloaded wheel against the SHA-256 hashes for its
+pinned PyPI release. The installation requires a matching wheel for every
+dependency on the selected architecture. The prepared identity binds the lock,
+installed distributions, interpreter and staged source. Preparation or final
+validation fails when covered bytes change.
 
-`./install.sh retention-preview --home /absolute/data-home --older-than-days 30`
-is a dry run for recipe preparation archive caches only. It lists old archives
-bound to a superseded runtime or collection generation; current, irregular and
-unreadable preparations stay protected. Interrupted maintenance blocks the
-preview. It deletes nothing, retains receipts, and does not suggest deleting
-runtime trees, backups or operation evidence. Review the returned exact IDs for
-outstanding owner tasks before requesting any separate cleanup.
+Run `./install.sh doctor --home /absolute/data-home` for manager and marker
+status, selected and running build identity, verification of installed runtime
+files, browser executable availability and socket health. A running core can
+report whether email work is pending as a boolean. A down or older core reports
+unknown. This command has no log, recipient, message, order or provider fields.
+
+An explicitly stopped installation can use `./install.sh rollback --home
+/absolute/data-home` after a completed update with an intact pre-use receipt.
+The installer verifies the prior release, backup, configuration and post-update
+household bytes. Opening the updated household runtime durably fences rollback
+before the first application operation. A changed household, missing legacy
+evidence or possible use requires forward recovery with the original journals.
+The prior service stays stopped. After an interrupted rollback, repeat the
+same command with the original home and backup.
+
+While the owner is stopped, review cleanup with
+
+```sh
+./install.sh retention-preview --home /absolute/data-home --older-than-days 30
+./install.sh retention-apply --home /absolute/data-home --older-than-days 30 --retention-review REVIEW
+```
+
+The returned manifest identifies exact stale preparations, interrupted staging
+copies, superseded program releases and duplicate complete backups. Unique
+backup contents, including possible-effect journals, retain an exact copy.
+Current, previous, recoverable and referenced program files stay protected.
+The installer rechecks each candidate, quarantines the reviewed object under
+its original filesystem and persists cleanup progress. Retry interrupted cleanup
+with the original review ID. Changed candidates require a new preview.
 
 ### Recover an interrupted attempt
 

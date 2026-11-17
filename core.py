@@ -1114,6 +1114,8 @@ class StateStore:
         self.path = self.directory / "state.json"
         self.lock_path = self.directory / "state.lock"
         self.config = dict(config)
+        from runtime_rollback import note_runtime_open
+        note_runtime_open(self.directory)
         if not self.path.exists():
             _atomic_json(self.path, initial_state(self.config))
         configured_provider = str(self.config.get("provider") or "oda").casefold()

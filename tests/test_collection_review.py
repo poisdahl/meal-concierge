@@ -1,5 +1,7 @@
 """Exact withdrawal review and private derivative export."""
 import json
+import sqlite3
+from unittest.mock import patch
 from pathlib import Path
 import sys
 import tempfile
@@ -23,8 +25,66 @@ class CollectionReviewTests(unittest.TestCase):
         before = withdrawal_preview(path, store.path.parent, store.household, expected)
         store.set_favorite(entry["library_recipe_ref"], True, idempotency_key="star")
         after = withdrawal_preview(path, store.path.parent, store.household, expected)
+        import install
+        with self.assertRaisesRegex(RuntimeError, "withdrawals require"):
+            install.apply_recipe_pack(path, fixture.meta, expected, preparation={
+                "withdrawal_consent": before["review"], "withdrawal_review": before["review"], "baseline": None})
+        self.assertTrue(store.get(entry["id"])["is_favorite"])
         self.assertNotEqual(before["review"], after["review"])
         self.assertEqual((after["count"], after["favorites"], after["items"][0]["name"]), (1, 1, entry["name"]))
+
+    def test_interrupted_bank_upgrade_preserves_exact_prior_bank_and_retries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recipes.sqlite3"
+            store = RecipeStore(path, "synthetic")
+            store.search()
+            with sqlite3.connect(path) as db:
+                db.execute("DROP TABLE pack_deletions")
+                db.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            with patch.object(RecipeStore, "_schema", side_effect=RuntimeError("synthetic migration stop")):
+                with self.assertRaisesRegex(RuntimeError, "synthetic migration stop"):
+                    store.search()
+            backup = path.with_name("recipes-v7.backup.sqlite3")
+            original = backup.read_bytes()
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone(), ("7",))
+            store.search()
+            self.assertEqual(backup.read_bytes(), original)
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone(), ("8",))
+
+    def test_bilingual_userinfo_and_query_review_restores_each_revision(self):
+        from test_recipe_languages import bilingual
+        from recipe_languages import source_text_digest
+        from recipe_portable import restore_private_archive
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            original = RecipeStore(root / 'before/recipes.sqlite3', 'synthetic')
+            recipe = bilingual()
+            recipe["notes"] += " https://reader:synthetic-pass@example.org:443/plate?portion=2"
+            recipe["translations"]["en"]["notes"] += " https://example.org/plate?token=synthetic-token&portion=2"
+            old_binding = source_text_digest(recipe)
+            recipe["translations"]["en"]["source_text_digest"] = old_binding
+            entry = original.save(recipe)
+            original.update(entry["id"], 1, bilingual())
+            receipt = review(original)
+            self.assertEqual(receipt["affected_revisions"], 1)
+            bindings = receipt["items"][0]["translation_bindings"]["en"]
+            self.assertEqual(bindings["original"], old_binding)
+            self.assertNotEqual(bindings["redacted"], old_binding)
+            export_reviewed(original, root / 'copy.zip', receipt['review'], root / 'prior.db')
+            restored = RecipeStore(root / 'after/recipes.sqlite3', 'synthetic')
+            restore_private_archive(root / 'copy.zip', restored)
+            with sqlite3.connect(restored.path) as db:
+                rows = [json.loads(row[0]) for row in db.execute(
+                    'SELECT document FROM revisions WHERE recipe_id=? ORDER BY revision',(entry['id'],))]
+            self.assertEqual(len(rows), 2)
+            self.assertIn('https://example.org:443/plate?portion=2', rows[0]['notes'])
+            self.assertIn('https://example.org/plate?portion=2', rows[0]['translations']['en']['notes'])
+            self.assertEqual(rows[0]['translations']['en']['source_text_digest'], bindings['redacted'])
+            self.assertEqual(rows[1], bilingual())
+            for secret in ('synthetic-pass','synthetic-token'):
+                self.assertNotIn(secret, json.dumps(rows) + json.dumps(receipt) + (root/'copy.zip.audit.json').read_text())
 
     def test_reviewed_redacted_copy_preserves_history_and_its_private_original(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -45,6 +105,10 @@ class CollectionReviewTests(unittest.TestCase):
                 export_reviewed(store, root / "safe.zip", "stale", root / "before.db")
             self.assertFalse((root / "before.db").exists())
             export_reviewed(store, root / "safe.zip", receipt["review"], root / "before.db")
+            audit = json.loads((root / "safe.zip.audit.json").read_bytes())
+            self.assertEqual(audit["review"], receipt["review"])
+            self.assertEqual(audit["revisions"], receipt["items"])
+            self.assertNotIn("synthetic-secret", json.dumps(audit))
             self.assertEqual((root / "before.db").read_bytes(), before)
             self.assertEqual(store.path.read_bytes(), before)
             with open_private_archive(root / "safe.zip") as archive:

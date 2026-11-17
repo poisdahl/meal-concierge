@@ -31,7 +31,7 @@ environment with the exact Python and dependencies used by the synthetic tests:
 
 ```sh
 uv venv --python 3.12.12 /tmp/meal-concierge-tests
-uv pip sync --python /tmp/meal-concierge-tests/bin/python tests/mcp-requirements.txt
+uv pip sync --require-hashes --only-binary :all: --python /tmp/meal-concierge-tests/bin/python runtime-requirements.txt
 /tmp/meal-concierge-tests/bin/python -I -B -m unittest discover -s tests -p 'test_*.py'
 /tmp/meal-concierge-tests/bin/python -I -B tests/test_mcp_runtime.py
 ```

@@ -127,7 +127,7 @@ class PreparationTests(unittest.TestCase):
 
     def test_old_installed_runtime_fails_before_receipt_or_state_write(self):
         archive, expected = self.pack()
-        old = (CORE / 'install.py').read_text().replace('RECIPE_PREPARATION_VERSION = 1', 'RECIPE_PREPARATION_VERSION = 0')
+        old = (CORE / 'install.py').read_text().replace('RECIPE_PREPARATION_VERSION = 2', 'RECIPE_PREPARATION_VERSION = 1')
         (self.release / 'install.py').unlink()
         (self.release / 'install.py').write_text(old)
         with self.assertRaisesRegex(RuntimeError, 'update the installed Meal Concierge runtime'):

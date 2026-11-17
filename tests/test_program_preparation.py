@@ -49,6 +49,18 @@ class ProgramPreparationTests(unittest.TestCase):
         with patch.object(install, 'stage_release', return_value=self.release):
             return install.prepare_program(self.home, self.meta)
 
+    def test_cli_preparation_while_external_run_holds_lifecycle_and_service_ownership(self):
+        home = self.home.resolve()
+        meta = {**self.meta, 'home': str(home)}
+        install.write_json(self.home / 'runtime.json', meta)
+        install.write_json(self.code / 'owner.json', {'home': str(home)})
+        with install.file_lock(home / '.installer.lock'), install.data_ownership(meta), \
+             patch.object(install, 'stage_release', return_value=self.release), \
+             patch.object(sys, 'argv', ['install.py', 'prepare-program', '--home', str(home)]), \
+             patch('sys.stdout', new_callable=io.StringIO) as report:
+            install.main()
+        self.assertEqual(json.loads(report.getvalue())['status'], 'prepared')
+
     def test_prepare_while_service_owns_data_and_offline_apply_never_downloads(self):
         before = {p.name: p.read_bytes() for p in (self.home / 'state/state.json', self.home / 'state/recipes.sqlite3')}
         with install.data_ownership(self.meta):

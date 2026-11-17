@@ -737,7 +737,8 @@ favorite and edit counts, bounded details and a review ID. Supply
 be removed. The stopped installer recomputes the affected revisions and favorite
 state before applying the archive. For a local authoritative collection, use
 `inspect-recipe-pack` to obtain the review and supply the normal digest and
-removal authorization as well.
+removal authorization as well. In a managed inbox, inspect the staged ZIP and
+pass its returned withdrawal review to the import tool.
 A regular Finder `.DS_Store` directly inside `pack-metadata` is ignored and left
 in place. Unexpected directories, symlinks and other metadata still block
 maintenance with an actionable name in the error.
@@ -765,8 +766,10 @@ hashes. It shows no URL values. After reviewing the transformation, use
 python import_recipes.py --installation-home HOME --export-private NEW_ARCHIVE --redact-reviewed-urls REVIEW --backup NEW_PRIVATE_DB
 ```
 
-The reviewed derivative removes recognized credential parameters from URLs
+The reviewed derivative removes URL user information and recognized credential parameters
 while preserving other parameters, original recipe and revision identities,
 attribution and history. The supplied backup retains the original bank. The
 working bank and frozen operation records keep their original bytes. The
-ordinary full archive verifier checks the completed derivative.
+ordinary full archive verifier checks the completed derivative. A private
+`NEW_ARCHIVE.audit.json` records the archive hash, source bank hash, every
+changed revision and the before/after text bindings of reviewed translations.
