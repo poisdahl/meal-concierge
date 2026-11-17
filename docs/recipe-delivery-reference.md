@@ -244,7 +244,8 @@ native attachment presentation or visual layout on every client.
 
 A delivery-day job that missed its unchanged provider delivery date returns
 `missed delivery date` and a review reference. Confirm the original provider,
-order, recipient and date with the user. After an explicit request to send it
+order, recipient and date with the user. To preview without claiming or sending, use `review_order`
+(or low-level `review_catch_up`). After an explicit request to send it
 now, repeat the original `send_order` (or low-level `due`) with
 `delivery_requested=true`, the `catch_up_ref`, and the original scheduler
 binding when applicable. The review expires when the household date, job or

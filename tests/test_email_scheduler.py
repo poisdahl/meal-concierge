@@ -410,7 +410,8 @@ class EmailSchedulerTests(unittest.TestCase):
         self.provider.delivery = "2020-01-01"
         self.call("schedule", delivery_date=self.provider.delivery)
         invocation = self.active()
-        review = self.call("due", scheduler=invocation)
+        review = self.call("review_catch_up", scheduler=invocation)
+        self.assertEqual(review, self.call("due", scheduler=invocation))
         self.assertEqual(review["reason"], "missed delivery date")
         self.assertFalse(review["send"])
         with self.assertRaisesRegex(HouseholdError, "explicit delivery intent"):

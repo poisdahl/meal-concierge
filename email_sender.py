@@ -231,6 +231,9 @@ class EmailSender:
             return self.status()
         if action == "configure":
             return self.configure(request)
+        if action == "review_order":
+            return self.rpc("email", action="review_catch_up", provider=request.get("provider"),
+                            order_id=request.get("order_id"), scheduler=request.get("scheduler"))
         if action == "adopt_order":
             return self.rpc("email", action="bind_sender", provider=request.get("provider"), order_id=request.get("order_id"))
         if action not in {"send", "reconcile", "retry", "send_order", "reconcile_order", "retry_order"}:

@@ -669,7 +669,10 @@ class EmailOperations:
             if self.email_automation_profile:
                 result["automation_environment"] = {"HERMES_WORKSPACE_AUTOMATION_PROFILE": self.email_automation_profile}
             return self._email_payload_within_transport(result)
-        if action == "due":
+        if action in {"due", "review_catch_up"}:
+            review_only = action == "review_catch_up"
+            if review_only and (requested_provider is None or request.get("catch_up_ref") is not None):
+                raise HouseholdError("missed email review requires its original provider and order")
             order_id = safe_order_id(request.get("order_id"))
             state = self.store.read()
             matching = matching_jobs(state, order_id, {"pending", "claimed", "sending"})
@@ -764,6 +767,8 @@ class EmailOperations:
                         ref = hashlib.sha256(canonical([job, local_today, tracking]).encode()).hexdigest()
                         if catch_up is None:
                             return {"send": False, "reason": "missed delivery date", "delivery_date": delivery,
+                                    "provider": job_provider, "order_id": order_id, "menu": menu_delivery_title(menu),
+                                    "sender": mask_email(binding["sender"]) if binding else None,
                                     "occurrence_id": self._email_occurrence(job), "recipient": mask_email(recipient),
                                     "catch_up_ref": ref,
                                     "next": "Review this original order email. To send it now, explicitly request delivery with this catch_up_ref."}
@@ -789,6 +794,8 @@ class EmailOperations:
                             "cron_prompt": email_automation_prompt(job_provider, order_id, delivery, automation_key),
                             "automation_ack": email_automation_ack(job_provider, order_id, delivery, automation_key),
                         }
+                if review_only:
+                    return {"send": False, "reason": "no missed delivery-day occurrence"}
                 if request.get("catch_up_ref") is None:
                     job.pop("catch_up_day", None)
                 if request.get("catch_up_ref") is not None and job.get("trigger") == "after_purchase":
