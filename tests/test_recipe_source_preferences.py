@@ -2,6 +2,7 @@
 from copy import deepcopy
 import json
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from core import HouseholdError, StateStore, recipe_source_preference
+from core import HouseholdError, StateStore, STATE_VERSION, recipe_source_preference
 from planner import _preference_reasons
 from recipe_selection import shortlist, source_group
 from recipes import RecipeError, normalize_recipe
@@ -84,6 +85,7 @@ class SourcePreferenceTests(unittest.TestCase):
         # A household saved before the setting existed loads, and can still be updated.
         path = self.directory / "state.json"
         state = json.loads(path.read_text())
+        state["version"] = 13
         for field in ("preferred_sources", "occasional_sources"):
             del state["profile"]["recipes"][field]
         path.write_text(json.dumps(state))
@@ -104,6 +106,71 @@ class SourcePreferenceTests(unittest.TestCase):
                                    "changes": {"recipes": {"occasional_sources": [], "preferred_sources": ["web"]}}})["profile"]
         self.assertEqual(recipe_source_preference(profile["recipes"], "web"), "preferred")
         self.assertEqual(recipe_source_preference(profile["recipes"], "own"), "normal")
+
+    def test_v13_migration_backs_up_before_profile_changes_and_preserves_saved_menu(self):
+        ids = self.fill_bank()
+        plan = self.app.handle({"operation": "menu", "action": "plan", "planner_input": {
+            "week": "2026-W47", "dates": ["2026-11-16"], "portions": 2,
+            "candidates": [{"recipe_ref": {"id": ids["Own 0"], "revision": 1}}]}})["plan"]
+        self.app.handle({"operation": "menu", "action": "save", "planner_ref": plan["save_ref"]})
+        path = self.directory / "state.json"
+        legacy = json.loads(path.read_text())
+        legacy["version"] = 13
+        for field in ("preferred_sources", "occasional_sources"):
+            del legacy["profile"]["recipes"][field]
+        path.write_text(json.dumps(legacy))
+        reopened = StateStore(self.directory, self.config)
+        migrated = reopened.read()
+        backup = self.directory / "state-v13.backup.json"
+        self.assertEqual(json.loads(backup.read_text()), legacy)
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+        self.assertEqual(migrated["version"], STATE_VERSION)
+        self.assertEqual(migrated["menu"], legacy["menu"])
+        reopened.update_profile({"recipes": {"preferred_sources": ["own"]}})
+        StateStore(self.directory, self.config)
+        self.assertEqual(json.loads(backup.read_text()), legacy)
+
+    def test_migration_failure_does_not_publish_or_overwrite_its_backup(self):
+        path = self.directory / "state.json"
+        legacy = json.loads(path.read_text())
+        legacy["version"] = 13
+        legacy["profile"]["recipes"]["preferred_sources"] = ["own", "own"]
+        path.write_text(json.dumps(legacy))
+        before = path.read_bytes()
+        with self.assertRaisesRegex(HouseholdError, "recipe source preferences"):
+            StateStore(self.directory, self.config)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(json.loads((self.directory / "state-v13.backup.json").read_text()), legacy)
+        legacy["profile"]["recipes"]["preferred_sources"] = []
+        path.write_text(json.dumps(legacy))
+        import core
+        original = core._atomic_json
+        def fail_publication(target, value):
+            if target == path:
+                raise OSError("synthetic state publication failure")
+            return original(target, value)
+        before = path.read_bytes()
+        with patch("core._atomic_json", side_effect=fail_publication):
+            with self.assertRaisesRegex(OSError, "synthetic state publication failure"):
+                StateStore(self.directory, self.config)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_current_preferences_are_validated_on_load_and_future_versions_fail_closed(self):
+        path = self.directory / "state.json"
+        original = json.loads(path.read_text())
+        for invalid in (None, "own", [1], ["own", "own"], ["internal"]):
+            with self.subTest(invalid=invalid):
+                state = deepcopy(original)
+                state["profile"]["recipes"]["preferred_sources"] = invalid
+                path.write_text(json.dumps(state))
+                before = path.read_bytes()
+                with self.assertRaisesRegex(HouseholdError, "recipe source preferences"):
+                    StateStore(self.directory, self.config)
+                self.assertEqual(path.read_bytes(), before)
+        original["version"] = STATE_VERSION + 1
+        path.write_text(json.dumps(original))
+        with self.assertRaisesRegex(HouseholdError, "newer than"):
+            StateStore(self.directory, self.config)
 
     def test_invalid_preferences_are_rejected_and_nothing_is_saved(self):
         self.apply({"preferred": ["own"]})
