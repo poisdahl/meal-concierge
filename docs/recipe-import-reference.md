@@ -59,6 +59,14 @@ checked against the upstream
 and [recipe converter](https://github.com/julianpoy/recipesage/blob/v4.0.6/packages/util/server/src/general/jsonLD.ts).
 It preserves the title, original ingredient lines, ordered steps and section
 headings, literal yield wording, notes, categories, timing text and attribution.
+RecipeSage bracketed ingredient headings such as `[Sauce]` annotate following
+ingredients through each row's `notes`; they never become shopping goods.
+Empty or trailing headings remain in recipe notes. Original ingredient wording
+and quantity evidence are preserved independently of this component association.
+Native Mealie/RecipeSage imports report non-URL original-source text as an
+unsupported field instead of letting it replace safe attribution. Malformed or
+credential-bearing HTTP(S) attribution URLs still reject explicitly. Empty Mealie
+editor rows are omitted and reported; structured food/amount rows remain data.
 Image URLs remain inert candidates pending managed-asset import. Source rating,
 nutrition and unrecognized fields are explicitly reported as unsupported.
 Neither rating nor a tag is automatically interpreted as a favorite.

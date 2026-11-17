@@ -534,12 +534,19 @@ def _recipesage_record(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise RecipeImportSourceError("RecipeSage native labels/images are incompatible") from exc
     instructions = [{"@type": "HowToSection", "name": line[1:-1]} if re.fullmatch(r"\[.*\]", line)
                     else {"@type": "HowToStep", "text": line} for line in lines("instructions")]
+    try:
+        original_url = _url(raw.get("url"), "RecipeSage original URL")
+    except RecipeImportReaderError:
+        if isinstance(raw.get("url"), str) and raw["url"].strip().casefold().startswith(("http://", "https://")):
+            raise
+        original_url = None
+        ignored.append("url")
     jsonld = {
         "@type": "Recipe", "identifier": raw.get("id"), "name": raw.get("title"),
         "description": raw.get("description"), "recipeIngredient": lines("ingredients"),
         "recipeInstructions": instructions, "recipeYield": raw.get("yield"),
         "prepTime": raw.get("activeTime"), "totalTime": raw.get("totalTime"),
-        "recipeCategory": categories, "creditText": raw.get("source"), "isBasedOn": raw.get("url"),
+        "recipeCategory": categories, "creditText": raw.get("source"), "isBasedOn": original_url,
         "image": image_urls, "comment": [{"@type": "Comment", "name": "Author Notes", "text": notes}],
     }
     record = read_recipesage_export(_wire_json({"recipes": [jsonld]}))[0]
