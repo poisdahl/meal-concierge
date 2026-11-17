@@ -219,6 +219,10 @@ class EmailSender:
             result.update(acknowledged=False, next="Receipt retained. Repeat this same request to reconcile; do not create a replacement send.")
         if record["outcome"] == "unknown":
             result["next"] = record.get("next") or "Email may have been sent. Reconcile this same request; never resend blindly."
+        elif record["outcome"] == "not_sent" and result.get("acknowledged"):
+            action = "retry_order" if record["target"]["kind"] == "order" else "retry"
+            result.update(retry_allowed=True,
+                          next=f"After an explicit request to retry, use {action} with delivery_requested=true for this same original target. Do not create a replacement send.")
         return result
 
     def execute(self, request):

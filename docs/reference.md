@@ -326,6 +326,11 @@ households gain `delivery.strategy="keep_selected"`, while new installations
 use `"cheapest"`. Preserve original operation identities and latest outcome
 journals. Do not restore old journals over possible external effects.
 
+An error response during shopping can carry `outcome: "unknown"` when an
+unresolved cart, checkout, cancellation or order-change journal remains. MCP and
+CLI expose `status: "outcome_unknown"`; read status and reconcile the original
+attempt before another write. The error does not clear or retry that journal.
+
 New installations use `"confirmation_policy": "fresh"`: Hermes prepares the
 exact checkout or cancellation summary and asks once before dispatch. An owner
 who wants a standing authorization can set the private config to

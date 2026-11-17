@@ -709,6 +709,8 @@ exact dates and portions (weekday only when verified), each recipe's actual sour
 and URL when available, and its known active and total cooking times. Say when a
 time is unknown. Label adaptations and distinguish a collection from the original
 author.
+Use Markdown links only when the current channel supports them. In plain-text
+channels, show the source title followed by its plain URL.
 Distinguish active work from elapsed time
 and per-dish time from a combined session; unknown times stay unknown. Use the
 contextual menu handoff above: full recipes are one option, not a mandatory
