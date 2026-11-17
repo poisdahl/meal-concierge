@@ -2063,6 +2063,24 @@ strict complete-price requirements. `budget_ore` rejects a known minimum above
 the budget, including every known deposit; unknown totals stay unverified. It
 excludes delivery and cart fees. Checkout always reads the final provider total.
 
+A complete product review includes menu requirements and the due standing
+goods unless the request specifies `include_recurring=false`. Each included
+occurrence must match one current observed SKU, availability, quantity and price.
+Read `recurring_issues` separately from menu ingredient issues. For a saved
+menu, pass its exact `menu_ref`, `recurring_review_ref` and `occurrence_ref` to
+`recurring review_occurrence`. Select `decision=include`, `skip` or `substitute`
+and supply an exact replacement SKU, name and package count for a substitution. Prepare the
+menu again to review changed quantities, prices and digest. The choice covers
+only that menu and occurrence. An unavailable good remains in scope until the
+household explicitly chooses a substitute or skips it.
+
+`merchandise_budget_review` compares the selected merchandise subtotal with
+the cap. In estimate mode its comparison is advisory. A verified minimum above
+the cap blocks the plan. Missing deposit or price facts leave the payable budget
+unverified. A product review covers the proposed shopping list. Extra goods
+already in the retailer cart, delivery, fees and discounts enter the final
+retailer checkout review.
+
 An incomplete preparation with reviewed selected lines may return digest-bound
 `partial_apply_arguments`. Partial apply rereads every selection accumulated by
 this and earlier partial applies before syncing them, excludes recurring goods,
@@ -2083,6 +2101,39 @@ arguments instead of hiding the remaining work. Resolve the listed
 `candidate_approvals` or `price_mode` issues and prepare the entire same menu
 again with its unchanged binding; product preparation has no supported menu
 requirement-scope reduction.
+
+Review suggestions identify exact available candidates with observed covering
+packages. The household agent reviews culinary suitability and each returned
+approval. Unapproved suggestions leave the plan incomplete. Continuation work
+retains provider, query, page, menu, ingredient and household context with a
+five-minute review window. Apply performs a fresh validation cycle and binds its
+prewrite checks to current menu, product, profile and cart evidence. Oda batches
+up to eight bounded product searches and retries failing queries individually.
+For public dietary details, an entry with a strong entity tag can reuse its
+bounded parsed facts only after the same retailer product page confirms the
+same tag. A changed response is parsed again, expiry or restart discards the
+cache, and retrieval failures produce unknown evidence. Dietary assessments are
+recomputed against the current profile and cart. OAuth transport ownership is
+per household and provider. Each transport session negotiates credentials
+inside that owner lock, waits briefly for contention under the caller deadline,
+and closes at the end of the operation. Bulk reads amortize negotiation without
+sharing mutable sessions across different operations or credential refreshes.
+
+A managed Oda or Mathem write retains its original operation identity, menu
+revision, exact deltas and expected cart. When the response is uncertain,
+`cart reconcile_change` reads the original operation without dispatching it
+again. The transport can positively identify a local refusal before the cart
+tool was entered. A timeout, generic merchant error or unchanged cart leaves a
+possibly dispatched write pending. If a completed batch has visible partial
+additions with ambiguous ownership, `ownership_review.maximum_adoptable`
+shows the bounded quantities the owner may choose to assign to the menu.
+Use `cart reconcile` with the exact digest, `keep_current` and approved
+`adopt_quantities`; all other unattributed quantities retain household ownership.
+
+An unsubmitted checkout review can be discarded with `checkout discard_review`
+and its exact confirmation ID. Discarding an unsubmitted recovery review restores
+the original pending attempt and its evidence. A dispatched payment, cancellation
+or removal continues through its existing reconciliation path.
 
 Cart sync and reconcile require the current `menu_ref` (menu_id, revision, digest),
 and product approval is invalidated by changed requirements even during external

@@ -674,6 +674,14 @@ def normalize_retail_product_search(value: Any, *, observed_at: str | None = Non
     }
 
 
+class IncompleteProductBatch(HouseholdError):
+    """Individual query results failed validation within a verified batch."""
+
+    def __init__(self, message, observations):
+        super().__init__(message)
+        self.observations = observations
+
+
 def normalize_retail_product_search_batch(value: Any, queries: list[str], *, size: int,
                                           provider: str = "oda") -> dict[str, dict[str, Any]]:
     """Bind every native result to exactly one requested query; never zip by order."""
@@ -689,11 +697,20 @@ def normalize_retail_product_search_batch(value: Any, queries: list[str], *, siz
         query = batch.get("query") if isinstance(batch, Mapping) else None
         if not isinstance(query, str) or query not in queries or query in observed:
             raise HouseholdError("Product search batch query changed")
-        normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
-        if len(batch["products"]) > size:
-            raise HouseholdError("Product search batch exceeded its candidate scope")
-        normalized["scope"]["requested_size"] = size
-        observed[query] = normalized
+        observed[query] = None
+    failure = None
+    for batch in batches:
+        query = batch["query"]
+        try:
+            normalized = normalize_retail_product_search({"result": [batch]}, provider=provider)
+            if len(batch["products"]) > size:
+                raise HouseholdError("Product search batch exceeded its candidate scope")
+            normalized["scope"]["requested_size"] = size
+            observed[query] = normalized
+        except HouseholdError as exc:
+            failure = exc
+    if failure:
+        raise IncompleteProductBatch(str(failure), {k: v for k, v in observed.items() if v is not None})
     return observed
 
 

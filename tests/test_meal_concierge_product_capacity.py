@@ -573,7 +573,7 @@ class ProductCapacityTests(unittest.TestCase):
         })
         self.assertEqual(
             sum(tool == "product_search" for tool, _arguments, _kwargs in self.provider.calls),
-            3,
+            2,  # One selected-line refresh plus the final prewrite refresh.
         )
         second = self.app.handle({
             "operation": "products", **arguments, "cart_change_requested": True,

@@ -141,3 +141,14 @@ portions. Do not infer cooking from a purchase or silence. Preserve actual
 recipe-specific storage/reheating guidance and its source; unknown guidance or a
 freezer preference cannot establish safe storage life. Use feedback `experience`
 for reported time, portion fit and leftover experience, not invented ratings.
+
+## Standing goods in a shopping review
+
+Read the product review's due occurrences, quantities, prices and separate
+`recurring_issues`. Ask for a substitute or an explicit skip when an intended
+item is unavailable. Record that decision with `recurring review_occurrence`,
+the saved menu reference and the returned occurrence and review references.
+Prepare again and present the revised shopping subtotal before applying it.
+A merchandise estimate with unknown deposits cannot establish final payable
+cost. When the user requests recipe goods only, prepare with
+`include_recurring=false`.

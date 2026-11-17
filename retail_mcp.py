@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import argparse
 from contextlib import contextmanager
+from copy import deepcopy
+from threading import Lock
 from datetime import date, datetime, timedelta
 import fcntl
 import hashlib
@@ -257,7 +259,27 @@ def _json_value(value: Any) -> Any:
 class RetailMcpClient:
     def product_dietary_evidence(self, reference, *, deadline=None):
         from dietary_assessment import read_retail_product_evidence
-        return read_retail_product_evidence(reference, deadline, provider=self.provider)
+        key = (self.provider, str(reference))
+        with self._detail_cache_lock:
+            retained = self._detail_cache.get(key)
+            if retained is not None and not 0 <= time.monotonic() - retained[0] <= 300:
+                retained = None
+                self._detail_cache.pop(key, None)
+        validator = {"if_none_match": retained[1]} if retained else {}
+        result = read_retail_product_evidence(reference, deadline, provider=self.provider,
+                                              previous=retained[2] if retained else None, validator=validator)
+        if result.get("unavailable") or not validator.get("etag"):
+            with self._detail_cache_lock:
+                if self._detail_cache.get(key) is retained:
+                    self._detail_cache.pop(key, None)
+        else:
+            with self._detail_cache_lock:
+                # Limit the per-household public facts held in memory. A lost
+                # process or discarded entry only causes a fresh complete read.
+                if len(self._detail_cache) >= 256 and key not in self._detail_cache:
+                    self._detail_cache.pop(next(iter(self._detail_cache)))
+                self._detail_cache[key] = (time.monotonic(), validator["etag"], deepcopy(result))
+        return result
 
     def __init__(self, token_directory: Path | str, *, provider: str = "oda"):
         if provider not in {"oda", "mathem"}:
@@ -267,6 +289,8 @@ class RetailMcpClient:
         self.endpoint = MATHEM_ENDPOINT if provider == "mathem" else ODA_ENDPOINT
         self.server_name = "mathem-weekly" if provider == "mathem" else SERVER_NAME
         self.token_directory = Path(token_directory)
+        self._detail_cache = {}
+        self._detail_cache_lock = Lock()
 
     def probe(self) -> dict[str, Any]:
         return self._run(None, {}, 90.0)
@@ -351,15 +375,15 @@ class RetailMcpClient:
                 if response.is_redirect:
                     raise HouseholdError(f"{self.label} MCP redirect is unsupported")
 
-            async with httpx.AsyncClient(
-                auth=provider,
-                follow_redirects=False,
-                timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
-                event_hooks={"response": [reject_redirect]},
-            ) as client:
-                async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
-                    async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
-                        async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout):
+                async with httpx.AsyncClient(
+                    auth=provider,
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
+                    event_hooks={"response": [reject_redirect]},
+                ) as client:
+                    async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
+                        async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
                             initialized = await session.initialize()
                             tools: list[Any] = []
                             cursor: str | None = None

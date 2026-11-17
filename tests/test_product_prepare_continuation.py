@@ -84,6 +84,27 @@ class ProductContinuationTests(unittest.TestCase):
                                  budget_ore=50000, ingredient_decisions=[])
         self.assertEqual(continued['product_plan']['price_mode'], 'exact')
 
+    def test_bad_batch_entry_retries_only_failed_query_and_preserves_good_observations(self):
+        self.save_week()
+        self.provider = BatchedRetailer()
+        self.app = Application(self.store, self.provider, object())
+        normal = self.provider.product_search_batch
+        bad = []
+
+        def malformed(queries, **kwargs):
+            response = normal(queries, **kwargs)
+            if not bad and len(queries) > 1:
+                bad.append(queries[-1])
+                response[bad[0]]["query"] = "unrelated"
+            return response
+        self.provider.product_search_batch = malformed
+        result = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu))
+        while result.get("continue_arguments"):
+            result = self.request(**result["continue_arguments"])
+        self.assertEqual(len(bad), 1)
+        self.assertEqual([args["queries"][0] for call, args, _ in self.provider.calls if call == "product_search"], bad)
+        self.assertTrue(all(row.get("observation") for row in result["product_plan"]["requirements"]))
+
     def test_service_default_matches_mcp_estimate_mode_for_retail_planning(self):
         self.save_week()
         result = self.request(action='prepare', menu_ref=self.app._cart_menu_ref(self.menu))

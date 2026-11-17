@@ -2154,6 +2154,7 @@ class OrderOperations:
     def _checkout_dietary(self, summary, deadline=None):
         from dietary_assessment import assess, digest, rules
         from product_planner import nonfood_candidate
+        from product_observations import IncompleteProductBatch
         profile = self.store.read()['profile']
         findings = []
         if rules(profile):
@@ -2166,6 +2167,8 @@ class OrderOperations:
                     group = queries[offset:offset + 8]
                     try:
                         search_results.update(batch(group, size=20, deadline=deadline))
+                    except IncompleteProductBatch as exc:
+                        search_results.update(exc.observations)
                     except HouseholdError:
                         pass  # Fall back to exact single-query reads below.
             reader = getattr(self.provider_client, 'product_dietary_evidence', None)
@@ -4985,11 +4988,18 @@ class OrderOperations:
         except HouseholdError as exc:
             if dispatch_started:
                 exc.outcome_unknown = True
-            with self.store.locked() as state:
-                current = state.get("pending_checkout")
-                if current and current.get("confirmation_id") == confirmation_id and current.get("status") == "clicking":
-                    exc.outcome_unknown = True
-                    current["status"] = "uncertain"
+            try:
+                with self.store.locked() as state:
+                    current = state.get("pending_checkout")
+                    if current and current.get("confirmation_id") == confirmation_id and current.get("status") == "clicking":
+                        exc.outcome_unknown = True
+                        current["status"] = "uncertain"
+            except (HouseholdError, OSError):
+                if not dispatch_started:
+                    raise
+                # The local callback already established possible dispatch.
+                # A failed journal reread cannot reverse that fact.
+                raise exc
             raise
 
     def _purchase_delivery(self, state, order_id):
