@@ -67,14 +67,34 @@ def old_identity(release):
     return [value["source_sha256"], value["installed_runtime_sha256"]]
 
 
-def arm(home, meta, previous, backup, release):
+def state_fingerprint(state):
+    return sha256(json.dumps(payload_files(state), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def preimage_fingerprint(backup):
+    material = [payload_files(backup / 'state'), content_hash(backup / 'config.json'),
+                content_hash(backup / 'backup.json')]
+    return sha256(json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def arm(home, meta, previous, backup, release, operation, previous_identity):
     state = Path(meta["paths"]["state"])
     prior = Path(previous["release"])
     if not prior.is_dir() or prior.is_symlink():
         return  # No unambiguous previous release to restore.
     original = payload_files(backup / "state")
     current = payload_files(state)
-    guard = {"release": release.name, "operation": uuid.uuid4().hex, "status": "never_started"}
+    guard = {"release": release.name, "operation": operation, "status": "never_started"}
+    receipt_path = home / 'rollback.json'
+    if receipt_path.exists():
+        from install import bounded_json
+        existing = bounded_json(receipt_path, 32 * 1024 * 1024)
+        if existing.get('guard', {}).get('operation') == operation:
+            # A retry must never reset evidence of use. If a crash split
+            # receipt and guard publication, an incomplete guard stays unknown.
+            return
+    if old_identity(prior) != previous_identity:
+        raise RuntimeError('previous runtime changed during upgrade; recover forward')
     cfg = content_hash(backup / "config.json")
     if cfg != content_hash(Path(meta["paths"]["config"])):
         raise RuntimeError("configuration changed during the offline upgrade")
@@ -84,7 +104,7 @@ def arm(home, meta, previous, backup, release):
             os.fsync(f.fileno())
     receipt = {"format": 1, "status": "armed", "previous_manifest": previous,
                "release": str(release), "backup": str(backup), "guard": guard,
-               "before": original, "after": current, "config_hash": cfg, "previous_identity": old_identity(prior)}
+               "before": original, "after": current, "config_hash": cfg, "previous_identity": previous_identity}
     with file_lock(state / ".release-use.lock"):
         _atomic_json(home / "rollback.json", receipt)
         _atomic_json(state / GUARD, guard)

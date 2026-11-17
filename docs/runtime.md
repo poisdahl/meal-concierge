@@ -274,8 +274,15 @@ use the recovery guidance below for an interrupted update.
 The installer verifies each downloaded wheel against the SHA-256 hashes for its
 pinned PyPI release. The installation requires a matching wheel for every
 dependency on the selected architecture. The prepared identity binds the lock,
-installed distributions, interpreter and staged source. Preparation or final
+installed distributions, interpreter, staged source and runnable bytecode. The
+installed Python disables new bytecode writes during ordinary launches. Preparation or final
 validation fails when covered bytes change.
+
+An interrupted update resumes the same staged release and verifies the original
+backup. The migration process records the migrated household while it owns the
+data. An update interrupted under an older installer can finish forward. Missing
+pre-update evidence or later changes keep the original backup private and disable
+automatic rollback.
 
 Run `./install.sh doctor --home /absolute/data-home` for manager and marker
 status, selected and running build identity, verification of installed runtime

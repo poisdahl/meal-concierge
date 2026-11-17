@@ -84,6 +84,34 @@ class BuildIdentityTests(unittest.TestCase):
                 locked[package] = hashes
         self.assertEqual(set(locked), pinned)
 
+    def test_qualified_bytecode_and_regular_installed_imports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            release = Path(temp)
+            subprocess.run([sys.executable, '-I', '-B', '-m', 'venv', '--without-pip', release/'venv'], check=True)
+            python = release/'venv/bin/python'
+            install.configure_installed_bytecode(release)
+            (release/'runtime-requirements.txt').write_text('')
+            (release/'synthetic_module.py').write_text('answer = 7\n')
+            install.write_json(release/identity.MANIFEST, identity.create(release,release,install.PYTHON))
+            before = install.candidate_identity(release)
+            subprocess.run([python, '-I', '-c',
+                'import sys; sys.path.insert(0, sys.argv[1]); import synthetic_module; assert sys.dont_write_bytecode',
+                str(release)], check=True)
+            self.assertEqual(install.candidate_identity(release),before)
+            lib = next((release/'venv/lib').glob('python*/site-packages'))
+            for directory in (release/'__pycache__', lib/'__pycache__'):
+                directory.mkdir(exist_ok=True)
+                fixture = directory/'synthetic_module.cpython-312.pyc'
+                fixture.write_bytes(b'inert cache fixture')
+                with self.assertRaisesRegex(RuntimeError,'bytes changed'):
+                    install.candidate_identity(release)
+                install.write_json(release/identity.MANIFEST, identity.create(release,release,install.PYTHON))
+                fixture.write_bytes(b'changed inert cache')
+                with self.assertRaisesRegex(RuntimeError,'bytes changed'):
+                    install.candidate_identity(release)
+                fixture.unlink()
+                install.write_json(release/identity.MANIFEST, identity.create(release,release,install.PYTHON))
+
     def test_old_manifest_and_nested_export_remain_unidentified(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

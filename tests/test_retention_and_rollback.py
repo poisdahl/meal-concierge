@@ -54,15 +54,11 @@ class MaintenanceTransitionTests(unittest.TestCase):
         self.assertEqual((self.code / "current").resolve(), self.fixture.release.resolve())
 
     def test_rollback_preserves_prior_journals_after_partial_restore_and_retry(self):
+        previous_state = json.loads(self.fixture.state.path.read_text())
+        previous_state["version"] = 13
+        install.write_json(self.fixture.state.path, previous_state)
         prior_bytes = self.fixture.state.path.read_bytes()
-        old_migrate = install.migrate
-        def migrate(release, meta):
-            old_migrate(release, meta)
-            doc = json.loads(self.fixture.state.path.read_text())
-            doc["migration_test"] = True
-            install.write_json(self.fixture.state.path, doc)
-        with patch.object(install, "migrate", migrate):
-            meta = self.update()
+        meta = self.update()
         with patch.object(install, "write_unit", side_effect=RuntimeError("interrupted switch")):
             with self.assertRaisesRegex(RuntimeError, "interrupted switch"):
                 reversal.rollback(self.home, meta)
@@ -71,6 +67,64 @@ class MaintenanceTransitionTests(unittest.TestCase):
             StateStore(self.fixture.state.path.parent, self.fixture.state.config)
         with patch.object(install, "write_unit"):
             self.assertEqual(reversal.rollback(self.home, meta)["status"], "rolled_back")
+
+    def test_interrupted_migrated_update_keeps_the_original_preimage_and_candidate(self):
+        state = self.fixture.state.path
+        self.meta['home'] = str(self.home.resolve())
+        install.write_json(self.home/'runtime.json', self.meta)
+        install.write_json(self.code/'owner.json', {'home':str(self.home.resolve())})
+        original = json.loads(state.read_text())
+        original['version'] = 13
+        install.write_json(state, original)
+        original_bytes = state.read_bytes()
+        def interrupted(release, meta):
+            migrate(release, meta)
+            raise RuntimeError('parent interrupted after migration')
+        migrate = install.migrate
+        with patch.object(install, 'migrate', interrupted):
+            with self.assertRaisesRegex(RuntimeError, 'parent interrupted'):
+                self.update()
+        pending = install.bounded_json(self.home / 'pending-install.json')['update_operation']
+        self.assertEqual(pending['phase'], 'migrated')
+        self.assertEqual(pending['previous_manifest'], self.meta)
+        backup = Path(pending['backup'])
+        self.assertEqual((backup / 'state/state.json').read_bytes(), original_bytes)
+        self.assertNotEqual(state.read_bytes(), original_bytes)
+        with patch.object(install,'stage_release',side_effect=AssertionError('new candidate')), \
+             patch.object(install,'migrate',side_effect=AssertionError('repeated migration')), \
+             patch.object(install,'backup',side_effect=AssertionError('new backup')), patch.object(install,'write_unit'):
+            with patch.object(sys,'argv',['install.py','update','--home',str(self.home)]):
+                install.main()
+            current = install.bounded_json(self.home/'runtime.json')
+            receipt = install.bounded_json(self.home/'rollback.json')
+            self.assertEqual((receipt['guard']['operation'],receipt['backup']), (pending['id'],str(backup)))
+            self.assertEqual(reversal.rollback(self.home, current)['status'], 'rolled_back')
+        self.assertEqual(state.read_bytes(), original_bytes)
+        self.assertEqual((self.code/'current').resolve(), self.prior.resolve())
+
+    def test_completed_migration_with_later_work_can_only_recover_forward(self):
+        with patch.object(install, 'write_unit', side_effect=RuntimeError('publication stopped')):
+            with self.assertRaisesRegex(RuntimeError, 'publication stopped'):
+                install.publish(json.loads(json.dumps(self.meta)), self.home/'runtime.json', self.home, None,
+                                prepared_release=self.fixture.release)
+        state = self.fixture.state.path
+        changed = json.loads(state.read_text())
+        changed['synthetic_local_record'] = 'retain'
+        install.write_json(state, changed)
+        with patch.object(install, 'write_unit'):
+            install.publish(json.loads(json.dumps(self.meta)), self.home/'runtime.json', self.home, None)
+        self.assertEqual(json.loads(state.read_text())['synthetic_local_record'], 'retain')
+        with self.assertRaisesRegex(RuntimeError,'no pre-use rollback evidence'):
+            reversal.rollback(self.home, install.bounded_json(self.home/'runtime.json'))
+        self.assertEqual(len(list((self.home/'backups').iterdir())), 1)
+
+    def test_legacy_pending_can_finish_forward_but_cannot_arm_rollback(self):
+        install.write_json(self.home/'pending-install.json', self.meta)
+        meta = self.update()
+        self.assertEqual(meta['release'], str(self.fixture.release))
+        self.assertFalse((self.home/'rollback.json').exists())
+        with self.assertRaisesRegex(RuntimeError,'no pre-use rollback evidence'):
+            reversal.rollback(self.home, meta)
 
     def test_partial_preimage_copy_resumes_without_discarding_unrelated_bytes(self):
         source = self.home / 'before'; source.write_bytes(b'original journal')
