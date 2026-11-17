@@ -107,6 +107,23 @@ class SourcePreferenceTests(unittest.TestCase):
         self.assertEqual(recipe_source_preference(profile["recipes"], "web"), "preferred")
         self.assertEqual(recipe_source_preference(profile["recipes"], "own"), "normal")
 
+    def test_completed_setup_does_not_opt_in_to_new_web_search(self):
+        state = self.store.read()
+        del state["profile"]["recipes"]["web_search"]
+        del state["checkout_payment"]
+        self.store.path.write_text(json.dumps(state))
+        migrated = StateStore(self.directory, {**self.config, "checkout_payment": {"method": "vipps"}}).read()
+        self.assertFalse(migrated["profile"]["recipes"]["web_search"]["enabled"])
+        self.assertEqual(migrated["setup"]["status"], "needs_review")
+        self.assertEqual(migrated["checkout_payment"]["method"], "vipps")
+        # A changed or invalid fallback cannot override the persisted choice.
+        bad_config = {**self.config, "checkout_payment": {"method": "unknown"}}
+        self.assertEqual(StateStore(self.directory, bad_config).read()["checkout_payment"]["method"], "vipps")
+        self.store.path.write_text(json.dumps(state))
+        with self.assertRaisesRegex(HouseholdError, "method"):
+            StateStore(self.directory, bad_config)
+        self.assertEqual(json.loads(self.store.path.read_text()), state)
+
     def test_v13_migration_backs_up_before_profile_changes_and_preserves_saved_menu(self):
         ids = self.fill_bank()
         plan = self.app.handle({"operation": "menu", "action": "plan", "planner_input": {

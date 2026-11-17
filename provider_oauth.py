@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
@@ -106,10 +107,27 @@ class ProviderTokenStorage:
     def require_resolved(self) -> None:
         self.recover()
         if self.transaction_path.exists():
-            raise HouseholdError(f"{self.label} login is required: previous token exchange outcome is uncertain")
+            raise HouseholdError(f"{self.label} login is required: previous token exchange outcome is uncertain; run the explicit provider login with the original token directory")
 
-    def begin_exchange(self) -> None:
-        private_json(self.transaction_path, {"status": "pending"})
+    def begin_exchange(self, kind: str) -> None:
+        previous = self.read(self.transaction_path)
+        if previous is not None:
+            if previous.get("status") != "pending" or kind != "authorization_code":
+                raise HouseholdError(f"{self.label} previous token exchange needs explicit login")
+            # Explicit login may supersede an unknown exchange. Retain its
+            # nonsecret receipt before replacing the write-ahead record.
+            prior_id = previous.get("exchange_id", "legacy")
+            if prior_id != "legacy":
+                try:
+                    prior_id = str(uuid.UUID(prior_id))
+                except (TypeError, ValueError, AttributeError):
+                    raise HouseholdError(f"{self.label} invalid exchange identity") from None
+            prior_kind = previous.get("kind")
+            receipt = {"exchange_id": prior_id, "kind": prior_kind if prior_kind in
+                       ("refresh", "authorization_code") else "unknown", "outcome": "uncertain"}
+            private_json(self.directory / f"{self.server_name}.superseded-{prior_id}.json", receipt)
+        private_json(self.transaction_path, {"status": "pending", "kind": kind,
+                                             "exchange_id": str(uuid.uuid4())})
 
     def publish(self, tokens: OAuthToken, client: OAuthClientInformationFull, metadata: dict) -> None:
         token_data = tokens.model_dump(mode="json", exclude_none=True)
@@ -164,7 +182,12 @@ class ProviderTokenStorage:
         exchange = pending.get("status") if pending else "none"
         if exchange not in ("none", "pending", "ready"):
             exchange = "invalid"
-        return {"tokens_present": tokens is not None, "registration_present": client is not None,
+        kind = pending.get("kind") if pending else None
+        recovery = {"none": "none" if tokens is not None else "explicit_login",
+                    "pending": "explicit_login", "ready": "finish_local_publication",
+                    "invalid": "inspect_storage"}[exchange]
+        return {"exchange_kind": kind if kind in ("refresh", "authorization_code") else "unknown",
+                "recovery": recovery, "tokens_present": tokens is not None, "registration_present": client is not None,
                 "metadata_present": metadata is not None,
                 "expires_in": tokens.expires_in if tokens else None,
                 "exchange": exchange}
@@ -241,7 +264,7 @@ class ProviderOAuth(OAuthClientProvider):
     async def _exchange_token_authorization_code(self, code, verifier):
         request = await super()._exchange_token_authorization_code(code, verifier)
         self._metadata()  # refuse a guessed token endpoint
-        self.storage.begin_exchange()
+        self.storage.begin_exchange("authorization_code")
         return request
 
     async def _handle_token_response(self, response):
@@ -284,7 +307,7 @@ class ProviderOAuth(OAuthClientProvider):
                         raise HouseholdError(f"{self.storage.label} login is required: token expired")
                     self._metadata()
                     refresh = await self._refresh_token()
-                    self.storage.begin_exchange()
+                    self.storage.begin_exchange("refresh")
                     response = yield refresh
                     if response.status_code != 200:
                         raise HouseholdError(f"{self.storage.label} login is required: token refresh failed")
