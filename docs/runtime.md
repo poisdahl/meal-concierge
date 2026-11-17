@@ -243,6 +243,9 @@ the exact staged source/dependency identity and installation baseline. Changed
 candidate bytes or an intervening program update require fresh preparation.
 If the stopped apply is interrupted, retain its markers and follow the existing
 stopped-update recovery procedure from the same pinned checkout.
+The rehearsal checks the normal JSON/SQLite migration path, including stored
+image references. It does not copy or inspect media bytes, validate browser
+sessions, contact a retailer, or certify the household's recipe content.
 
 Inspect active shopping, payment, delivery and email work.
 Wait for it to finish and resolve uncertain results before maintenance. For a

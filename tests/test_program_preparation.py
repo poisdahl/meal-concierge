@@ -113,6 +113,28 @@ class ProgramPreparationTests(unittest.TestCase):
             install.prepare_program(self.home, self.meta)
         stage.assert_not_called()
 
+    def test_missing_household_state_cannot_qualify_as_a_new_household(self):
+        self.state.path.unlink()
+        with self.assertRaisesRegex(RuntimeError, 'compatibility preflight failed'):
+            self.prepare()
+        self.assertFalse(self.state.path.exists())
+        self.assertFalse((self.home / 'program-preparations').exists())
+        self.assertFalse((self.home / 'maintenance.json').exists())
+
+    def test_preflight_accepts_a_bank_with_managed_cover_references_without_copying_media(self):
+        from PIL import Image
+        content = io.BytesIO()
+        Image.new('RGB', (4, 4), 'green').save(content, format='PNG')
+        cover = self.bank.assets.import_bytes(content.getvalue())
+        self.bank.save({'schema_version': 2, 'name': 'Synthetic covered lentils', 'portions': 2,
+            'ingredients': ['200 g lentils'], 'steps': ['Simmer.'],
+            'source': {'kind': 'user', 'relationship': 'user_supplied'}, 'rights': {'storage': 'full'},
+            'image': {'asset_id': cover, 'credit': 'Synthetic fixture'}})
+        before = self.bank.assets.read(cover)
+        self.assertEqual(self.prepare()['status'], 'prepared')
+        self.assertEqual(self.bank.assets.read(cover), before)
+        self.assertFalse(list(self.home.glob('.program-preflight-*')))
+
     def test_doctor_uses_only_allowlisted_technical_metadata(self):
         (self.code / 'current').symlink_to(self.release.name)
         self.meta['release'] = str(self.release)
