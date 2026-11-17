@@ -551,6 +551,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                 operation == "setup" and action == "apply"
             ) or (
                 operation == "recurring" and action in {"add", "remove", "substitute"}
+            ) or (
+                operation == "shopping_list" and action == "record_stock"
             ):
                 with self.product_plan_lock:
                     result = dispatch()
@@ -562,9 +564,11 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                     request.get("planner_handoff") is not None or request.get("planner_ref") is not None
                 ):
                     with self._recipe_planner_operation():
-                        result = dispatch()
+                        with self.product_plan_lock:
+                            result = dispatch()
                 else:
-                    result = dispatch()
+                    with self.product_plan_lock:
+                        result = dispatch()
             elif operation == "recipe_pack":
                 with self._recipe_planner_operation(), self.product_plan_lock:
                     result = dispatch()
