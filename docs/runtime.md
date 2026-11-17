@@ -316,6 +316,35 @@ import has exited (including an error), restore the service through its owner
 when no update/recovery marker prevents starting it. Do not claim a partial import
 completed. See [preparation and recovery details](runtime-reference.md#versioned-recipe-package-integration).
 
+#### Resolve an explicit local recipe conflict
+
+A `locally_modified` conflict preserves the household's exact recipe. After
+reviewing that recipe and the prepared publisher version, choose one disposition
+for its reported pack recipe ID and current bank revision:
+
+```sh
+./install.sh resolve-recipe-conflict --home /absolute/data-home \
+  --prepared PREPARED_ID --pack-recipe-id PACK_RECIPE_ID \
+  --expected-revision CURRENT_REVISION --resolution keep_local
+```
+
+Use `adopt_publisher` instead to accept the exact verified publisher content.
+Run while idle and stopped through the existing owner. The command re-verifies
+the prepared archive and binds the disposition to its whole SHA-256 and the
+current recipe revision. It preserves the stable recipe ID, previous revisions,
+favorites and genuine local status choices. Adopting publisher content otherwise
+follows its ready/draft status. It does not change other recipes or household
+settings. Retry the same prepared import to finish the collection sync, then
+restart through the same owner when recovery markers permit.
+
+`keep_local` accepts that exact local revision for that exact archive, so an
+unchanged retry completes without erasing the edit. A new local revision or
+different archive conflicts again and needs a new decision. This is a scoped
+maintenance receipt, preserved by full installation backups. Private recipe-only
+exports omit the receipt; a restored local edit remains intact and asks again
+on its next sync. A disposition never overrides authoritative publisher
+withdrawals or creates permanent permission to ignore future changes.
+
 For an independently approved **local** collection archive that is not on the
 publisher channel, use the applicable reviewed import path for that pack. A
 user-selected pack follows the

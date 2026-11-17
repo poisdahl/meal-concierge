@@ -346,6 +346,34 @@ def apply_recipe_pack(archive, meta, expected, *, allow_removals=False, preparat
         raise SystemExit(2)
 
 
+def resolve_recipe_conflict(meta, prepared, recipe_id, expected_revision, disposition):
+    """Installed-runtime entry: exact prepared publisher archive, stopped owner."""
+    from recipe_portable import resolve_archive_conflict
+    home = Path(meta['home'])
+    with offline(meta):
+        archive, expected, receipt = read_preparation(home, meta, prepared)
+        current = collection_generation(meta)
+        if (current != receipt['baseline'] and not (current and current.get('action') == 'apply'
+                and current.get('pack_id') == expected['pack_id'] and current.get('sha256') == expected['sha256'])):
+            raise RuntimeError('collection changed after preparation; prepare the exact archive again')
+        # Like import, bind the attempted collection generation before mutation.
+        # A failed disposition remains a reported, conservative maintenance attempt.
+        advance_collection_generation(meta, expected['sha256'])
+        settings = json.loads(Path(meta['paths']['config']).read_text())
+        return resolve_archive_conflict(archive, meta['paths']['state'], settings['household'], expected,
+            pack_recipe_id=recipe_id, expected_revision=expected_revision, disposition=disposition)
+
+
+def recipe_conflict_command(release, meta, prepared, recipe_id, expected_revision, disposition):
+    code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import resolve_recipe_conflict; print(json.dumps(resolve_recipe_conflict(*json.loads(sys.argv[2]))))"
+    result = subprocess.run([str(release / 'venv/bin/python'), '-I', '-B', '-c', code, str(release),
+                             json.dumps([meta, prepared, recipe_id, expected_revision, disposition])],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError('recipe conflict resolution failed: ' + (result.stderr or result.stdout).strip()[-1500:])
+    return json.loads(result.stdout)
+
+
 def remove_recipe_collection(meta):
     """Installed-runtime child entry point; no release lookup or download."""
     from recipe_portable import remove_collection
@@ -885,7 +913,7 @@ def connect_store(meta, args, home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'resolve-recipe-conflict', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -902,6 +930,9 @@ def main():
     parser.add_argument('--browser-xauthority', help='absolute display authorization file, if required by the host')
     parser.add_argument('--recipe-pack', type=Path, help='recipe-pack ZIP selected for an inspect/import/removal action')
     parser.add_argument('--prepared', help='exact preparation ID for an offline import-recipes')
+    parser.add_argument('--pack-recipe-id', help='exact recipe identity from a collection conflict report')
+    parser.add_argument('--expected-revision', type=int, help='exact current bank revision for conflict resolution')
+    parser.add_argument('--resolution', choices=['keep_local', 'adopt_publisher'])
     parser.add_argument('--expected-sha256', help='exact digest pin for a local collection import/removal')
     parser.add_argument('--allow-recipe-removals', action='store_true', help='allow an authoritative local pack to remove absent recipes from its own pack_id')
     parser.add_argument('--backup', type=Path)
@@ -909,11 +940,16 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     home = args.home.expanduser().resolve()
+    if args.action == 'resolve-recipe-conflict':
+        if not args.prepared or not args.pack_recipe_id or args.expected_revision is None or args.expected_revision < 1 or args.resolution is None:
+            raise RuntimeError('resolve-recipe-conflict requires --prepared, --pack-recipe-id, --expected-revision and --resolution')
+    elif any(value is not None for value in (args.pack_recipe_id, args.expected_revision, args.resolution)):
+        raise RuntimeError('conflict disposition arguments apply only to resolve-recipe-conflict')
     if args.history_preview is not None and args.action != 'history-archive':
         raise RuntimeError('--history-preview applies only to history-archive')
     pack_actions = {'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'}
-    if args.prepared is not None and (args.action != 'import-recipes' or args.recipe_pack is not None):
-        raise RuntimeError('--prepared applies only to import-recipes and cannot be combined with --recipe-pack')
+    if args.prepared is not None and (args.action not in {'import-recipes', 'resolve-recipe-conflict'} or args.recipe_pack is not None):
+        raise RuntimeError('--prepared applies only to import-recipes or resolve-recipe-conflict and cannot be combined with --recipe-pack')
     if args.recipe_pack is not None and args.action not in pack_actions:
         raise RuntimeError('--recipe-pack applies only to recipe-pack inspect/import/removal actions')
     if args.action in {'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-pack'} and args.recipe_pack is None:
@@ -1026,6 +1062,13 @@ def main():
                     raise RuntimeError('--backup destination is required')
                 with offline(meta):
                     print(backup(meta, args.backup))
+                return
+            if args.action == 'resolve-recipe-conflict':
+                if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
+                    raise RuntimeError('complete the runtime update before resolving collection conflicts')
+                assert_stopped(meta)
+                print(json.dumps(recipe_conflict_command(Path(meta['release']), meta, args.prepared,
+                    args.pack_recipe_id, args.expected_revision, args.resolution)))
                 return
             if args.action in {'prepare-recipes', 'import-recipes', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack'}:
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():

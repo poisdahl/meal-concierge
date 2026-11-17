@@ -4825,7 +4825,7 @@ class RecipeStore:
 
     def import_pack_record(
         self, recipe: Any, *, pack_id: str, recipe_id: str, version: str,
-        status: str = "ready", entry_origin: str = "bundled",
+        status: str = "ready", entry_origin: str = "bundled", archive_sha256: str | None = None,
     ) -> dict[str, Any]:
         """Import one record from a caller-verified pack, never from ordinary RPC.
 
@@ -4836,6 +4836,9 @@ class RecipeStore:
         pack_id = _bounded_text(pack_id, "pack_id", required=True, maximum=128)
         pack_recipe_id = _bounded_text(recipe_id, "pack recipe_id", required=True, maximum=256)
         version = _bounded_text(version, "pack version", required=True, maximum=128)
+        if archive_sha256 is not None and (not isinstance(archive_sha256, str)
+                or re.fullmatch(r'[0-9a-f]{64}', archive_sha256) is None):
+            raise RecipeError("pack archive SHA-256 is invalid")
         if entry_origin not in {"bundled", "collection"}:
             raise RecipeError("pack entry_origin must be bundled or collection")
         if status not in ("ready", "draft"):
@@ -4864,21 +4867,17 @@ class RecipeStore:
                             (search_text, existing["id"]),
                         )
                     if existing["content_hash"] != existing["baseline_hash"]:
+                        decision = connection.execute("SELECT value FROM metadata WHERE key=?",
+                                                      ('pack-resolution:' + existing['id'],)).fetchone()
+                        expected_decision = self._pack_keep_decision(existing, pack_id, pack_recipe_id,
+                                                                     version, content_hash, archive_sha256)
+                        if archive_sha256 and decision and decision[0] == _canonical(expected_decision):
+                            connection.execute("UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?",
+                                               (version, existing['id']))
+                            result = self._record(connection, existing, created=False)
+                            return {"outcome": "unchanged", "resolution": "keep_local", "recipe": result}
                         return {"outcome": "conflict", "reason": "locally_modified", "recipe": result}
-                    provenance = connection.execute(
-                        "SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?",
-                        (existing["id"],)).fetchone()
-                    # Only changes after the last successful importer revision
-                    # can establish new local intent. Legacy history is ambiguous
-                    # and keeps the prior conservative treatment.
-                    since = provenance["applied_revision"] if provenance else 0
-                    history = list(connection.execute(
-                        "SELECT revision,status,document FROM revisions WHERE recipe_id=? AND revision>=? ORDER BY revision",
-                        (existing["id"], since)))
-                    local_status = bool(provenance and provenance["local_status"]) or any(
-                        old["status"] != new["status"]
-                        and (provenance is not None or old["document"] == new["document"])
-                        for old, new in zip(history, history[1:]))
+                    local_status = self._pack_status_is_local(connection, existing['id'])
                     def remember_status(revision):
                         connection.execute(
                             "INSERT OR REPLACE INTO recipe_pack_status VALUES(?,?,?)",
@@ -4928,6 +4927,93 @@ class RecipeStore:
                 return {"outcome": "created", "recipe": result}
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
+
+    @staticmethod
+    def _pack_status_is_local(connection, recipe_id):
+        provenance = connection.execute('SELECT applied_revision,local_status FROM recipe_pack_status WHERE recipe_id=?',
+                                        (recipe_id,)).fetchone()
+        since = provenance['applied_revision'] if provenance else 0
+        history = list(connection.execute('SELECT revision,status,document FROM revisions WHERE recipe_id=? AND revision>=? ORDER BY revision',
+                                          (recipe_id, since)))
+        # Legacy status-only history remains conservatively local. With known
+        # importer provenance, every later status transition is household intent.
+        return bool(provenance and provenance['local_status']) or any(
+            old['status'] != new['status'] and (provenance is not None or old['document'] == new['document'])
+            for old, new in zip(history, history[1:]))
+
+    @staticmethod
+    def _pack_keep_decision(existing, pack_id, pack_recipe_id, version, publisher_hash, archive_sha256):
+        return {'format': 1, 'disposition': 'keep_local', 'pack_id': pack_id, 'pack_recipe_id': pack_recipe_id,
+                'pack_version': version, 'archive_sha256': archive_sha256, 'publisher_hash': publisher_hash,
+                'local_hash': existing['content_hash'], 'expected_revision': existing['revision']}
+
+    def resolve_pack_record_conflict(self, recipe, *, pack_id, recipe_id, version, archive_sha256,
+                                     expected_revision, disposition, status='ready', entry_origin='bundled'):
+        """Resolve one verified pack record under the installer's offline ownership.
+
+        Keep-local is a decision for these exact local bytes/revision and this
+        exact archive, not permission to ignore later publisher or local edits.
+        It is maintenance workflow metadata, omitted from private recipe export.
+        """
+        if disposition not in {'keep_local', 'adopt_publisher'}:
+            raise RecipeError('resolution must be keep_local or adopt_publisher')
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise RecipeError('resolution requires the exact expected recipe revision')
+        if not isinstance(archive_sha256, str) or re.fullmatch(r'[0-9a-f]{64}', archive_sha256) is None:
+            raise RecipeError('resolution requires the exact verified archive SHA-256')
+        pack_id = _bounded_text(pack_id, 'pack_id', required=True, maximum=128)
+        recipe_id = _bounded_text(recipe_id, 'pack recipe_id', required=True, maximum=256)
+        version = _bounded_text(version, 'pack version', required=True, maximum=128)
+        if entry_origin not in {'bundled', 'collection'} or status not in {'ready', 'draft'}:
+            raise RecipeError('resolution pack origin/status is invalid')
+        recipe = normalize_recipe(recipe)
+        if recipe_source_provider(recipe) is not None:
+            raise RecipeError('store-bound recipes cannot resolve a pack conflict')
+        publisher_hash = _hash(recipe)
+        try:
+            with self._connection() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                existing = connection.execute('''SELECT r.*,m.baseline_hash,m.entry_origin
+                    FROM recipes r JOIN recipe_entry_metadata m ON m.recipe_id=r.id
+                    WHERE m.pack_id=? AND m.pack_recipe_id=?''', (pack_id, recipe_id)).fetchone()
+                if existing is None or existing['entry_origin'] != entry_origin:
+                    raise RecipeError('the selected recipe does not belong to this exact pack')
+                if existing['revision'] != expected_revision:
+                    raise RecipeError('recipe changed after review; inspect its new revision before resolving')
+                if existing['content_hash'] == existing['baseline_hash']:
+                    raise RecipeError('selected pack recipe has no local content conflict')
+                key = 'pack-resolution:' + existing['id']
+                if disposition == 'keep_local':
+                    decision = self._pack_keep_decision(existing, pack_id, recipe_id, version,
+                                                        publisher_hash, archive_sha256)
+                    connection.execute('INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)', (key, _canonical(decision)))
+                else:
+                    validate_recipe_image(recipe, self.assets, prior=_stored_recipe_document(existing['document']))
+                    duplicate = self._source_duplicate(connection, recipe)
+                    if duplicate is not None and duplicate['id'] != existing['id']:
+                        raise RecipeError('publisher source identity belongs to another recipe')
+                    local_status = self._pack_status_is_local(connection, existing['id'])
+                    next_status = (existing['status'] if local_status or existing['status'] == 'archived'
+                                   else 'active' if status == 'ready' else 'draft')
+                    revision, updated_at = existing['revision'] + 1, _now()
+                    connection.execute('''UPDATE recipes SET revision=?,status=?,name=?,search_text=?,source_key=?,
+                        content_fingerprint=?,content_hash=?,document=?,updated_at=? WHERE id=?''',
+                        (revision, next_status, recipe['name'], self._search_text(recipe), source_key(recipe), content_fingerprint(recipe),
+                         publisher_hash, _canonical(recipe), updated_at, existing['id']))
+                    connection.execute('INSERT INTO revisions VALUES(?,?,?,?,?)',
+                                       (existing['id'], revision, next_status, _canonical(recipe), updated_at))
+                    connection.execute('UPDATE recipe_entry_metadata SET baseline_hash=? WHERE recipe_id=?',
+                                       (publisher_hash, existing['id']))
+                    connection.execute('INSERT OR REPLACE INTO recipe_pack_status VALUES(?,?,?)', (existing['id'], revision, int(local_status)))
+                    connection.execute('DELETE FROM metadata WHERE key=?', (key,))
+                connection.execute('UPDATE recipe_entry_metadata SET pack_version=? WHERE recipe_id=?',
+                                   (version, existing['id']))
+                current = connection.execute('SELECT revision,status FROM recipes WHERE id=?', (existing['id'],)).fetchone()
+                return {'resolved': True, 'disposition': disposition, 'pack_id': pack_id,
+                        'pack_recipe_id': recipe_id, 'bank_recipe_id': existing['id'],
+                        'revision': current['revision'], 'status': current['status'], 'archive_sha256': archive_sha256}
+        except sqlite3.Error as exc:
+            raise RecipeError('recipe conflict resolution could not be committed') from exc
 
     def get(self, recipe_id: Any, revision: Any = None, *, _transaction=None) -> dict[str, Any]:
         recipe_id = _bounded_text(recipe_id, "recipe_id", required=True, maximum=80)
@@ -5145,6 +5231,7 @@ class RecipeStore:
             (_now(), recipe_id),
         )
         connection.execute("DELETE FROM revisions WHERE recipe_id=?", (recipe_id,))
+        connection.execute("DELETE FROM metadata WHERE key=?", ('pack-resolution:' + recipe_id,))
         # recipe_favorites and recipe_entry_metadata cascade only for this exact id.
         connection.execute("DELETE FROM recipes WHERE id=?", (recipe_id,))
 

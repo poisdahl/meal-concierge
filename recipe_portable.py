@@ -1435,6 +1435,33 @@ def remove_collection(state_directory: Path | str, household: str,
     }
 
 
+def resolve_archive_conflict(path, state_directory, household, expected_descriptor, *,
+                             pack_recipe_id, expected_revision, disposition):
+    """Resolve one exact record from a verified archive under offline ownership."""
+    from recipes import RecipeStore
+    from recipe_assets import RecipeAssets
+    with _verified_archive(path, expected_descriptor) as archive:
+        local = archive.manifest['kind'] == LOCAL_PACK_KIND
+        _preflight(archive, trust='local' if local else 'official')
+        selected = None
+        for record in archive.records():
+            if record['recipe_id'] == pack_recipe_id:
+                if selected is not None:
+                    raise RecipeError('selected pack recipe identity is duplicated')
+                selected = record
+        if selected is None:
+            raise RecipeError('selected recipe is absent from the exact archive')
+        state = Path(state_directory)
+        store = RecipeStore(state / 'recipes.sqlite3', household)
+        if image := selected['recipe'].get('image'):
+            RecipeAssets(state / 'recipe-assets').install_managed(image['asset_id'], archive.read_asset(image['asset_id']))
+        return store.resolve_pack_record_conflict(selected['recipe'], pack_id=archive.manifest['pack_id'],
+            recipe_id=pack_recipe_id, version=archive.manifest['pack_version'],
+            status=selected['status'], entry_origin='collection' if local else 'bundled',
+            archive_sha256=expected_descriptor['sha256'], expected_revision=expected_revision,
+            disposition=disposition)
+
+
 def apply_archive(
     path: Path | str,
     state_directory: Path | str,
@@ -1510,7 +1537,8 @@ def apply_archive(
                         assets.install_managed(image["asset_id"], archive.read_asset(image["asset_id"]))
                     outcome = store.import_pack_record(record["recipe"], pack_id=archive.manifest["pack_id"],
                         recipe_id=current, version=archive.manifest["pack_version"],
-                        status=record["status"], entry_origin=entry_origin)
+                        status=record["status"], entry_origin=entry_origin,
+                        archive_sha256=expected_descriptor['sha256'])
                     category = {"created": "created", "updated": "updated", "unchanged": "unchanged", "conflict": "conflicts"}[outcome["outcome"]]
                     report[category] += 1
                     report["processed"] += 1
@@ -1518,6 +1546,8 @@ def apply_archive(
                               "bank_recipe_ref": outcome["recipe"]["library_recipe_ref"]}
                     if outcome.get("reason"):
                         result["reason"] = outcome["reason"]
+                    if outcome.get('resolution'):
+                        result['resolution'] = outcome['resolution']
                     results.append(result)
                     current = None
                     _report_bytes(directory, "status.json", canonical_bytes(report))
