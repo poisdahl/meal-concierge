@@ -37,6 +37,32 @@ class RecipeSaveTests(unittest.TestCase):
     def call(self, **request):
         return self.app.handle({"operation": "recipes", **request})
 
+    def test_file_import_preserves_deleted_intent_and_continues(self):
+        store = self.app.recipes
+        soup, rice = recipe("Soup", "soup"), recipe("Rice", "rice")
+        self.assertEqual(store.import_records([soup])["created"], 1)
+        with store._connection() as con:
+            saved = con.execute("SELECT id,revision FROM recipes").fetchone()
+        store.delete(saved["id"], saved["revision"])
+        result = store.import_records([soup, rice])
+        self.assertEqual([r["record"] for r in result["conflicts"]], [1])
+        self.assertEqual(result["created"], 1)
+        self.assertEqual(store.import_records([soup], import_intent="restore-reviewed")["created"], 1)
+        self.assertEqual(store.import_records([soup], import_intent="restore-reviewed")["created"], 0)
+
+    def test_labels_reject_controls_and_errors_name_only_the_field(self):
+        from recipes import normalize_recipe, RecipeError
+        value = recipe("Søt suppe", "soup")
+        value["notes"] = "Line one.\nLine two."
+        self.assertEqual(normalize_recipe(value)["notes"], value["notes"])
+        for name in ("Soup\nsecond", "Soup\u202eabc"):
+            with self.assertRaisesRegex(RecipeError, "single-line"):
+                self.call(action="save", recipe={**value, "name": name}, idempotency_key="control-test")
+        value["rights"]["license_url"] = "https://user:synthetic@example.test"
+        with self.assertRaisesRegex(RecipeError, "rights.license_url") as error:
+            normalize_recipe(value)
+        self.assertNotIn("synthetic", str(error.exception))
+
     def test_an_adaptation_with_a_cover_is_saved_beside_its_original(self):
         original = self.call(action="save", recipe=recipe("Gulrotsuppe", "soup"), idempotency_key="original")["recipe"]
         adapted = self.call(action="adapt", recipe_ref={"id": original["id"], "revision": original["revision"]},

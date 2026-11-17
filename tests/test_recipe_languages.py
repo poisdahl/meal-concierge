@@ -59,6 +59,19 @@ class RecipeLanguageTests(unittest.TestCase):
         self.assertTrue(presentation['fallback'])
         self.assertEqual(presentation['resolved_language'], 'nb-NO')
 
+    def test_foreign_identity_and_unbound_legacy_translation_fall_back(self):
+        recipe = bilingual()
+        recipe['translations']['en']['ingredients'][0]['item'] = '1 kg pork'
+        result = recipe_presentation(recipe, 'en')
+        self.assertEqual(result['ingredients'][0]['item'], 'gulrot')
+        self.assertTrue(result['ingredients'][0]['identity_fallback'])
+        recipe['translations']['en']['source_text_digest'] = source_text_digest(recipe, legacy=True)
+        self.assertEqual(recipe_presentation(recipe, 'en')['resolved_language'], 'nb-NO')
+        recipe = bilingual()
+        recipe['source']['external_id'] = 'another-source'
+        with self.assertRaisesRegex(RecipeError, 'stale'):
+            normalize_recipe(recipe)
+
     def test_fallback_retains_unstructured_source_quantity(self):
         from recipe_languages import display_recipe
         from service_common import menu_email_html

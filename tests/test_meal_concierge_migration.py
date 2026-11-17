@@ -524,6 +524,22 @@ class NativeRetirementTests(unittest.TestCase):
                 self.assertNotIn(original['authenticated_user']['id'], json.dumps(result))
         self.assertTrue(all(method == 'GET' or method == 'POST' and path == '/compat/v2/recipes/getRecipes' for method, path, _ in self.calls))
 
+    def test_legacy_undispatched_plan_uses_verified_reread_time(self):
+        self.configure('mealie')
+        plan = self.prepare()
+        with self.app.recipes._connection() as connection:
+            frozen = json.loads(connection.execute(
+                "SELECT frozen FROM migration_items WHERE plan_id=?", (plan['plan_id'],)).fetchone()[0])
+            del frozen['source_fetched_at']
+            connection.execute("UPDATE migration_items SET frozen=? WHERE plan_id=?",
+                               (json.dumps(frozen), plan['plan_id']))
+        result = self.execute(plan)
+        self.assertEqual(result['status'], 'complete', result)
+        saved = self.app.recipes.get(result['items'][0]['destination_ref']['recipe_id'])
+        progress = migration.Migration(self.app).load(plan['plan_id'])['items'][0]['progress']
+        self.assertTrue(progress['source_fetched_at'].startswith('20'))
+        self.assertEqual(saved['external_snapshot']['fetched_at'], progress['source_fetched_at'])
+
     def test_native_binding_version_and_favorite_drift_block_copy(self):
         for change in ('binding', 'version', 'favorite'):
             with self.subTest(change=change):

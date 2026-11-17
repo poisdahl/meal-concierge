@@ -117,6 +117,7 @@ def main() -> None:
     private_mode.add_argument("--export-private", type=Path, help="write a new private recipe/history archive from a stopped installation")
     private_mode.add_argument("--restore-private", type=Path, help="restore exact private recipe history into a stopped installation without overwriting conflicts")
     parser.add_argument("--installation-home", type=Path, help="explicit installation home containing runtime.json; required for private export/restore")
+    parser.add_argument("--import-intent", help="stable key for a new intentional file import; reuse it for retries")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--status", choices=("active", "draft"))
     parser.add_argument("--backup", type=Path, help="write a verified SQLite backup before a committed import")
@@ -124,7 +125,7 @@ def main() -> None:
     if args.export_private is not None or args.restore_private is not None:
         operation = "export" if args.export_private is not None else "restore"
         if (args.installation_home is None or args.path is not None or args.image is not None
-                or args.import_root is not None or args.backup is not None or args.dry_run or args.status is not None):
+                or args.import_root is not None or args.import_intent is not None or args.backup is not None or args.dry_run or args.status is not None):
             parser.error("private export/restore requires --installation-home and cannot be combined with import/image/backup/dry-run/status options")
         try:
             result = _export_private(args) if operation == "export" else _restore_private(args)
@@ -141,7 +142,7 @@ def main() -> None:
     if args.installation_home is not None or args.state_directory is None:
         parser.error("normal imports require --state-directory; --installation-home is only used with private export/restore")
     if args.image is not None:
-        if args.path is not None or args.import_root is None or args.backup is not None:
+        if args.path is not None or args.import_root is None or args.backup is not None or args.import_intent is not None:
             parser.error("--image requires --import-root and cannot be combined with a recipe path or --backup")
     elif args.path is None or args.import_root is not None:
         parser.error("supply a recipe path, or --image with --import-root")
@@ -164,7 +165,7 @@ def main() -> None:
             if args.dry_run:
                 raise RecipeError("--backup is not used with --dry-run")
             backup = str(store.backup(args.backup))
-        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status or "active", provider=state.get("provider"))
+        result = store.import_records(_json_records(args.path), dry_run=args.dry_run, default_status=args.status or "active", provider=state.get("provider"), import_intent=args.import_intent)
     except (OSError, RecipeError, RecipeAssetError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps({**result, "backup": backup}, ensure_ascii=False, sort_keys=True))

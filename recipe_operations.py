@@ -20,6 +20,7 @@ import unicodedata
 from recipe_import_readers import read_transcript, RecipeImportReaderError
 from recipe_import_sources import fetch_public_webpage, read_native_recipe, fetch_native_cover, RecipeImportSourceError
 from recipe_assets import RecipeAssetError, sanitize_image
+from urllib.parse import urlsplit
 from urllib.error import HTTPError
 from core import HouseholdError
 from recipes import RecipeError, normalize_recipe, normalize_source_url, scale_recipe, validate_week, prepare_recipe_input, adapt_recipe_input, adapt_recipe_changes, convert_recipe_changes, recipe_digest, accept_recipe_estimates
@@ -75,14 +76,17 @@ class RecipeOperations:
                 url = normalize_source_url(request.get("url"), version=2)
                 if not url:
                     raise RecipeError("link-only import requires a URL")
-                recipe = normalize_recipe({"schema_version": 2, "name": "Recipe link",
+                # Derive a display label from the supplied origin only. Paths
+                # and queries can carry private values and are poor titles.
+                name = f"Recipe link ({urlsplit(url).hostname})"
+                recipe = normalize_recipe({"schema_version": 2, "name": name,
                     "source": {"kind": "web", "relationship": "user_supplied", "url": url},
                     "rights": {"storage": "link_only", "storage_decision": decision}})
                 snapshot = self.recipes.persist_discovery(recipe, source_identity=self._import_identity("public", "web:link", url))
                 return {**snapshot, "personal_entry_created": False, "persisted": True, "fetched": False,
                         "readiness": {"scaling_ready": False, "missing_decisions": ["full_recipe_storage_not_allowed"]},
                         "shopping_requirements": [], "suggested_status": "draft",
-                        "import_report": {"image_status": "omitted", "content_status": "link_only"}}
+                        "import_report": {"image_status": "omitted", "content_status": "link_only", "name_basis": "supplied_url_host"}}
             if kind == "transcript":
                 if any(request.get(key) is not None for key in ("url", "library_recipe_ref", "interpretation")):
                     raise RecipeError("transcript import cannot include another source")

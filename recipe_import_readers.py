@@ -800,7 +800,24 @@ def read_transcript(value: Any) -> dict[str, Any]:
     def has_dependency(text):
         return any(pattern.search(text) for pattern in dependency_patterns)
     for item in ingredient_excerpts:
-        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item"))
+        quote, evidence_input = excerpt(item, "ingredient", extra=("estimated_amount", "item", "choice", "whole_count"))
+        original_quote = quote
+        if "choice" in item:
+            # Only a single shared explicit measure and two complete named
+            # alternatives establish the amount for either selected ingredient.
+            parts = re.fullmatch(r"(\d+(?:[.,/]\d+)?\s+[^\W\d_]+)\s+([^\W\d_]+)\s+(?:or|eller)\s+([^\W\d_]+)",
+                                 quote, re.IGNORECASE)
+            if (not parts or item["choice"] not in parts.groups()[1:]
+                    or "estimated_amount" in item or "item" in item or "whole_count" in item):
+                raise RecipeImportReaderError("choose one complete source alternative with the same stated measure")
+            quote = f"{parts[1]} {item['choice']}"
+        if "whole_count" in item:
+            pieces = re.fullmatch(r"([1-9]\d{0,2})\s+(egg|eggs|løk|onion|onions|gulrot|gulrøtter|carrot|carrots)",
+                                  quote, re.IGNORECASE)
+            if (not pieces or item["whole_count"] is not True or "estimated_amount" in item
+                    or "item" in item or "choice" in item):
+                raise RecipeImportReaderError("whole_count requires an explicit count of a recognized whole ingredient")
+            quote = f"{pieces[1]} stk {pieces[2]}"
         if (re.search(r"\b(?:or|eller)\b", quote, re.IGNORECASE)
                 or re.search(r"(?<=[^\W\d_])\s*[/|]\s*(?=[^\W\d_])", quote, re.UNICODE)):
             raise RecipeImportReaderError("ingredient alternatives require one source-supported choice")
@@ -826,6 +843,12 @@ def read_transcript(value: Any) -> dict[str, Any]:
             if without_leading_amount != quote.strip():
                 estimated_item = without_leading_amount
         ingredient = source_ingredient(quote, item=estimated_item, language=language, attached_metric_units=True)
+        if quote != original_quote:
+            if ingredient["quantity"] is None or ingredient["unit"] is None:
+                raise RecipeImportReaderError("selected ingredient needs a source-supported measure")
+            ingredient["original_text"] = ingredient["raw"] = original_quote
+            if "choice" in item:
+                ingredient["notes"] = f"Selected from source alternatives: {item['choice']}"
         for evidence in ingredient["evidence"].values():
             evidence["input"] = evidence_input
         if "estimated_amount" in item:
@@ -843,8 +866,16 @@ def read_transcript(value: Any) -> dict[str, Any]:
         ingredients.append(ingredient)
     step_excerpts = selected("steps", 100)
     steps = [excerpt(item, "step", maximum=MAX_TEXT)[0] for item in step_excerpts]
-    if any(has_dependency(step) for step in steps):
-        raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+    reserved_marinade = False
+    for step in steps:
+        checked = step
+        if reserved_marinade:
+            checked = re.sub(r"\b(?:the leftover marinade|rest(?:en|ene) av marinaden)\b",
+                             "marinade", checked, flags=re.IGNORECASE)
+        if has_dependency(checked):
+            raise RecipeImportReaderError("cross-meal recipe dependencies require an explicit standalone adaptation")
+        if re.search(r"\b(?:reserve|set aside|sett av|hold av)\s+(?:(?:some|the|half|litt|halve|av)\s+){0,4}marinad(?:e|en)\b", step, re.IGNORECASE):
+            reserved_marinade = True
     note_excerpts = selected("notes", 100, optional=True)
     notes = "\n\n".join(excerpt(item, "note", maximum=MAX_TEXT)[0] for item in note_excerpts)
     notes = _text(notes, "combined transcript notes", MAX_TEXT) or None

@@ -94,6 +94,10 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode()).hexdigest()
 
 
+class _ReplayConflict(RecipeError):
+    """A prior idempotency receipt conflicts with this save request."""
+
+
 def _normalized_text(value: Any) -> str:
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value or ""))).strip().casefold()
 
@@ -111,6 +115,16 @@ def _bounded_text(value: Any, field: str, *, required: bool = False, maximum: in
     if len(result) > maximum:
         raise RecipeError(f"{field} is too long")
     return result or None
+
+
+def _single_line(value: Any, field: str, **options) -> str | None:
+    if isinstance(value, str) and any(
+        unicodedata.category(ch) in {"Cc", "Zl", "Zp"}
+        or unicodedata.bidirectional(ch) in {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+        for ch in value
+    ):
+        raise RecipeError(f"{field} must be single-line text without directional controls")
+    return _bounded_text(value, field, **options)
 
 
 def _favorite_revision(value: Any, field: str) -> int | str | None:
@@ -178,49 +192,49 @@ def validate_week(value: Any) -> str:
     return str(value)
 
 
-def normalize_source_url(value: Any, *, version: int = 2) -> str | None:
-    return _normalize_recipe_url(value, version=version)
+def normalize_source_url(value: Any, *, version: int = 2, field: str = "source.url") -> str | None:
+    return _normalize_recipe_url(value, version=version, field=field)
 
 
-def _normalize_recipe_url(value: Any, *, version: int = 2, attribution: bool = False) -> str | None:
+def _normalize_recipe_url(value: Any, *, version: int = 2, attribution: bool = False, field: str = "source.url") -> str | None:
     if value is None or value == "":
         return None
-    text = _bounded_text(value, "source.url", maximum=2_048)
+    text = _single_line(value, field, maximum=2_048)
     if text is None:
         return None
     if any(character == "\\" or character.isspace() or ord(character) < 32 or ord(character) == 127 for character in text):
-        raise RecipeError("source.url contains forbidden characters")
+        raise RecipeError(f"{field} contains forbidden characters")
     try:
         parsed = urlsplit(text or "")
     except ValueError as exc:
-        raise RecipeError("source.url is invalid") from exc
+        raise RecipeError(f"{field} is invalid") from exc
     scheme = parsed.scheme.casefold()
     if scheme not in ({"http", "https"} if attribution else {"https"}) or not parsed.hostname or parsed.username or parsed.password:
         protocols = "HTTP or HTTPS" if attribution else "HTTPS"
-        raise RecipeError(f"source.url must be a credential-free {protocols} URL")
+        raise RecipeError(f"{field} must be a credential-free {protocols} URL")
     raw_host = parsed.hostname.casefold().rstrip(".")
     if "%" in raw_host:
-        raise RecipeError("source.url hostname must not contain percent escapes")
+        raise RecipeError(f"{field} hostname must not contain percent escapes")
     try:
         host = ipaddress.ip_address(raw_host).compressed
     except ValueError:
         try:
             host = raw_host.encode("idna").decode("ascii").casefold().rstrip(".")
         except UnicodeError as exc:
-            raise RecipeError("source.url hostname is invalid") from exc
+            raise RecipeError(f"{field} hostname is invalid") from exc
         if not host or any(
             re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
             for label in host.split(".")
         ):
-            raise RecipeError("source.url hostname is invalid")
+            raise RecipeError(f"{field} hostname is invalid")
     try:
         port = parsed.port
     except ValueError as exc:
-        raise RecipeError("source.url is invalid") from exc
+        raise RecipeError(f"{field} is invalid") from exc
     if version == 1 and port not in {None, 443}:
-        raise RecipeError("source.url must use the standard HTTPS port")
+        raise RecipeError(f"{field} must use the standard HTTPS port")
     if port == 0:
-        raise RecipeError("source.url port is invalid")
+        raise RecipeError(f"{field} port is invalid")
     path = re.sub(r"/{2,}", "/", parsed.path or "/")
     rendered_host = f"[{host}]" if ":" in host else host
     if port is not None and port != (80 if scheme == "http" else 443):
@@ -236,10 +250,10 @@ def _normalize_recipe_url(value: Any, *, version: int = 2, attribution: bool = F
     return urlunsplit((scheme, rendered_host, path, query, ""))
 
 
-def normalize_attribution_url(value: Any) -> str | None:
+def normalize_attribution_url(value: Any, *, field: str = "source.original.url") -> str | None:
     # Attribution is a link, never a fetch instruction. Keep an upstream HTTP
     # source honest rather than changing its scheme or losing its credit.
-    return _normalize_recipe_url(value, attribution=True)
+    return _normalize_recipe_url(value, attribution=True, field=field)
 
 
 def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str, Any]:
@@ -255,12 +269,12 @@ def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str,
     if relationship not in VALID_RELATIONSHIPS:
         raise RecipeError("source.relationship is invalid")
     result = {
-        "kind": _bounded_text(value.get("kind") or "unknown", "source.kind", required=True, maximum=40),
+        "kind": _single_line(value.get("kind") or "unknown", "source.kind", required=True, maximum=40),
         "publisher": _bounded_text(value.get("publisher"), "source.publisher", maximum=200),
-        "title": _bounded_text(value.get("title"), "source.title", maximum=300),
+        "title": _single_line(value.get("title"), "source.title", maximum=300),
         "author": _bounded_text(value.get("author"), "source.author", maximum=200),
         "url": normalize_source_url(value.get("url"), version=version),
-        "external_id": _bounded_text(value.get("external_id"), "source.external_id", maximum=300),
+        "external_id": _single_line(value.get("external_id"), "source.external_id", maximum=300),
         "relationship": relationship,
     }
     if version >= 2 and value.get("original") is not None:
@@ -530,7 +544,7 @@ def _rights(value: Any, *, version: int = 2) -> dict[str, Any]:
     result = {
         "storage": storage,
         "license": _bounded_text(value.get("license"), "rights.license", maximum=200),
-        "license_url": normalize_source_url(value.get("license_url"), version=version),
+        "license_url": normalize_source_url(value.get("license_url"), version=version, field="rights.license_url"),
         "credit": _bounded_text(value.get("credit"), "rights.credit", maximum=500),
     }
     if version >= 2 and value.get("storage_decision") is not None:
@@ -568,7 +582,7 @@ def _external_snapshot(value: Any, source: Mapping[str, Any], *, version: int = 
         "source_revision_id": _bounded_text(
             value.get("source_revision_id"), "external_snapshot.source_revision_id", maximum=200,
         ),
-        "permanent_url": normalize_source_url(value.get("permanent_url"), version=version),
+        "permanent_url": normalize_source_url(value.get("permanent_url"), version=version, field="external_snapshot.permanent_url"),
         "changes": _bounded_text(value.get("changes"), "external_snapshot.changes", required=required, maximum=1_000),
     }
 
@@ -588,7 +602,7 @@ def _store_product_hint(value: Any, field: str) -> dict[str, Any] | None:
         raise RecipeError(f"{field} has unsupported fields")
     provider = value.get("provider")
     product_ref = value.get("product_ref")
-    name = _bounded_text(value.get("name"), f"{field}.name", required=True, maximum=300)
+    name = _single_line(value.get("name"), f"{field}.name", required=True, maximum=300)
     url = value.get("url")
     relationship = value.get("relationship")
     parsed = urlsplit(url) if isinstance(url, str) else None
@@ -621,9 +635,9 @@ def _ingredient_v1(
         raise RecipeError(f"ingredients[{index}] must be text or an object")
     raw = _bounded_text(value.get("raw"), f"ingredients[{index}].raw", maximum=500)
     supplied_amount = _bounded_text(value.get("amount"), f"ingredients[{index}].amount", maximum=100)
-    item = _bounded_text(value.get("item") or value.get("name"), f"ingredients[{index}].item", required=True, maximum=300)
+    item = _single_line(value.get("item") or value.get("name"), f"ingredients[{index}].item", required=True, maximum=300)
     quantity = value.get("quantity")
-    unit = _bounded_text(value.get("unit"), f"ingredients[{index}].unit", maximum=40)
+    unit = _single_line(value.get("unit"), f"ingredients[{index}].unit", maximum=40)
     scalable = value.get("scalable", quantity is not None)
     if not isinstance(scalable, bool):
         raise RecipeError(f"ingredients[{index}].scalable must be true or false")
@@ -738,11 +752,11 @@ def _ingredient(
         value = {"raw": value, "item": value, "original_text": value, "scalable": False}
     if not isinstance(value, Mapping):
         raise RecipeError(f"{field} must be text or an object")
-    item = _bounded_text(value.get("item") or value.get("name"), f"{field}.item", required=True, maximum=300)
+    item = _single_line(value.get("item") or value.get("name"), f"{field}.item", required=True, maximum=300)
     raw = _bounded_text(value.get("raw"), f"{field}.raw", maximum=500)
     original = _bounded_text(value.get("original_text", raw), f"{field}.original_text", maximum=500)
     quantity = _quantity(value.get("quantity"), f"{field}.quantity")
-    unit = _bounded_text(value.get("unit"), f"{field}.unit", maximum=40)
+    unit = _single_line(value.get("unit"), f"{field}.unit", maximum=40)
     unit = normalized_unit(unit) or None
     if unit is not None and len(unicodedata.normalize("NFC", unit)) > 40:
         # Case folding can lengthen text; the stored form must pass the same
@@ -783,7 +797,7 @@ def _yield(value: Any, *, basis: str) -> dict[str, Any] | None:
     result = {
         "original_text": original,
         "quantity": _quantity(value.get("quantity"), "yield.quantity"),
-        "unit": _bounded_text(value.get("unit"), "yield.unit", maximum=80),
+        "unit": _single_line(value.get("unit"), "yield.unit", maximum=80),
         "evidence": _amount_evidence(value.get("evidence"), "yield.evidence", original=original, basis=basis),
     }
     if "scalable" in value:
@@ -803,7 +817,7 @@ def _image(value: Any) -> dict[str, Any] | None:
         raise RecipeError("image contains unsupported fields; use one managed asset reference")
     if re.fullmatch(r"sha256:[a-f0-9]{64}", str(value.get("asset_id") or "")) is None:
         raise RecipeError("image.asset_id must be a managed sha256 identifier")
-    return {key: _normalize_recipe_url(value.get(key), attribution=True) if key.endswith("_url") else
+    return {key: _normalize_recipe_url(value.get(key), attribution=True, field=f"image.{key}") if key.endswith("_url") else
             _bounded_text(value.get(key), f"image.{key}", required=key == "asset_id", maximum=500)
             for key in sorted(fields)}
 
@@ -916,15 +930,15 @@ def normalize_recipe(
     cleaned = {key: child for key, child in value.items() if key not in SERVER_FIELDS and key != "recipe_ref"}
     source = _source(cleaned.get("source"), version=version)
     rights = _rights(cleaned.get("rights"), version=version)
-    name = _bounded_text(cleaned.get("name"), "name", required=True, maximum=300)
+    name = _single_line(cleaned.get("name"), "name", required=True, maximum=300)
     tags = cleaned.get("tags", [])
     if not isinstance(tags, list) or len(tags) > 50:
         raise RecipeError("tags must be a list with at most 50 values")
-    normalized_tags = [_bounded_text(item, f"tags[{index}]", required=True, maximum=80) for index, item in enumerate(tags)]
+    normalized_tags = [_single_line(item, f"tags[{index}]", required=True, maximum=80) for index, item in enumerate(tags)]
     result: dict[str, Any] = {
         "schema_version": version,
         "name": name,
-        "language": _bounded_text(cleaned.get("language") or "nb-NO", "language", required=True, maximum=20),
+        "language": _single_line(cleaned.get("language") or "nb-NO", "language", required=True, maximum=20),
         "tags": normalized_tags,
         "source": source,
         "rights": rights,
@@ -2379,7 +2393,7 @@ class RecipeStore:
         if row is None:
             return None
         if row["operation"] != operation or row["request_hash"] != request_hash:
-            raise RecipeError("idempotency key was already used with different content")
+            raise _ReplayConflict("idempotency key was already used with different content")
         try:
             decoded = json.loads(row["response_json"])
         except (json.JSONDecodeError, TypeError, RecursionError) as exc:
@@ -2394,7 +2408,7 @@ class RecipeStore:
         if isinstance(result_recipe_id, str) and connection.execute(
             "SELECT 1 FROM recipes WHERE id=?", (result_recipe_id,)
         ).fetchone() is None:
-            raise RecipeError("idempotency key belongs to a permanently deleted recipe")
+            raise _ReplayConflict("idempotency key belongs to a permanently deleted recipe")
         result["idempotent"] = True
         result["created"] = False
         if isinstance(result_recipe_id, str):
@@ -5726,9 +5740,11 @@ class RecipeStore:
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
 
-    def import_records(self, records: Iterable[Any], *, dry_run: bool = False, default_status: str = "active", provider: str | None = None) -> dict[str, Any]:
+    def import_records(self, records: Iterable[Any], *, dry_run: bool = False, default_status: str = "active", provider: str | None = None, import_intent: str | None = None) -> dict[str, Any]:
         if default_status not in {"active", "draft"}:
             raise RecipeError("default import status is invalid")
+        import_intent = self._idempotency_key(import_intent)
+        conflicts = []
         created = skipped = warnings = 0
         try:
             if dry_run:
@@ -5764,8 +5780,18 @@ class RecipeStore:
                     required = recipe_source_provider(recipe)
                     if required is not None and provider != required:
                         raise RecipeError(f"recipe requires {required.upper()} as the selected grocery provider for import")
-                    key = key or f"import:{_hash(recipe)}"
-                    result = self._save(connection, recipe, status, key, "import")
+                    implicit = key is None
+                    if implicit:
+                        key = f"import:{_hash(recipe)}" if import_intent is None else f"import-intent:{_hash([import_intent, recipe])}"
+                    try:
+                        result = self._save(connection, recipe, status, key, "import")
+                    except _ReplayConflict:
+                        if not implicit:
+                            raise
+                        conflicts.append({"record": index, "status": "prior_import_conflict",
+                                          "next": "Review this record and use a new explicit import intent to import it again."})
+                        skipped += 1
+                        continue
                     if result.get("created"):
                         created += 1
                     else:
@@ -5783,7 +5809,7 @@ class RecipeStore:
                 connection.close()
         except sqlite3.Error as exc:
             raise RecipeError("recipe bank is unavailable") from exc
-        return {"dry_run": dry_run, "created": created, "skipped": skipped, "duplicate_warnings": warnings}
+        return {"dry_run": dry_run, "created": created, "skipped": skipped, "duplicate_warnings": warnings, **({"conflicts": conflicts} if conflicts else {})}
 
     def backup(self, destination: Path | str) -> Path:
         destination = Path(destination)
