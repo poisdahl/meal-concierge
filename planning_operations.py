@@ -946,6 +946,7 @@ class PlanningOperations:
         historical = {s["slot_id"] for s in current["slots"] if mp.past(s, today) or mp.slot_outcome(snapshot, current, s) == "cooked"}
         locks = set(snapshot["menu_planning"]["locks"].get(mp.lock_key(current), []))
         created = {}
+        storage_reviews = {}
         changed = set()
         added = []
 
@@ -1059,6 +1060,21 @@ class PlanningOperations:
             action = edit.get("action")
             if not isinstance(action, str):
                 raise HouseholdError("edit action must be add, replace, remove or move")
+            if action == "review_storage":
+                if (len(edits) != 1 or set(edit) != {"action", "source_slot_id", "spec_digest", "suitability", "storage"}
+                        or not isinstance(edit["source_slot_id"], str)):
+                    raise HouseholdError("review one exact batch using source_slot_id, spec_digest, suitability and storage")
+                source_id = edit["source_slot_id"]
+                prior = next((b for b in bp.sources(current) if b["source_slot_id"] == source_id), None)
+                if prior is None or prior["spec_digest"] != edit["spec_digest"]:
+                    raise HouseholdError("batch preparation changed; read its current storage review again")
+                component = [s for s in slots if source_id in {s["slot_id"], s.get("source_slot_id")}]
+                if any(s["slot_id"] in historical or s["slot_id"] in locks or mp.past(s, today)
+                       or mp.slot_outcome(snapshot, current, s) is not None for s in component):
+                    raise HouseholdError("recorded or locked batch guidance cannot be changed")
+                storage_reviews[source_id] = (deepcopy(edit["suitability"]),
+                                               bp.reviewed_storage(current, edit["suitability"], edit["storage"]))
+                continue
             if action == "add":
                 if "reference" in edit:
                     if set(edit).difference({"action", "day", "date", "meal_type", "portions", "reference", "leafy_green", "dietary_facets", "served_with"}):
@@ -1147,7 +1163,15 @@ class PlanningOperations:
                 old_source = mp.slot_by_id(current, source["slot_id"])
                 old_dependents = sorted((s for s in current["slots"] if s.get("source_slot_id") == source["slot_id"]), key=mp.slot_order)
                 if source == old_source and dependents == old_dependents:
-                    successors.append(deepcopy(old_batch))
+                    retained = deepcopy(old_batch)
+                    if source["slot_id"] in storage_reviews:
+                        suitability, storage = storage_reviews[source["slot_id"]]
+                        if any(not mp.within_storage(source, s, storage) for s in dependents):
+                            raise HouseholdError("reviewed storage does not cover every linked serving")
+                        retained.update(suitability=suitability, storage=storage)
+                        retained.pop("storage_review", None)
+                        retained["spec_digest"] = mp.digest({k: v for k, v in retained.items() if k != "spec_digest"})
+                    successors.append(retained)
                     continue
                 old_component = [old_source] + [s for s in current["slots"]
                                                 if s.get("source_slot_id") == source["slot_id"]]
@@ -1187,6 +1211,18 @@ class PlanningOperations:
                      "storage": {"basis": "unknown"},
                      "leftovers": [{"replaces_slot_id": s["slot_id"], **mp.day_fields(mp.slot_day(s)), "meal_type": s["meal_type"],
                                     "portions": bp.rational(bp.fraction(s["portions"])), "slot_id": s["slot_id"]} for s in dependents]}
+            # Renumbering equivalent linked servings leaves the preparation,
+            # its size, timing, recipe and all storage assumptions intact.
+            def serving_facts(rows):
+                return sorted((mp.slot_day(s), s["meal_type"], bp.fraction(s["portions"])) for s in rows)
+            if (old_batch and source == old_source and total == bp.fraction(old_batch["prepared_portions"])
+                    and serving_facts(dependents) == serving_facts(old_dependents)):
+                batch.update(suitability=deepcopy(old_batch["suitability"]), storage=deepcopy(prior_storage))
+                if old_batch.get("storage_review"):
+                    batch["storage_review"] = deepcopy(old_batch["storage_review"])
+            else:
+                batch["storage_review"] = {"reason": "new_or_changed_preparation_quantity_or_serving_schedule",
+                                           "next": "Review this batch's current portions, dates and storage; submit edit_slots with review_storage, its source_slot_id and spec_digest."}
             batch["spec_digest"] = mp.digest(batch)
             successors.append(batch)
         successor["batches"] = successors
@@ -1624,7 +1660,7 @@ class PlanningOperations:
             or re.fullmatch(r"[a-f0-9]{64}", value[field]) is None
             for field in ("input_digest", "selection_digest")
         ):
-            raise PlannerError("planner_ref version or digests are invalid")
+            raise PlannerError("planner_ref version or digests changed; regenerate the unsaved proposal")
         if not isinstance(value.get("request"), Mapping) or not isinstance(
             value["request"].get("candidates"), list
         ) or not value["request"]["candidates"]:

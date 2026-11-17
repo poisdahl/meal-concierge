@@ -98,6 +98,14 @@ def source_group(recipe: Mapping[str, Any], *, entry_origin: str | None = None,
     return kind if kind in {"themealdb", "wikibooks", "web"} else "own"
 
 
+def source_tie_order(candidate, profile):
+    from core import recipe_source_preference
+    group = source_group(candidate["recipe"], entry_origin=candidate.get("entry_origin"), pack=candidate.get("pack"))
+    level = recipe_source_preference(profile.get("recipes") or {}, group)
+    return ({"preferred": 0, "normal": 1, "occasional": 2}[level],
+            "recipe_ref" not in candidate["reference"], candidate["reference_key"])
+
+
 def compact_candidate(recipe: Mapping[str, Any], reference: Mapping[str, Any]) -> dict[str, Any]:
     """Project a loaded version without passing a partial document as a recipe."""
     fields = ("name", "portions", "times", "tags", "categories", "source", "source_provider", "schema_version",
@@ -119,6 +127,12 @@ def merge_family_usage(group: list[Mapping[str, Any]]) -> dict[str, Any]:
     usages = [item.get("usage") or {} for item in group]
     merged = deepcopy(usages[0])
     merged["eligible"] = all(usage.get("eligible") is True for usage in usages)
+    if any("history_coverage" in usage for usage in usages):
+        severity = {"complete": 0, "partial": 1, "history_work_limit": 2}
+        merged["history_coverage"] = max((usage.get("history_coverage", "complete") for usage in usages),
+                                         key=severity.__getitem__)
+        merged["unresolved_history_count"] = max(usage.get("unresolved_history_count", 0) for usage in usages)
+        merged["disjoint_history_count"] = min(usage.get("disjoint_history_count", 0) for usage in usages)
     for field in ("last_planned_week", "last_ordered_week", "last_cooked_week", "next_eligible_week"):
         merged[field] = max((usage[field] for usage in usages if usage.get(field)), default=None)
     blockers = {canonical(blocker): blocker for usage in usages for blocker in usage.get("blocked_by", [])}
@@ -145,6 +159,28 @@ def _local_history_reference(reference: Mapping[str, Any]) -> dict[str, Any] | N
     return None
 
 
+def _native_original_provider(recipe):
+    """Only an explicitly original retailer record with no outside attribution."""
+    source = recipe.get("source") or {}
+    if not isinstance(source, Mapping) or not isinstance(source.get("original") or {}, Mapping):
+        return None
+    kind = source.get("kind")
+    if (not isinstance(kind, str) or kind not in {"oda", "meny", "mathem"} or recipe.get("source_provider") != kind
+            or str(source.get("publisher") or "").casefold() != kind or source.get("relationship") != "original"
+            or any((source.get("original") or {}).values())):
+        return None
+    return kind
+
+
+def _native_alias_provider(identity):
+    if identity.startswith("source-url:"):
+        hostname = urlsplit(identity.removeprefix("source-url:")).hostname
+        return {"oda.com": "oda", "meny.no": "meny", "mathem.se": "mathem"}.get(hostname)
+    if identity.startswith("source:"):
+        return identity.split(":", 2)[1]
+    return None
+
+
 def history_source_index(state: Mapping[str, Any], resolve_exact: Callable) -> dict[str, Any]:
     """Index retained source evidence without catalog searches or latest reads."""
     from planner import canonical, digest
@@ -154,6 +190,7 @@ def history_source_index(state: Mapping[str, Any], resolve_exact: Callable) -> d
     retained_refs: dict[str, set[str]] = {}
     covered_records: dict[str, set[str]] = {}
     unresolved: dict[tuple[str, str], str] = {}
+    original_providers = {}
     documents = reads = 0
     limited = False
 
@@ -179,6 +216,8 @@ def history_source_index(state: Mapping[str, Any], resolve_exact: Callable) -> d
             return None
         if not identities:
             unresolved[(key, context)] = "source_identity_unknown"
+            if provider := _native_original_provider(recipe):
+                original_providers[(key, context)] = provider
             return None
         bind(key, identities)
         return identities
@@ -247,7 +286,8 @@ def history_source_index(state: Mapping[str, Any], resolve_exact: Callable) -> d
                 unresolved[(key, "usage:" + menu_id)] = "historical_source_not_retained"
     return {"aliases": {key: sorted(values) for key, values in aliases.items()},
             "key_aliases": {key: sorted(values) for key, values in key_aliases.items()},
-            "unresolved": [{"recipe_key": key, "context": context, "reason": reason}
+            "unresolved": [{"recipe_key": key, "context": context, "reason": reason,
+                            **({"original_provider": provider} if (provider := original_providers.get((key, context))) else {})}
                            for (key, context), reason in sorted(unresolved.items())],
             "status": "history_work_limit" if limited else "partial" if unresolved else "complete",
             "work": {"documents": documents, "exact_reads": reads,
@@ -269,8 +309,18 @@ def family_history_usage(candidate: Mapping[str, Any], index: Mapping[str, Any],
             pending.update(set(index["key_aliases"].get(key, [])) - seen)
     usage = merge_family_usage([{"usage": usage_for_key(key)} for key in sorted(keys)])
     usage["family_recipe_keys"] = sorted(keys)
-    usage["history_coverage"] = index["status"]
-    usage["unresolved_history_count"] = len(index["unresolved"])
+    provider = _native_original_provider(candidate["recipe"])
+    # A known alias to a third-party source prevents narrowing. Missing
+    # references, user originals and key-only history remain unknown for all.
+    disjoint = 0
+    if provider and seen and all(_native_alias_provider(alias) == provider for alias in seen):
+        disjoint = sum(row.get("original_provider") not in {None, provider} and row["recipe_key"] not in keys
+                       for row in index["unresolved"])
+    unresolved = len(index["unresolved"]) - disjoint
+    usage["history_coverage"] = ("history_work_limit" if index["status"] == "history_work_limit"
+                                 else "partial" if unresolved else "complete")
+    usage["unresolved_history_count"] = unresolved
+    usage["disjoint_history_count"] = disjoint
     return usage
 
 
@@ -311,7 +361,7 @@ def shortlist(candidates: list[Mapping[str, Any]], request: Mapping[str, Any], p
         # Evaluate readiness before preferring a saved version. Never overwrite it.
         ordered = sorted(group, key=lambda item: (
             0 if item["hard_constraints"]["status"] == "pass" else 1 if candidate_needs_input(item) else 2,
-            "recipe_ref" not in item["reference"],
+            *source_tie_order(item, profile)[:2],
             not item.get("locally_modified", False),
             not item.get("is_favorite", False), item["reference_key"],
         ))
@@ -322,9 +372,8 @@ def shortlist(candidates: list[Mapping[str, Any]], request: Mapping[str, Any], p
     def score(item):
         return sum(reason["weight"] for index, day in enumerate(dates)
                    for reason in _slot_reasons(item, day, index, len(dates), profile))
-    # On equal scores a saved recipe goes before a store or web discovery. The
-    # reference key alone put every "discovery_ref" ahead of every "recipe_ref".
-    representatives.sort(key=lambda item: (-score(item), "recipe_ref" not in item["reference"], item["reference_key"]))
+    # The shortlist and final ranked search share the same policy for ties.
+    representatives.sort(key=lambda item: (-score(item), source_tie_order(item, profile)))
     capacity = shortlist_capacity(len(dates))
     return {"candidates": representatives[:capacity], "suitable_count": len(representatives),
             "unknown": unknown, "rejected": rejected, "capacity": capacity,

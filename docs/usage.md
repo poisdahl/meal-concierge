@@ -293,3 +293,5 @@ their store binding and use the existing schema-2 format.
 An explicit request to empty the cart uses its freshly observed digest. The menu
 is retained, earlier product completion is invalidated, and an uncertain removal
 is reconciled before another write. An empty cart is not a cancelled order.
+
+Ask “Which recipe sources are on?” to see saved recipes, collections, the selected retailer and recipe websites with their current priority. “Prefer my family collection and use store recipes occasionally” changes selection priority while both sources stay enabled. The planner rotates through active recipes as planning dates and saved history change, and keeps dietary and availability checks in force.

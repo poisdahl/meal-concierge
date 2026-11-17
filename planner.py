@@ -20,7 +20,7 @@ from recipes import RecipeError, scale_recipe
 from recipe_quantities import UNITS, normalized_unit, read_quantity
 
 
-PLANNER_VERSION = "weekly-menu-v6"
+PLANNER_VERSION = "weekly-menu-v7"
 MAX_CANDIDATES = 12
 MAX_DAYS = 7
 MAX_ALTERNATIVES = 3
@@ -840,7 +840,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
             for selected_slot in fact_slots:
                 if not isinstance(selected_slot, Mapping):
                     continue
-                if planner_selection.get("planner_version") == PLANNER_VERSION:
+                if planner_selection.get("planner_version") in {"weekly-menu-v6", PLANNER_VERSION}:
                     new_assessment_slots.add((mp.slot_day(selected_slot), selected_slot.get("recipe_key")))
                 facets = selected_slot.get("dietary_facets")
                 if not (isinstance(facets, Mapping) and isinstance(facets.get("values"), list)
@@ -1501,6 +1501,8 @@ def plan_week(
         if agent_mode else
         ((candidate, index, day) for candidate in eligible for index, day in enumerate(source_dates))
     )
+    from recipe_selection import source_tie_order
+    source_ties = {item["reference_key"]: source_tie_order(item, profile) for item in eligible}
     slot_scores = {
         (candidate["reference_key"], index): sum(
             reason["weight"] for reason in _slot_reasons(
@@ -1540,7 +1542,7 @@ def plan_week(
         for index in range(count):
             by_candidate_set: dict[
                 tuple[tuple[str, ...], tuple[Any, ...]],
-                list[tuple[int, tuple[str, ...], tuple[Mapping[str, Any], ...]]],
+                list[tuple[int, tuple[tuple[int, bool, str], ...], tuple[Mapping[str, Any], ...]]],
             ] = {}
             for prefix in frontier:
                 for candidate in eligible:
@@ -1565,11 +1567,11 @@ def plan_week(
                     )
                     ranked_prefix = (
                         -score,
-                        tuple(item["reference_key"] for item in selected),
+                        tuple(source_ties[item["reference_key"]] for item in selected),
                         selected,
                     )
                     state_key = (
-                        tuple(sorted(ranked_prefix[1])),
+                        tuple(sorted(item["reference_key"] for item in selected)),
                         batch_prefix_signature(selected),
                     )
                     retained = by_candidate_set.setdefault(state_key, [])
@@ -1624,12 +1626,13 @@ def plan_week(
                 for index, item in enumerate(selected)
             ),
             "tie_break": tie_break,
+            "source_tie": tuple(source_ties[key] for key in tie_break),
         })
         # Exact references are unique within every permutation, so tie_break is
         # itself unique. The selection digest can be computed only for the
         # retained winners without changing the deterministic ordering.
         if not agent_mode:
-            ranked.sort(key=lambda item: (-item["total_score"], item["tie_break"]))
+            ranked.sort(key=lambda item: (-item["total_score"], item["source_tie"]))
             del ranked[checked["alternatives"]:]
     if not ranked:
         if strict_unknowns:

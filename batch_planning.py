@@ -37,25 +37,7 @@ def rational(value):
     return {'numerator':value.numerator,'denominator':value.denominator}
 
 
-def normalize(state, menu, value, today):
-    expected={'source_slot_id','source_snapshot_digest','prepared_portions','consumed_at_source','suitability','storage','leftovers'}
-    if not isinstance(value,dict) or set(value) != expected:
-        raise HouseholdError('batch specification needs exact source, portions, suitability, storage and dependent slots')
-    reserved = {b['source_slot_id'] for b in sources(menu)} | {s['slot_id'] for s in menu['slots'] if s.get('kind') == 'leftover'}
-    if value['source_slot_id'] in reserved or (isinstance(value['leftovers'], list) and any(x.get('slot_id') in reserved for x in value['leftovers'] if isinstance(x, dict))):
-        raise HouseholdError('batch component intersects an existing source or leftover')
-    source=mp.slot_by_id(menu,value['source_slot_id'])
-    if source['meal_type'] not in RECIPE_CATEGORIES:
-        raise HouseholdError('batch source meal type is invalid')
-    if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
-        raise HouseholdError('batch source must be one exact fresh recipe snapshot')
-    if mp.past(source, today) or mp.slot_outcome(state,menu,source) is not None:
-        raise HouseholdError('batch source must be an unrecorded current/future meal')
-    recipe=mp.recipe_for_slot(menu, source)
-    prepared=fraction(value['prepared_portions']); consumed=fraction(value['consumed_at_source'])
-    if consumed != fraction(str(recipe['portions'])) or prepared <= consumed:
-        raise HouseholdError('source consumption must match its exact meal portions, with explicit extra preparation')
-    suitability=value['suitability']; storage=value['storage']
+def reviewed_storage(menu, suitability, storage):
     if (not isinstance(suitability,dict) or not isinstance(suitability.get('source'),str)
             or suitability.get('source') not in {'current_user','agent'}
             or suitability != {'source':suitability['source'],'value':'suitable'}):
@@ -79,6 +61,29 @@ def normalize(state, menu, value, today):
         mp.checked_day(use_by)
         if mp.relative(menu):
             raise HouseholdError('absolute use-by dates require a dated menu')
+    return storage
+
+
+def normalize(state, menu, value, today):
+    expected={'source_slot_id','source_snapshot_digest','prepared_portions','consumed_at_source','suitability','storage','leftovers'}
+    if not isinstance(value,dict) or set(value) != expected:
+        raise HouseholdError('batch specification needs exact source, portions, suitability, storage and dependent slots')
+    reserved = {b['source_slot_id'] for b in sources(menu)} | {s['slot_id'] for s in menu['slots'] if s.get('kind') == 'leftover'}
+    if value['source_slot_id'] in reserved or (isinstance(value['leftovers'], list) and any(x.get('slot_id') in reserved for x in value['leftovers'] if isinstance(x, dict))):
+        raise HouseholdError('batch component intersects an existing source or leftover')
+    source=mp.slot_by_id(menu,value['source_slot_id'])
+    if source['meal_type'] not in RECIPE_CATEGORIES:
+        raise HouseholdError('batch source meal type is invalid')
+    if value['source_snapshot_digest'] != source['snapshot_digest'] or source.get('kind') == 'leftover':
+        raise HouseholdError('batch source must be one exact fresh recipe snapshot')
+    if mp.past(source, today) or mp.slot_outcome(state,menu,source) is not None:
+        raise HouseholdError('batch source must be an unrecorded current/future meal')
+    recipe=mp.recipe_for_slot(menu, source)
+    prepared=fraction(value['prepared_portions']); consumed=fraction(value['consumed_at_source'])
+    if consumed != fraction(str(recipe['portions'])) or prepared <= consumed:
+        raise HouseholdError('source consumption must match its exact meal portions, with explicit extra preparation')
+    suitability=value['suitability']; storage=value['storage']
+    storage = reviewed_storage(menu, suitability, storage)
     raw=value['leftovers']
     if not isinstance(raw,list) or not 1 <= len(raw) <= 6:
         raise HouseholdError('batch needs one to six exact dependent slots')

@@ -234,3 +234,5 @@ behind nutritional choices. Narrow cream/sour-cream preferences and `never_buy`
 rules do not imply a milk allergy or a ban on all dairy;
 only explicit user intent changes stored rules. Numeric goals with missing
 evidence stay visibly unverified rather than being silently certified.
+
+A linked-serving edit preserves storage guidance for an unchanged preparation, batch size and equivalent portions and dates. When those facts change, read the batch storage_review and review the new preparation. Submit one menu edit_slots edit with action=review_storage, its source_slot_id and spec_digest, and the replacement suitability and storage from the batch contract. The review must cover each linked serving. Recorded and locked batches keep their existing guidance.
