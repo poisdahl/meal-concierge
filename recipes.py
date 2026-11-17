@@ -420,7 +420,7 @@ _ATTACHED_METRIC_UNIT = re.compile(r"^(\s*\d+(?:[.,]\d+)?)(kg|mg|g|ml|cl|dl|l)(?
 # range mark and a number ("+ 2 ss", "og 1 ts", "til 300 g", "- 300g"), or a
 # number with its own unit ("1kg 200g mel"). "2% melk" is neither.
 _SECOND_AMOUNT = re.compile(
-    r"(?:(?:\+|&|[-–—]|(?:pluss?|samt|och|og|and|til|to)\b)\s*(?:\d|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])"
+    r"(?:(?:\+|&|[/|–—-]|(?:pluss?|samt|och|og|and|til|to|or|eller)\b)\s*(?:\d|[¼½¾⅐⅑⅒⅓⅔⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞])"
     r"|\d+(?:[.,]\d+)?\s*(?:kg|mg|g|ml|cl|dl|l|ss|ts|stk)\b)", re.IGNORECASE)
 
 
