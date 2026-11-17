@@ -590,6 +590,52 @@ class GroceryTopupTests(unittest.TestCase):
             client._change_cart({"operations": [{"productId": flow_fixture.MENY_PRODUCT, "quantity": 1}]})
         self.assertNotIsInstance(caught.exception, MenyCartStoppedError)
 
+    def test_managed_meny_typed_stop_records_only_earlier_completed_batches(self):
+        from retail_mcp import RetailPreDispatchError
+        for stop_at in (1, 2):
+            with self.subTest(stop_at=stop_at):
+                store, provider, _browser, app, product = self.household("meny")
+                original = app._cart_provider_call
+                attempts = []
+                def stop(tool, arguments, *, deadline):
+                    if tool == "manipulate_cart":
+                        attempts.append(deepcopy(store.read()["pending_cart_change"]))
+                        if len(attempts) == stop_at:
+                            raise RetailPreDispatchError("deadline before dispatch")
+                    return original(tool, arguments, deadline=deadline)
+                app._cart_provider_call = stop
+                if stop_at == 1:
+                    with self.assertRaises(RetailPreDispatchError):
+                        flow_fixture.CartPlanTests.sync(app, product, 6)
+                else:
+                    stopped = flow_fixture.CartPlanTests.sync(app, product, 6)
+                    self.assertFalse(stopped["synced"])
+                    self.assertEqual(store.read()["cart_plan"]["added_quantities"], {product: 2})
+                self.assertFalse(store.read().get("pending_cart_change"))
+                receipt = store.read()["cart_change_receipts"][attempts[-1]["operation_id"]]
+                self.assertEqual(receipt["status"], "not_dispatched" if stop_at == 1 else "read_back")
+                self.assertEqual(len(attempts), stop_at)
+                self.assertEqual(self.quantities(app, provider)[product], 1 + 2 * (stop_at - 1))
+
+    def test_raw_meny_zero_click_proof_needs_no_post_stop_read(self):
+        from meny import MenyCartStoppedError
+        store, provider, _browser, app, product = self.household("meny")
+        original = provider.call
+        stopped = False
+        def stop(tool, args, **kwargs):
+            nonlocal stopped
+            if tool == "manipulate_cart":
+                stopped = True
+                raise MenyCartStoppedError("no enabled item control")
+            if tool == "get_cart" and stopped:
+                self.fail("a zero-click terminal disposition does not need a second cart read")
+            return original(tool, args, **kwargs)
+        provider.call = stop
+        result = self.ensure(app, product, 3)
+        self.assertEqual(result["status"], "not_dispatched")
+        self.assertFalse(store.read().get("pending_cart_change"))
+        self.assertIn(result["operation_id"], store.read()["cart_change_receipts"])
+
     def test_stopped_meny_batch_keeps_journal_until_earlier_click_is_read_back(self):
         from meny import MenyCartStoppedError
         store, provider, _browser, app, product = self.household("meny")

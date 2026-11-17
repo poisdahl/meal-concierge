@@ -2206,7 +2206,8 @@ class OdaBrowser:
    const main=document.querySelector('main');
    roots=[main||document];
    const cartRoot=main||document.body;
-   const candidates=[...cartRoot.querySelectorAll('[role="alert"],[role="alertdialog"],li,article')].filter(visible);
+   const rows=[...cartRoot.querySelectorAll('input[type="number"]')].filter(visible).map(control=>control.closest('li,article')).filter(Boolean);
+   const candidates=[...rows,...cartRoot.querySelectorAll('[role="alert"],[role="alertdialog"]')].filter(visible);
    // The flat acknowledgement lists the heading, item and removal direction.
    // Newsletter, footer and ancillary service availability are outside the goods review.
    const lines=(cartRoot.innerText||'').split(/\n+/).map(norm);

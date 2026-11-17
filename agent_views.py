@@ -809,11 +809,11 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
     view = {"projection": "agent", "operation": "cart", "action": action}
     view.update(_fields(result, ("status", "reason", "next", "cart_digest", "cart_write_pending",
                                  "cleared", "ensured", "reconciled", "synced", "stopped", "idempotent",
-                                 "changed", "outcome_unknown", "cart_reconciliation_required", "decision",
+                                 "changed", "outcome_unknown", "operation_id", "cart_observation", "cart_reconciliation_required", "decision",
                                  "product_plan_stale", "menu_binding_stale", "order_id", "applied_operations",
                                  "excluded_product_ids", "accepted_missing_product_ids", "default_suggestion")))
     if isinstance(result.get("cart_plan"), dict):
-        view["cart_plan"] = _fields(result["cart_plan"], ("provider", "status", "menu_ref", "cart_digest", "approved"))
+        view["cart_plan"] = _fields(result["cart_plan"], ("provider", "status", "menu_ref", "cart_digest", "approved", "ownership_review"))
         view["cart_plan"]["items"] = _cart_plan_items(result["cart_plan"], offset, limit)
     cart = result.get("cart") if isinstance(result.get("cart"), dict) else result
     try:
@@ -836,7 +836,7 @@ def _cart_view(action: str, result: dict[str, Any], offset: int, limit: int, sec
         view["line_count"] = len(lines)
     if isinstance(result.get("meal_concierge_cart_plan"), dict):
         view["meal_concierge_cart_plan"] = _fields(result["meal_concierge_cart_plan"],
-                                                   ("provider", "status", "menu_ref", "cart_digest", "approved"))
+                                                   ("provider", "status", "menu_ref", "cart_digest", "approved", "ownership_review"))
         view["meal_concierge_cart_plan"]["items"] = _cart_plan_items(
             result["meal_concierge_cart_plan"], offset, limit)
     return view

@@ -62,6 +62,23 @@ class PendingAdditionCancellationTests(unittest.TestCase):
         return self.app.handle({"operation": "orders", "action": "cancel_confirm",
                                 "order_id": "order-1", "confirmation_id": prepared["confirmation_id"]})
 
+    def test_proven_stop_replays_original_standing_key_without_new_cancellation(self):
+        self.app.confirmation_policy = "standing"
+        calls = []
+        def stop(*args, **kwargs):
+            calls.append("entered")
+            raise CancellationPreconditionError("bound final control unavailable")
+        self.browser.submit_cancellation = stop
+        request = {"operation": "orders", "action": "cancel_submit", "order_id": "order-1",
+                   "idempotency_key": "cancel-synthetic-once"}
+        with self.assertRaises(CancellationPreconditionError):
+            self.app.handle(request)
+        result = self.app.handle(request)
+        self.assertEqual(result["status"], "not_dispatched")
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(calls, ["entered"])
+        self.assertIsNotNone(self.app.store.read()["pending_checkout"])
+
     def test_uncertain_addition_can_cancel_exact_order_without_payment_closure(self):
         checkout = deepcopy(self.app.store.read()["pending_checkout"])
         prepared = self.prepare()

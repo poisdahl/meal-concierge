@@ -149,6 +149,10 @@ class WeeklyFlowTests(unittest.TestCase):
         issue, = plan["recurring_issues"]
         self.assertEqual(plan["status"], "needs_input")
         self.assertEqual(issue["product_id"], "20")
+        page = self.app.handle({**preparation, "response_view": "agent"})
+        self.assertEqual(page["progress"]["recurring_issues_count"], 1)
+        detail = self.app.handle({"operation": "products", **page["recurring_issues_arguments"], "response_view": "agent"})
+        self.assertEqual(detail["recurring_issues"][0]["occurrence_ref"], issue["occurrence_ref"])
         update = {"operation": "recurring", "action": "review_occurrence", "decision": "skip",
                   "occurrence_ref": issue["occurrence_ref"], "recurring_review_ref":plan["recurring_review_ref"],
                   "menu_ref": mp.menu_ref(menu)}
@@ -167,6 +171,28 @@ class WeeklyFlowTests(unittest.TestCase):
                                         "cart_change_requested": True})["applied"])
         self.assertNotIn("20", self.store.read()["cart_plan"]["required_quantities"])
         self.assertEqual(self.app.handle({"operation": "recurring", "action": "due"})["due"][0]["product_id"], "20")
+
+    @mock.patch.object(Application, "_household_today", lambda self, state=None: date(2026, 9, 7))
+    def test_due_goods_cross_the_cap_and_cannot_enter_through_raw_sync(self):
+        menu, menu_plan = self.shop(self.batch())
+        menu_cost = menu_plan["totals"]["total_payable_ore"]
+        self.recurring("20")
+        before = deepcopy(self.provider.cart)
+        ref = mp.menu_ref(menu)
+        raw = self.app.handle({"operation": "cart", "action": "sync", "menu_ref": ref,
+            "requirements": [{"product_id": "10", "product_name": "Gulrot", "quantity": 2}]})
+        self.assertEqual(raw["reason"], "recurring_review_changed")
+        self.assertEqual(self.provider.cart, before)
+        prepared = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": ref,
+            "continuation_mode": "reset", "budget_ore": menu_cost,
+            "candidate_approvals": self.app._plan_approvals(menu_plan)})
+        self.assertIsNone(prepared["apply_arguments"])
+        plan = prepared["product_plan"]
+        self.assertEqual(plan["budget_status"], "exceeded")
+        self.assertEqual(plan["totals"]["total_payable_ore"], menu_cost + 3500)
+        self.assertEqual(plan["merchandise_budget_review"]["scope"], "menu_and_reviewed_recurring")
+        self.assertEqual(plan["merchandise_budget_review"]["comparison"], "above")
+        self.assertEqual(self.provider.cart, before)
 
     def test_digest_replaces_105_ids_and_replays_once(self):
         self.profile(diet={'rules': [{'kind': 'allergy', 'term': 'synthetic' + str(i)} for i in range(5)]})

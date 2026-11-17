@@ -1955,6 +1955,7 @@ class OrderOperations:
                         self._cancellation_checkout_guard(state, pending)
                     except HouseholdError as exc:
                         raise CancellationPreconditionError(str(exc)) from exc
+            submit_returned = False
             try:
                 self.browser.submit_cancellation(
                     order_id,
@@ -1963,6 +1964,7 @@ class OrderOperations:
                     before_click,
                     deadline=deadline,
                 )
+                submit_returned = True
                 if getattr(self.browser, "native_receipt_reconciliation", False):
                     current = self._orders({"action": "get", "order_id": order_id, "_deadline": deadline})
                     tracking = current["tracking"]
@@ -1973,19 +1975,27 @@ class OrderOperations:
                 if self.provider in {"oda", "mathem"}:
                     self.browser.read_order_binding(order_id, current["order"], deadline=deadline,
                                                     expected_binding=require_order_binding(pending["browser"].get("binding")))
-            except CancellationPreconditionError:
+            except CancellationPreconditionError as exc:
+                if submit_returned:
+                    exc.outcome_unknown = True
+                    raise
                 with self.store.locked() as state:
-                    current_pending = state.get("pending_cancellation")
-                    if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
+                    if state.get("pending_cancellation") == pending:
+                        self._store_protected_result(state, confirmation_id, "cancellation", {
+                            "status": "not_dispatched", "confirmation_id": confirmation_id, "cancelled": False,
+                            "order_id": order_id, "retry_allowed": False,
+                            "next": "Prepare a fresh cancellation. For standing authorization, use a new intent key.",
+                        }, target_id=order_id)
                         state["pending_cancellation"] = None
                 raise
             except HouseholdError as exc:
                 exc.outcome_unknown = True
-                with self.store.locked() as state:
-                    current_pending = state.get("pending_cancellation")
-                    if current_pending and current_pending.get("status") == "clicking" and current_pending.get("browser") == pending.get("browser"):
-                        state["pending_cancellation"]["status"] = "uncertain"
-                raise
+                try:
+                    with self.store.locked() as state:
+                        if state.get("pending_cancellation") == pending:
+                            state["pending_cancellation"]["status"] = "uncertain"
+                finally:
+                    raise exc
             cancelled = self._cancellation_completed(order_id, current)
             with self.store.locked() as state:
                 if canonical(state.get("pending_cancellation")) != canonical(pending):

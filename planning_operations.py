@@ -3141,6 +3141,11 @@ class PlanningOperations:
             row["issues"] = [deepcopy(issue) for issue in issues
                              if issue.get("requirement_id") == row["requirement_id"]]
             rows.append(row)
+        for name in ("recurring_review", "recurring_issues"):
+            for row in snapshot.get(name, []):
+                assessed = row.pop("dietary_assessments", None)
+                if assessed:
+                    row["dietary_findings"] = findings(assessed)
         snapshot.update(requirements=rows, issues=issues, dietary_rules=rules)
         return snapshot
 
@@ -3157,8 +3162,8 @@ class PlanningOperations:
         section = request.get("section") if request.get("section") is not None else "requirements"
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
             raise HouseholdError("products pages require offset >= 0 and limit between 1 and 20")
-        if section not in {"requirements", "issues"}:
-            raise HouseholdError("products section must be requirements or issues")
+        if section not in {"requirements", "issues", "recurring_review", "recurring_issues"}:
+            raise HouseholdError("unknown product review section")
         if request.get("requirement_id") is not None and (
             not isinstance(request["requirement_id"], str) or section != "requirements" or offset
         ):
@@ -3178,14 +3183,14 @@ class PlanningOperations:
         snapshot = record.get("snapshot")
         if not isinstance(snapshot, Mapping):
             raise HouseholdError("this older product_plan_ref has no review snapshot; prepare the exact menu again")
-        rows = snapshot[section]
+        rows = snapshot.get(section, [])
         requested_id = request.get("requirement_id")
         if requested_id is not None:
             rows = [row for row in rows if row.get("requirement_id") == requested_id]
             if not rows:
                 raise HouseholdError("requirement_id does not belong to this exact product_plan_ref")
         page = {key: deepcopy(value) for key, value in snapshot.items()
-                if key not in {"requirements", "issues", "dietary_rules"}}
+                if key not in {"requirements", "issues", "dietary_rules", "recurring_review", "recurring_issues"}}
         page.update(
             projection="agent", product_plan_ref=reference,
             product_selection_digest=record["selection_digest"],
@@ -3195,6 +3200,10 @@ class PlanningOperations:
                       "issue_count": len(snapshot["issues"])},
             section=section, offset=offset, total=len(rows), next_offset=None,
         )
+        for name in ("recurring_review", "recurring_issues"):
+            if snapshot.get(name):
+                page["progress"][name + "_count"] = len(snapshot[name])
+                page[name + "_arguments"] = {"action": "get", "section": name, "product_plan_ref": reference}
         work = record.get("observation_work") or {}
         page["progress"].update(self._product_work_progress(work))
         if self._product_work_pending(work):
@@ -3237,6 +3246,10 @@ class PlanningOperations:
                 products = displayed.get("candidates", []) + displayed.get("selection", {}).get("products", [])
                 for candidate in products:
                     for indexes in candidate.get("dietary_findings", {}).values():
+                        rule_indexes.update(indexes)
+            if section in {"recurring_review", "recurring_issues"}:
+                for occurrence in proposed[section]:
+                    for indexes in occurrence.get("dietary_findings", {}).values():
                         rule_indexes.update(indexes)
             proposed["dietary_rules"] = [{"index": index, **deepcopy(snapshot["dietary_rules"][index])}
                                          for index in sorted(rule_indexes)]
@@ -4805,7 +4818,12 @@ class PlanningOperations:
         operation_id = secrets.token_hex(16)
         original = dict(acknowledged)
         for batch in self._meny_cart_batches(operations):
-            before = self._cart_provider_call("get_cart", {}, deadline=deadline)
+            try:
+                before = self._cart_provider_call("get_cart", {}, deadline=deadline)
+            except RetailPreDispatchError as exc:
+                if acknowledged != original:
+                    raise MenyCartStoppedError("Prior MENY batches completed; no next batch was dispatched") from exc
+                raise
             before_live, _names = self._cart_lines(cart_summary(before))
             if before_live != acknowledged:
                 raise HouseholdError("MENY cart changed between bounded batches")
@@ -4825,6 +4843,18 @@ class PlanningOperations:
                 state["pending_cart_change"] = deepcopy(pending)
             try:
                 changed = self._cart_provider_call("manipulate_cart", {"operations": batch}, deadline=deadline)
+            except RetailPreDispatchError as exc:
+                with self.store.locked() as state:
+                    if state.get("pending_cart_change") != pending:
+                        raise HouseholdError("original MENY batch changed during pre-dispatch stop")
+                    if acknowledged == original:
+                        self._finish_managed_cart_journal(state, pending, "not_dispatched")
+                    else:
+                        state["pending_cart_change"].update(expected=dict(acknowledged), dispatch_finished=True,
+                                                            stopped_before_next_click=True)
+                if acknowledged != original:
+                    raise MenyCartStoppedError("Prior MENY batches completed; no next batch was dispatched") from exc
+                raise
             except MenyCartStoppedError as exc:
                 prefix = self._quantities_after_operations(before_live, exc.applied_operations)
                 with self.store.locked() as state:
@@ -4984,7 +5014,7 @@ class PlanningOperations:
                    "managed_menu": deepcopy(menu_ref), "product_plan_digest": plan_digest, "before": deepcopy(before),
                    "expected": deepcopy(target), "operations": deepcopy(operations), "order_change": None}
         with self.store.locked() as state:
-            if (state.get("pending_cart_change") or state.get("pending_checkout")
+            if (state.get("pending_cart_change") or state.get("pending_checkout") or state.get("pending_cancellation")
                     or state.get("order_change") or self._cart_menu_ref(state.get("menu")) != menu_ref):
                 raise HouseholdError("cart owner or menu changed before dispatch")
             state["pending_cart_change"] = deepcopy(pending)
@@ -5031,8 +5061,9 @@ class PlanningOperations:
         recurring = []
         if request.get("_include_recurring", True) and snapshot['recurring_items']:
             scope, rows = self._menu_recurring_scope(snapshot)
-            if request.get('_reviewed_recurring_scope') is not None and request['_reviewed_recurring_scope'] != scope:
-                raise HouseholdError('recurring occurrences changed; prepare and review the current menu again')
+            if rows and scope != request.get('_reviewed_recurring_scope'):
+                return {"synced": False, "status": "needs_input", "reason": "recurring_review_changed",
+                        "next": "Prepare and apply the current menu products to review actual due goods and their budget."}
             recurring = [r['item'] for r in rows if r['decision'] != 'skip']
         for item in recurring:
             key = self._product_id(item['product_id'])
@@ -6017,6 +6048,17 @@ class PlanningOperations:
                                 locked.pop("pending_cart_change")
                     raise
                 except MenyCartStoppedError as exc:
+                    if not exc.applied_operations:
+                        with self.store.locked() as locked:
+                            if locked.get("pending_cart_change") != pending:
+                                raise HouseholdError("original MENY batch changed during pre-click stop")
+                            locked.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {
+                                "provider": self.provider, "request_digest": pending["request_digest"], "status": "not_dispatched"}
+                            locked.pop("pending_cart_change")
+                        return {"ensured": False, "stopped": True, "status": "not_dispatched",
+                                "operation_id": pending["operation_id"], "reason": str(exc),
+                                "cart": latest, "cart_observation": "before_stopped_batch",
+                                "next": "The current batch stopped before its first click. Read the cart before preparing any further change."}
                     acknowledged = dict(before)
                     for item in exc.applied_operations:
                         key = str(item["productId"])

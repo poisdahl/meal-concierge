@@ -498,6 +498,9 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise HouseholdError("request must be an object")
+        if {"_include_recurring", "_reviewed_recurring_scope", "_reviewed_product_digest", "_expected_menu_ref",
+                "_expected_product_context", "_allow_empty_requirements", "_before_cart_write"}.intersection(request):
+            raise HouseholdError("managed product review arguments are internal-only")
         if "_restore_missing_cart_digest" in request:
             raise HouseholdError("_restore_missing_cart_digest is internal-only")
         if "_native_cart_binding" in request:
