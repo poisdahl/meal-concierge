@@ -1684,6 +1684,9 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
     with offline(meta):
         prior_pending = bounded_json(pending, 8 * 1024 * 1024)
         operation = prior_pending['update_operation']
+        build = candidate_identity(release)
+        if build != operation['candidate_identity']:
+            raise RuntimeError('candidate changed during migration; preserve the original backup')
         if operation['prior_identity'] is not None and (
                 operation['phase'] != 'migrated' or operation.get('after_state_sha256') != state_fingerprint(Path(meta['paths']['state']))):
             operation['prior_identity'] = None
@@ -1697,7 +1700,6 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
             arm(home, meta, operation['previous_manifest'], destination, release, operation['id'], operation['prior_identity'])
         meta['previous_release'] = meta.get('release')
         meta['release'] = str(release)
-        build = read(release)
         if build.get('installed_runtime_sha256'):
             meta['runtime_identity'] = {key: build[key] for key in ('source_sha256', 'installed_runtime_sha256', 'dependencies_sha256')}
         write_json(path, meta)

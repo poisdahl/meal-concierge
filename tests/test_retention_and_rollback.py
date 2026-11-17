@@ -33,6 +33,18 @@ class MaintenanceTransitionTests(unittest.TestCase):
                             prepared_release=self.fixture.release)
         return json.loads((self.home / "runtime.json").read_text())
 
+    def test_changed_candidate_after_migration_is_never_selected(self):
+        migrate = install.migrate
+        def changed(release, meta):
+            migrate(release, meta)
+            (release / "staged_change.py").write_text("# inert post-migration change")
+        with patch.object(install, "migrate", changed):
+            with self.assertRaisesRegex(RuntimeError, "bytes changed"):
+                self.update()
+        self.assertEqual((self.code / "current").resolve(), self.prior.resolve())
+        self.assertTrue((self.home / "pending-install.json").is_file())
+        self.assertTrue((self.home / "maintenance.json").is_file())
+
     def test_rollback_pre_use_is_idempotent_and_does_not_start_service(self):
         meta = self.update()
         with patch.object(install, "write_unit"), patch.object(install, "lifecycle", side_effect=AssertionError("started")):
