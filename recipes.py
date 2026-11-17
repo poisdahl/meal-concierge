@@ -5401,7 +5401,7 @@ class RecipeStore:
             with self._connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 rows = connection.execute("""
-                    SELECT r.id, r.revision, r.status, r.content_hash,
+                    SELECT r.id, r.name, r.revision, r.status, r.content_hash,
                            m.pack_recipe_id, m.baseline_hash,
                            coalesce(f.is_favorite, 0) AS is_favorite
                     FROM recipe_entry_metadata m
@@ -5420,6 +5420,7 @@ class RecipeStore:
                     deleted.append({
                         "recipe_id": row["pack_recipe_id"],
                         "bank_recipe_id": row["id"],
+                        "name": row["name"],
                         "bank_revision": row["revision"],
                         "status": row["status"],
                         "was_favorite": bool(row["is_favorite"]),
