@@ -104,6 +104,15 @@ class MenuStockCheckTests(unittest.TestCase):
                                        'action': 'have_quantity', 'quantity': 1, 'unit': unit}])
             self.assertEqual(self.store.path.read_bytes(), before)
 
+    def test_accepted_pantry_instruction_is_visible_without_inventing_a_stock_quantity(self):
+        with self.store.locked() as state:
+            state['profile']['pantry'].update(assume=['olivenolje'], assumptions_accepted=True)
+        listing = self.get()
+        oil = self.row(listing, 'olivenolje')
+        self.assertTrue(oil['accepted_pantry_assumption'])
+        self.assertEqual(oil['answered_sources'], 0)
+        self.assertEqual(read_quantity(oil['remaining_quantity']), 75)
+
 
 class StockSuccessorTests(unittest.TestCase):
     def setUp(self):
