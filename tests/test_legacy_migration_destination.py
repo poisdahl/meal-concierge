@@ -68,6 +68,7 @@ class LegacyDestinationTests(unittest.TestCase):
     def test_existing_and_dangling_symlinks_are_rejected_without_touching_targets(self):
         target = self.root / "target"
         target.mkdir(mode=0o750)
+        mode = stat.S_IMODE(target.stat().st_mode)
         (target / "state.json").write_bytes(b"PRIVATE SYNTHETIC TARGET")
         before = tree_bytes(target)
         self.output.symlink_to(target, target_is_directory=True)
@@ -75,7 +76,7 @@ class LegacyDestinationTests(unittest.TestCase):
             legacy.write_migration(self.output, CONFIG, self.valid)
         self.assertTrue(self.output.is_symlink())
         self.assertEqual(tree_bytes(target), before)
-        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o750)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), mode)
         dangling = self.root / "dangling"
         missing = self.root / "missing"
         dangling.symlink_to(missing, target_is_directory=True)
