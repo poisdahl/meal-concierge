@@ -630,6 +630,14 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             or operation == "checkout"
             or (operation == "orders" and request.get("action") not in {None, "list", "get"})
         ):
+            if (operation == "products" and request.get("action") == "apply" and pending_cart.get("managed_menu")
+                    and pending_cart.get("product_plan_digest") and pending_cart["product_plan_digest"] in
+                    (request.get("product_plan_digest"), request.get("partial_product_plan_digest"))):
+                return {"applied": False, "status": "outcome_unknown", "outcome_unknown": True,
+                        "cart_write_pending": True, "cart_reconciliation_required": True, "synced": None,
+                        "operation_id": pending_cart["operation_id"], "menu_ref": pending_cart["managed_menu"],
+                        "product_plan_digest": pending_cart["product_plan_digest"],
+                        "next": "Read and reconcile the original cart change without another dispatch."}
             error = HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
             error.outcome_unknown = pending_cart.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
             raise error
@@ -1118,8 +1126,8 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                             **({'due_on': period} if item['schedule']['unit'] == 'days' else {})})
         return due
 
-    def _menu_recurring_scope(self, state):
-        menu_ref = self._cart_menu_ref(state.get("menu"))
+    def _menu_recurring_scope(self, state, *, preview_binding=None):
+        menu_ref = self._cart_menu_ref(state.get("menu")) if preview_binding is None else None
         due = self._due_recurring(state, self._household_today(state))
         saved = state.get("menu_recurring_decisions") or {}
         decisions = saved.get("decisions", {}) if menu_ref and saved.get("menu_ref") == menu_ref else {}
@@ -1131,7 +1139,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             if decision["action"] == "substitute":
                 resolved["original_product_id"] = item.get("original_product_id", item["product_id"])
             rows.append({"occurrence_ref": identity, "decision": decision["action"], "item": resolved})
-        return mp.digest({"provider": self.provider, "menu_ref": menu_ref, "rows": rows}), rows
+        return mp.digest({"provider": self.provider, "menu_ref": menu_ref, "preview_binding": preview_binding, "rows": rows}), rows
 
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")

@@ -432,6 +432,7 @@ def _oda_checkout_amount_script(
             "AMOUNT_LABELS",
             json.dumps(labels, ensure_ascii=False, separators=(",", ":")),
         )
+        .replace("RETAIN_DIAGNOSTIC", json.dumps(retry or addition_retry))
         .replace("TOTAL", json.dumps(expected_total))
         .replace("ADDITION_GOODS", json.dumps(addition_goods_minor if addition_goods_minor is not None else expected_total))
         .replace("PRODUCT_LABEL",

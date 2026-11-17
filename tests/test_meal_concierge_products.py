@@ -986,6 +986,21 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(budgeted["status"], "prepared")
         self.assertEqual(budgeted["budget_status"], "unverified")
 
+    def test_advisory_estimate_ceiling_and_measured_practical_surplus(self):
+        value = menu({"item": "brus", "quantity": 450, "unit": "ml"})
+        req = menu_requirements(value)[0][0]
+        priced = {"package_count":1, "price_kind":"estimate", "estimated_merchandise_ore":2200,
+                  "mandatory_deposit_ore":None, "offer_kind":"regular", "eligibility":"confirmed"}
+        for cap, comparison in [(2199, "above"), (2200, "at"), (2201, "below")]:
+            plan = build_product_plan(provider="oda", binding={}, menu=value, budget_ore=cap, price_mode="estimate",
+                observations={req["requirement_id"]:observation("brus",[product("10","Brus",3000,"ml",[priced])])},
+                candidate_approvals=[{"requirement_id":req["requirement_id"], "candidate_refs":["10"],
+                                      "package_count":1, "quantity_basis":"one six-pack"}])
+            self.assertEqual(plan["budget_status"], "unverified")
+            self.assertEqual(plan["merchandise_budget_review"]["comparison"], comparison)
+            self.assertIsNone(plan["totals"]["total_payable_ore"])
+            self.assertIn("oversized_package", [r["reason"] for r in plan["requirements"][0]["selection"]["quantity_warnings"]])
+
     def test_estimated_line_cannot_hide_exact_budget_floor_violation(self):
         value = menu(
             {"item": "hvetemel", "quantity": 500, "unit": "g"},

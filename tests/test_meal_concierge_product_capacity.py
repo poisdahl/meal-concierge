@@ -369,6 +369,7 @@ class ProductCapacityTests(unittest.TestCase):
         self.save_week()
         initial = self.prepare()
         recurring_ref = self.provider.entry("salmon")["products"][0]["product_ref"]
+        self.provider.catalog["Recurring fixture"] = observation("Recurring fixture", self.provider.entry("salmon")["products"])
         self.app.handle({
             "operation": "recurring", "action": "add", "item": {
                 "product_id": recurring_ref, "product_name": "Recurring fixture",
@@ -396,7 +397,7 @@ class ProductCapacityTests(unittest.TestCase):
         self.assertEqual(refreshed["product_plan"]["ingredient_decisions"], decisions)
         self.assertEqual(
             [tool for tool, _arguments, _kwargs in self.provider.calls],
-            ["get_cart"],
+            ["get_cart", "product_search"],
         )
 
     def test_full_apply_seed_reads_live_cart_and_fails_closed_on_drift(self):

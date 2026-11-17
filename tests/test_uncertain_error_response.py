@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from unittest import mock
@@ -105,6 +106,33 @@ class UncertainErrorResponseTests(unittest.TestCase):
             with mock.patch('retail_mcp.fcntl.flock', side_effect=held_lock):
                 with self.assertRaises(RetailPreDispatchError):
                     client._run('manipulate_cart', {}, .02)
+
+    def test_short_transport_contention_spends_the_original_timeout(self):
+        client = RetailMcpClient(self.temp.name)
+        budgets = []
+        async def synthetic(_tool, _args, timeout):
+            budgets.append(timeout)
+            return {"ok": True}
+        release = threading.Event()
+        acquired = threading.Event()
+        def hold():
+            with client._lock():
+                acquired.set()
+                release.wait(2)
+        owner = threading.Thread(target=hold)
+        owner.start()
+        try:
+            self.assertTrue(acquired.wait(1))
+            timer = threading.Timer(.08, release.set)
+            timer.start()
+            with mock.patch.object(client, "_run_async", synthetic):
+                self.assertTrue(client.call("get_cart", {}, deadline=time.monotonic()+1)["ok"])
+            self.assertEqual(len(budgets), 1)
+            self.assertGreater(budgets[0], 0)
+            self.assertLess(budgets[0], .98)
+        finally:
+            release.set()
+            owner.join(2)
 
     def test_unrelated_journals_cannot_label_an_error_uncertain(self):
         # Exercise Application's common exception boundary without inventing

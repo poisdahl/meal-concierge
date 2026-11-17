@@ -211,6 +211,15 @@ class ProductContinuationTests(unittest.TestCase):
         # A fresh default shop explicitly reset from the menu still includes due items.
         ordinary = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
                                 continuation_mode="reset", candidate_approvals=self.approvals(initial))
+        # This fake catalog treats case as distinct. The configured display
+        # name initially returns different SKUs; no unobserved standing item
+        # may acquire full apply authority.
+        self.assertIsNone(ordinary["apply_arguments"])
+        self.assertEqual(ordinary["product_plan"]["recurring_issues"][0]["reason"], "recurring_product_not_observed")
+        name = self.store.read()["recurring_items"][0]["product_name"]
+        self.provider.catalog[name] = observation(name, self.provider.entry("recurring fixture")["products"])
+        ordinary = self.request(action="prepare", menu_ref=self.app._cart_menu_ref(self.menu),
+                                continuation_mode="reset", candidate_approvals=self.approvals(initial))
         self.assertTrue(self.request(**ordinary["apply_arguments"], cart_change_requested=True)["applied"])
         self.assertEqual(self.provider.quantities[recurring], 1)
         self.assertIsNone(self.app._weekly_checkout_problem())
