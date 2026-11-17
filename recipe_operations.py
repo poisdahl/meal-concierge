@@ -41,6 +41,9 @@ class _InvalidRecipeCursor(RecipeError):
     """Caller cursor errors must not be reported as a provider outage."""
 
 
+MAX_INTERNAL_DISCOVERY_ROWS = 200
+
+
 class RecipeOperations:
     def _require_legacy_recipe_operation(self, idempotency_key):
         if self.recipes.library_operation_for_idempotency(idempotency_key) is None:
@@ -503,16 +506,37 @@ class RecipeOperations:
     def _internal_recipe_candidates(
         self, query: str, limit: int, state: Mapping[str, Any], week: str,
     ) -> list[dict[str, Any]]:
-        results = []
+        return self._internal_recipe_page(query, limit, state, week)["recipes"]
+
+    def _internal_recipe_page(self, query, limit, state, week, *, offset=0):
+        """Filter bounded bank pages before counting candidates, retaining a live cursor."""
+        results, positions = [], []
         ranks = self._bank_group_ranks(state["profile"]["recipes"])
-        for row in self.recipes.search(query, limit=limit, include_archived=False, group_ranks=ranks):
-            recipe = self.recipes.get(row["id"], row["revision"])
-            for field in ("library_id", "is_favorite", "favorite_revision"):
-                recipe.pop(field, None)
-            recipe["usage"] = self._usage_summary(state, recipe["recipe_key"], week)
-            if recipe["usage"]["eligible"] and recipe_provider_problem(recipe, self.provider) is None:
-                results.append(recipe)
-        return results
+        examined, exhausted = 0, False
+        deadline = time.monotonic() + 8
+        while examined < MAX_INTERNAL_DISCOVERY_ROWS and len(results) < limit and time.monotonic() < deadline:
+            size = min(20, MAX_INTERNAL_DISCOVERY_ROWS - examined)
+            rows = self.recipes.search(query, limit=size, offset=offset, include_archived=False, group_ranks=ranks)
+            consumed = 0
+            for row in rows:
+                if time.monotonic() >= deadline:
+                    break
+                recipe = self.recipes.get(row["id"], row["revision"])
+                offset, examined, consumed = offset + 1, examined + 1, consumed + 1
+                for field in ("library_id", "is_favorite", "favorite_revision"):
+                    recipe.pop(field, None)
+                recipe["usage"] = self._usage_summary(state, recipe["recipe_key"], week)
+                if (recipe["status"] != "archived" and recipe["usage"]["eligible"]
+                        and recipe_provider_problem(recipe, self.provider) is None):
+                    results.append(recipe)
+                    positions.append(offset)
+                if len(results) >= limit:
+                    break
+            exhausted = len(rows) < size and consumed == len(rows)
+            if exhausted or consumed < len(rows):
+                break
+        return {"recipes": results, "positions": positions, "next_offset": offset,
+                "examined": examined, "exhausted": exhausted}
 
     def _provider_recipe_candidates(self, provider: str, query: str, limit: int, *, deadline: float | None = None) -> list[dict[str, Any]]:
         response = self._provider_recipe_search(provider, query, limit, deadline=deadline)
@@ -740,6 +764,22 @@ class RecipeOperations:
         enabled = [source for source in SOURCE_IDS if sources[source] and (source not in {"oda", "meny", "mathem"} or source == self.provider)]
         if not enabled:
             raise HouseholdError("no recipe sources are enabled")
+        bank_binding = hashlib.sha256(canonical({
+            "query": query, "week": week, "provider": self.provider,
+            "groups": self._bank_group_ranks(state["profile"]["recipes"]),
+            "cooldown": state["profile"]["recipes"]["repeat_cooldown_weeks"],
+        }).encode()).hexdigest()
+        cursor = request.get("cursor")
+        bank_offset = 0
+        if cursor is not None:
+            if (not isinstance(cursor, Mapping) or set(cursor) != {"kind", "offset", "binding"}
+                    or cursor["kind"] != "internal_discovery" or cursor["binding"] != bank_binding
+                    or type(cursor["offset"]) is not int or not 0 <= cursor["offset"] <= 2**63 - 1):
+                raise _InvalidRecipeCursor("invalid full discovery bank cursor; repeat the original query/week or start a new search")
+            if not sources["internal"]:
+                raise _InvalidRecipeCursor("the local recipe bank is disabled; start a new search")
+            bank_offset = cursor["offset"]
+            enabled = ["internal"]  # Continuation never repeats optional network searches.
         per_source = min(5, max(1, math.ceil(total_limit / len(enabled))))
         recipe_profile = state["profile"]["recipes"]
         # Every source is asked for the same share. A preferred source is listed
@@ -755,7 +795,7 @@ class RecipeOperations:
         tasks: dict[str, Any] = {}
         for source in enabled:
             if source == "internal":
-                tasks[source] = lambda q=query, n=per_source: self._internal_recipe_candidates(q, n, state, week)
+                tasks[source] = lambda: self._internal_recipe_page(query, total_limit, state, week, offset=bank_offset)
             elif source in {"themealdb", "wikibooks"}:
                 adapter = self.external_recipe_sources.get(source)
                 if adapter is not None:
@@ -770,12 +810,16 @@ class RecipeOperations:
         executor.shutdown(wait=False, cancel_futures=True)
         by_source: dict[str, list[dict[str, Any]]] = {source: [] for source in SOURCE_IDS}
         statuses = []
+        internal_page = None
         for source in SOURCE_IDS:
             if not sources[source]:
                 statuses.append({"source": source, "enabled": False, "status": "disabled", "count": 0})
                 continue
             if source in {"oda", "meny", "mathem"} and source != self.provider:
                 statuses.append({"source": source, "enabled": True, "status": "ineligible", "count": 0, "reason": f"select {source.upper()} to use its recipes"})
+                continue
+            if cursor is not None and source != "internal":
+                statuses.append({"source": source, "enabled": True, "status": "not_requested", "count": 0})
                 continue
             future = next((candidate for candidate, name in futures.items() if name == source), None)
             if future is None:
@@ -787,11 +831,17 @@ class RecipeOperations:
                 continue
             try:
                 values = future.result()
+                details = {}
+                if source == "internal":
+                    internal_page = values
+                    details = {key: values[key] for key in ("examined", "exhausted")}
+                    values = values["recipes"]
                 if not isinstance(values, list):
                     raise HouseholdError("recipe source result is invalid")
-                by_source[source] = [deepcopy(value) for value in values[:per_source] if isinstance(value, Mapping)]
-                status = "ready" if by_source[source] else "empty"
-                statuses.append({"source": source, "enabled": True, "status": status, "count": len(by_source[source])})
+                source_limit = total_limit if source == "internal" else per_source
+                by_source[source] = [deepcopy(value) for value in values[:source_limit] if isinstance(value, Mapping)]
+                status = "ready" if by_source[source] else "search_limit" if details and not details["exhausted"] else "empty"
+                statuses.append({"source": source, "enabled": True, "status": status, "count": len(by_source[source]), **details})
             except (HouseholdError, OSError, ValueError, TypeError, RecursionError):
                 statuses.append({"source": source, "enabled": True, "status": "unavailable", "count": 0})
         for status in statuses:
@@ -799,12 +849,15 @@ class RecipeOperations:
                 status["preference"] = preference[status["source"]]
         results = []
         seen = set()
-        for index in range(per_source):
+        bank_consumed = 0
+        for index in range(max((len(values) for values in by_source.values()), default=0)):
             for source in source_order:
                 values = by_source[source]
                 if index >= len(values):
                     continue
                 recipe = values[index]
+                if source == "internal":
+                    bank_consumed = index + 1
                 identities = self._discovery_identities(recipe)
                 if identities & seen:
                     continue
@@ -823,12 +876,24 @@ class RecipeOperations:
                     break
             if len(results) == total_limit:
                 break
+        continuation = {}
+        if internal_page is not None:
+            unused = bank_consumed < len(by_source["internal"])
+            resume_offset = ((internal_page["positions"][bank_consumed - 1] if bank_consumed else bank_offset)
+                             if unused else internal_page["next_offset"])
+            exhausted = internal_page["exhausted"] and not unused
+            next_cursor = None if exhausted else {"kind": "internal_discovery", "offset": resume_offset, "binding": bank_binding}
+            continuation = {"next_cursor": next_cursor, "bank_exhausted": exhausted}
+            bank_status = next(item for item in statuses if item["source"] == "internal")
+            bank_status.update(exhausted=exhausted, next_cursor=next_cursor,
+                               returned=sum(row["discovery_source"] == "internal" for row in results))
         return {
             "week": week,
             "query": query,
             "recipes": results,
             "sources": statuses,
             "balanced_limit_per_source": per_source,
+            **continuation,
             **({"source_preferences": preferences} if (preferences := self._source_preferences(recipe_profile)) else {}),
         }
 

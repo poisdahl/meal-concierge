@@ -171,6 +171,18 @@ clients. Full details use the exact bank ID/revision or discovery ref, never a
 summary masquerading as a recipe. Offset pages can change during concurrent
 catalog edits; every selected revision is re-resolved and checked before use.
 
+Full discovery filters local cooldown/provider eligibility while scanning up to
+200 ordered bank rows or eight seconds, rather than filtering only the first
+source share. The bank can fill slots unused by other sources, up to the requested
+total limit. Preferred/occasional group ordering is preserved; draft previews
+remain visibly marked as drafts. The internal source reports `examined` and
+`exhausted`, and `search_limit` when a bounded scan found no eligible results.
+An empty bounded page is not a claim that the whole bank is empty.
+Return its `next_cursor` unchanged with the same query/week to continue the local
+bank only; optional source searches are not repeated. The cursor is bound to the
+provider, group preferences and cooldown policy. Start a new search after changing
+those settings or editing the bank, whose live offset order can change.
+
 MENY detail results and client-assisted conversions use a bounded disposable
 SQLite metadata memo keyed by exact source ref, digest, schema and transform
 version. Immutable snapshots retain their existing expiry and storage limits;

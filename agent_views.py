@@ -974,6 +974,8 @@ def _recipe_candidates_view(result: dict[str, Any]) -> dict[str, Any]:
         rows.append(row)
     view["recipes"] = rows
     view["next"] = "Shortlist candidates, then read ingredients and steps with recipes get for an exact recipe/library ref, or discovery resolve/detail for a discovery_ref. Summaries do not establish dietary fit."
+    if result.get("next_cursor") and result.get("projection") != "summary":
+        view["next"] += " Continue the local bank with next_cursor unchanged and the same query/week; this does not repeat optional source searches."
     return view
 
 
