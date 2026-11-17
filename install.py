@@ -716,8 +716,10 @@ def program_preflight_owned(meta):
         state = Path(temporary) / 'state'
         state.mkdir(mode=0o700)
         document = source / 'state.json'
-        if document.exists():
-            write_json(state / 'state.json', bounded_json(document, 64 * 1024 * 1024))
+        # This path is only for an existing installation. Missing authoritative
+        # household state is a recovery problem, never permission to qualify a
+        # fresh replacement household with default settings.
+        write_json(state / 'state.json', bounded_json(document, 64 * 1024 * 1024))
         bank = source / 'recipes.sqlite3'
         if bank.exists():
             descriptor = os.open(bank, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
