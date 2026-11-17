@@ -656,7 +656,7 @@ class RecipeStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "7")
             self.assertNotIn("is_favorite", json.loads(before[5]))
         self.assertFalse(self.path.with_name("recipes-v3.backup.sqlite3").exists())
 
@@ -1378,7 +1378,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(
                 connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0],
-                "6",
+                "7",
             )
 
     def test_v1_backup_waits_for_and_includes_a_concurrent_writer(self):
@@ -1442,7 +1442,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "7")
             self.assertTrue({
                 "library_operations", "library_mappings", "library_connection_controls",
                 "recipe_favorites",
@@ -1513,7 +1513,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v2_bank(newer, full_recipe("Newer", external_id="newer"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")
@@ -1619,14 +1619,14 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "6")
+            ).fetchone()[0], "7")
             self.assertIn("recipe_favorites", {
                 row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             })
         RecipeStore(path, "Hus A").search("")
         self.assertEqual((backup.stat().st_ino, backup.read_bytes()), before)
 
-    def test_v3_control_only_bank_is_backed_up_and_unknown_v7_fails_closed(self):
+    def test_v3_control_only_bank_is_backed_up_and_unknown_v8_fails_closed(self):
         control_only = Path(self.temp.name) / "control-only" / "recipes.sqlite3"
         control_only.parent.mkdir()
         create_v3_bank(control_only, full_recipe("Removed v3", external_id="removed-v3"))
@@ -1649,7 +1649,7 @@ class RecipeStoreTests(unittest.TestCase):
         newer.parent.mkdir()
         create_v3_bank(newer, full_recipe("Future v5", external_id="future-v5"))
         with closing(sqlite3.connect(newer)) as connection:
-            connection.execute("UPDATE metadata SET value='7' WHERE key='schema_version'")
+            connection.execute("UPDATE metadata SET value='8' WHERE key='schema_version'")
             connection.commit()
         with self.assertRaisesRegex(RecipeError, "newer"):
             RecipeStore(newer, "Hus A").search("")
