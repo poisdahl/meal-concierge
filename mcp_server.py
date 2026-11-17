@@ -614,9 +614,11 @@ def meal_concierge_products(
     limit: Annotated[int, Field(ge=1, le=20)] = 8,
     section: Literal["requirements", "issues"] = "requirements",
     requirement_id: str | None = None,
+    language: str | None = None,
 ) -> Any:
     arguments = {
         "action": action, "menu_ref": menu_ref, "planner_ref": planner_ref,
+        "language": language,
         "planner_input": planner_input, "planner_handoff": planner_handoff,
         "planner_selection_ref": planner_selection_ref, "product_plan_ref": product_plan_ref,
         "candidate_approvals": candidate_approvals, "ingredient_decisions": ingredient_decisions,
@@ -661,10 +663,11 @@ def meal_concierge_shopping_list(
     price_mode: Literal["exact", "estimate"] = "estimate",
     offset: Annotated[int, Field(ge=0)] = 0,
     limit: Annotated[int, Field(ge=1, le=20)] = 8,
+    language: str | None = None,
 ) -> Any:
     arguments = {"action": action, "list_ref": list_ref, "extra_items": extra_items,
                  "checked_items": checked_items, "candidate_approvals": candidate_approvals,
-                 "product_plan_ref": product_plan_ref, "offset": offset, "limit": limit}
+                 "product_plan_ref": product_plan_ref, "offset": offset, "limit": limit, "language": language}
     if action == "match":
         arguments.update(continuation_mode=continuation_mode, price_mode=price_mode)
     return _agent_text(rpc("shopping_list", **{key: value for key, value in arguments.items() if value is not None}))

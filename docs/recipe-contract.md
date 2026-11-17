@@ -100,6 +100,16 @@ quantities and explicit `scalable: false` remain unresolved.
 
 `item` is the supplied consistent ingredient matching name. Preserve its input
 in `original_text`; `raw`/`amount` are normalized display text in schema 2.
+
+Agent recipe views, shopping-list pages, product-review pages and rendered
+recipes expose a separate `display_amount`. Counts use exact mixed fractions;
+mass/volume use exact short decimals when possible (decimal comma in Norwegian),
+otherwise exact fractions. Unit names are localized without changing the unit's
+measurement convention. No rounding or blanket gram increment is applied, and
+an unknown amount stays unknown. The canonical `quantity`, `unit`, `amount`,
+`raw` and all identity/digest inputs remain unchanged. Shopping-list and product
+pages accept `language` for this presentation alone; changing it changes no
+list reference, product approval or stored recipe.
 Readers parse only explicit supported measures and otherwise keep source text
 unresolved. The calling normalization workflow supplies any needed translation
 into the household's matching language. Similar titles/names do not establish

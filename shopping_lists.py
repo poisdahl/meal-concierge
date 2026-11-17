@@ -1,12 +1,11 @@
 """General shopping lists over the same requirements used by product preparation."""
 from copy import deepcopy
-from fractions import Fraction
 from typing import Mapping
 
 from core import HouseholdError
 import menu_planning as mp
 from product_planner import canonical, menu_requirements
-from recipe_quantities import read_quantity, quantity_json
+from recipe_quantities import read_quantity, quantity_json, display_amount
 
 
 _AUTO = object()
@@ -115,12 +114,20 @@ def build_list(state):
         elif baseline[key] != fingerprint:
             changes['changed'].append(key)
     return {'menu_ref': reference, 'scope': scope, 'list_ref': mp.digest({'menu_ref': reference, 'rows': rows, 'annotations': annotations}),
+            'display_language': (menu or {}).get('output_language') or 'nb',
             'items': rows, 'changes': changes, 'fingerprints': fingerprints,
             'cart_changed': False, 'provider': state.get('provider', 'oda'),
             'note': 'List checks and personal extras do not change pantry facts, product plans or carts. Changed quantities reopen checked rows. Record stock explicitly before preparing an order.'}
 
 
 def _page(value, request):
+    language = request.get('language') or value.get('display_language') or 'nb'
+    from recipe_languages import language_tag
+    from recipes import RecipeError
+    try:
+        language_tag(language)
+    except RecipeError as exc:
+        raise HouseholdError(str(exc)) from exc
     offset, limit = request.get('offset', 0), request.get('limit', 12)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
         raise HouseholdError('shopping list pages require offset >= 0 and limit from 1 to 20')
@@ -137,13 +144,14 @@ def _page(value, request):
                   next_offset=offset + limit if offset + limit < len(value['items']) else None)
     lines = []
     for row in rows:
-        quantity = row.get('quantity')
-        if isinstance(quantity, Mapping):
-            number = Fraction(quantity['numerator'], quantity['denominator'])
-            quantity = str(number.numerator) if number.denominator == 1 else str(float(number))
-        measure = ' '.join(str(part) for part in (quantity, row.get('unit')) if part is not None)
+        measure = display_amount(row.get('quantity'), row.get('unit'), language)
+        if measure is not None:
+            row['display_amount'] = measure
+        elif row.get('quantity') is None and row.get('unit'):
+            measure = str(row['unit'])
         lines.append(f"[{'x' if row['checked'] else ' '}] {row['item']}" + (f' — {measure}' if measure else ''))
     result['text'] = '\n'.join(lines)
+    result['display_language'] = language
     return result
 
 

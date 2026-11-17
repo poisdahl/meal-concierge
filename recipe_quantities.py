@@ -96,6 +96,72 @@ def quantity_text(value: Any) -> str:
     return str(number.numerator) if number.denominator == 1 else f"{number.numerator}/{number.denominator}"
 
 
+def display_amount(value: Any, unit: Any = None, language: str | None = None) -> str | None:
+    """Exact presentation only: mixed counts, short decimals and localized units.
+
+    Never round, change the measurement convention or infer an unknown amount.
+    Callers add this as display_amount; canonical amount/raw/quantity stay intact.
+    """
+    try:
+        number = read_quantity(value, legacy_float=True)
+    except ValueError:
+        return None
+    family = language.split("-")[0] if isinstance(language, str) else "nb"
+    name = normalized_unit(unit)
+    dimension = UNITS.get(name, (None, None))[0]
+    counts = {"count", "clove", "stalk", "package", "drop", "pinch", "handful", "slice", "bunch", "pot", "sheet", "thumb"}
+    whole, remainder = divmod(number.numerator, number.denominator)
+    shown = str(whole) if not remainder else (f"{whole} " if whole else "") + f"{remainder}/{number.denominator}"
+    if remainder and dimension not in counts:
+        denominator, twos, fives = number.denominator, 0, 0
+        while denominator % 2 == 0:
+            denominator //= 2
+            twos += 1
+        while denominator % 5 == 0:
+            denominator //= 5
+            fives += 1
+        places = max(twos, fives)
+        if denominator == 1 and places <= 6:
+            scaled = number.numerator * (10 ** places // number.denominator)
+            digits = str(scaled).rjust(places + 1, "0")
+            separator = "," if family in {"nb", "nn", "no", "sv", "da"} else "."
+            shown = digits[:-places] + separator + digits[-places:]
+    if family in {"en", "nb", "nn", "no"}:
+        english = family == "en"
+        labels = {
+            "count": ("piece", "pieces") if english else ("stk", "stk"),
+            "clove": ("clove", "cloves") if english else ("fedd", "fedd"),
+            "stalk": ("stalk", "stalks") if english else ("stilk", "stilker"),
+            "package": ("package", "packages") if english else ("pakke", "pakker"),
+            "drop": ("drop", "drops") if english else ("dråpe", "dråper"),
+            "pinch": ("pinch", "pinches") if english else ("klype", "klyper"),
+            "handful": ("handful", "handfuls") if english else ("håndfull", "håndfuller"),
+            "slice": ("slice", "slices") if english else ("skive", "skiver"),
+            "bunch": ("bunch", "bunches") if english else ("bunt", "bunter"),
+            "pot": ("pot", "pots") if english else ("potte", "potter"),
+            "sheet": ("sheet", "sheets") if english else ("ark", "ark"),
+            "thumb": ("thumb", "thumbs") if english else ("tommel", "tomler"),
+        }
+        if dimension in labels:
+            name = labels[dimension][number > 1]
+        elif name in UNITS:
+            if UNITS[name] == ("ml", Fraction(5)):
+                name = "tsp" if english else "ts"
+            elif UNITS[name] == ("ml", Fraction(15)):
+                name = "tbsp" if english else "ss"
+            elif name in {"metric cup", "metrisk kopp"}:
+                name = "metric cup" if english else "metrisk kopp"
+            elif name in {"us cup", "amerikansk kopp"}:
+                name = "US cup" if english else "amerikansk kopp"
+            elif name in {"us liquid quart", "amerikansk væskekvart"}:
+                name = "US liquid quart" if english else "amerikansk væskekvart"
+            elif name not in {"oz", "lb"}:
+                name = {Fraction(1, 1000): "mg", Fraction(1): dimension,
+                        Fraction(10): "cl", Fraction(100): "dl",
+                        Fraction(1000): "kg" if dimension == "g" else "l"}.get(UNITS[name][1], name)
+    return (shown + " " + name).strip()
+
+
 def parse_measure(value: str, *, numeric: bool = False) -> tuple[dict[str, int] | None, str | None]:
     """Read an unambiguous source amount and unit without interpreting prose.
 
