@@ -93,6 +93,13 @@ class IngredientDecision(TypedDict):
     unit: NotRequired[str]
 
 
+class StockAnswer(TypedDict):
+    requirement_id: str
+    action: Literal["have_all", "have_quantity", "include", "omit"]
+    quantity: NotRequired[dict[str, int] | int | float | str]
+    unit: NotRequired[str]
+
+
 class CartOperation(TypedDict):
     product_id: str | int
     quantity: int  # Signed package delta: positive adds, negative removes.
@@ -651,9 +658,9 @@ def meal_concierge_products(
     return _agent_text(result if result.get("projection") == "agent" else _bounded_product_result(result))
 
 
-@server.tool(structured_output=False, description="Read a general shopping list without store login. get is local and never starts product searches. Lists share the saved menu's exact portion, batch and recorded pantry calculations with ordering; unresolved ingredients stay visible. update/refresh require the exact current list_ref. extra_items replaces all personal extras with {id,item,quantity?,unit?}; preserve unrelated extras, using returned extra_id as input id (row id is for checks). checked_items maps returned row ids to booleans; checks never change pantry or cart, and changed quantities and unrelated new menus reopen rows. refresh acknowledges current menu changes while preserving extras. Explicit match requires a connected store account and uses ordinary guarded products.prepare with include_recurring=false. It only reads the retailer, but stores local product-review state; never match merely to display a list. It returns bounded product_result and product_plan_ref; use products.get for later pages and products.prepare for returned continuations. Match covers menu ingredients only: personal extras and recurring items are excluded from the estimate. Retailer prices/availability do not describe another physical shop. Use explicit record_ingredients for pantry facts. Ordering remains the normal separately requested products.apply/checkout flow; list checks and catalog suggestions authorize neither.")
+@server.tool(structured_output=False, description="Read a general shopping list without store login. get is local and never starts product searches. stock_check covers the whole menu with grouped totals, pantry/optional flags, recorded-answer status and pending_count; follow its next_offset for bounded pages before one combined question. Reuse already answered sources. record_stock requires the current stock_ref and stock_answers by requirement_id with action have_all, have_quantity, include or omit (optional only). Partial stock is the total available for that ingredient, allocated once across sources; only have_quantity accepts quantity/unit. This replaces older stock for the answered ingredient, preserves unrelated answers and changes no cart. Unchanged exact preparation/source/amount answers survive menu successors; changed ones are reported as dropped. Lists share the saved menu's exact portion, batch and recorded pantry calculations with ordering; unresolved ingredients stay visible. update/refresh require the exact current list_ref. extra_items replaces all personal extras with {id,item,quantity?,unit?}; preserve unrelated extras, using returned extra_id as input id (row id is for checks). checked_items maps returned row ids to booleans; checks never change pantry or cart, and changed quantities and unrelated new menus reopen rows. refresh acknowledges current menu changes while preserving extras. Explicit match requires a connected store account and uses ordinary guarded products.prepare with include_recurring=false. It only reads the retailer, but stores local product-review state; never match merely to display a list. It returns bounded product_result and product_plan_ref; use products.get for later pages and products.prepare for returned continuations. Match covers menu ingredients only: personal extras and recurring items are excluded from the estimate. Retailer prices/availability do not describe another physical shop. Use explicit record_ingredients for pantry facts. Ordering remains the normal separately requested products.apply/checkout flow; list checks and catalog suggestions authorize neither.")
 def meal_concierge_shopping_list(
-    action: Literal["get", "update", "refresh", "match"] = "get",
+    action: Literal["get", "update", "refresh", "match", "record_stock"] = "get",
     list_ref: str | None = None,
     extra_items: list[dict[str, Any]] | None = None,
     checked_items: dict[str, bool] | None = None,
@@ -664,10 +671,13 @@ def meal_concierge_shopping_list(
     offset: Annotated[int, Field(ge=0)] = 0,
     limit: Annotated[int, Field(ge=1, le=20)] = 8,
     language: str | None = None,
+    stock_ref: str | None = None,
+    stock_answers: Annotated[list[StockAnswer], Field(max_length=64)] | None = None,
 ) -> Any:
     arguments = {"action": action, "list_ref": list_ref, "extra_items": extra_items,
                  "checked_items": checked_items, "candidate_approvals": candidate_approvals,
-                 "product_plan_ref": product_plan_ref, "offset": offset, "limit": limit, "language": language}
+                 "product_plan_ref": product_plan_ref, "offset": offset, "limit": limit, "language": language,
+                 "stock_ref": stock_ref, "stock_answers": stock_answers}
     if action == "match":
         arguments.update(continuation_mode=continuation_mode, price_mode=price_mode)
     return _agent_text(rpc("shopping_list", **{key: value for key, value in arguments.items() if value is not None}))
