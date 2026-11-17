@@ -174,7 +174,7 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
                authorization: str | None = None,
                search_api_key: str | None = None,
                accept: str = "application/json, text/html, application/xhtml+xml",
-               json_body: dict | None = None) -> tuple[bytes, str]:
+               json_body: dict | None = None, public_product_validator: dict | None = None) -> tuple[bytes, str]:
     """Fixed-origin GET. Only an independently configured origin permits private IPs."""
     checked = _url(url, "source URL")
     if not checked:
@@ -217,6 +217,16 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
     if port != (443 if parsed.scheme == "https" else 80):
         authority += f":{port}"
     headers = {"Host": authority, "Accept": accept, "Accept-Encoding": "identity", "User-Agent": "meal-concierge/source-import-v1"}
+    if public_product_validator is not None:
+        # Validators only apply to anonymous retailer detail reads.
+        if (configured_origin is not None or authorization or search_api_key or json_body is not None
+                or not re.fullmatch(r"https://(?:oda\.com/no|www\.mathem\.se/se)/products/[1-9][0-9]{0,19}(?:-[A-Za-z0-9._~-]+)?/", checked)):
+            raise RecipeImportSourceError("invalid public product validator destination")
+        tag = public_product_validator.get("if_none_match")
+        if tag is not None:
+            if not isinstance(tag, str) or not re.fullmatch(r'"[!#-~]{1,128}"', tag):
+                raise RecipeImportSourceError("invalid public product validator")
+            headers["If-None-Match"] = tag
     if checked.startswith("https://www.matprat.no/api/ContentSearch/Search?"):
         # The publisher's public search requires its own search-page referrer.
         headers["Referer"] = "https://www.matprat.no/sok/"
@@ -236,6 +246,13 @@ def _get_bytes(url: str, *, maximum: int, configured_origin: str | None = None,
         else:
             connection.request("POST", path, body=_wire_json(json_body), headers=headers)
         response = connection.getresponse()
+        if public_product_validator is not None:
+            tags = response.headers.get_all("ETag", [])
+            if len(tags) == 1 and re.fullmatch(r'"[!#-~]{1,128}"', tags[0]):
+                public_product_validator["etag"] = tags[0]
+            if response.status == 304 and headers.get("If-None-Match") and public_product_validator.get("etag") == headers["If-None-Match"]:
+                public_product_validator["unchanged"] = True
+                return b"", ""
         if 300 <= response.status < 400:
             # Only a plain public page read reports where its own site moved it.
             plain = configured_origin is None and search_header is None and json_body is None

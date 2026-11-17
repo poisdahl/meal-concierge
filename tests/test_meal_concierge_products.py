@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -943,6 +944,24 @@ class ProductPlannerTests(unittest.TestCase):
         self.assertEqual(len(requirements), 1)
         self.assertEqual(requirements[0]["quantity"], {"numerator": 10, "denominator": 1})
         self.assertEqual(requirements[0]["confirmed_pantry_quantity"], {"numerator": 140, "denominator": 1})
+
+    def test_source_stock_decisions_preserve_unanswered_units_without_double_counting(self):
+        value = menu({"item": "garlic", "quantity": 100, "unit": "g"},
+                     {"item": "garlic", "quantity": 100, "unit": "g"},
+                     {"item": "garlic", "quantity": 30, "unit": "ml"})
+        value["available_ingredients"] = [{"item": "garlic", "quantity": 70, "unit": "g"}]
+        source = {"collection": "dishes", "recipe_index": 0}
+        for position, action, fields, expected in (
+            (2, "include", {}, {"g": 130, "ml": 30}),
+            (0, "have_quantity", {"quantity": 40, "unit": "g"}, {"g": 130, "ml": 30}),
+            (0, "include", {}, {"g": 130, "ml": 30}),
+            (0, "have_all", {}, {"g": 100, "ml": 30}),
+        ):
+            with self.subTest(position=position, action=action):
+                rows, issues = menu_requirements(value, ingredient_decisions=[
+                    {"source": {**source, "ingredient_index": position}, "action": action, **fields}])
+                self.assertEqual(issues, [])
+                self.assertEqual({r["unit"]: r["quantity"]["numerator"] for r in rows}, expected)
 
     def test_fresh_form_is_not_erased_for_yeast_pasta_or_herbs(self):
         for fresh, plain in (("fersk gjær", "gjær"), ("fersk pasta", "pasta"), ("fersk koriander", "koriander")):
@@ -2107,12 +2126,8 @@ class ProductRuntimeTests(unittest.TestCase):
             }],
         })
         original_prepare = self.app._prepare_products
-        prepare_calls = 0
-
         def drift_before_full_validation(**kwargs):
-            nonlocal prepare_calls
-            prepare_calls += 1
-            if prepare_calls == 3:
+            if kwargs.get("work") is not None:
                 apple["purchase_options"][0].update(
                     merchandise_ore=400, total_payable_ore=400,
                 )
@@ -2236,6 +2251,49 @@ class ProductRuntimeTests(unittest.TestCase):
             [[item["quantity"] for item in batch] for batch in batches], [[2], [1]]
         )
         self.assertEqual(provider.cart["items"][0]["quantity"], 3)
+
+    def test_managed_meny_lost_reply_fences_late_batch_across_restart(self):
+        provider = MenyFixtureProvider()
+        reference = provider.milk["product_ref"]
+        with tempfile.TemporaryDirectory() as temp:
+            store = StateStore(Path(temp), {"instance": "test", "household": "Test", "provider": "meny"})
+            menu_value = {**self.menu, "dishes": [{"shopping_requirements": [{
+                "item": "Lettmelk", "quantity": 4, "unit": "l", "scalable": True}]}]}
+            with store.locked() as state:
+                state["menu"] = deepcopy(menu_value)
+            browser = mock.Mock()
+            provider.verify_order_change = browser.verify_order_change
+            app = Application(store, provider, browser)
+            requirement, = menu_requirements(menu_value)[0]
+            prepared = app.handle({"operation": "products", "action": "prepare",
+                "menu_ref": app._cart_menu_ref(menu_value), "candidate_approvals": [
+                    {"requirement_id": requirement["requirement_id"], "candidate_refs": [reference]}]})
+            original = provider.call
+            attempted = []
+            def delayed(tool, args, **kwargs):
+                if tool == "manipulate_cart":
+                    attempted.append(deepcopy(args))
+                    if len(attempted) == 2:
+                        raise HouseholdError("response lost before observation")
+                return original(tool, args, **kwargs)
+            provider.call = delayed
+            request = {"operation": "products", **prepared["apply_arguments"], "cart_change_requested": True}
+            result = app.handle(request)
+            self.assertTrue(result["outcome_unknown"])
+            journal = store.read()["pending_cart_change"]
+            self.assertEqual(journal["acknowledged"], {reference: 2})
+            self.assertEqual(journal["expected"], {reference: 4})
+            app = Application(store, provider, browser)
+            self.assertEqual(app.handle(request)["operation_id"], journal["operation_id"])
+            with self.assertRaises(HouseholdError):
+                app.handle({"operation": "cart", "action": "reconcile_change"})
+            self.assertEqual(store.read()["pending_cart_change"], journal)
+            original("manipulate_cart", attempted[1])
+            result = app.handle({"operation": "cart", "action": "reconcile_change"})
+            self.assertTrue(result["reconciled"])
+            self.assertFalse(store.read().get("pending_cart_change"))
+            self.assertEqual(store.read()["cart_plan"]["added_quantities"], {reference: 2})
+            self.assertEqual(len(attempted), 2)
 
     def test_meny_apply_stops_remaining_batches_on_intermediate_cart_change(self):
         provider = MenyFixtureProvider()

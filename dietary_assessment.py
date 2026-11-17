@@ -264,7 +264,7 @@ def read_oda_product_evidence(reference, deadline=None):
     return read_retail_product_evidence(reference, deadline, provider='oda')
 
 
-def read_retail_product_evidence(reference, deadline=None, *, provider):
+def read_retail_product_evidence(reference, deadline=None, *, provider, previous=None, validator=None):
     """Unauthenticated public detail, bound to one provider product ID and origin."""
     import http.client
     import threading
@@ -275,6 +275,21 @@ def read_retail_product_evidence(reference, deadline=None, *, provider):
     if not re.fullmatch(r'[1-9][0-9]{0,19}', str(reference)):
         raise HouseholdError(f'{provider} dietary detail needs an exact product ID')
     url = f'https://{host}/{region}/products/{reference}/'
+    if previous is not None:
+        # The retained location was bound to this exact numeric identity on
+        # the previous fetch. Revalidate its bytes even on a warm checkout.
+        url = previous["source_url"]
+        if deadline is not None and time.monotonic() + TIMEOUT > deadline:
+            return {"source_url": url, "unavailable": "detail_time_budget_exhausted"}
+        try:
+            raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, public_product_validator=validator)
+            if validator.get("unchanged"):
+                return deepcopy(previous)
+            if content_type == "text/html":
+                return parse_retail_product_page(raw, url, provider=provider)
+        except (OSError, http.client.HTTPException, RecipeImportSourceError, ValueError, HouseholdError):
+            pass
+        return {"source_url": url, "unavailable": "exact_public_product_detail_unavailable"}
     if deadline is not None and time.monotonic() + 2 * TIMEOUT > deadline:
         return {'source_url': url, 'unavailable': 'detail_time_budget_exhausted'}
     connection = _PinnedConnection(host, 443, tls=True, public_only=True)
@@ -297,7 +312,7 @@ def read_retail_product_evidence(reference, deadline=None, *, provider):
         response.close()
         connection.close()
         timer.cancel()
-        raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024)
+        raw, content_type = _get_bytes(url, maximum=2 * 1024 * 1024, public_product_validator=validator)
         if content_type != 'text/html':
             raise HouseholdError('Product detail is not HTML')
         return parse_retail_product_page(raw, url, provider=provider)

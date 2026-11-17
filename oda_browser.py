@@ -2205,8 +2205,17 @@ class OdaBrowser:
  if(location.href===CART){
    const main=document.querySelector('main');
    roots=[main||document];
-   const message=stockMessage(main||document.body);
-   if(message)return JSON.stringify({action:'blocked',unavailable_message:message});
+   const cartRoot=main||document.body;
+   const candidates=[...cartRoot.querySelectorAll('[role="alert"],[role="alertdialog"],li,article')].filter(visible);
+   // The flat acknowledgement lists the heading, item and removal direction.
+   // Newsletter, footer and ancillary service availability are outside the goods review.
+   const lines=(cartRoot.innerText||'').split(/\n+/).map(norm);
+   for(let i=0;i<lines.length;i++){
+     if(/^(?:Du må fjerne noen varer fra handlekurven|Du måste ta bort .*varor .*varukorgen)/i.test(lines[i])){
+       candidates.push({innerText:lines.slice(i,i+4).join('\n')});
+     }
+   }
+   for(const node of candidates){const message=stockMessage(node);if(message)return JSON.stringify({action:'blocked',unavailable_message:message});}
  }else{
    const candidates=dialogs.length?dialogs:(storefrontLinkOnly?[document]:[]);
    roots=candidates.filter(root=>{

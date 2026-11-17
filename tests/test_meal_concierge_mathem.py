@@ -336,6 +336,48 @@ class MathemDietaryDetailTests(unittest.TestCase):
                     else:
                         self.assertIn('unavailable', result); fetch.assert_not_called()
 
+    def test_strong_validators_reduce_detail_reads_and_never_reuse_changed_or_expired_data(self):
+        from email.message import Message
+        import time
+        from recipe_import_sources import _PinnedConnection
+        tag = '"original"'
+        body = self.HTML
+        methods = []
+        def connection(*args, **kwargs):
+            transport = mock.MagicMock(spec=_PinnedConnection)
+            transport.sock = None
+            transport._deadline = time.monotonic() + 5
+            def respond():
+                method, path = transport.request.call_args.args
+                headers = transport.request.call_args.kwargs.get("headers", {})
+                methods.append((method, path, headers.get("If-None-Match")))
+                response = mock.Mock()
+                response.headers = Message()
+                response.headers["Content-Type"] = "text/html"
+                response.headers["ETag"] = tag
+                response.status = 304 if headers.get("If-None-Match") == tag else 200
+                response.read1.side_effect = [body, b""]
+                return response
+            transport.getresponse.side_effect = respond
+            return transport
+        with tempfile.TemporaryDirectory() as root, mock.patch('recipe_import_sources._PinnedConnection', side_effect=connection):
+            client = RetailMcpClient(root, provider="mathem")
+            original = client.product_dietary_evidence("4694")
+            self.assertEqual(client.product_dietary_evidence("4694"), original)
+            self.assertEqual([m[0] for m in methods], ["HEAD", "GET", "GET"])
+            self.assertEqual(methods[-1][2], tag)
+            tag, body = '"changed"', self.HTML.replace(b'DURUMVETE', b'RICE')
+            changed = client.product_dietary_evidence("4694")
+            self.assertIn("RICE", changed["ingredients"])
+            client._detail_cache[("mathem", "4694")] = (time.monotonic() - 301, tag, changed)
+            client.product_dietary_evidence("4694")
+            self.assertEqual([m[0] for m in methods[-2:]], ["HEAD", "GET"])
+            self.assertIsNone(methods[-1][2])
+            separate = RetailMcpClient(root, provider="oda")
+            separate.product_dietary_evidence("4694")
+            self.assertEqual(methods[-1][1], "/no/products/4694/")
+            self.assertIsNone(methods[-1][2])
+
     def test_missing_duplicate_and_script_rows_do_not_become_evidence(self):
         from dietary_assessment import parse_retail_product_page
         raw = b'<script>Allergener\nmilk</script><div>Ingredienser</div><div>x</div><div>Ingredienser</div><div>y</div>'

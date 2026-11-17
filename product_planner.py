@@ -461,8 +461,6 @@ def normalize_approvals(value: Any, requirement_ids: set[str]) -> dict[str, dict
             count, basis = raw.get("package_count"), raw.get("quantity_basis")
             if len(refs) != 1 or type(count) is not int or not 1 <= count <= MAX_PACKAGES_PER_REQUIREMENT or not isinstance(basis, str) or not 1 <= len(basis.strip()) <= 600:
                 raise HouseholdError("practical package choice needs one exact candidate, bounded package_count and quantity_basis")
-            if raw.get("max_excess") is not None:
-                raise HouseholdError("practical package coverage cannot claim an exact maximum excess")
             approval.update(package_count=count, quantity_basis=basis.strip())
         if raw.get("max_excess") is not None:
             maximum = _read_fraction(raw["max_excess"])
@@ -946,7 +944,8 @@ def _practical_packages(requirement, observation, approval, price_mode):
     required = _read_fraction(requirement['quantity'], positive=True)
     measured = size is not None and not re.search(r'\b(?:drained|avrent)\b', requirement.get('item', ''), re.I)
     coverage = count * size if measured and 'shared_package' not in approval else None
-    if 'max_excess' in approval and (coverage is None or coverage - required > _read_fraction(approval['max_excess'])):
+    if 'max_excess' in approval and (coverage is None or package.get('quantity_kind') in {'minimum', 'expected'}
+            or (coverage - required) / required > _read_fraction(approval['max_excess'])):
         return None
     if size is not None and count * size < required:
         return None  # Even the full observed package cannot cover this amount.
@@ -1198,6 +1197,7 @@ def build_product_plan(
         # the declared shared count must cover their sum. Other dimensions rely
         # on the user's explicit bounded culinary quantity_basis, just like the
         # existing practical-package contract.
+        group_warning = None
         if valid_group:
             units = {row.get("unit") for row in rows}
             package = selections[0].get("observed_package")
@@ -1209,7 +1209,13 @@ def build_product_plan(
                         (_read_fraction(row["quantity"], positive=True) for row in rows),
                         Fraction(0),
                     )
-                    valid_group = shared["package_count"] * size >= required
+                    coverage = shared["package_count"] * size
+                    valid_group = coverage >= required
+                    if coverage > 2 * required and not any(
+                            re.search(r"\b(?:drained|avrent)\b", row.get("item", ""), re.I) for row in rows):
+                        group_warning = {"reason": "oversized_package", "unit": unit,
+                            "required": _fraction_json(required), "coverage": _fraction_json(coverage),
+                            "next": "Review a smaller pack or explain the surplus across the shared requirements."}
         if not valid_group:
             for row in rows:
                 if isinstance(row, dict) and row.get("status") == "selected":
@@ -1230,6 +1236,8 @@ def build_product_plan(
         for row, selection in zip(rows, selections):
             selection["shared_package_allocation"] = deepcopy(allocation)
             selection["counts_toward_cart_and_totals"] = row["requirement_id"] == owner
+            if group_warning and row["requirement_id"] == owner:
+                selection.setdefault("quantity_warnings", []).append(group_warning)
         allocated_refs.add(reference)
 
     # An exact SKU selected for several compatible requirements is one stock
