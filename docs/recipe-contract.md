@@ -1,7 +1,7 @@
 # Versioned culinary document contract
 
 Recipe document versions and SQLite versions are separate. The culinary
-document uses schema 2; bank origin metadata uses SQLite schema 6. Stored schema-1 documents,
+document uses schema 2; bank origin metadata uses SQLite schema 7 (schema 6 introduced origins; schema 7 adds publisher-status provenance). Stored schema-1 documents,
 revisions, discovery references and digests are decoded by their original rules;
 reads do not migrate them. Unversioned legacy text-only requests retain schema 1.
 New producers specify `schema_version: 2`; supplying a new typed field also

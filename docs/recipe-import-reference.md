@@ -439,7 +439,7 @@ references retain the same digest.
 `export_private_archive(destination, store)` exports one coherent recipe snapshot
 from an explicit `RecipeStore`. Its caller holds the installation's offline
 ownership locks throughout the database and asset reads. It opens SQLite directly
-in read-only mode and checks the exact household and schema 6 internally. It
+in read-only mode and checks the exact household and bank schema 6 or 7 internally. It
 does not migrate, clean up or checkpoint the source. The current rollback-journal
 bank is supported; WAL mode or a nonempty journal fails explicitly because a
 read-only WAL connection can create source-side shared-memory files.
@@ -468,8 +468,8 @@ The private manifest has exactly `format: meal-concierge-recipes`,
 `format_version: 1`, `kind: private`, `private_schema_version`, `recipes_count`,
 `records_count` and `files`. Private schema 1 remains readable for archives with
 the original user/bundled/unknown origins. The writer emits private schema 2
-when any entry has collection origin; older runtimes must be updated before
-restoring that archive. Each canonical revision retains its own recipe schema 1
+when any entry has collection origin, or schema 3 when a pack entry carries
+status provenance; older runtimes must be updated before restoring those archives. Each canonical revision retains its own recipe schema 1
 or 2, so there is no single recipe schema version in the manifest. Members are
 `records.jsonl` and managed `assets/<sha256>.jpg` only; shared ZIP framing,
 inventory and path checks still apply.
@@ -482,7 +482,10 @@ Each recipe occupies one contiguous group in the JSONL stream:
   `recipe_id`, `revision`, `status`, `document` and `created_at`.
 
 `pack` is null or `{pack_id, recipe_id, version, baseline_hash}` for bundled or
-collection entries. `favorite` is null if there was never a favorite row; otherwise it holds
+collection entries. In private schema 3, a tracked pack also carries
+`status_provenance: {applied_revision, local_status}`. This distinguishes publisher
+status changes from local status decisions across export and restore.
+`favorite` is null if there was never a favorite row; otherwise it holds
 `is_favorite`, `favorite_revision`, `created_at` and `updated_at`. An explicit
 false favorite retains its revision. The exact stored source key survives,
 including migration identities. The final revision must match the entry's head,
@@ -663,3 +666,15 @@ The returned handoff freezes the combined exact references; save/replay does
 not repeat search. Bounded web search never establishes exhaustive absence for
 automatic AI fallback. Link-only content and webpage instructions must not be
 used as a route around these restrictions.
+
+### Collection status provenance
+
+Recipe bank schema 7 adds importer-owned status provenance without changing any
+stored recipe or revision. Publisher-only active/draft changes no longer become
+local decisions and block later publisher changes. Local status changes after
+the last imported revision remain durable, including across content upgrades.
+Legacy histories without provenance cannot distinguish who made a status-only
+revision: their existing conservative local-intent interpretation is retained.
+The first successful import records provenance for subsequent changes. This does
+not automatically repair previously ambiguous local/publisher decisions. Older
+runtimes reject schema 7; use the pre-update installation backup for a rollback.
