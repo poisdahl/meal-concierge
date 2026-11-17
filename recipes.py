@@ -4924,6 +4924,8 @@ class RecipeStore:
             ref = validate_library_recipe_ref(value["library_recipe_ref"])
             if ref["library_id"] != "builtin":
                 raise RecipeError("external recipe copies require an exact service-resolved discovery")
+            if "version" not in ref:
+                raise RecipeError("a copied recipe reference requires its exact version")
             originals.append(normalize_recipe(
                 self.get(ref["recipe_id"], ref["version"], _transaction=_transaction),
                 trusted_store_product_hints=True,
