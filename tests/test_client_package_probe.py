@@ -104,7 +104,9 @@ class CartRecoveryFixtureTests(unittest.TestCase):
             self.assertEqual(cart["items"][0]["quantity"], 1)
             self.assertNotIn("_fixture", cart)
             failed = self.cli("change", operations=[{"product_id": "10", "quantity": 1}], expected=1)
-            self.assertEqual(failed, {"ok": False, "error": "Provider reply unavailable; cart change outcome is unknown."})
+            self.assertEqual(failed, {"ok": False, "error": "Provider reply unavailable; cart change outcome is unknown.",
+                "status": "outcome_unknown", "outcome": "unknown",
+                "recovery": "Read status and reconcile the original attempt/ref/key before any further write; do not repeat the mutation."})
             for action in ("get", "reconcile_change"):
                 self.assertIn("temporarily unavailable", self.cli(action, expected=1)["error"])
             pending = self.inspect()
