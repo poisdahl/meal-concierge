@@ -778,7 +778,7 @@ def saved_menu_minimum_evaluation(menu: Any, profile: Mapping[str, Any]) -> dict
     planner_request = planner_selection.get("request") if isinstance(planner_selection, Mapping) else None
     scope = menu.get("planning_scope") if isinstance(menu, Mapping) else None
     request = scope if isinstance(scope, Mapping) else planner_request
-    if isinstance(request, Mapping) and request.get("planning_mode") == "ad_hoc" and not request.get("relative_origin") and len(request_days(request)) < 7:
+    if isinstance(request, Mapping) and _partial_period(request, profile):
         explicit = set(request.get("strict_targets", []))
         targets = [target for target in targets if target in explicit]
     agent_mode = isinstance(request, Mapping) and request.get("selection_mode") == "agent"
@@ -1204,9 +1204,19 @@ def planning_dates(value, today, default_count):
     return mode, week, dates
 
 
+def _partial_period(request, profile):
+    """Whether this scope is shorter than the weekly targets describe."""
+    if request.get("planning_mode") == "ad_hoc" and not request.get("relative_origin"):
+        return len(request_days(request)) < 7
+    if request.get("planning_mode") == "relative" or request.get("relative_origin"):
+        expected = (profile.get("meals") or {}).get("dinner_days", 7)
+        return type(expected) is int and len(request_days(request)) < expected
+    return False
+
+
 def period_profile(profile, request):
-    """A short ad-hoc plan cannot certify a household's full-week quotas."""
-    if request.get("planning_mode") != "ad_hoc" or len(request_days(request)) >= 7:
+    """A short dated or relative plan cannot certify full-week quotas."""
+    if not _partial_period(request, profile):
         return profile
     result = deepcopy(profile)
     explicit = set(request.get("strict_targets", []))
@@ -1326,11 +1336,17 @@ def plan_week(
     dinner_days = meals.get("dinner_days") if isinstance(meals, Mapping) else None
     diet = profile.get("diet") if isinstance(profile, Mapping) else None
     agent_mode = checked.get("selection_mode") == "agent"
-    if not agent_mode and type(dinner_days) is int and len(request_days(checked)) == dinner_days and isinstance(diet, Mapping):
+    complete_period = (
+        checked.get("planning_mode") in {"ad_hoc", "relative"} and not _partial_period(checked, profile)
+        or type(dinner_days) is int and len(request_days(checked)) == dinner_days
+    )
+    if not agent_mode and complete_period and isinstance(diet, Mapping):
         saved_minima = {
             target for target in SAVED_MINIMUM_TARGETS
             if type(diet.get(target)) is int and diet[target] > 0
         }
+        if diet.get("leafy_green_days"):
+            saved_minima.add("leafy_green_days")
         checked["strict_targets"] = sorted(set(checked["strict_targets"]) | saved_minima)
     if not isinstance(history, Mapping) or len(history) > MAX_HISTORY_RECORDS:
         raise PlannerError(f"planner history exceeds {MAX_HISTORY_RECORDS} records")

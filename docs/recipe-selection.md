@@ -5,7 +5,8 @@ Ordinary plans accept `planning_mode="ad_hoc"` and exact dates or
 calendar weeks and include up to seven eating dates. Without an explicit week,
 ad-hoc is the default; explicit weekly requests preserve calendar behavior.
 The saved scope retains those dates and relative batch sessions. Short plans
-do not automatically inherit full-week numeric quotas; explicit strict targets
+do not automatically inherit full-week numeric quotas; relative day-number plans
+shorter than the household's usual dinner count follow the same policy. Explicit strict targets
 remain enforced and saved dietary preferences still guide the agent.
 
 For ordinary open-ended planning, the host model compares a bounded candidate
@@ -25,6 +26,11 @@ settings. Numeric goals are assessed but advisory unless named in `strict_target
 Dietary hard rules, cooldown, source binding and readiness remain enforced.
 The automatic collection/ranking behavior below remains available in `ranked`
 mode and to clients that omit `selection_mode`.
+
+For a complete ranked period, saved positive numeric minima and the saved
+leafy-green dinner range are checked before returning a save reference. Missing
+evidence returns `needs_input`; a known infeasible set returns `no_plan`. Saving
+the unchanged result uses the same minimum policy.
 
 `recipe_selection.py` supplies the compact projection, source-family grouping,
 context queries, bounded retrieval and shortlist used by automatic selection.
