@@ -182,6 +182,10 @@ def _oda_ore(value: Any) -> int | None:
 
 
 def _fraction(value: str) -> Fraction | None:
+    # In store display text, 1.000 / 1,000 can mean one or one thousand.
+    # Neither reading is exact package evidence without a declared numeric format.
+    if re.fullmatch(r"[1-9][0-9]{0,2}[.,][0-9]{3}", value):
+        return None
     try:
         decimal = Decimal(value.replace(",", "."))
     except InvalidOperation:
