@@ -19,6 +19,7 @@ import secrets
 import time
 from typing import Any, Mapping
 from core import HouseholdError, cart_contents, cart_summary
+from retail_mcp import RetailPreDispatchError
 from meny import MAX_CART_CLICKS, MENY_CART_TIMEOUT, MenyBrowserError, MenyCartStoppedError
 from recipes import RecipeError, normalize_recipe, prepare_recipe_input, validate_recipe_image, recipe_key, scale_recipe, validate_week
 from recipes import recipe_provider_problem, RECIPE_CATEGORIES
@@ -5657,6 +5658,15 @@ class PlanningOperations:
                     arguments["order_change_code"] = change["code"]
                 try:
                     self.provider_client.call("manipulate_cart", arguments, deadline=deadline)
+                except RetailPreDispatchError:
+                    # Only our local transport boundary can prove this call
+                    # never entered the retailer transport. Generic errors,
+                    # refusals and an unchanged cart do not prove non-dispatch.
+                    if self.provider in {"oda", "mathem"}:
+                        with self.store.locked() as locked:
+                            if canonical(locked.get("pending_cart_change")) == canonical(pending):
+                                locked.pop("pending_cart_change")
+                    raise
                 except MenyCartStoppedError as exc:
                     acknowledged = dict(before)
                     for item in exc.applied_operations:
