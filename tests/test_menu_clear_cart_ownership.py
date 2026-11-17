@@ -45,6 +45,22 @@ class MenuClearCartOwnershipTests(unittest.TestCase):
             self.assertEqual(successor["baseline_quantities"], {"10":2})
             self.assertEqual(successor["added_quantities"], {"10":2})
 
+    def test_manual_removal_cannot_convert_the_last_baseline_unit_into_menu_ownership(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store, shop, _browser, app, product = fixtures.CartPlanTests.app(directory, "oda")
+            self.assertTrue(fixtures.CartPlanTests.sync(app, product, 3)["synced"])
+            ref = app._cart_menu_ref(store.read()["menu"])
+            shop._mutate_cart({"operations": [{"productId": 10, "quantity": -2}]})
+            digest = app.handle({"operation": "cart", "action": "get"})["cart_digest"]
+            app.handle({"operation": "cart", "action": "reconcile", "menu_ref": ref,
+                        "cart_digest": digest, "decision": "keep_current"})
+            plan = store.read()["cart_plan"]
+            self.assertEqual(plan["added_quantities"], {})
+            successor = app._new_cart_plan({**ref, "revision": ref["revision"] + 1}, {product: 1},
+                {product: "Pasta"}, {}, {}, set(), previous=plan)
+            self.assertEqual(successor["baseline_quantities"], {product: 1})
+            self.assertEqual(app._cart_target(successor), {product: 1})
+
     def test_clear_preserves_ledger_across_restart_and_next_menu(self):
         for provider_name in ('oda', 'mathem', 'meny'):
             with self.subTest(provider=provider_name), tempfile.TemporaryDirectory() as directory:
