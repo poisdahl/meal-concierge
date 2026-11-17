@@ -72,6 +72,7 @@ CATEGORY_ALIASES = {
     "condiments": "condiment", "preserves": "preserve", "syltetøy": "preserve",
 }
 SERVER_FIELDS = {
+    "label_review",
     "id", "revision", "status", "created_at", "updated_at", "created_via",
     "recipe_key", "content_fingerprint", "content_hash", "shopping_requirements",
     "library_id", "library_recipe_ref", "is_favorite", "favorite_revision",
@@ -1040,6 +1041,14 @@ def normalize_recipe(
     return result
 
 
+def _normalize_stored_revision(value: Mapping[str, Any], review_fields: list[str] | None = None) -> dict[str, Any]:
+    token = _stored_label_review.set(review_fields if review_fields is not None else [])
+    try:
+        return normalize_recipe(value, trusted_store_product_hints=True)
+    finally:
+        _stored_label_review.reset(token)
+
+
 def _stored_recipe_document(value: Any, *, review_fields: list[str] | None = None) -> dict[str, Any]:
     try:
         decoded = json.loads(value)
@@ -1047,13 +1056,10 @@ def _stored_recipe_document(value: Any, *, review_fields: list[str] | None = Non
         raise RecipeError("recipe bank is unavailable") from exc
     if not isinstance(decoded, Mapping):
         raise RecipeError("recipe bank is unavailable")
-    token = _stored_label_review.set(review_fields if review_fields is not None else [])
     try:
-        normalized = normalize_recipe(decoded, trusted_store_product_hints=True)
+        normalized = _normalize_stored_revision(decoded, review_fields)
     except RecipeError as exc:
         raise RecipeError("recipe bank is unavailable") from exc
-    finally:
-        _stored_label_review.reset(token)
     if _canonical(normalized) != _canonical(decoded):
         raise RecipeError("recipe bank is unavailable")
     return normalized
@@ -1151,9 +1157,7 @@ def _prior_evidence_paths(recipe: Mapping[str, Any], prior: Mapping[str, Any] | 
 
 def prepare_recipe_input(value: Any, *, prior: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Validate caller/import authority once, separately from stored decoding."""
-    prior = normalize_recipe(
-        prior, trusted_store_product_hints=True,
-    ) if prior is not None else None
+    prior = _normalize_stored_revision(prior) if prior is not None else None
     if prior is not None and prior["schema_version"] == 2 and isinstance(value, Mapping) and value.get("schema_version") == 1:
         raise RecipeError("an update cannot downgrade schema 2 or discard its evidence")
     if isinstance(value, Mapping) and prior is not None:
@@ -5069,23 +5073,19 @@ class RecipeStore:
             raise RecipeError("recipe must be an object")
         originals = []
         if prior is not None:
-            originals.append(normalize_recipe(
-                prior, trusted_store_product_hints=True,
-            ))
+            originals.append(_normalize_stored_revision(prior))
         reference = value.get("recipe_ref")
         if isinstance(reference, Mapping):
             if set(reference) != {"id", "revision"}:
                 raise RecipeError("copied recipe_ref must contain an exact id and revision")
-            originals.append(normalize_recipe(
+            originals.append(_normalize_stored_revision(
                 self.get(reference["id"], reference["revision"], _transaction=_transaction),
-                trusted_store_product_hints=True,
             ))
         if value.get("id") is not None:
             if value.get("revision") is None:
                 raise RecipeError("copied recipe id requires its exact revision")
-            originals.append(normalize_recipe(
+            originals.append(_normalize_stored_revision(
                 self.get(value["id"], value["revision"], _transaction=_transaction),
-                trusted_store_product_hints=True,
             ))
         if value.get("library_recipe_ref") is not None:
             ref = validate_library_recipe_ref(value["library_recipe_ref"])
@@ -5093,9 +5093,8 @@ class RecipeStore:
                 raise RecipeError("external recipe copies require an exact service-resolved discovery")
             if "version" not in ref:
                 raise RecipeError("a copied recipe reference requires its exact version")
-            originals.append(normalize_recipe(
+            originals.append(_normalize_stored_revision(
                 self.get(ref["recipe_id"], ref["version"], _transaction=_transaction),
-                trusted_store_product_hints=True,
             ))
         if value.get("discovery_ref") is not None:
             originals.append(self.resolve_discovery(value["discovery_ref"], _transaction=_transaction)["recipe"])

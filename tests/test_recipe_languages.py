@@ -99,7 +99,9 @@ class RecipeLanguageTests(unittest.TestCase):
             restored = RecipeStore(root / "restored/recipes.sqlite3", "synthetic")
             restore_private_archive(archive, restored)
             self.assertEqual(restored.get(identity)["recipe_digest"], stored["recipe_digest"])
-            repaired = restored.update(identity, 1, bilingual())
+            app = Application(StateStore(restored.path.parent, {"household": "synthetic", "provider": "none"}), None, None)
+            repaired = app.handle({"operation": "recipes", "action": "update", "recipe_id": identity,
+                                   "expected_revision": 1, "recipe": bilingual()})["recipe"]
             self.assertNotIn("label_review", repaired)
             self.assertEqual(restored.get(identity, 1)["name"], old["name"])
 
