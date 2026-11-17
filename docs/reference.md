@@ -321,7 +321,7 @@ recovery. Installation does not perform provider login or prompt for payment
 configuration. Oda and MENY require the private `vipps_phone_number` in their
 config before a Vipps checkout can dispatch.
 
-JSON and SQLite migrations run offline. Clean state is v13; existing v6
+JSON and SQLite migrations run offline. Clean state is v14; existing v6
 households gain `delivery.strategy="keep_selected"`, while new installations
 use `"cheapest"`. Preserve original operation identities and latest outcome
 journals. Do not restore old journals over possible external effects.
@@ -1653,6 +1653,11 @@ Slot metadata uses the additive v8→v9 migration, with
 one private atomic `state-v8.backup.json` before upgrading an existing v8 file.
 Direct v7 upgrades retain their own `state-v7.backup.json`. Backups are 0600,
 never overwritten; migration is atomic/idempotent and newer versions fail closed.
+V13→v14 atomically preserves `state-v13.backup.json` before adding empty
+recipe-source preference lists. Older runtimes reject v14; rollback requires the
+pre-update backup and reconciliation of any later external outcomes. Unsaved
+planner proposals must be generated again after this profile migration; saved
+menus remain unchanged.
 V12→v13 atomically backs up `state-v12.backup.json` before adding the durable
 prepared-replan store, so restoring that backup supports rollback to v12 code.
 Planning metadata is bounded to 2,000 menus; reaching the bound stops new
