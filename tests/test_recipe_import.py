@@ -2234,8 +2234,11 @@ class WebpageTextTests(unittest.TestCase):
         self.assertNotIn('source', footer_result['source_context']['metadata_basis'].values())
 
     def test_malformed_structured_recipe_does_not_silently_downgrade(self):
-        with self.assertRaises(RecipeImportReaderError):
-            read_webpage('<script type="application/ld+json">{bad}</script><p>Soup</p>', source_url='https://example.org')
+        result = read_webpage('<script type="application/ld+json">{bad}</script><p>Soup</p>', source_url='https://example.org')
+        self.assertEqual(result['mode'], 'text')
+        self.assertEqual(result['recipes'], [])
+        self.assertTrue(result['requires_interpretation'])
+        self.assertEqual(result['structured_error']['code'], 'structured_recipe_unavailable')
 
     def test_oversize_empty_and_unclosed_hidden_content_fail(self):
         for html in ('<p>' + 'x' * (MAX_WEBPAGE_TEXT_BYTES + 1) + '</p>', '<script>x</script>', '<script>closed never', '<span>' * 129 + 'text'):
