@@ -70,6 +70,20 @@ class BuildIdentityTests(unittest.TestCase):
             self.assertNotIn(str(root),json.dumps(clean))
             self.assertEqual(identity.read(root)['identity_status'],'unavailable')
 
+    def test_supported_runtime_artifacts_have_exact_hashes_for_all_probe_pins(self):
+        root = Path(__file__).resolve().parents[1]
+        pinned = {s for s in (root / 'tests/mcp-requirements.txt').read_text().splitlines() if s and not s.startswith('#')}
+        locked = {}
+        for line in (root / 'runtime-requirements.txt').read_text().splitlines():
+            if line and not line.startswith('#'):
+                package, *hashes = line.split()
+                self.assertTrue(hashes)
+                self.assertEqual(len(set(hashes)), len(hashes))
+                for digest in hashes:
+                    self.assertRegex(digest, r'^--hash=sha256:[0-9a-f]{64}$')
+                locked[package] = hashes
+        self.assertEqual(set(locked), pinned)
+
     def test_old_manifest_and_nested_export_remain_unidentified(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

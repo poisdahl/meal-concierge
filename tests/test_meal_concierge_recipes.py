@@ -656,7 +656,7 @@ class RecipeStoreTests(unittest.TestCase):
             ).fetchone()
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "7")
+            ).fetchone()[0], "8")
             self.assertNotIn("is_favorite", json.loads(before[5]))
         self.assertFalse(self.path.with_name("recipes-v3.backup.sqlite3").exists())
 
@@ -1378,7 +1378,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             self.assertEqual(
                 connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0],
-                "7",
+                "8",
             )
 
     def test_v1_backup_waits_for_and_includes_a_concurrent_writer(self):
@@ -1442,7 +1442,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "7")
+            ).fetchone()[0], "8")
             self.assertTrue({
                 "library_operations", "library_mappings", "library_connection_controls",
                 "recipe_favorites",
@@ -1619,7 +1619,7 @@ class RecipeStoreTests(unittest.TestCase):
         with closing(sqlite3.connect(path)) as connection:
             self.assertEqual(connection.execute(
                 "SELECT value FROM metadata WHERE key='schema_version'"
-            ).fetchone()[0], "7")
+            ).fetchone()[0], "8")
             self.assertIn("recipe_favorites", {
                 row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             })

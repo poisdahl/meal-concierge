@@ -170,7 +170,7 @@ from delivery_operations import DeliveryOperations
 _RECIPE_PACK_ARCHIVE_ID = re.compile(r"[0-9a-f]{64}\.zip\Z")
 
 
-from build_identity import read as read_build_identity
+from build_identity import at_start as read_build_identity
 BUILD_IDENTITY = read_build_identity(Path(__file__).resolve().parent)
 
 class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOperations, DeliveryOperations):
@@ -457,15 +457,18 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             if fields != common:
                 raise HouseholdError("recipe-pack inspect accepts only archive_id")
             with self._staged_recipe_pack(archive_id) as (archive, _digest, _bytes):
-                from recipe_portable import PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive
-                return inspect_local_archive(
+                from recipe_portable import PUBLISHER_RECIPE_PACK_IDS, inspect_local_archive, withdrawal_preview
+                descriptor = inspect_local_archive(
                     archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
                 )
+                return {**descriptor, "withdrawals": withdrawal_preview(
+                    archive, self.store.directory, str(self.store.config["household"]), descriptor)}
         expected_sha256 = self._recipe_pack_expected_sha256(
             request.get("expected_sha256"), archive_id
         )
         if action == "import":
-            if fields != common | {"expected_sha256", "allow_recipe_removals"}:
+            required = common | {"expected_sha256", "allow_recipe_removals"}
+            if fields != required and fields != required | {"withdrawal_review"}:
                 raise HouseholdError("recipe-pack import needs archive_id, expected_sha256 and allow_recipe_removals")
             allow_removals = request.get("allow_recipe_removals")
             if not isinstance(allow_removals, bool):
@@ -473,12 +476,15 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             with self._staged_recipe_pack(archive_id, expected_sha256) as (archive, _digest, _bytes):
                 from recipe_portable import (
                     PUBLISHER_RECIPE_PACK_IDS, apply_archive, inspect_local_archive,
-                    preflight_archive,
+                    preflight_archive, withdrawal_preview,
                 )
                 descriptor = inspect_local_archive(
                     archive, reserved_pack_ids=PUBLISHER_RECIPE_PACK_IDS
                 )
                 preflight_archive(archive, descriptor)
+                review = withdrawal_preview(archive, self.store.directory, str(self.store.config["household"]), descriptor)
+                if (review["count"] or "withdrawal_review" in fields) and review["review"] != request.get("withdrawal_review"):
+                    raise HouseholdError("inspect the current withdrawals and confirm the exact withdrawal_review")
                 return apply_archive(
                     archive, self.store.directory, str(self.store.config["household"]),
                     descriptor, allow_removals=allow_removals,
@@ -642,6 +648,12 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             error = HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
             error.outcome_unknown = pending_cart.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
             raise error
+        if operation == "maintenance_health":
+            state = self.store.read()
+            return {"ok": True, "source_sha256": BUILD_IDENTITY.get("source_sha256"),
+                    "installed_runtime_sha256": BUILD_IDENTITY.get("installed_runtime_sha256"),
+                    "email_work_pending": any(job.get("status") in {"pending", "claimed", "sending", "uncertain", "outcome_unknown"}
+                                              for job in state.get("email_jobs", []))}
         if operation == "health":
             return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY),
                     "admission_deadline_clock": time.monotonic()}
@@ -1389,6 +1401,8 @@ def main() -> None:
     validate_browser_prerequisites(args, settings)
     browser_owner = (None, None, None, None, None, None) if settings["provider"] == "none" else (args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid)
     with ownership(args.state, *browser_owner):
+        if args.maintenance and args.maintenance.exists():
+            raise SystemExit("offline update is incomplete; repair it before starting the service")
         run(args, settings)
 
 
@@ -1407,6 +1421,9 @@ def validate_browser_prerequisites(args, settings) -> None:
 
 
 def run(args, settings=None) -> None:
+    # Mark the attempt before provider/library adapter setup can begin.
+    from runtime_rollback import note_runtime_open
+    note_runtime_open(args.state)
     if settings is None:
         settings = config(args.config)
         validate_browser_prerequisites(args, settings)

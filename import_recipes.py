@@ -76,7 +76,7 @@ def _offline_store(args):
             meta = json.loads((home / "runtime.json").read_text(encoding="utf-8"))
             paths = meta["paths"]
             if (meta.get("format") != 1 or Path(meta["home"]).resolve() != home
-                    or meta.get("manager") not in {"systemd", "launchd"}
+                    or meta.get("manager") not in {"systemd", "launchd", "external"}
                     or not isinstance(meta.get("name"), str)
                     or any(not isinstance(paths[key], str) or not Path(paths[key]).is_absolute()
                            for key in ("state", "browser_profile", "browser_home", "browser_socket_directory", "socket"))):
@@ -88,6 +88,8 @@ def _offline_store(args):
             raise RecipeError("--state-directory differs from the installation manifest")
         # The calling process retains both installer and runtime lifetime
         # ownership. It never stops, restarts or adopts an existing service.
+        if any((home / name).exists() for name in ("maintenance.json", "pending-install.json", "pending-store.json")):
+            raise RecipeError("complete interrupted maintenance before a private recipe operation")
         with install.offline(meta):
             state = _household_state(state_directory)
             yield RecipeStore(state_directory / "recipes.sqlite3", state["household"])
@@ -126,6 +128,9 @@ def main() -> None:
     private_mode.add_argument("--preview-private-url-remediation", action="store_true")
     parser.add_argument("--redact-reviewed-urls", metavar="REVIEW", help="write a credential-redacted export copy using the exact preview and a fresh --backup")
     args = parser.parse_args()
+    if args.import_intent is not None and (
+            args.preview_private_url_remediation or args.redact_reviewed_urls or args.allow_pack_reintroduction):
+        parser.error("--import-intent is incompatible with private URL review, redaction and collection reintroduction")
     if args.preview_private_url_remediation or args.redact_reviewed_urls:
         if (not args.installation_home or any((args.path, args.image, args.import_root, args.dry_run, args.status))
                 or args.redact_reviewed_urls and (not args.export_private or not args.backup)

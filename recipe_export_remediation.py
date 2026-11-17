@@ -26,9 +26,10 @@ def _clean_url(match):
         return "&".join(piece for piece in value.split("&")
                         if unquote_plus(piece.partition("=")[0]).casefold() not in _CREDENTIAL_KEYS)
     query, fragment = clean(parts.query), clean(parts.fragment)
-    if (query, fragment) == (parts.query, parts.fragment):
+    authority = parts.netloc.rsplit("@", 1)[-1]
+    if (authority, query, fragment) == (parts.netloc, parts.query, parts.fragment):
         return original
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+    return urlunsplit((parts.scheme, authority, parts.path, query, fragment))
 
 
 def _transform(value):
@@ -56,8 +57,19 @@ def _inventory(db, *, apply=False):
         changed = _transform(original)
         if changed == original:
             continue
-        identity = rid if re.fullmatch(r"[0-9a-f-]{32,36}", rid) else "sha256:" + _digest(rid.encode())
-        details.append({"recipe_id": identity, "revision": revision, "current_revision": head,
+        identity = rid if re.fullmatch(r"rec_[0-9a-f]{24}|[0-9a-f-]{32,36}", rid) else "sha256:" + _digest(rid.encode())
+        bindings = {}
+        if "translations" in original:
+            from recipe_languages import normalize_translations, source_text_digest
+            # A redacted derivative can rebind reviewed text only when every
+            # prior translation was valid for the exact canonical pre-image.
+            normalize_translations(original["translations"], original)
+            old_binding, new_binding = source_text_digest(original), source_text_digest(changed)
+            for language, variant in changed["translations"].items():
+                variant["source_text_digest"] = new_binding
+                bindings[language] = {"original": old_binding, "redacted": new_binding}
+            normalize_translations(changed["translations"], changed)
+        details.append({"recipe_id": identity, "translation_bindings": bindings, "revision": revision, "current_revision": head,
                         "original_sha256": _digest(canonical_bytes(original)), "redacted_sha256": _digest(canonical_bytes(changed))})
         if apply:
             text = canonical_bytes(changed).decode()
@@ -99,6 +111,11 @@ def export_reviewed(store, destination, expected, backup):
             shutil.copyfileobj(source, output)
             output.flush()
             os.fsync(output.fileno())
+    parent = os.open(backup.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(parent)
+    finally:
+        os.close(parent)
     class ExportCopy(RecipeStore):
         @property
         def assets(self):
@@ -110,6 +127,30 @@ def export_reviewed(store, destination, expected, backup):
             raise RecipeError("private backup differs from the reviewed revisions")
         with closing(sqlite3.connect(copy.path)) as db, db:
             details = _inventory(db, apply=True)
-        manifest = export_private_archive(destination, copy)
+        archive = Path(tmp) / "redacted.zip"
+        manifest = export_private_archive(archive, copy)
+        digest = hashlib.sha256()
+        with archive.open("rb") as checked:
+            for block in iter(lambda: checked.read(1024 * 1024), b""):
+                digest.update(block)
+        audit = {"format": 1, "review": expected, "bank_sha256": receipt["bank_sha256"],
+                 "archive_sha256": digest.hexdigest(), "revisions": details}
+        audit_bytes = canonical_bytes(audit)
+        audit_path = Path(str(destination) + ".audit.json")
+        with (Path(tmp) / "audit").open("xb") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(audit_bytes)
+            output.flush()
+            os.fsync(output.fileno())
+        # No existing archive or audit can be overwritten. The audit is durable
+        # before the redacted copy is published.
+        parent = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.link(Path(tmp) / "audit", audit_path)
+            os.fsync(parent)
+            os.link(archive, destination)
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     return {**receipt, "exported": True, "backup_preserved": True, "recipes_count": manifest["recipes_count"],
-            "audit_sha256": _digest(canonical_bytes(details))}
+            "audit_sha256": _digest(audit_bytes)}

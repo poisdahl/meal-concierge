@@ -45,7 +45,7 @@ RECIPE_PACK = {
     'pack_id': PUBLISHER_RECIPE_PACK_IDS[0],
 }
 MAX_PACK_BYTES = 1024 * 1024 * 1024
-RECIPE_PREPARATION_VERSION = 1
+RECIPE_PREPARATION_VERSION = 2
 RECIPE_CHANNEL_URL = 'https://raw.githubusercontent.com/poisdahl/meal-concierge/recipe-channel/optional-recipes.json'
 
 
@@ -174,10 +174,20 @@ def recipe_pack_command(
     release, action, archive, meta=None, expected=None, *, allow_removals=False, preparation=None,
 ):
     if action == 'inspect-local':
-        code = "import sys,json; sys.path.insert(0,sys.argv[1]); from recipe_portable import inspect_local_archive; print(json.dumps(inspect_local_archive(sys.argv[2],reserved_pack_ids=tuple(json.loads(sys.argv[3])))))"
+        code = """import sys,json
+sys.path.insert(0,sys.argv[1])
+from recipe_portable import inspect_local_archive
+report = inspect_local_archive(sys.argv[2],reserved_pack_ids=tuple(json.loads(sys.argv[3])))
+meta = json.loads(sys.argv[4])
+if meta is not None:
+    from recipe_portable import withdrawal_preview
+    with open(meta['paths']['config'], encoding='utf-8') as settings:
+        report['withdrawals'] = withdrawal_preview(sys.argv[2],meta['paths']['state'],json.load(settings)['household'],report)
+print(json.dumps(report))
+"""
         args = [
             release / 'venv/bin/python', '-I', '-c', code, release, archive,
-            json.dumps([RECIPE_PACK['pack_id']]),
+            json.dumps([RECIPE_PACK['pack_id']]), json.dumps(meta),
         ]
         result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
         if result.returncode != 0:
@@ -191,20 +201,29 @@ import install
 from install import RECIPE_PACK
 from recipe_portable import preflight_archive
 expected=json.loads(sys.argv[3])
-if json.loads(sys.argv[4]) and getattr(install, 'RECIPE_PREPARATION_VERSION', 0) != 1:
+if json.loads(sys.argv[4]) and getattr(install, 'RECIPE_PREPARATION_VERSION', 0) != 2:
     raise RuntimeError('update the installed Meal Concierge runtime before preparing recipes')
 if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
     raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
-print(json.dumps(preflight_archive(sys.argv[2],expected)))
+report = preflight_archive(sys.argv[2],expected)
+if json.loads(sys.argv[4]):
+    from recipe_portable import withdrawal_preview
+    meta=json.loads(sys.argv[5])
+    with open(meta['paths']['config'], encoding='utf-8') as settings:
+        report['withdrawals']=withdrawal_preview(sys.argv[2],meta['paths']['state'],json.load(settings)['household'],expected)
+print(json.dumps(report))
 """
-    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected), json.dumps(action == 'prepare')]
+    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected), json.dumps(action == 'prepare'), json.dumps(meta)]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
         code = """import sys,json
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
+import install
 from install import RECIPE_PACK,apply_recipe_pack
+if getattr(install,'RECIPE_PREPARATION_VERSION',0) != 2:
+    raise RuntimeError('update the installed runtime before applying a collection with withdrawal review')
 expected=json.loads(sys.argv[4])
 if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != RECIPE_PACK['normalizer_version']:
     raise RuntimeError('official recipe pack requires a different installed runtime normalizer')
@@ -279,6 +298,7 @@ def advance_collection_generation(meta, digest=None):
 
 def prepare_recipes(home, meta, source=None):
     progress('Checking the published recipe collection; the service may stay running.')
+    baseline = collection_generation(meta)
     expected = latest_recipe_pack()
     release = Path(meta['release'])
     root = home / 'recipe-preparations'
@@ -290,16 +310,18 @@ def prepare_recipes(home, meta, source=None):
         cached = destination / 'archive.zip'
         archive = stage_recipe_pack(temporary, source if source is not None else (cached if cached.exists() else None), expected)
         progress('Verifying the complete archive and installed runtime compatibility.')
-        report = recipe_pack_command(release, 'prepare', archive, expected=expected)
+        report = recipe_pack_command(release, 'prepare', archive, expected=expected, meta=meta)
+        if baseline != collection_generation(meta):
+            raise RuntimeError('collection changed during preparation; repeat the preview')
         receipt = {'format': RECIPE_PREPARATION_VERSION, 'expected': expected,
                    'release': str(release), 'state': str(Path(meta['paths']['state']).resolve()),
-                   'baseline': collection_generation(meta), 'prepared_at': datetime.now(timezone.utc).isoformat()}
+                   'baseline': baseline, 'withdrawal_review': report['withdrawals']['review'], 'prepared_at': datetime.now(timezone.utc).isoformat()}
         destination.mkdir(mode=0o700, exist_ok=True)
         os.replace(archive, cached)
         write_json(destination / 'receipt.json', receipt)
     return {'status': 'prepared', 'prepared': expected['sha256'], 'pack_version': expected['pack_version'],
             'sha256': expected['sha256'], 'records_count': report['records_count'],
-            'prepared_at': receipt['prepared_at'], 'service_stop_required': False,
+            'prepared_at': receipt['prepared_at'], 'withdrawals': report['withdrawals'], 'service_stop_required': False,
             'next': 'When idle, stop through the existing service owner, import-recipes --prepared this ID, then restart through the same owner.'}
 
 
@@ -324,8 +346,14 @@ def read_preparation(home, meta, identifier):
 
 def apply_recipe_pack(archive, meta, expected, *, allow_removals=False, preparation=None):
     """Installed-runtime child entry point; no parent-owned lifetime locks."""
-    from recipe_portable import apply_archive
+    from recipe_portable import apply_archive, withdrawal_preview
     with offline(meta):
+        settings = json.loads(Path(meta['paths']['config']).read_text())
+        review = withdrawal_preview(archive, meta['paths']['state'], settings['household'], expected)
+        consent = (preparation or {}).get('withdrawal_consent')
+        if (review['count'] or consent is not None) and (consent != review['review']
+                or (preparation or {}).get('withdrawal_review') != review['review']):
+            raise RuntimeError('collection withdrawals require a current preview and --withdrawal-review matching that preview')
         if expected.get('kind') == 'bundled':
             current = collection_generation(meta)
             if (preparation is not None and current != preparation['baseline']
@@ -410,11 +438,8 @@ def run(*args, **kwargs):
 
 
 def write_json(path, value):
-    path = Path(path)
-    temporary = path.with_name(path.name + '.tmp-' + uuid.uuid4().hex)
-    temporary.write_text(json.dumps(value, indent=2) + '\n')
-    temporary.chmod(0o600)
-    os.replace(temporary, path)
+    from core import _atomic_json
+    _atomic_json(Path(path), value)
 
 
 def browser_paths(args, provider, existing=None, *, runtime_path=None):
@@ -499,11 +524,12 @@ def service_args(meta, release=None):
     return result
 
 
-def health(meta):
+def health(meta, *, diagnostics=False):
     with socket.socket(socket.AF_UNIX) as client:
         client.settimeout(2)
         client.connect(meta['paths']['socket'])
-        client.sendall(b'{"operation":"health","contract":1}\n')
+        operation = 'maintenance_health' if diagnostics else 'health'
+        client.sendall((json.dumps({'operation': operation, 'contract': 1}) + '\n').encode())
         data = b''
         while b'\n' not in data and len(data) <= 2 * 1024 * 1024:
             chunk = client.recv(65536)
@@ -513,7 +539,33 @@ def health(meta):
     value = json.loads(data)
     if value.get('ok') is not True or value.get('contract') != 1:
         raise RuntimeError('incompatible service; update the stopped core before attachment')
+    if not isinstance(value.get('result'), dict):
+        raise RuntimeError('service returned incompatible health data')
     return value['result']
+
+
+def selected_identity(meta):
+    release = meta.get('release')
+    if not release:
+        return None
+    from build_identity import read
+    build = read(release)
+    if build.get('installed_runtime_sha256') is None and not meta.get('runtime_identity'):
+        return None  # Existing installations predate verified artifact reporting.
+    if (not meta.get('code_root') or (Path(meta['code_root']) / 'current').resolve() != Path(release).resolve()):
+        raise RuntimeError('current program differs from the installation manifest; inspect doctor')
+    selected = candidate_identity(Path(release))
+    expected = meta.get('runtime_identity')
+    if expected and any(selected[k] != v for k,v in expected.items()):
+        raise RuntimeError('selected build differs from the completed installation; inspect doctor')
+    return selected
+
+
+def verify_serving(meta, selected):
+    result = health(meta, diagnostics=bool(selected))
+    if selected and any(selected[key] != result.get(key) for key in ('installed_runtime_sha256', 'source_sha256')):
+        raise RuntimeError('serving process differs from the selected release; inspect doctor')
+    return result
 
 
 def lifecycle(meta, action):
@@ -525,6 +577,7 @@ def lifecycle(meta, action):
             raise RuntimeError('external run requires a completed installation; recover the stopped installation first')
         # The caller keeps the installer lock while this foreground child runs.
         # The child also owns state/listener locks if its parent is interrupted.
+        selected_identity(meta)
         env = {**os.environ, 'PATH': meta['runtime_path'], 'PYTHONNOUSERSITE': '1'}
         run(*service_args(meta, meta['release']), env=env)
         return
@@ -536,6 +589,7 @@ def lifecycle(meta, action):
         lifecycle(meta, 'stop')
         lifecycle(meta, 'start')
         return
+    selected = selected_identity(meta) if action == 'start' else None
     if meta['manager'] == 'systemd':
         run('systemctl', '--user', action, meta['name'] + '.service')
     elif action == 'stop':
@@ -547,11 +601,11 @@ def lifecycle(meta, action):
         deadline = time.monotonic() + 20
         while True:
             try:
-                health(meta)
+                verify_serving(meta, selected)
                 return
             except (OSError, ValueError):
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(f"service did not become ready; inspect {meta['home']}/service.err.log")
+                    raise RuntimeError("service did not become ready; run doctor for technical status")
                 time.sleep(.1)
     else:
         # launchd bootout can return before process exit; never take over early.
@@ -705,16 +759,20 @@ def stage_release(code_root, uv_binary=None):
     uv = executable(uv_binary, ['uv'], 'uv')
     release = code_root / ('release-' + uuid.uuid4().hex)
     release.mkdir(parents=True, mode=0o700)
+    marker = release / '.program-staging.json'
+    write_json(marker, {'format': 1, 'release': release.name, 'purpose': 'staging'})
     for path in SOURCE.glob('*.py'):
         shutil.copyfile(path, release / path.name)
     shutil.copyfile(SOURCE / 'runtime-requirements.txt', release / 'runtime-requirements.txt')
     shutil.copytree(SOURCE / 'skill', release / 'skill')
     run(uv, '--no-config', 'venv', '--python', PYTHON, release / 'venv')
-    run(uv, '--no-config', 'pip', 'sync', '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
+    run(uv, '--no-config', 'pip', 'sync', '--link-mode', 'copy', '--require-hashes', '--only-binary', ':all:',
+        '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
     # Check both versions AND the actual loaded modules inside this private venv.
     run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
     from build_identity import create, MANIFEST
     write_json(release / MANIFEST, create(SOURCE, release, PYTHON))
+    marker.unlink()
     return release
 
 
@@ -782,7 +840,7 @@ def bounded_json(path, maximum=16384):
 
 
 def program_baseline(meta):
-    value = {key: meta.get(key) for key in ('home', 'release', 'code_root', 'manager', 'name', 'paths', 'runtime_path', 'browser_launch')}
+    value = {key: meta.get(key) for key in ('home', 'release', 'code_root', 'manager', 'name', 'paths', 'runtime_path', 'browser_launch', 'runtime_identity')}
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -792,6 +850,8 @@ def candidate_identity(release):
     actual = create(release, release, PYTHON)
     if (recorded.get('identity_status') != 'recorded' or recorded.get('python') != PYTHON
             or recorded.get('source_sha256') != actual['source_sha256']
+            or not actual['installed_runtime_sha256']
+            or recorded.get('installed_runtime_sha256') != actual['installed_runtime_sha256']
             or recorded.get('dependencies_sha256') != actual['dependencies_sha256']):
         raise RuntimeError('prepared program bytes changed; prepare again before stopping')
     return recorded
@@ -808,9 +868,17 @@ def preflight_program(release, meta):
         raise RuntimeError('candidate program did not complete compatibility preflight')
 
 
+def completed_manifest(home):
+    if any((home / name).exists() for name in ('maintenance.json', 'pending-store.json', 'pending-install.json')):
+        raise RuntimeError('complete the interrupted maintenance before preparing another artifact')
+    return bounded_json(home / 'runtime.json')
+
+
 def prepare_program(home, meta, uv_binary=None):
     code_root = Path(meta['code_root']).resolve()
     with file_lock(code_root / '.installer.lock'):
+        if completed_manifest(home) != meta:
+            raise RuntimeError('installation changed before program preparation')
         owner = bounded_json(code_root / 'owner.json')
         if not isinstance(owner, dict) or owner.get('home') != str(home):
             raise RuntimeError('code root belongs to a different installation')
@@ -896,10 +964,23 @@ def doctor(home):
     except (OSError, ValueError, RuntimeError):
         result['build'] = {'identity_status': 'unavailable'}
     try:
-        health(meta)
-        result['socket_health'] = 'ready'
+        checked = selected_identity(meta) or {}
+        result['selected_runtime'] = ('selection_changed' if result['current_matches_release'] is not True
+                                      else 'verified' if checked else 'unverified')
     except (OSError, RuntimeError, ValueError):
-        result['socket_health'] = 'unavailable'
+        checked = {}
+        result['selected_runtime'] = 'unverified'
+    result.update(socket_health='unavailable', email_work_pending='unknown', serving_selected_runtime='unknown')
+    try:
+        health_result = health(meta, diagnostics=True)
+        result['socket_health'] = 'ready'
+        if type(health_result.get('email_work_pending')) is bool:
+            result['email_work_pending'] = health_result['email_work_pending']
+        if checked and result['current_matches_release'] is True:
+            result['serving_selected_runtime'] = all(checked[key] == health_result.get(key)
+                for key in ('source_sha256', 'installed_runtime_sha256'))
+    except (OSError, RuntimeError, ValueError):
+        pass
     return result
 
 
@@ -934,7 +1015,7 @@ def preparation_retention_preview(home, meta, older_than_days=30):
             info = archive.stat(follow_symlinks=False)
             if prepared_at.tzinfo is None or not stat.S_ISREG(info.st_mode):
                 raise ValueError('irregular preparation')
-            valid = (receipt.get('format') == RECIPE_PREPARATION_VERSION
+            valid = (receipt.get('format') in (1, RECIPE_PREPARATION_VERSION)
                      and receipt.get('expected', {}).get('sha256') == directory.name
                      and receipt.get('state') == str(Path(meta['paths']['state']).resolve()))
             stale = receipt.get('release') != str(meta['release']) or receipt.get('baseline') != current_baseline
@@ -1135,7 +1216,7 @@ def connect_store(meta, args, home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['doctor', 'retention-preview', 'history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-program', 'resolve-recipe-conflict', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
+    parser.add_argument('action', choices=['doctor', 'rollback', 'retention-preview', 'retention-apply', 'history-preview', 'history-archive', 'history-restore', 'history-rebaseline', 'prepare-program', 'resolve-recipe-conflict', 'prepare-recipes', 'import-recipes', 'inspect-recipe-pack', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack', 'install', 'update', 'connect-store', 'check-browser', 'attach', 'start', 'stop', 'restart', 'run', 'backup', 'restore', 'discover'])
     parser.add_argument('--manager', choices=['native', 'external'], help='new installations default to native; external uses run under a host-owned executor')
     parser.add_argument('--home', type=Path, default=Path(os.environ.get('MEAL_CONCIERGE_HOME', str(Path.home() / '.local/share/meal-concierge'))))
     parser.add_argument('--code-root', type=Path)
@@ -1155,7 +1236,9 @@ def main():
     parser.add_argument('--pack-recipe-id', help='exact recipe identity from a collection conflict report')
     parser.add_argument('--expected-revision', type=int, help='exact current bank revision for conflict resolution')
     parser.add_argument('--resolution', choices=['keep_local', 'adopt_publisher'])
+    parser.add_argument('--withdrawal-review', help='consent to the exact current withdrawal preview')
     parser.add_argument('--prepared-program', help='exact prepare-program ID for an offline update')
+    parser.add_argument('--retention-review', help='exact retention-preview digest')
     parser.add_argument('--older-than-days', type=int, default=30, help='minimum age for the dry-run retention-preview')
     parser.add_argument('--expected-sha256', help='exact digest pin for a local collection import/removal')
     parser.add_argument('--allow-recipe-removals', action='store_true', help='allow an authoritative local pack to remove absent recipes from its own pack_id')
@@ -1169,6 +1252,10 @@ def main():
             raise RuntimeError('resolve-recipe-conflict requires --prepared, --pack-recipe-id, --expected-revision and --resolution')
     elif any(value is not None for value in (args.pack_recipe_id, args.expected_revision, args.resolution)):
         raise RuntimeError('conflict disposition arguments apply only to resolve-recipe-conflict')
+    if bool(args.retention_review) != (args.action == 'retention-apply'):
+        raise RuntimeError('retention-apply requires --retention-review from the exact offline preview')
+    if args.withdrawal_review is not None and (args.action not in {'import-recipes', 'import-recipe-pack'} or not re.fullmatch(r'[0-9a-f]{64}', args.withdrawal_review)):
+        raise RuntimeError('--withdrawal-review requires an exact current import preview')
     if args.prepared_program is not None and args.action != 'update':
         raise RuntimeError('--prepared-program applies only to update')
     if args.history_preview is not None and args.action != 'history-archive':
@@ -1231,7 +1318,7 @@ def main():
             raise RuntimeError('complete the runtime update before inspecting a local recipe pack')
         meta = json.loads(manifest.read_text())
         report = recipe_pack_command(
-            Path(meta['release']), 'inspect-local', args.recipe_pack,
+            Path(meta['release']), 'inspect-local', args.recipe_pack, meta,
         )
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return
@@ -1253,7 +1340,7 @@ def main():
     if args.action == 'attach':
         meta = json.loads((home / 'runtime.json').read_text())
         try:
-            health(meta)
+            verify_serving(meta, selected_identity(meta))
         except (OSError, ValueError) as exc:
             raise RuntimeError('existing service is unavailable; use doctor for technical status and preserve the installation') from exc
         current = Path(meta['code_root']) / 'current'
@@ -1261,6 +1348,22 @@ def main():
         if os.environ.get('MEAL_CONCIERGE_EMAIL_CONFIG'):
             env['MEAL_CONCIERGE_EMAIL_CONFIG'] = str(Path(os.environ['MEAL_CONCIERGE_EMAIL_CONFIG']).expanduser().resolve())
         print(json.dumps({'command': str(current / 'venv/bin/python'), 'args': ['-I', str(current / 'mcp_server.py')], 'env': env, 'skill': str(current / 'skill/SKILL.md')}, indent=2)); return
+    if args.action in {'prepare-program', 'prepare-recipes'}:
+        # External 'run' owns the lifecycle lock for the entire service session.
+        # Preparation only writes staged artifacts and uses the separate code lock.
+        meta = completed_manifest(home)
+        if args.manager is not None and (args.manager == 'external') != (meta['manager'] == 'external'):
+            raise RuntimeError('existing installation manager differs')
+        if args.action == 'prepare-program':
+            result = prepare_program(home, meta, args.uv)
+        else:
+            code_root = Path(meta['code_root'])
+            with file_lock(code_root / '.installer.lock'):
+                if completed_manifest(home) != meta or bounded_json(code_root / 'owner.json').get('home') != str(home):
+                    raise RuntimeError('collection preparation installation changed')
+                result = prepare_recipes(home, meta, args.recipe_pack)
+        print(json.dumps(result))
+        return
     home.mkdir(parents=True, mode=0o700, exist_ok=True)
     with file_lock(home / '.installer.lock'):
         path = home / 'runtime.json'
@@ -1282,17 +1385,27 @@ def main():
                 return
             if (home / 'pending-store.json').exists() or ((home / 'maintenance.json').exists() and json.loads((home / 'maintenance.json').read_text()).get('kind') == 'first_store_connection'):
                 raise RuntimeError('resume connect-store with its original provider before other maintenance or lifecycle actions')
-            if args.action == 'prepare-program' or args.prepared_program is not None:
+            if (home / 'maintenance.json').exists() and bounded_json(home / 'maintenance.json').get('kind') == 'rollback' and args.action != 'rollback':
+                raise RuntimeError('resume the interrupted rollback before other maintenance')
+            if args.prepared_program is not None:
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
                     raise RuntimeError('complete the interrupted update before preparing another program')
-                if args.action == 'prepare-program':
-                    print(json.dumps(prepare_program(home, meta, args.uv)))
-                    return
                 prepared_release = read_program_preparation(home, meta, args.prepared_program)
             if args.action in {'start', 'stop', 'restart', 'run'}:
                 lifecycle(meta, args.action); return
-            if args.action == 'retention-preview':
-                print(json.dumps(preparation_retention_preview(home, meta, args.older_than_days), indent=2))
+            if args.action == 'rollback':
+                from runtime_rollback import rollback
+                with file_lock(Path(meta['code_root']) / '.installer.lock'):
+                    print(json.dumps(rollback(home, meta)))
+                return
+            if args.action in {'retention-preview', 'retention-apply'}:
+                import runtime_retention
+                with file_lock(Path(meta['code_root']) / '.installer.lock'), offline(meta):
+                    if args.action == 'retention-preview':
+                        result = runtime_retention.public_preview(runtime_retention.inventory(home, meta, args.older_than_days))
+                    else:
+                        result = runtime_retention.apply(home, meta, args.older_than_days, args.retention_review)
+                print(json.dumps(result, indent=2))
                 return
             if args.action in {'history-preview', 'history-archive', 'history-restore', 'history-rebaseline'}:
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
@@ -1312,12 +1425,9 @@ def main():
                 print(json.dumps(recipe_conflict_command(Path(meta['release']), meta, args.prepared,
                     args.pack_recipe_id, args.expected_revision, args.resolution)))
                 return
-            if args.action in {'prepare-recipes', 'import-recipes', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack'}:
+            if args.action in {'import-recipes', 'import-recipe-pack', 'remove-recipe-collection', 'remove-recipe-pack'}:
                 if not path.exists() or pending.exists() or (home / 'maintenance.json').exists():
                     raise RuntimeError('complete the stopped runtime update before changing the recipe collection')
-                if args.action == 'prepare-recipes':
-                    print(json.dumps(prepare_recipes(home, meta, args.recipe_pack)))
-                    return
                 assert_stopped(meta)
                 release = Path(meta['release'])
                 if args.action == 'remove-recipe-collection':
@@ -1349,6 +1459,12 @@ def main():
                         return
                     progress(f'Validating collection {expected["pack_version"]} before import.')
                     recipe_pack_command(release, 'preflight', archive, expected=expected)
+                    if args.withdrawal_review:
+                        if local_collection:
+                            preparation = {'withdrawal_review': args.withdrawal_review}
+                        if preparation is None:
+                            raise RuntimeError('prepare the exact archive before confirming its withdrawals')
+                        preparation = {**preparation, 'withdrawal_consent': args.withdrawal_review}
                     progress('Importing the verified collection; keep the service stopped until the command exits.')
                     report = recipe_pack_command(
                         release, 'apply', archive, meta, expected,
@@ -1462,6 +1578,9 @@ def main():
 
 def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
     release = prepared_release or stage_release(Path(meta['code_root']), uv_binary)
+    previous = (bounded_json(path) if path.exists() and not any((home / name).exists()
+                for name in ('maintenance.json', 'pending-install.json')) else None)
+    destination = None
     with offline(meta):
         if path.exists():
             # No maintenance marker or authoritative data changes precede a
@@ -1487,8 +1606,15 @@ def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
         replacement = current.with_name('.current-' + uuid.uuid4().hex)
         replacement.symlink_to(release.name)
         os.replace(replacement, current)
+        if previous and destination:
+            from runtime_rollback import arm
+            arm(home, meta, previous, destination, release)
         meta['previous_release'] = meta.get('release')
         meta['release'] = str(release)
+        from build_identity import read
+        build = read(release)
+        if build.get('installed_runtime_sha256'):
+            meta['runtime_identity'] = {key: build[key] for key in ('source_sha256', 'installed_runtime_sha256', 'dependencies_sha256')}
         write_json(path, meta)
         (home / 'maintenance.json').unlink()
         (home / 'pending-install.json').unlink()

@@ -431,8 +431,8 @@ store before the other fails; do not manually remove the maintenance marker and
 start old code. Repair the cause and retry, or inspect a private offline restore.
 
 Code rollback is separate from data recovery. Never replace current journals with
-a pre-order/pre-send backup after possible external effects. This installer does
-not offer an automatic data rollback or downgrade. Preserve latest outcomes and
+a pre-order/pre-send backup after possible external effects. An explicit stopped rollback requires the durable evidence of a never-used update,
+its intact pre-update backup and a matching current household. Preserve latest outcomes and
 reconcile their original identities before any recovery decision.
 
 ## Complete private data backup and relocated restore
