@@ -99,6 +99,17 @@ def assert_no_legacy_service(state, profile, browser_home=None, browser_socket_d
             words, cwd = process_arguments(pid)
         except (ProcessLookupError, FileNotFoundError):
             continue
+        except (subprocess.CalledProcessError, RuntimeError):
+            # A candidate can exit between ps, sysctl and lsof on macOS.
+            # Only a definite absent PID makes an inspection failure harmless;
+            # permission errors or failures inspecting a live owner still block.
+            try:
+                os.kill(int(pid), 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            raise
         if not any(Path(w).name == 'service.py' for w in words) and not any(words[i:i+2] == ['-m', 'service'] for i in range(len(words))):
             continue
         if not all(any(w == flag or w.startswith(flag + '=') for w in words) for flag in ('--state', '--config')):
