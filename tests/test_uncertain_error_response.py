@@ -1,5 +1,6 @@
 """A lost write response must survive the service, RPC and presentation layers."""
 from copy import deepcopy
+import fcntl
 import io
 import json
 from pathlib import Path
@@ -65,6 +66,8 @@ class UncertainErrorResponseTests(unittest.TestCase):
         repeated = self.wire(request)
         self.assertEqual(repeated['outcome'], 'unknown')
         self.assertEqual(len(writes), 1)
+        different = {**request, "operations": [{"product_id": 11, "quantity": 1}]}
+        self.assertNotIn("outcome", self.wire(different))
 
     def test_predispatch_validation_error_is_still_an_ordinary_rejection(self):
         result = self.wire({'operation': 'cart', 'action': 'change', 'operations': []})
@@ -96,11 +99,14 @@ class UncertainErrorResponseTests(unittest.TestCase):
             with self.assertRaises(RetailPreDispatchError):
                 client._run('manipulate_cart', {}, 10)
             client.token_directory.mkdir()
-            with mock.patch('retail_mcp.fcntl.flock', side_effect=[BlockingIOError(), None]):
+            def held_lock(_fd, flags):
+                if flags != fcntl.LOCK_UN:
+                    raise BlockingIOError()
+            with mock.patch('retail_mcp.fcntl.flock', side_effect=held_lock):
                 with self.assertRaises(RetailPreDispatchError):
-                    client._run('manipulate_cart', {}, 10)
+                    client._run('manipulate_cart', {}, .02)
 
-    def test_checkout_and_cancellation_journals_preserve_outcome(self):
+    def test_unrelated_journals_cannot_label_an_error_uncertain(self):
         # Exercise Application's common exception boundary without inventing
         # provider confirmation evidence or dispatching a checkout.
         for name in ('pending_checkout', 'pending_cancellation', 'order_change'):
@@ -110,7 +116,7 @@ class UncertainErrorResponseTests(unittest.TestCase):
                     with mock.patch.object(self.store, 'read', return_value=state), \
                          mock.patch.object(self.app, '_handle', side_effect=HouseholdError('synthetic stop')):
                         result = self.wire({'operation': 'checkout', 'action': 'confirm'})
-                    self.assertEqual(result.get('outcome') == 'unknown', unknown)
+                    self.assertNotIn('outcome', result)  # Unrelated state is never evidence of this call.
 
     def test_rpc_and_mcp_and_cli_preserve_unknown_disposition(self):
         class Connection:

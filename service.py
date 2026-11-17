@@ -557,7 +557,7 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             ) or (
                 operation == "setup" and action == "apply"
             ) or (
-                operation == "recurring" and action in {"add", "remove", "substitute"}
+                operation == "recurring" and action in {"add", "remove", "substitute", "review_occurrence"}
             ) or (
                 operation == "shopping_list" and action == "record_stock"
             ):
@@ -590,20 +590,6 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
             else:
                 result = dispatch()
         except HouseholdError as exc:
-            # An explicit error response does not prove a previously dispatched
-            # mutation failed. Keep the original journal and expose only the
-            # recovery disposition, never private journal contents.
-            if operation in {"cart", "products", "checkout", "orders", "delivery"}:
-                try:
-                    state = self.store.read()
-                    exc.outcome_unknown = bool(
-                        state.get("pending_cart_change")
-                        or (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES
-                        or (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}
-                        or (state.get("order_change") or {}).get("status") in {"clicking", "uncertain"}
-                    )
-                except (HouseholdError, OSError):
-                    pass
             alternate_oda_email = (
                 request.get("operation") == "email" and request.get("provider") == "oda"
             )
@@ -638,13 +624,16 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
 
     def _handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         operation = request.get("operation")
-        if self.store.read().get("pending_cart_change") and (
+        pending_cart = self.store.read().get("pending_cart_change")
+        if pending_cart and (
             (operation == "cart" and request.get("action", "get") not in {"get", "reconcile_change"})
             or (operation == "products" and request.get("action") == "apply")
             or operation == "checkout"
             or (operation == "orders" and request.get("action") not in {None, "list", "get"})
         ):
-            raise HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
+            error = HouseholdError("reconcile_change before continuing; the previous cart write is uncertain")
+            error.outcome_unknown = pending_cart.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
+            raise error
         if operation == "health":
             return {"ok": True, "integration": self.integration, "build": deepcopy(BUILD_IDENTITY),
                     "admission_deadline_clock": time.monotonic()}
@@ -1130,8 +1119,51 @@ class Application(RecipeOperations, PlanningOperations, OrderOperations, EmailOp
                             **({'due_on': period} if item['schedule']['unit'] == 'days' else {})})
         return due
 
+    def _menu_recurring_scope(self, state):
+        menu_ref = self._cart_menu_ref(state.get("menu"))
+        due = self._due_recurring(state, self._household_today(state))
+        saved = state.get("menu_recurring_decisions") or {}
+        decisions = saved.get("decisions", {}) if menu_ref and saved.get("menu_ref") == menu_ref else {}
+        rows = []
+        for item in due:
+            identity = mp.digest(item)
+            decision = decisions.get(identity) or {"action": "include"}
+            resolved = {**item, **decision.get("replacement", {})}
+            if decision["action"] == "substitute":
+                resolved["original_product_id"] = item.get("original_product_id", item["product_id"])
+            rows.append({"occurrence_ref": identity, "decision": decision["action"], "item": resolved})
+        return mp.digest({"provider": self.provider, "menu_ref": menu_ref, "rows": rows}), rows
+
     def _recurring(self, request: Mapping[str, Any]) -> dict[str, Any]:
         action = request.get("action", "list")
+        if action == "review_occurrence":
+            with self.store.locked() as state:
+                reference = self._cart_menu_ref(state.get("menu"))
+                if (not reference or reference != request.get("menu_ref") or state.get("pending_checkout")
+                        or state.get("order_change") or state.get("pending_cart_change")):
+                    raise HouseholdError("review the current saved menu after resolving any pending operation")
+                scope, rows = self._menu_recurring_scope(state)
+                key, choice = request.get("occurrence_ref"), request.get("decision")
+                if (scope != request.get("recurring_review_ref") or not isinstance(key, str)
+                        or key not in {r["occurrence_ref"] for r in rows} or choice not in {"include", "skip", "substitute"}):
+                    raise HouseholdError("recurring occurrence changed; prepare the exact current menu again")
+                decision = {"action": choice}
+                raw = request.get("replacement")
+                if choice == "substitute":
+                    if not isinstance(raw, Mapping) or set(raw) != {"product_id", "product_name", "quantity"}:
+                        raise HouseholdError("substitution requires the exact replacement and package count")
+                    decision["replacement"] = put_item([], {**raw, "product_id": self._product_id(raw["product_id"])})[0]
+                elif raw is not None:
+                    raise HouseholdError("only substitute accepts a replacement")
+                old = state.get("menu_recurring_decisions") or {}
+                valid = {r["occurrence_ref"] for r in rows}
+                previous = old.get("decisions", {}) if old.get("menu_ref") == reference else {}
+                state["menu_recurring_decisions"] = {"menu_ref": reference, "decisions": {
+                    **{k:v for k,v in previous.items() if k in valid}, key: decision}}
+                state.pop("product_plan_completion", None)
+                self._clear_persisted_product_plan(state.get("cart_plan"))
+                state["managed_product_apply_fence"] = {"menu_ref": reference, "started_at": self._now().isoformat()}
+            return {"recorded": True, "cart_changed": False, "next": "Prepare and review the updated product plan before applying."}
         if action == "substitute":
             original = self._product_id(request.get("product_id"))
             raw = request.get("replacement")

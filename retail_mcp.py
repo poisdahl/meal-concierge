@@ -309,9 +309,13 @@ class RetailMcpClient:
     def _run(self, tool: str | None, arguments: dict[str, Any], timeout: float) -> dict[str, Any]:
         if not self.token_directory.is_dir():
             raise RetailPreDispatchError(f"{self.label} login is required")
-        with self._lock():
+        deadline = time.monotonic() + timeout
+        with self._lock(deadline=deadline):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RetailPreDispatchError(f"{self.label} operation deadline reached")
             try:
-                return asyncio.run(self._run_async(tool, arguments, timeout))
+                return asyncio.run(self._run_async(tool, arguments, remaining))
             except HouseholdError:
                 raise
             except Exception as exc:
@@ -327,57 +331,67 @@ class RetailMcpClient:
                 raise HouseholdError(f"{self.label} MCP is unavailable") from None
 
     async def _run_async(self, tool: str | None, arguments: dict[str, Any], timeout: float, *, auth=None) -> dict[str, Any]:
+        # Session negotiation, authentication and discovery can contact the
+        # provider, but cannot dispatch the requested merchant tool. Once
+        # call_tool begins, even a transport teardown failure is ambiguous.
+        entered_tool = False
         try:
-            import httpx2 as httpx
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamable_http_client
-            from provider_oauth import build_auth
-        except ImportError as exc:
-            raise HouseholdError("Meal Concierge MCP runtime is unavailable") from exc
+            try:
+                import httpx2 as httpx
+                from mcp import ClientSession
+                from mcp.client.streamable_http import streamable_http_client
+                from provider_oauth import build_auth
+            except ImportError as exc:
+                raise HouseholdError("Meal Concierge MCP runtime is unavailable") from exc
 
-        provider = auth or build_auth(self.token_directory, self.server_name, self.label, self.endpoint)
-        async def reject_redirect(response: Any) -> None:
-            # httpx response hooks run before next_request is populated. Never
-            # forward credential-bearing POST bodies to a redirect destination.
-            if response.is_redirect:
-                raise HouseholdError(f"{self.label} MCP redirect is unsupported")
+            provider = auth or build_auth(self.token_directory, self.server_name, self.label, self.endpoint)
+            async def reject_redirect(response: Any) -> None:
+                # httpx response hooks run before next_request is populated. Never
+                # forward credential-bearing POST bodies to a redirect destination.
+                if response.is_redirect:
+                    raise HouseholdError(f"{self.label} MCP redirect is unsupported")
 
-        async with httpx.AsyncClient(
-            auth=provider,
-            follow_redirects=False,
-            timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
-            event_hooks={"response": [reject_redirect]},
-        ) as client:
-            async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
-                async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
-                    async with asyncio.timeout(timeout):
-                        initialized = await session.initialize()
-                        tools: list[Any] = []
-                        cursor: str | None = None
-                        for _ in range(10):
-                            page = await (session.list_tools(cursor=cursor) if cursor else session.list_tools())
-                            tools.extend(page.tools)
-                            cursor = getattr(page, "next_cursor", getattr(page, "nextCursor", None))
-                            if not cursor:
-                                break
-                        names = {str(getattr(item, "name", "")) for item in tools}
-                        missing = sorted(REQUIRED_TOOLS - names)
-                        if missing:
-                            raise HouseholdError(f"{self.label} MCP lacks required operations: " + ", ".join(missing))
-                        server_info = _json_value(getattr(initialized, "server_info", None))
-                        protocol = str(getattr(initialized, "protocol_version", ""))
-                        status = {
-                            "status": "ready",
-                            "protocol_version": protocol,
-                            "server": server_info,
-                            "tool_count": len(names),
-                            "tools": sorted(names),
-                        }
-                        if tool is None:
-                            return status
-                        if tool not in names:
-                            raise HouseholdError(f"{self.label} does not expose {tool}")
-                        result = await session.call_tool(tool, arguments)
+            async with httpx.AsyncClient(
+                auth=provider,
+                follow_redirects=False,
+                timeout=httpx.Timeout(timeout, read=min(60.0, timeout)),
+                event_hooks={"response": [reject_redirect]},
+            ) as client:
+                async with streamable_http_client(self.endpoint, http_client=client, terminate_on_close=False) as streams:
+                    async with ClientSession(streams[0], streams[1], read_timeout_seconds=timeout) as session:
+                        async with asyncio.timeout(timeout):
+                            initialized = await session.initialize()
+                            tools: list[Any] = []
+                            cursor: str | None = None
+                            for _ in range(10):
+                                page = await (session.list_tools(cursor=cursor) if cursor else session.list_tools())
+                                tools.extend(page.tools)
+                                cursor = getattr(page, "next_cursor", getattr(page, "nextCursor", None))
+                                if not cursor:
+                                    break
+                            names = {str(getattr(item, "name", "")) for item in tools}
+                            missing = sorted(REQUIRED_TOOLS - names)
+                            if missing:
+                                raise HouseholdError(f"{self.label} MCP lacks required operations: " + ", ".join(missing))
+                            server_info = _json_value(getattr(initialized, "server_info", None))
+                            protocol = str(getattr(initialized, "protocol_version", ""))
+                            status = {
+                                "status": "ready",
+                                "protocol_version": protocol,
+                                "server": server_info,
+                                "tool_count": len(names),
+                                "tools": sorted(names),
+                            }
+                            if tool is None:
+                                return status
+                            if tool not in names:
+                                raise HouseholdError(f"{self.label} does not expose {tool}")
+                            entered_tool = True
+                            result = await session.call_tool(tool, arguments)
+        except Exception as exc:
+            if tool == "manipulate_cart" and not entered_tool:
+                raise RetailPreDispatchError(f"{self.label} cart operation stopped before tool dispatch") from exc
+            raise
         if bool(getattr(result, "is_error", getattr(result, "isError", False))):
             raise HouseholdError(f"{self.label} rejected the operation")
         structured = getattr(result, "structured_content", getattr(result, "structuredContent", None))
@@ -401,14 +415,24 @@ class RetailMcpClient:
         return value
 
     @contextmanager
-    def _lock(self):
+    def _lock(self, *, deadline=None):
         path = self.token_directory / f".{self.provider}-household.lock"
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise RetailPreDispatchError(f"another {self.label} operation is active") from exc
+            # Interactive login/explicit owners retain nonblocking acquisition.
+            # A provider call may absorb short-lived contention within its deadline.
+            until = min(deadline, time.monotonic() + 2.0) if deadline is not None else time.monotonic()
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    remaining = until - time.monotonic()
+                    if remaining <= 0:
+                        raise RetailPreDispatchError(f"another {self.label} operation is active") from exc
+                    time.sleep(min(0.025, remaining))
+                except OSError as exc:
+                    raise RetailPreDispatchError(f"{self.label} operation lock unavailable") from exc
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)

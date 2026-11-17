@@ -42,6 +42,10 @@ class NegationBoundaryTests(unittest.TestCase):
         self.assertEqual(conditions("Soya melk 1 l", {}, "melk"), {"melk": "unknown"})
         self.assertEqual(conditions("Kokosmelk", {"ingredients": "kokos melk, vann"}, "melk"), {"melk": "unknown"})
 
+    def test_negation_of_one_ingredient_cannot_clear_another(self):
+        for name in ("Helmelk med kaffe uten melk i glasuren", "Melkesjokolade uten melk med kremfløte"):
+            self.assertEqual(conditions(name, {}, "melk"), {"melk": "conflict"})
+
     def test_real_negations_still_deny_the_allergen(self):
         for term, value in (("egg", "uten egg"), ("egg", "Pasta uten egg"), ("milk", "no milk"), ("melk", "utan melk"),
                             ("egg", "does not contain egg"), ("egg", "contains no traces of egg"),

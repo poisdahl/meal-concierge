@@ -128,23 +128,22 @@ def matches(term, value, *, milk_ambiguity=False, free_prefix=None):
     return False
 
 
-def title_allergen_negated(term, value):
-    """Return whether the whole product title explicitly negates this allergen."""
-    normalized_term = text(term)
-    if normalized_term in {'milk', 'melk', 'mjölk'}:
-        allergen_words = r'(?:milk|melk|mjölk)'
-    elif normalized_term in {'peanut', 'peanuts', 'peanøtt', 'peanøtter', 'jordnöt', 'jordnötter'}:
-        allergen_words = r'(?:peanut|peanuts|peanøtt|peanøtter|jordnöt|jordnötter)'
-    elif normalized_term in {'egg', 'ägg'}:
-        allergen_words = r'(?:egg|ägg)'
-    else:
-        return False
-    return re.search(
-        r'\b(?:does\s+not\s+contain|contains\s+no|without|no|uten|utan|fri\s+for|fri\s+från|inneholder\s+ikke|innehåller\s+inte)'
-        r'(?:\s+(?:added|tilsatt|tillsatt|traces?\s+of|spor\s+av|spår\s+av))?\s+'
-        + allergen_words + r'\b',
-        text(value),
-    ) is not None
+def _title_evidence(term, value):
+    # A named food can be an explicitly qualified imitation (egg noodles
+    # without egg). Only remove the immediately qualified food phrase. Other
+    # clauses and independently listed ingredients remain positive evidence.
+    aliases = {
+        'milk': (r'(?:milk chocolate|melkesjokolade|mjölkchoklad)', r'(?:milk|melk|mjölk)'),
+        'egg': (r'(?:egg noodles|ägg nudlar|eggnudler|äggnudlar)', r'(?:egg|ägg)'),
+        'peanut': (r'(?:peanut butter|peanøttsmør|jordnötssmör)', r'(?:peanuts?|peanøtt(?:er)?|jordnöt(?:ter)?)'),
+    }
+    family = {'melk': 'milk', 'mjölk': 'milk', 'ägg': 'egg', 'peanuts': 'peanut',
+              'peanøtt': 'peanut', 'peanøtter': 'peanut', 'jordnöt': 'peanut', 'jordnötter': 'peanut'}.get(text(term), text(term))
+    value = text(value)
+    if family in aliases:
+        food, allergen = aliases[family]
+        value = re.sub(r'\b' + food + r'\s+(?:without|uten|utan)\s+' + allergen + r'\b', ' ', value)
+    return value
 
 
 def title_positive_match(term, value):
@@ -166,8 +165,8 @@ def title_positive_match(term, value):
     }
     normalized_term = text(term)
     pattern = patterns.get(normalized_term)
-    normalized_value = text(value)
-    if pattern is None or title_allergen_negated(term, value):
+    normalized_value = _title_evidence(term, value)
+    if pattern is None:
         return False
     for match in re.finditer(pattern, normalized_value):
         before = normalized_value[max(0, match.start() - 35):match.start()]
@@ -178,7 +177,7 @@ def title_positive_match(term, value):
             r'|(?<!\w)(?:havre|mandel|soja|kokos|ris)(?:[- ]*basert|[- ]*baserad)?[- ]*$', before
         ):
             continue
-        if re.search(r'(?<!\w)(?:without|no|uten|utan)\s*$', before):
+        if re.search(r'(?<!\w)(?:does not contain|contains no|without|no|uten|utan|fri for|fri från|inneholder ikke|innehåller inte)(?:\s+(?:added|tilsatt|tillsatt|traces? of|spor av|spår av))?\s*$', before) or re.match(r'[- ]?(?:free|fri|fritt)\b', normalized_value[match.end():]):
             continue
         return True
     return False
@@ -205,9 +204,7 @@ def assess(profile, item, *, recipe=False):
         # retailer evidence and must never be ignored by product authorization.
         rule_evidence = {**evidence, 'product_name': item.get('name', '')}
         present = any(
-            not (field == 'product_name' and title_allergen_negated(term, rule_evidence.get(field, '')))
-            # A declared allergen list names allergens: "Soya Melk" there is soy and milk, not soy milk.
-            and matches(t, rule_evidence.get(field, ''),
+            matches(t, _title_evidence(term, rule_evidence[field]) if field == 'product_name' else rule_evidence.get(field, ''),
                         milk_ambiguity=field in {'ingredients', 'product_name'} and text(term) in {'milk', 'melk', 'mjölk'} and kind in {'allergy', 'allergy_or_sensitivity', 'sensitivity'},
                         free_prefix=_FREE_PREFIXES.get(text(term)) if field in {'ingredients', 'product_name'} else None)
             for field in ('ingredients', 'allergens', 'may_contain', 'product_name') for t in terms

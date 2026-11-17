@@ -14,13 +14,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import test_meal_concierge as fixtures
 from test_payment_setup import PAYMENT_DOM
 from core import HouseholdError
-from oda_browser import OdaBrowser, CART_URL, DELIVERY_URL, _oda_delivery_restrictions_script
+from oda_browser import OdaBrowser, CART_URL, DELIVERY_URL, _oda_delivery_restrictions_script, checkout_delivery_matches
 
 WARNING = 'Noen av varene i handlekurven, f.eks. Håndsåpe refill, er ikke tilgjengelige før 18. oktober 2026.'
 SNAPSHOT = {'items': [('10', 1)], 'address': {'id': 1, 'address': 'Eksempelveien 1'}}
 
 
 class DeliveryStockTests(unittest.TestCase):
+    def test_bound_address_is_removed_before_checking_the_exact_window(self):
+        expected = "17. mai kl 21:00–24:00"
+        observed = ["Levering 17. mai kl 21:00–00:00 17. mai-plassen 12–14"]
+        self.assertTrue(checkout_delivery_matches(expected, observed, bound_address="17. mai-plassen 12–14"))
+        self.assertFalse(checkout_delivery_matches(expected, observed, bound_address="Annen vei 12–14"))
+        self.assertFalse(checkout_delivery_matches(expected, [observed[0].replace("00:00", "24:15")], bound_address="17. mai-plassen 12–14"))
+
     def test_real_browser_reader_waits_on_delivery_page_and_restores_original_tab(self):
         node = shutil.which('node')
         if not node:

@@ -9,17 +9,25 @@ from recipe_quantities import read_quantity, quantity_json, display_amount
 from stock_check import build_stock_check, stock_check_page, stock_answer_decisions
 
 
+class StockDecisionConflict(HouseholdError):
+    """Preparation supplied a different decision for an already answered position."""
+
+
 _AUTO = object()
 
 def effective_ingredient_decisions(state, menu, supplied=None, *, reference=_AUTO):
-    """Current recorded stock wins over a repeated, older preparation request."""
+    """A fresh conflicting answer needs an explicit update of the saved stock review."""
     saved = state.get('menu_ingredient_decisions') or {}
     reference = mp.menu_ref(menu) if reference is _AUTO else reference
     if reference is None or saved.get('menu_ref') != reference:
         return supplied, None
     menu_requirements(mp.shopping_menu(menu), ingredient_decisions=supplied)
     merged = {canonical(d['source']): d for d in supplied or []}
-    merged.update({canonical(d['source']): deepcopy(d) for d in saved['decisions']})
+    for decision in saved['decisions']:
+        key = canonical(decision['source'])
+        if key in merged and merged[key] != decision:
+            raise StockDecisionConflict('ingredient decision differs from saved stock; read the shopping list and record_stock with its current stock_ref')
+        merged[key] = deepcopy(decision)
     return list(merged.values()), mp.digest(saved['decisions'])
 
 

@@ -124,9 +124,49 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertEqual(self.provider.cart['items'], [])
 
     def recurring(self, product='10'):
+        name = 'Fast vare ' + product
+        self.provider.recurring_catalog[name] = [fixture.products_fixture.product(product, name, 1, 'count', [fixture.products_fixture.option(3500)])]
         return self.app.handle({'operation': 'recurring', 'action': 'add', 'item': {
-            'product_id': product, 'product_name': 'Fast vare', 'quantity': 1,
+            'product_id': product, 'product_name': name, 'quantity': 1,
             'schedule': {'every': 1, 'unit': 'weeks', 'anchor': '2026-W37'}}})
+
+    def reapply_recurring(self, menu):
+        preview = self.app.handle({"operation": "products", "action": "prepare", "menu_ref": mp.menu_ref(menu)})
+        self.assertEqual(preview["product_plan"]["status"], "prepared", preview["product_plan"]["recurring_issues"])
+        applied = self.app.handle({"operation": "products", **preview["apply_arguments"], "cart_change_requested": True})
+        self.assertTrue(applied["applied"], applied)
+        return preview["product_plan"]
+
+    @mock.patch.object(Application, '_household_today', lambda self, state=None: date(2026, 9, 7))
+    def test_unavailable_recurring_can_be_skipped_for_one_exact_menu_occurrence(self):
+        menu, _ = self.shop(self.batch())
+        self.recurring("20")
+        name = "Fast vare 20"
+        self.provider.recurring_catalog[name][0]["availability"] = "unavailable"
+        before = deepcopy(self.provider.cart)
+        preparation = {"operation": "products", "action": "prepare", "menu_ref": mp.menu_ref(menu)}
+        plan = self.app.handle(preparation)["product_plan"]
+        issue, = plan["recurring_issues"]
+        self.assertEqual(plan["status"], "needs_input")
+        self.assertEqual(issue["product_id"], "20")
+        update = {"operation": "recurring", "action": "review_occurrence", "decision": "skip",
+                  "occurrence_ref": issue["occurrence_ref"], "recurring_review_ref":plan["recurring_review_ref"],
+                  "menu_ref": mp.menu_ref(menu)}
+        with self.assertRaises(HouseholdError):
+            self.app.handle({**update, "recurring_review_ref": "stale"})
+        self.assertTrue(self.app.handle(update)["recorded"])
+        self.assertEqual(self.provider.cart, before)
+        self.app = Application(self.store, self.provider, self.browser)
+        preview = self.app.handle({**preparation, "continuation_mode": "reset"})
+        approvals = [{"requirement_id": r["requirement_id"], "candidate_refs": ["10"]}
+                     for r in preview["product_plan"]["requirements"]]
+        reviewed = self.app.handle({**preparation, "candidate_approvals": approvals})
+        self.assertEqual(reviewed["product_plan"]["recurring_issues"], [])
+        self.assertEqual(reviewed["product_plan"]["recurring_review"][0]["decision"], "skip")
+        self.assertTrue(self.app.handle({"operation": "products", **reviewed["apply_arguments"],
+                                        "cart_change_requested": True})["applied"])
+        self.assertNotIn("20", self.store.read()["cart_plan"]["required_quantities"])
+        self.assertEqual(self.app.handle({"operation": "recurring", "action": "due"})["due"][0]["product_id"], "20")
 
     def test_digest_replaces_105_ids_and_replays_once(self):
         self.profile(diet={'rules': [{'kind': 'allergy', 'term': 'synthetic' + str(i)} for i in range(5)]})
@@ -175,8 +215,9 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(sync['synced']); self.assertEqual(first_cart, self.provider.cart)
         self.recurring('20')
         sync = self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})
-        self.assertTrue(sync['synced'])
-        self.assertEqual(self.store.read()['cart_plan']['product_plan_digest'], products['product_plan_digest'])
+        self.assertEqual(sync['reason'], 'recurring_review_changed')
+        reviewed = self.reapply_recurring(menu)
+        self.assertNotEqual(reviewed['product_plan_digest'], products['product_plan_digest'])
         self.app.confirmation_policy = 'standing'
         result = self.call('submit', weekly=True, idempotency_key='weekly-order')
         self.assertTrue(result['confirmed'], result)
@@ -245,7 +286,7 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'ensure', 'requirements': [
             {'product_id': '50', 'product_name': 'Spirer', 'quantity': 1}]})['idempotent'])
         self.recurring('20')  # Changed requirements must not revive withdrawn extras.
-        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
+        self.reapply_recurring(menu)
         self.assertEqual({str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}, {'10': 2, '50': 1, '20': 1})
 
     def test_recorded_home_stock_survives_restart_and_removes_menu_goods_only(self):
@@ -359,7 +400,9 @@ class WeeklyFlowTests(unittest.TestCase):
         self.assertTrue(self.app.handle(request)['substituted'])
         self.assertTrue(self.app.handle(request)['substituted'])
         self.assertEqual(self.call('prepare', weekly=True)['reason'], 'weekly_goods_changed')
-        self.assertTrue(self.app.handle({'operation': 'cart', 'action': 'weekly', 'menu_ref': mp.menu_ref(menu)})['synced'])
+        name = replacement['product_name']
+        self.provider.recurring_catalog[name] = [fixture.products_fixture.product('21', name, 500, 'g', [fixture.products_fixture.option(3500)])]
+        self.reapply_recurring(menu)
         quantities = {str(i['product_id']): i['quantity'] for i in self.provider.cart['items']}
         self.assertNotIn('20', quantities); self.assertEqual(quantities['21'], 1)
         self.assertEqual(self.store.read()['recurring_items'], original)

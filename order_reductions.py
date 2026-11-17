@@ -271,21 +271,20 @@ def _delivery(source, provider="oda"):
 def _reconcile(app, pending, deadline):
     current = _read(app, pending["order_id"], deadline, pending["before"]["binding"])
     before = pending["before"]
-    expected = {pid: r["uncredited_quantity"] for pid, r in _items(before["eligibility"], app.provider).items()}
-    for item in pending["items"]:
-        expected[item["product_id"]] = item["quantity"]
-    observed = {pid: r["uncredited_quantity"] for pid, r in _items(current["eligibility"], app.provider).items()}
-    quantities_match = {k:v for k,v in expected.items() if v} == {k:v for k,v in observed.items() if v}
+    observed = {pid: row["uncredited_quantity"] for pid, row in _items(current["eligibility"], app.provider).items()}
+    # Read the independently account-bound target lines. Unrelated lines,
+    # delivery fees and discounts do not establish the amount refunded.
+    quantities_match = all(observed.get(item["product_id"], 0) == item["quantity"] for item in pending["items"])
     summary = current["details"]["summary"]
     total = money_cents(summary["gross_amount"])
-    matched = (quantities_match and total == pending["total_ore"] - pending["credit_ore"]
-               and _delivery(current, app.provider) == _delivery(before, app.provider))
+    matched = quantities_match and _delivery(current, app.provider) == _delivery(before, app.provider)
     with app.store.locked() as state:
         if canonical(state.get("order_change")) != canonical(pending):
             raise HouseholdError("The pending removal changed during reconciliation")
         if matched:
             result = {**_view(pending), "status": "removed", "removed": True, "confirmation_required": False,
-                      "new_total_ore": total, "credit_ore": pending["total_ore"] - total,
+                      "new_total_ore": total, "credit_ore": pending["credit_ore"],
+                      "order_total_change_ore": pending["total_ore"] - total,
                       "cart_unchanged": current["cart"] == before["cart"],
                       "payment_resolution": {"refund": "unknown", "source": "merchant_order_summary"}}
             app._store_protected_result(state, pending["confirmation_id"], "order_reduction", result,
@@ -294,7 +293,7 @@ def _reconcile(app, pending, deadline):
             return result
         state["order_change"]["status"] = "uncertain"
         return {**_view(state["order_change"]), "removed": False, "reconciliation_required": True,
-                "message": "The exact quantity and order-total change is not verified; do not repeat removal"}
+                "message": "The reviewed target quantities and delivery are not verified; do not repeat removal"}
 
 
 def orders_remove(app, request):
@@ -407,4 +406,6 @@ def orders_remove(app, request):
             with app.store.locked() as state:
                 if state.get("order_change") == pending:
                     state["order_change"]["status"] = "uncertain"
-            raise HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click") from None
+            error = HouseholdError(f"{spec['label']} removal result is uncertain; use remove_reconcile without another click")
+            error.outcome_unknown = True
+            raise error from None

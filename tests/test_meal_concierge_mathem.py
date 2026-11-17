@@ -176,7 +176,7 @@ process.stdout.write(JSON.stringify({value:JSON.parse(eval(input.script)),marked
             b = self.browser(MathemBrowser)
             b._eval = mock.Mock(side_effect=AssertionError('no subsequent navigation'))
             if failure == 'lost_continue': b._click_action.side_effect = HouseholdError('mouse up response lost')
-            elif failure == 'expiry': b._settle.side_effect = HouseholdError('checkout deadline reached')
+            elif failure == 'expiry': b._require_checkout_time = mock.Mock(side_effect=HouseholdError('checkout deadline reached'))
             elif failure == 'ambiguous': b._cart_surface.return_value = {'action': 'blocked'}
             else: b._cart_surface.return_value = {'action': 'full_cart'}
             with self.subTest(failure=failure), self.assertRaises(HouseholdError): b._navigate_to_checkout()

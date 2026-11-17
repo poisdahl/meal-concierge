@@ -2582,11 +2582,17 @@ class PlanningOperations:
         failed = work.setdefault("search_failures", {}) if work is not None else {}
         batch_reader = getattr(self.provider_client, "product_search_batch", None)
         native_batch = callable(batch_reader) and self.provider == "oda"
+        singles = work.setdefault("single_searches", []) if work is not None else []
         while missing:
             remaining = MAX_REQUIREMENTS - work.get("reads", 0) if work is not None else len(missing)
             if remaining <= 0 or deadline is not None and time.monotonic() >= deadline:
                 break
-            keys = missing[:min(8 if native_batch else 1, remaining)]
+            batch_size = min(8, remaining) if native_batch and missing[0] not in singles else 1
+            keys = []
+            for key in missing[:batch_size]:
+                if keys and key in singles:
+                    break
+                keys.append(key)
             del missing[:len(keys)]
             queries = [requested[key] for key in keys]
             if work is not None:
@@ -2596,7 +2602,7 @@ class PlanningOperations:
                     attempted.remove(key)
                 attempted.append(key)
             try:
-                if native_batch:
+                if native_batch and keys[0] not in singles:
                     result = batch_reader(queries, size=MAX_CANDIDATES_PER_REQUIREMENT, deadline=deadline)
                     if not isinstance(result, Mapping) or set(result) != set(queries):
                         raise HouseholdError("provider product batch query scope changed")
@@ -2612,6 +2618,9 @@ class PlanningOperations:
                 for key in keys:
                     failed.pop(key, None)
             except HouseholdError as exc:
+                if len(keys) > 1:
+                    singles.extend(key for key in keys if key not in singles)
+                    missing.extend(keys)
                 for key in keys:
                     failed[key] = {"unavailable_reason": "provider_search_deadline" if deadline is not None and time.monotonic() >= deadline else "provider_search_unavailable_or_scope_changed"}
                     if isinstance(exc, MenyBrowserError) and exc.provider_failure:
@@ -3081,8 +3090,8 @@ class PlanningOperations:
         """Retain reviewable facts once, without the internal plan's repeated evidence."""
         snapshot = {key: deepcopy(plan[key]) for key in (
             "provider", "status", "product_plan_digest", "partial_product_plan_digest",
-            "coverage_status", "cost_status", "budget_status", "budget_ore", "price_mode",
-            "totals", "excluded_costs", "scope", "comparison_claim",
+            "coverage_status", "cost_status", "budget_status", "merchandise_budget_review", "budget_ore", "price_mode",
+            "totals", "excluded_costs", "scope", "comparison_claim", "recurring_review_ref", "recurring_review", "recurring_issues",
         ) if key in plan}
         snapshot["include_recurring"] = plan.get("binding", {}).get("include_recurring", True)
         rules = []
@@ -3124,7 +3133,7 @@ class PlanningOperations:
         for requirement in plan.get("requirements", []):
             row = {key: deepcopy(requirement[key]) for key in (
                 "requirement_id", "item", "quantity", "unit", "status", "sources",
-                "gross_quantity", "confirmed_pantry_quantity", "candidate_approval",
+                "gross_quantity", "confirmed_pantry_quantity", "candidate_approval", "suggested_candidate_approval",
             ) if key in requirement}
             source_keys = {canonical(source) for source in requirement.get("sources", [])}
             decisions = [deepcopy(decision) for decision in plan.get("ingredient_decisions", [])
@@ -3486,7 +3495,7 @@ class PlanningOperations:
     @staticmethod
     def _product_current_context(state):
         return mp.digest({key: state.get(key) for key in
-            ("provider", "profile", "menu_ingredient_decisions", "product_selection_generation")})
+            ("provider", "profile", "menu_ingredient_decisions", "product_selection_generation", "menu_recurring_decisions", "recurring_items", "recurring_substitutions", "recurring_fulfilled")})
 
     def _prepare_products(
         self, *, binding: Mapping[str, Any], menu: Mapping[str, Any],
@@ -3607,7 +3616,7 @@ class PlanningOperations:
                         observation['unavailable_reason'] = 'product_detail_pending'
         if work is not None:
             work["pending_detail_count"] = len(pending_details)
-        return build_product_plan(
+        plan = build_product_plan(
             provider=self.provider,
             binding=binding,
             menu=mp.shopping_menu(menu),
@@ -3618,6 +3627,101 @@ class PlanningOperations:
             ingredient_decisions=ingredient_decisions, budget_ore=budget_ore, price_mode=price_mode, deadline=deadline,
             selected_refs=selected_refs,
         )
+
+        if include_recurring and snapshot["recurring_items"] and reference:
+            self._review_recurring_products(plan, snapshot, read_deadline, work)
+        return plan
+
+    def _review_recurring_products(self, plan, state, deadline, work):
+        from dietary_assessment import assess
+        from product_planner import _practical_packages
+        scope, rows = self._menu_recurring_scope(state)
+        if not rows:
+            return
+        reviewed, problems = [], []
+        base = plan.get("totals") or {}
+        merchandise = base.get("merchandise_ore", 0)
+        exact_floor = 0
+        payable = base.get("total_payable_ore")
+        deposits = base.get("mandatory_deposit_ore")
+        cache = work.setdefault("recurring_observations", {}) if work is not None else {}
+        for row in rows:
+            item = row["item"]
+            review = {"occurrence_ref": row["occurrence_ref"], "decision": row["decision"],
+                      "product_id": item["product_id"], "product_name": item["product_name"], "quantity": item["quantity"]}
+            reviewed.append(review)
+            if row["decision"] == "skip":
+                continue
+            query = item["product_name"]
+            key = mp.digest([self.provider, scope, query, item["product_id"]])
+            if key not in cache:
+                if work is not None and work["reads"] >= MAX_REQUIREMENTS or deadline is not None and time.monotonic() >= deadline:
+                    review["reason"] = "recurring_observation_pending"
+                    if work is not None:
+                        work["pending_search_count"] += 1
+                else:
+                    if work is not None:
+                        work["reads"] += 1
+                    try:
+                        result = self._cart_provider_call("product_search", {"queries": [query], "page": 1,
+                            "size": MAX_CANDIDATES_PER_REQUIREMENT}, deadline=deadline)
+                        observed = self._checked_product_observation(result, self.provider, query)
+                        matches = [p for p in observed["products"] if str(p["product_ref"]) == str(item["product_id"])]
+                        cache[key] = matches[0] if len(matches) == 1 else {}
+                    except HouseholdError:
+                        review["reason"] = "recurring_search_unavailable"
+            product = cache.get(key) or {}
+            if product:
+                review["observed_product_name"] = product.get("name")
+                review["availability"] = product.get("availability")
+                blocked = any(f["blocked"] for f in assess(state["profile"], product))
+                amounts = _practical_packages({"quantity": {"numerator": 1, "denominator": 1}, "unit": "package"},
+                    {"products": [product]}, {"candidate_refs": [product["product_ref"]],
+                    "package_count": item["quantity"], "quantity_basis": "saved package count"}, plan["price_mode"])
+                if blocked:
+                    review["reason"] = "recurring_dietary_conflict"
+                elif amounts:
+                    for field in ("merchandise_ore", "mandatory_deposit_ore", "total_payable_ore"):
+                        review[field] = amounts[field]
+                    merchandise += amounts["merchandise_ore"]
+                    estimated = amounts["products"][0].get("price_status") == "estimate"
+                    if not estimated:
+                        exact_floor += amounts["merchandise_ore"] + (amounts["mandatory_deposit_ore"] or 0)
+                    payable = payable + amounts["total_payable_ore"] if payable is not None and amounts["total_payable_ore"] is not None else None
+                    deposits = deposits + amounts["mandatory_deposit_ore"] if deposits is not None and amounts["mandatory_deposit_ore"] is not None else None
+                else:
+                    review["reason"] = "recurring_availability_or_price_unresolved"
+            elif "reason" not in review:
+                review["reason"] = "recurring_product_not_observed"
+            if "reason" in review:
+                problems.append(review)
+        plan.update(recurring_review_ref=scope, recurring_review=reviewed, recurring_issues=problems)
+        if problems:
+            payable = deposits = None
+        if base:
+            base.update(merchandise_ore=merchandise, mandatory_deposit_ore=deposits, total_payable_ore=payable,
+                        package_count=base["package_count"] + sum(r["quantity"] for r in reviewed if r["decision"] != "skip" and "reason" not in r))
+        if problems:
+            plan["status"] = "needs_input"
+            plan["cost_status"] = "unresolved"
+        cap = plan.get("budget_ore")
+        if cap is not None:
+            exact_floor += sum((p["merchandise_ore"] + (p["mandatory_deposit_ore"] or 0))
+                for r in plan["requirements"] if r.get("selection", {}).get("counts_toward_cart_and_totals", True)
+                for p in r.get("selection", {}).get("products", []) if p.get("price_status") != "estimate")
+            plan["merchandise_budget_review"] = {"policy": "advisory_estimate", "scope": "menu_and_reviewed_recurring",
+                "merchandise_ore": merchandise, "comparison": "incomplete" if problems or not base else
+                "above" if merchandise > cap else "at" if merchandise == cap else "below", "payable_verified": payable is not None and not problems and bool(base)}
+            if exact_floor > cap:
+                plan["status"] = "needs_input"
+                plan["budget_status"] = "exceeded"
+                plan["unresolved_requirements"].append({"reason": "product_budget_exceeded", "known_minimum_ore": exact_floor, "budget_ore": cap})
+            elif payable is None or problems:
+                plan["budget_status"] = "unverified"
+        if payable is None and plan["status"] == "prepared":
+            plan["cost_status"] = "merchandise_estimate_only"
+        plan.pop("partial_product_plan_digest", None)
+        plan["product_plan_digest"] = product_plan_digest(plan)
 
     def _compare_menu_costs(self, request: Mapping[str, Any]) -> dict[str, Any]:
         value = request.get("planner_input")
@@ -3747,7 +3851,18 @@ class PlanningOperations:
         agent = request.get("response_view") == "agent"
         if agent and request.get("action", "prepare") in {"prepare", "get"}:
             self._product_page_options(request)
-        result = self._products_operation(request)
+        from shopping_lists import StockDecisionConflict
+        try:
+            result = self._products_operation(request)
+        except StockDecisionConflict as exc:
+            if request.get("action") != "apply":
+                raise
+            ref = request.get("menu_ref") or ((request.get("product_plan") or {}).get("binding") or {}).get("menu_ref")
+            result = {"applied": False, "status": "needs_input", "product_plan_stale": True, "reason": str(exc)}
+            if ref:
+                current = self._products_operation({"operation": "products", "action": "prepare",
+                    "menu_ref": ref, "continuation_mode": "reset", **({"_deadline": request["_deadline"]} if request.get("_deadline") else {})})
+                result["fresh_product_plan"] = current["product_plan"]
         if not agent or result.get("projection") == "agent":
             return result
         if request.get("action", "prepare") == "prepare" and result.get("product_plan_ref"):
@@ -3941,6 +4056,10 @@ class PlanningOperations:
                     price_mode = request.get("price_mode") or ("estimate" if self.provider in {"oda", "mathem"} else "exact")
             observation_work = (deepcopy(continuation_record.get("observation_work") or {})
                                 if continuation_record is not None and mode not in {"reset", "refresh_stock"} else {})
+            observed_now = self._now()
+            observed_start = observation_work.get("started_at")
+            if observed_start is None or not 0 <= (observed_now - datetime.fromisoformat(observed_start)).total_seconds() <= 300:
+                observation_work = {"started_at": observed_now.isoformat()}
             plan = self._prepare_products(
                 include_recurring=include_recurring,
                 work=observation_work,
@@ -4421,7 +4540,7 @@ class PlanningOperations:
             if (not prepared_cart_requirements(supplied) and (not include_recurring or not self.store.read()["recurring_items"])
                     and not (self.store.read().get("cart_plan") or {}).get("supplemental_quantities")):
                 cart_result = self._cart_sync({"requirements": [], "_expected_menu_ref": expected_menu_ref,
-                    "_include_recurring": include_recurring,
+                    "_include_recurring": include_recurring, "_reviewed_recurring_scope": supplied.get("recurring_review_ref"),
                     "_allow_empty_requirements": True, "_before_cart_write": final_product_prewrite_check,
                     "_expected_product_context": context, "_restore_missing_cart_digest": restore_digest if restore else None}, deadline)
                 if not cart_result.get("synced"):
@@ -4463,7 +4582,7 @@ class PlanningOperations:
                     state["cart_plan"]["product_plan_summary"] = {
                         key: deepcopy(supplied.get(key))
                         for key in (
-                            "totals", "cost_status", "budget_status", "budget_ore",
+                            "totals", "cost_status", "budget_status", "merchandise_budget_review", "budget_ore",
                             "ingredient_decisions", "coverage_status",
                         )
                     }
@@ -4479,7 +4598,7 @@ class PlanningOperations:
                 }
             cart_result = self._cart_sync({
                 "requirements": prepared_cart_requirements(supplied),
-                "_include_recurring": include_recurring,
+                "_include_recurring": include_recurring, "_reviewed_recurring_scope": supplied.get("recurring_review_ref"),
                 "_allow_empty_requirements": True,
                 "_expected_menu_ref": expected_menu_ref,
                 "_before_cart_write": final_product_prewrite_check,
@@ -4512,7 +4631,7 @@ class PlanningOperations:
                     supplied, expected_menu_ref, state["cart_plan"]
                 )
                 state["cart_plan"]["product_plan_summary"] = {
-                    key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "budget_ore", "ingredient_decisions", "coverage_status")
+                    key: deepcopy(supplied.get(key)) for key in ("totals", "cost_status", "budget_status", "merchandise_budget_review", "budget_ore", "ingredient_decisions", "coverage_status")
                 }
                 meals = (state.get("profile") or {}).get("meals") or {}
                 expected_dinners = meals.get("dinner_days")
@@ -4670,7 +4789,7 @@ class PlanningOperations:
 
     def _cart_provider_call(self, tool: str, arguments: Mapping[str, Any], *, deadline: float | None) -> dict[str, Any]:
         if deadline is not None and time.monotonic() >= deadline:
-            raise HouseholdError("cart operation deadline reached; reconcile any unverified changes")
+            raise RetailPreDispatchError("cart operation deadline reached; reconcile any unverified changes")
         kwargs = {"deadline": deadline} if deadline is not None else {}
         return self.provider_client.call(tool, arguments, **kwargs)
 
@@ -4727,6 +4846,7 @@ class PlanningOperations:
             "status": plan["status"],
             "cart_digest": self._cart_digest(live),
             "approved": approved,
+            **({"ownership_review": deepcopy(plan["ownership_review"])} if plan.get("ownership_review") else {}),
             "items": items,
         }
 
@@ -4826,6 +4946,43 @@ class PlanningOperations:
                 )
         plan["added_quantities"] = retained
 
+    def _dispatch_managed_cart(self, operations, before, target, menu_ref, deadline):
+        # The native adapter durably binds its individual delegation requests.
+        # Ordinary MCP has no per-line completion identity or ownership receipt.
+        if callable(getattr(self.provider_client, "validate_cart_reconciliation", None)):
+            return self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
+        pending = {"operation_id": secrets.token_hex(16), "provider": self.provider,
+                   "managed_menu": deepcopy(menu_ref), "before": deepcopy(before),
+                   "expected": deepcopy(target), "operations": deepcopy(operations), "order_change": None}
+        with self.store.locked() as state:
+            if (state.get("pending_cart_change") or state.get("pending_checkout")
+                    or state.get("order_change") or self._cart_menu_ref(state.get("menu")) != menu_ref):
+                raise HouseholdError("cart owner or menu changed before dispatch")
+            state["pending_cart_change"] = deepcopy(pending)
+        try:
+            self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
+        except RetailPreDispatchError:
+            with self.store.locked() as state:
+                if state.get("pending_cart_change") == pending:
+                    self._finish_managed_cart_journal(state, pending, "not_dispatched")
+            raise
+        with self.store.locked() as state:
+            if state.get("pending_cart_change") != pending:
+                raise HouseholdError("original cart operation changed after dispatch")
+            state["pending_cart_change"]["dispatch_finished"] = True
+
+    @staticmethod
+    def _finish_managed_cart_journal(state, pending, status):
+        state.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {
+            "status": status, "provider": pending["provider"], "menu_ref": pending["managed_menu"],
+            "request_digest": mp.digest(pending["operations"]), "expected_digest": mp.digest(pending["expected"])}
+        state.pop("pending_cart_change")
+
+    def _finish_observed_managed_cart(self, state, menu_ref):
+        pending = state.get("pending_cart_change")
+        if pending and pending.get("managed_menu") == menu_ref and pending.get("dispatch_finished") is True:
+            self._finish_managed_cart_journal(state, pending, "read_back")
+
     def _cart_sync(self, request: Mapping[str, Any], deadline: float | None) -> dict[str, Any]:
         expected_menu_ref = self._require_cart_menu(request)
         summarize = getattr(self.provider_client, "managed_cart_summary", cart_summary)
@@ -4837,7 +4994,10 @@ class PlanningOperations:
         menu = snapshot.get('menu') or {}
         recurring = []
         if request.get("_include_recurring", True) and snapshot['recurring_items']:
-            recurring = self._due_recurring(snapshot, self._household_today(snapshot))
+            scope, rows = self._menu_recurring_scope(snapshot)
+            if request.get('_reviewed_recurring_scope') is not None and request['_reviewed_recurring_scope'] != scope:
+                raise HouseholdError('recurring occurrences changed; prepare and review the current menu again')
+            recurring = [r['item'] for r in rows if r['decision'] != 'skip']
         for item in recurring:
             key = self._product_id(item['product_id'])
             requirements[key] = requirements.get(key, 0) + item['quantity']
@@ -4923,6 +5083,7 @@ class PlanningOperations:
                 state["cart_plan"] = deepcopy(current)
             current['menu_required_quantities'] = menu_requirements
             current['recurring_items'] = recurring
+            current['recurring_review_ref'] = request.get('_reviewed_recurring_scope')
             current['include_recurring'] = request.get('_include_recurring', True)
             state['cart_plan'] = deepcopy(current)
         if current["status"] == "needs_input":
@@ -4998,7 +5159,9 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
+                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline)
+            except RetailPreDispatchError:
+                raise
             except HouseholdError as exc:
                 mutation_error = exc
         try:
@@ -5037,10 +5200,20 @@ class PlanningOperations:
                 expected.pop(product_id)
         if mutation_error is not None or verified_live != expected:
             with self.store.locked() as state:
+                self._finish_observed_managed_cart(state, expected_menu_ref)
                 plan = state["cart_plan"]
                 self._retain_acknowledged_cart_additions(
                     plan, first_live, acknowledged_live, verified_live
                 )
+                if mutation_error is None and self.provider in {"oda", "mathem"}:
+                    # A completed batch lacks per-line authorship. Expose only
+                    # unattributed positive deltas, never claim them by inference.
+                    candidates = {str(op["productId"]): min(op["quantity"], verified_live.get(str(op["productId"]), 0)
+                        - first_live.get(str(op["productId"]), 0)) for op in operations if op["quantity"] > 0}
+                    candidates = {pid: quantity for pid, quantity in candidates.items() if quantity > 0}
+                    if candidates:
+                        plan["ownership_review"] = {"cart_digest": self._cart_digest(verified_live),
+                            "menu_ref": deepcopy(expected_menu_ref), "maximum_adoptable": candidates}
                 self._set_cart_needs_input(plan, verified_live, verified_names)
                 current = deepcopy(plan)
             return {
@@ -5052,6 +5225,7 @@ class PlanningOperations:
                 ),
             }
         with self.store.locked() as state:
+            self._finish_observed_managed_cart(state, expected_menu_ref)
             plan = state.get("cart_plan")
             if not isinstance(plan, dict) or canonical(plan.get("menu_ref")) != canonical(current.get("menu_ref")):
                 raise HouseholdError("cart plan changed while syncing")
@@ -5128,6 +5302,18 @@ class PlanningOperations:
         unknown = (excluded | accepted_missing) - (set(first_live) | set(requirements) | set(plan.get("supplemental_quantities", {})))
         if unknown:
             raise HouseholdError("cart decisions must use exact products from the current plan or cart")
+        adoption = request.get("adopt_quantities") or {}
+        receipt = plan.get("ownership_review") or {}
+        if adoption:
+            if (not isinstance(adoption, dict) or len(adoption) > 100 or decision != "keep_current"
+                    or excluded or accepted_missing or receipt.get("cart_digest") != supplied_digest
+                    or receipt.get("menu_ref") != expected_menu_ref):
+                raise HouseholdError("ownership adoption requires the exact current keep_current review without cart edits")
+            for pid, quantity in adoption.items():
+                if (type(quantity) is not int or not 1 <= quantity <= receipt["maximum_adoptable"].get(pid, 0)
+                        or quantity + plan["baseline_quantities"].get(pid, 0) + plan["added_quantities"].get(pid, 0)
+                        + plan.get("supplemental_quantities", {}).get(pid, 0) > first_live.get(pid, 0)):
+                    raise HouseholdError("adopt only reviewed quantities above the protected household baseline")
         target = dict(first_live)
         if decision == "restore_missing":
             for product_id, required in self._cart_target(plan).items():
@@ -5167,7 +5353,9 @@ class PlanningOperations:
                         operations, acknowledged_live, deadline=deadline
                     )
                 else:
-                    self._cart_provider_call("manipulate_cart", {"operations": operations}, deadline=deadline)
+                    self._dispatch_managed_cart(operations, first_live, target, expected_menu_ref, deadline)
+            except RetailPreDispatchError:
+                raise
             except HouseholdError as exc:
                 mutation_error = exc
         try:
@@ -5184,6 +5372,7 @@ class PlanningOperations:
         verified_live, verified_names = self._cart_lines(verified_summary)
         if mutation_error is not None or verified_live != target:
             with self.store.locked() as state:
+                self._finish_observed_managed_cart(state, expected_menu_ref)
                 current = state["cart_plan"]
                 self._reduce_supplements(current, first_live, {key: verified_live.get(key, 0) if key in excluded else value for key, value in first_live.items()})
                 self._retain_acknowledged_cart_additions(
@@ -5201,6 +5390,7 @@ class PlanningOperations:
             }
         approved_digest = self._cart_digest(verified_live)
         with self.store.locked() as state:
+            self._finish_observed_managed_cart(state, expected_menu_ref)
             current = state.get("cart_plan")
             if not isinstance(current, dict) or current.get("pending_cart_digest") != supplied_digest:
                 raise HouseholdError("cart plan changed while applying the decision")
@@ -5228,6 +5418,12 @@ class PlanningOperations:
                 key: min(value, max(0, verified_live.get(key, 0) - current.get("supplemental_quantities", {}).get(key, 0)))
                 for key, value in current["added_quantities"].items()
             }
+            for pid, quantity in adoption.items():
+                current["added_quantities"][pid] = current["added_quantities"].get(pid, 0) + quantity
+            if adoption:
+                current["ownership_adoption_receipt"] = {"menu_ref": deepcopy(expected_menu_ref),
+                    "cart_digest": approved_digest, "quantities": deepcopy(adoption)}
+            current.pop("ownership_review", None)
             current["product_names"].update(verified_names)
             current["last_synced_quantities"] = dict(verified_live)
             current["last_synced_digest"] = approved_digest
@@ -5529,6 +5725,16 @@ class PlanningOperations:
                             raise HouseholdError("original native cart intent changed during refusal reconciliation")
                         state.pop("pending_cart_change")
                     return
+        if pending.get("managed_menu"):
+            if not pending.get("dispatch_finished") and quantities != pending["expected"]:
+                raise HouseholdError("cart dispatch remains uncertain; use reconcile_change to read the original target without resending")
+            with self.store.locked() as state:
+                plan = state.get("cart_plan") or {}
+                if state.get("pending_cart_change") != pending or plan.get("menu_ref") != pending["managed_menu"]:
+                    raise HouseholdError("original managed cart intent or menu changed")
+                self._set_cart_needs_input(plan, quantities, names)
+                self._finish_managed_cart_journal(state, pending, "observed_review_required")
+            return
         if pending.get("native_managed"):
             self._complete_native_managed_write(pending, quantities, names)
             return
@@ -5575,8 +5781,13 @@ class PlanningOperations:
                     or canonical(plan.get('menu_ref')) != canonical(reference)
                     or not plan.get('product_plan_digest')):
                 return {'synced': False, 'status': 'needs_input', 'reason': 'Prepare and apply the menu product plan first; weekly goods are included there.'}
+            scope, rows = self._menu_recurring_scope(state)
+            if plan.get("include_recurring", True) and (rows or plan.get("recurring_items")) and scope != plan.get("recurring_review_ref"):
+                return {"synced": False, "status": "needs_input", "reason": "recurring_review_changed",
+                        "next": "Prepare and apply a fresh product plan for this menu to review due items and the updated merchandise budget."}
             required = plan.get('menu_required_quantities', plan['required_quantities'])
-            return self._cart({**request, 'action': 'sync', 'requirements': [
+            return self._cart({**request, 'action': 'sync', "_include_recurring": plan.get("include_recurring", True),
+                "_reviewed_recurring_scope": plan.get("recurring_review_ref"), 'requirements': [
                 {'product_id': key, 'product_name': plan['product_names'][key], 'quantity': value}
                 for key, value in required.items()], '_allow_empty_requirements': True})
         if action in {"sync", "reconcile"}:
@@ -5598,10 +5809,10 @@ class PlanningOperations:
         if action not in {"change", "apply", "set", "update", "clear", "ensure", "reconcile_change"}:
             raise HouseholdError("unknown cart action")
         deadline = time.monotonic() + MENY_CART_TIMEOUT if self.provider == "meny" else request.get("_deadline")
-        with self._browser_operation(deadline, allow_pending_cart=action == "reconcile_change"):
+        with self._browser_operation(deadline, allow_pending_cart=True):
             state = self.store.read()
-            if (state.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                raise HouseholdError("reconcile the pending checkout before changing the cart")
+            if state.get("pending_checkout") and action != "reconcile_change":
+                raise HouseholdError("finish or discard the pending checkout review before changing the cart")
             if (state.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
                 raise HouseholdError("reconcile the pending cancellation before changing the cart")
             pending = state.get("pending_cart_change")
@@ -5625,7 +5836,9 @@ class PlanningOperations:
                                  if pending.get("native_managed") else
                                  "The saved write is verified. Rerun ensure for the original minimum if a multi-batch request was interrupted; never repeat a delta.")}
             if pending:
-                raise HouseholdError("reconcile_change before another cart write; do not repeat an uncertain delta")
+                error = HouseholdError("reconcile_change before another cart write; do not repeat an uncertain delta")
+                error.outcome_unknown = pending.get("request_digest") == mp.digest({k:v for k,v in request.items() if not k.startswith("_")})
+                raise error
             change = deepcopy(state.get("order_change"))
             if action == "clear" and change:
                 raise HouseholdError("finish or abort the active order edit before clearing the cart")
@@ -5710,9 +5923,11 @@ class PlanningOperations:
                         self._require_raw_cart_write_allowed(locked)
                     if (locked.get("pending_cancellation") or {}).get("status") in {"clicking", "uncertain"}:
                         raise HouseholdError("reconcile the pending cancellation before changing the cart")
-                    if (locked.get("pending_checkout") or {}).get("status") in UNRESOLVED_CHECKOUT_STATUSES:
-                        raise HouseholdError("reconcile the pending checkout before changing the cart")
-                    pending = {"provider": self.provider, "before": before, "expected": expected,
+                    if locked.get("pending_checkout"):
+                        raise HouseholdError("finish or discard the pending checkout review before changing the cart")
+                    pending = {"provider": self.provider, "operation_id": secrets.token_hex(16),
+                               "request_digest": mp.digest({k:v for k,v in request.items() if not k.startswith("_")}),
+                               "before": before, "expected": expected,
                                "order_change": deepcopy(change), "operations": batch,
                                **({"clear_requested": True} if action == "clear" else {})}
                     if request.get("_native_cart_binding") is not None:
@@ -5732,6 +5947,8 @@ class PlanningOperations:
                     if self.provider in {"oda", "mathem"}:
                         with self.store.locked() as locked:
                             if canonical(locked.get("pending_cart_change")) == canonical(pending):
+                                locked.setdefault("cart_change_receipts", {})[pending["operation_id"]] = {"provider": self.provider,
+                                    "request_digest": pending["request_digest"], "status": "not_dispatched"}
                                 locked.pop("pending_cart_change")
                     raise
                 except MenyCartStoppedError as exc:
@@ -5748,10 +5965,18 @@ class PlanningOperations:
                     self._complete_cart_write(pending, cart)
                     return {"ensured": False, "stopped": True, "reason": str(exc), "cart": cart,
                             "next": "The adapter stopped before the next click. Earlier additions are retained; resolve product availability before a new ensure."}
-                if self.provider == "meny":
-                    self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
-                cart = self.provider_client.call("get_cart", {}, deadline=deadline)
-                self._complete_cart_write(pending, cart)
+                except HouseholdError as exc:
+                    exc.outcome_unknown = True
+                    raise
+                try:
+                    if self.provider == "meny":
+                        self.browser.verify_order_change(change.get("order_id") if change else None, change.get("code") if change else None, deadline=deadline)
+                    cart = self.provider_client.call("get_cart", {}, deadline=deadline)
+                    self._complete_cart_write(pending, cart)
+                except (HouseholdError, OSError) as exc:
+                    error = HouseholdError("The original cart write needs readback; reconcile_change without resending")
+                    error.outcome_unknown = True
+                    raise error from exc
                 before = expected
                 change = deepcopy(self.store.read().get("order_change"))
             if action == "clear":

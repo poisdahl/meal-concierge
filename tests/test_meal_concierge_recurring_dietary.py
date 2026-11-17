@@ -21,6 +21,7 @@ class Retailer(MutableFakeOda):
     def __init__(self):
         super().__init__()
         self.evidence = {}
+        self.recurring_catalog = {}
         self.product_id = 10
         self.detail_html = None
 
@@ -32,6 +33,9 @@ class Retailer(MutableFakeOda):
 
     def call(self, tool, arguments, **kwargs):
         if tool == 'product_search':
+            name = arguments['queries'][0]
+            if name in self.recurring_catalog:
+                return products_fixture.observation(name, self.recurring_catalog[name])
             product = products_fixture.product(str(self.product_id), 'Gulrot', 1000, 'g', [products_fixture.option(3500)])
             product['dietary_evidence'] = deepcopy(self.evidence)
             return products_fixture.observation(arguments['queries'][0], [product])
