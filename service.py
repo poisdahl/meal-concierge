@@ -1360,6 +1360,8 @@ def main() -> None:
     validate_browser_prerequisites(args, settings)
     browser_owner = (None, None, None, None, None, None) if settings["provider"] == "none" else (args.browser_profile, args.browser_home, args.browser_socket_directory, args.browser_cdp, args.browser_uid, args.browser_gid)
     with ownership(args.state, *browser_owner):
+        if args.maintenance and args.maintenance.exists():
+            raise SystemExit("offline update is incomplete; repair it before starting the service")
         run(args, settings)
 
 
@@ -1378,6 +1380,9 @@ def validate_browser_prerequisites(args, settings) -> None:
 
 
 def run(args, settings=None) -> None:
+    # Mark the attempt before provider/library adapter setup can begin.
+    from runtime_rollback import note_runtime_open
+    note_runtime_open(args.state)
     if settings is None:
         settings = config(args.config)
         validate_browser_prerequisites(args, settings)
