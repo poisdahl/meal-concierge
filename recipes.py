@@ -2779,10 +2779,12 @@ class RecipeStore:
         """Whether this exact destination already has a terminal/dispatched save."""
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT status, dispatched_at FROM library_operations WHERE library_id=? AND discovery_ref=? AND kind='create'",
+                "SELECT status, dispatched_at, error_code FROM library_operations WHERE library_id=? AND discovery_ref=? AND kind='create'",
                 (library_id, discovery_ref),
             ).fetchone()
-            return row is not None and (row["status"] in {"confirmed", "failed", "uncertain"} or row["dispatched_at"] is not None)
+            retryable = (row is not None and library_id == "builtin" and row["status"] == "failed"
+                         and row["error_code"] in {"builtin_rejected", "source_conflict"})
+            return row is not None and not retryable and (row["status"] in {"confirmed", "failed", "uncertain"} or row["dispatched_at"] is not None)
 
     def has_library_save(self, discovery_ref: Any, library_id: str, idempotency_key: Any) -> bool:
         """A prior create authorizes only its exact replay, validated by begin_library_create."""
@@ -2818,6 +2820,22 @@ class RecipeStore:
                     "SELECT 1 FROM library_connection_controls WHERE library_id=?", (library,)
                 ).fetchone() is not None:
                     raise RecipeError("recipe library connection is disabled")
+                def resume_builtin(row):
+                    if (library != "builtin" or row["status"] != "failed"
+                            or row["error_code"] not in {"builtin_rejected", "source_conflict"}):
+                        return None
+                    result = self._library_operation(row)
+                    if result["requested_status"] != status:
+                        raise RecipeError("retry the exact built-in save status")
+                    # The save has definite local rollback/source-conflict semantics.
+                    # Resolve again, and retain its exact identity and snapshot.
+                    self._resolved_snapshot(connection, ref)
+                    connection.execute(
+                        "UPDATE library_operations SET status='pending', dispatched_at=NULL, "
+                        "idempotency_key=?, error_code=NULL, error_text=NULL, updated_at=? "
+                        "WHERE operation_id=?", (key, _now(), row["operation_id"]))
+                    return self._library_operation(connection.execute(
+                        "SELECT * FROM library_operations WHERE operation_id=?", (row["operation_id"],)).fetchone())
                 if key is not None:
                     keyed = connection.execute(
                         "SELECT * FROM library_operations WHERE library_id=? AND idempotency_key=?",
@@ -2834,7 +2852,7 @@ class RecipeStore:
                                 "idempotency key was already used for another library operation"
                             )
                         if keyed["discovery_ref"] == ref:
-                            return keyed_result
+                            return resume_builtin(keyed) or keyed_result
                         snapshot = connection.execute(
                             "SELECT snapshot_key, source_identity FROM discovery_snapshots "
                             "WHERE discovery_ref=?",
@@ -2867,6 +2885,8 @@ class RecipeStore:
                             "the external recipe previously saved from this discovery "
                             "reference was permanently deleted"
                         )
+                    if resumed := resume_builtin(existing):
+                        return resumed
                     if key is not None:
                         raise RecipeError(
                             "discovery was already saved with a different idempotency key"
@@ -4051,13 +4071,20 @@ class RecipeStore:
                     raise RecipeError("library_recipe_ref does not match the bound library")
                 timestamp = _now()
                 if reference is not None:
-                    connection.execute("""INSERT INTO library_mappings(
+                    cursor = connection.execute("""INSERT INTO library_mappings(
                         library_id, source_identity, snapshot_digest, recipe_id, version,
                         operation_id, created_at, updated_at
-                    ) VALUES(?,?,?,?,?,?,?,?)""", (
+                    ) VALUES(?,?,?,?,?,?,?,?)
+                    ON CONFLICT(library_id,recipe_id) DO UPDATE SET
+                        snapshot_digest=excluded.snapshot_digest, version=excluded.version,
+                        operation_id=excluded.operation_id, updated_at=excluded.updated_at
+                    WHERE library_mappings.library_id='builtin'
+                        AND library_mappings.source_identity=excluded.source_identity""", (
                         row["library_id"], row["source_identity"], row["snapshot_digest"],
                         reference["recipe_id"], reference.get("version"), operation, timestamp, timestamp,
                     ))
+                    if cursor.rowcount != 1:
+                        raise RecipeError("recipe library mapping already belongs to another source")
                 connection.execute("""UPDATE library_operations SET
                     status=?, result_metadata=?, provider_recipe_id=?, provider_version=?,
                     error_code=?, error_text=?, updated_at=? WHERE operation_id=?""", (
@@ -4619,7 +4646,7 @@ class RecipeStore:
                                 "id": existing["id"],
                                 "revision": existing["revision"],
                             },
-                            "requires": "explicit update with expected_revision",
+                            "requires": "explicit update with discovery_ref and expected_revision",
                         }
                         self._store_idem(connection, key, "save_discovery", request_hash, result)
                         return result

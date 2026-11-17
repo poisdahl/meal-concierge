@@ -37,6 +37,12 @@ and reports a conflict rather than overwriting them. A legacy unqualified source
 identity requires explicit reconciliation. Original attribution and private
 provider restrictions remain independent from this duplicate identity.
 
+After reviewing a `source_changed` conflict on an imported recipe, explicitly
+update using its `recipe_id`, `expected_revision`, corrected `discovery_ref` and
+a stable idempotency key. The service checks that the frozen discovery belongs
+to that saved source identity and retains its trusted source evidence. Do not
+resend the source recipe as caller-authored JSON to assert new source evidence.
+
 Native snapshots retain their exact source revision in existing
 `external_snapshot` metadata. Ordinary get/search never fetches image URLs.
 
