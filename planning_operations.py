@@ -3292,7 +3292,7 @@ class PlanningOperations:
         """Keep write outcomes and reconciliation identities ahead of diagnostics."""
         fields = (
             "applied", "partial_applied", "completed_from_partial", "synced", "idempotent",
-            "outcome_unknown", "cart_write_pending", "cart_reconciliation_required", "reason",
+            "outcome_unknown", "operation_id", "cart_write_pending", "cart_reconciliation_required", "reason",
             "menu_ref", "product_plan_digest", "partial_product_plan_digest", "remaining_issue_count",
             "cart_changed", "nothing_to_buy", "nothing_to_buy_for_menu", "price_verification",
             "price_locked", "final_price_authority", "product_plan_stale", "menu_binding_stale",
@@ -4860,8 +4860,13 @@ class PlanningOperations:
                 with self.store.locked() as state:
                     if state.get("pending_cart_change") != pending:
                         raise HouseholdError("original MENY batch changed during stopped-prefix readback")
-                    state["pending_cart_change"].update(expected=prefix, acknowledged=prefix,
-                        dispatch_finished=not exc.applied_operations, stopped_before_next_click=True)
+                    if not exc.applied_operations and acknowledged == original:
+                        self._finish_managed_cart_journal(state, pending, "not_dispatched")
+                    else:
+                        state["pending_cart_change"].update(expected=prefix, acknowledged=prefix,
+                            dispatch_finished=not exc.applied_operations, stopped_before_next_click=True)
+                if not exc.applied_operations and acknowledged == original:
+                    raise RetailPreDispatchError("MENY stopped before its first managed click") from exc
                 acknowledged.clear()
                 acknowledged.update(prefix)
                 raise
@@ -4926,7 +4931,7 @@ class PlanningOperations:
         status = "active"
         if isinstance(previous, Mapping) and previous.get("provider") == self.provider:
             for product_id, quantity in previous.get("added_quantities", {}).items():
-                retained = min(quantity, max(0, live.get(product_id, 0) - previous.get("supplemental_quantities", {}).get(product_id, 0)))
+                retained = min(quantity, self._menu_owned_capacity(previous, live, product_id))
                 if retained:
                     retained_added[product_id] = retained
                     baseline[product_id] = live.get(product_id, 0) - retained
@@ -4985,12 +4990,17 @@ class PlanningOperations:
         plan["updated_at"] = self._now().isoformat()
 
     @staticmethod
+    def _menu_owned_capacity(plan, live, product_id):
+        # Even after a manual removal, automatic cleanup can only claim units
+        # above both classes of protected household stock.
+        return max(0, live.get(product_id, 0) - plan.get("baseline_quantities", {}).get(product_id, 0)
+                   - plan.get("supplemental_quantities", {}).get(product_id, 0))
+
     def _retain_acknowledged_cart_additions(
-        plan: dict[str, Any], before: Mapping[str, int],
+        self, plan: dict[str, Any], before: Mapping[str, int],
         acknowledged: Mapping[str, int], live: Mapping[str, int],
     ) -> None:
-        capacity = {product_id: max(0, quantity - plan.get("supplemental_quantities", {}).get(product_id, 0))
-                    for product_id, quantity in live.items()}
+        capacity = {product_id: self._menu_owned_capacity(plan, live, product_id) for product_id in live}
         retained = {
             product_id: min(quantity, capacity.get(product_id, 0))
             for product_id, quantity in plan["added_quantities"].items()
@@ -5495,8 +5505,8 @@ class PlanningOperations:
                     product_id = str(operation["productId"])
                     current["added_quantities"][product_id] = current["added_quantities"].get(product_id, 0) + operation["quantity"]
             current["added_quantities"] = {
-                key: min(value, max(0, verified_live.get(key, 0) - current.get("supplemental_quantities", {}).get(key, 0)))
-                for key, value in current["added_quantities"].items()
+                key: min(value, self._menu_owned_capacity(current, verified_live, key))
+                for key, value in current["added_quantities"].items() if self._menu_owned_capacity(current, verified_live, key)
             }
             for pid, quantity in adoption.items():
                 current["added_quantities"][pid] = current["added_quantities"].get(pid, 0) + quantity
@@ -5624,8 +5634,8 @@ class PlanningOperations:
                 continue
             supplements[product_id] = max(0, supplements.get(product_id, 0) + delta)
             retained = max(0, after.get(product_id, 0) - supplements[product_id])
-            plan["added_quantities"][product_id] = min(plan["added_quantities"].get(product_id, 0), retained)
-            plan["baseline_quantities"][product_id] = min(plan["baseline_quantities"].get(product_id, 0), retained - plan["added_quantities"][product_id])
+            plan["baseline_quantities"][product_id] = min(plan["baseline_quantities"].get(product_id, 0), retained)
+            plan["added_quantities"][product_id] = min(plan["added_quantities"].get(product_id, 0), retained - plan["baseline_quantities"][product_id])
         plan["supplemental_quantities"] = {key: value for key, value in supplements.items() if value}
 
     def _record_supplemental_cart_change(
