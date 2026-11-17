@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Native, owner-local installation. No agent registration or provider login side effects."""
 from __future__ import annotations
+import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit("Meal Concierge installation requires Python 3.10+ on PATH as python3. Install a supported Python and uv, then retry the same command.")
+
 import argparse
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -15,7 +20,6 @@ import shutil
 import socket
 import stat
 import subprocess
-import sys
 import time
 import tempfile
 import uuid
