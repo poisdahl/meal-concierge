@@ -75,11 +75,19 @@ def _offline_store(args):
         try:
             meta = json.loads((home / "runtime.json").read_text(encoding="utf-8"))
             paths = meta["paths"]
+            browser_paths = ("browser_profile", "browser_home", "browser_socket_directory")
+            required_paths = ["state", "socket", *[key for key in browser_paths if key in paths]]
+            if any(key not in paths for key in browser_paths):
+                # Planning-only installations omit browser resources. Confirm
+                # their explicit provider before accepting fewer owner locks.
+                config_path = Path(paths["config"])
+                if not config_path.is_absolute() or install.bounded_json(config_path).get("provider") != "none":
+                    raise ValueError()
             if (meta.get("format") != 1 or Path(meta["home"]).resolve() != home
                     or meta.get("manager") not in {"systemd", "launchd", "external"}
                     or not isinstance(meta.get("name"), str)
                     or any(not isinstance(paths[key], str) or not Path(paths[key]).is_absolute()
-                           for key in ("state", "browser_profile", "browser_home", "browser_socket_directory", "socket"))):
+                           for key in required_paths)):
                 raise ValueError()
             state_directory = Path(paths["state"])
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:

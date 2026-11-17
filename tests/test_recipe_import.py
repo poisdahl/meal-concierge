@@ -2666,6 +2666,23 @@ class PrivateCLITests(unittest.TestCase):
     def export(self,**options):
         return self.invoke('--export-private',self.output,'--installation-home',self.home,**options)
 
+    def test_planning_only_external_cli_uses_the_state_and_listener_ownership(self):
+        self.meta['manager'] = 'external'
+        config = self.home / 'config.json'
+        install.write_json(config, {'provider':'none','household':self.household})
+        self.meta['paths'] = {'state':str(self.state), 'config':str(config), 'socket':self.meta['paths']['socket']}
+        install.write_json(self.home / 'runtime.json', self.meta)
+        install.write_json(self.state/'state.json', {'household':self.household,'provider':'none'})
+        with install.data_ownership(self.meta), self.assertRaisesRegex(SystemExit, 'ownership locks'):
+            self.export()
+        self.assertFalse(self.output.exists())
+        self.assertTrue(self.export()['exported'])
+        self.output.unlink()
+        install.write_json(config, {'provider':'oda','household':self.household})
+        with self.assertRaisesRegex(SystemExit, 'matching runtime.json'):
+            self.export()
+        self.assertFalse(self.output.exists())
+
     def test_actual_main_exports_manifest_state_history_and_cover(self):
         before=(self.state/'recipes.sqlite3').read_bytes()
         result=self.export()
