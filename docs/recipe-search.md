@@ -39,6 +39,9 @@ These are separate choices:
   and their subdomains remain excluded even with broad search enabled.
 - Installation `recipe_search`: selected backend and optional secret-file path.
   This is local operator configuration, not a chat/profile credential field.
+- `preferred_sources` / `occasional_sources`: how recipes found through website
+  discovery (`web`) rank against the bank and the store. See
+  [source preferences](recipe-selection.md#source-preferences).
 
 Setup explains the selected sites and asks once, within the existing settings
 conversation, whether other recipe websites may be searched when needed. API
