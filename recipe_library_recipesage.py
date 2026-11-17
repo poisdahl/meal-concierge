@@ -27,6 +27,7 @@ from recipe_libraries import (
     validate_library_id,
     validate_library_recipe_ref,
 )
+from core import contains_line_controls
 from recipes import RecipeError, evidence_inputs, normalize_recipe, normalize_source_url, source_ingredient, source_yield, recipe_evidence_fields
 
 
@@ -151,17 +152,10 @@ def _canonical(value: Any) -> str:
 def _text(value: Any, field: str, maximum: int, *, required: bool = True) -> str | None:
     if value is None and not required:
         return None
-    if not isinstance(value, str):
+    if not isinstance(value, str) or contains_line_controls(value):
         raise RecipeLibraryError(f"RecipeSage {field} is invalid")
     result = value.strip()
-    if required and not result:
-        raise RecipeLibraryError(f"RecipeSage {field} is invalid")
-    if len(result) > maximum or any(
-        ord(character) < 32
-        or ord(character) == 127
-        or 0xD800 <= ord(character) <= 0xDFFF
-        for character in result
-    ):
+    if (required and not result) or len(result) > maximum:
         raise RecipeLibraryError(f"RecipeSage {field} is invalid")
     return result or None
 

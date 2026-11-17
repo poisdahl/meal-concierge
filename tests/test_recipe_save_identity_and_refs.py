@@ -25,6 +25,15 @@ def recipe(name, external_id):
 
 
 class RecipeSaveTests(unittest.TestCase):
+    def test_source_attribution_labels_are_single_line(self):
+        for key in ("publisher", "author", "title", "external_id"):
+            for original in (True, False):
+                value = recipe("Brød", "bread")
+                source = value["source"].setdefault("original", {}) if original else value["source"]
+                source[key] = "Bakery\u2028Kitchen"
+                with self.subTest(key=key, original=original), self.assertRaisesRegex(HouseholdError, "single-line"):
+                    self.call(action="save", recipe=value)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

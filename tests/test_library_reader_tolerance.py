@@ -58,6 +58,17 @@ class NativeRecipeProseTests(unittest.TestCase):
             mapped = reader(provider)._mapped_recipe(raw)
             self.assertEqual(mapped["source"]["original"]["url"], "https://recipes.example/soup?id=12")
 
+    def test_browsed_titles_reject_line_controls_before_mapping_full_recipe(self):
+        for provider, field in (("recipesage", "title"), ("mealie", "name")):
+            for control in ("\u2028", "\u202e"):
+                raw = fixture(provider)
+                raw[field] = "Soup" + control + "Second title"
+                adapter = reader(provider)
+                if provider == "recipesage":
+                    adapter._user_id = raw["userId"]
+                with self.subTest(provider=provider, control=control), self.assertRaisesRegex(RecipeLibraryError, "recipe (name|title)"):
+                    adapter._summary(raw)
+
     def test_mealie_identity_fields_do_not_accept_line_breaks(self):
         raw = fixture("mealie")
         raw["name"] = "Soup\nSecond title"

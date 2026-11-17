@@ -276,9 +276,9 @@ def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str,
         raise RecipeError("source.relationship is invalid")
     result = {
         "kind": _single_line(value.get("kind") or "unknown", "source.kind", required=True, maximum=40),
-        "publisher": _bounded_text(value.get("publisher"), "source.publisher", maximum=200),
+        "publisher": _single_line(value.get("publisher"), "source.publisher", maximum=200),
         "title": _single_line(value.get("title"), "source.title", maximum=300),
-        "author": _bounded_text(value.get("author"), "source.author", maximum=200),
+        "author": _single_line(value.get("author"), "source.author", maximum=200),
         "url": normalize_source_url(value.get("url"), version=version),
         "external_id": _single_line(value.get("external_id"), "source.external_id", maximum=300),
         "relationship": relationship,
@@ -290,7 +290,7 @@ def _source(value: Any, *, required: bool = True, version: int = 2) -> dict[str,
             raise RecipeError("source.original must contain only attribution fields")
         result["original"] = {
             key: normalize_attribution_url(original.get(key)) if key == "url" else
-            _bounded_text(original.get(key), f"source.original.{key}", maximum=300)
+            _single_line(original.get(key), f"source.original.{key}", maximum=300)
             for key in sorted(fields)
         }
     return result
