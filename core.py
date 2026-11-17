@@ -771,6 +771,10 @@ def _migrate_state(
     before_v13: Callable[[Mapping[str, Any]], None] | None = None,
     before_v14: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> None:
+    original_profile = state.get("profile")
+    original_recipes = original_profile.get("recipes") if isinstance(original_profile, dict) else None
+    missing_web_settings = not isinstance(original_recipes, dict) or "web_search" not in original_recipes
+    reviewed_setup = isinstance(state.get("setup"), dict) and state["setup"].get("status") == "complete"
     version = state.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise HouseholdError("household state version is invalid")
@@ -965,7 +969,7 @@ def _migrate_state(
         state["version"] = 14
     # Additive migration: do not rewrite legacy settings, frozen email jobs or
     # receipts, and never enqueue an occurrence merely by opening old state.
-    state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment"), str(state.get("provider") or config.get("provider") or "oda").casefold())
+    state["checkout_payment"] = checkout_payment_settings(state.get("checkout_payment", config.get("checkout_payment")), str(state.get("provider") or config.get("provider") or "oda").casefold())
     delivery = state.setdefault("recipe_delivery", initial_recipe_delivery(
         legacy=True, legacy_email=valid_email_address(state.get("email_recipient"))))
     preferences = delivery.get("preferences") if isinstance(delivery, dict) else None
@@ -1033,6 +1037,9 @@ def _migrate_state(
     if not isinstance(recipe_profile, dict):
         raise HouseholdError("household recipe profile is invalid")
     recipe_profile.setdefault("web_search", deepcopy(DEFAULT_WEB_SEARCH))
+    if missing_web_settings and reviewed_setup:
+        recipe_profile["web_search"]["enabled"] = False
+        state["setup"]["status"] = "needs_review"
     _validate_recipe_source_preferences(recipe_profile)
     try:
         validate_web_search(recipe_profile["web_search"])

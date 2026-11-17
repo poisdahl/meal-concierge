@@ -830,3 +830,18 @@ Oda retry discount labels are descriptive data, not a promotion grammar. The
 parser reads signed itemized amounts from the bound summary, checks full bill
 arithmetic and freezes the exact rows for submission. Unknown/malformed money,
 changed rows and inconsistent totals still reject submission.
+
+
+A completed legacy setup with no saved web-search settings reopens setup review
+with web search disabled. An existing household payment preference takes
+precedence over the installation configuration. Upgrades validate the configured
+payment method only when the household has no stored preference.
+
+Provider login `--status` reports the exchange kind and recovery action.
+For `explicit_login`, use the provider login command above with the original
+provider and token directory. A fresh interactive grant preserves a secret-free
+receipt of the superseded uncertain exchange. A ready exchange finishes local
+publication on the next authenticated operation. Neither
+[Oda's connection guide](https://oda.com/mcp?lang=en) nor
+[Mathem's guide](https://www.mathem.se/mcp?lang=en) documents a replay or
+reconciliation contract for a lost refresh response.
