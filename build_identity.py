@@ -19,14 +19,14 @@ def installed_runtime_digest(release):
     digest = hashlib.sha256()
     for root, dirs, files in os.walk(venv):
         dirs.sort()
-        # Bytecode caches are derived when Python imports a module.
-        dirs[:] = [name for name in dirs if name != '__pycache__']
         for name in sorted([*files, *dirs]):
             path = Path(root) / name
             info = path.lstat()
             relative = path.relative_to(venv).as_posix()
             digest.update(json.dumps([relative, info.st_mode], separators=(',', ':')).encode() + b'\x00')
             if stat.S_ISLNK(info.st_mode):
+                if '__pycache__' in path.parts or path.suffix == '.pyc':
+                    raise ValueError('runtime bytecode cache cannot be linked')
                 digest.update(os.fsencode(os.readlink(path)) + b'\x00')
                 if relative != 'bin/python':
                     continue
@@ -44,7 +44,13 @@ def installed_runtime_digest(release):
 
 def create(source, release, python_version):
     source, release = Path(source), Path(release)
-    paths = sorted([*release.glob('*.py'), release / 'runtime-requirements.txt',
+    cache = release / '__pycache__'
+    if cache.is_symlink():
+        raise ValueError('program bytecode cache cannot be linked')
+    cached_files = [*release.glob('*.pyc'), *cache.glob('*')]
+    if any(p.is_symlink() or not p.is_file() for p in cached_files):
+        raise ValueError('program bytecode cache contains an irregular file')
+    paths = sorted([*release.glob('*.py'), *cached_files, release / 'runtime-requirements.txt',
                     *(p for p in (release / 'skill').rglob('*') if p.is_file())],
                    key=lambda p: p.relative_to(release).as_posix())
     digest = hashlib.sha256()

@@ -3,6 +3,9 @@
 from __future__ import annotations
 import sys
 
+# The bootstrap can be run by the host Python directly from a published tree.
+sys.dont_write_bytecode = True
+
 if sys.version_info < (3, 10):
     raise SystemExit("Meal Concierge installation requires Python 3.10+ on PATH as python3. Install a supported Python and uv, then retry the same command.")
 
@@ -186,7 +189,7 @@ if meta is not None:
 print(json.dumps(report))
 """
         args = [
-            release / 'venv/bin/python', '-I', '-c', code, release, archive,
+            release / 'venv/bin/python', '-I', '-B', '-c', code, release, archive,
             json.dumps([RECIPE_PACK['pack_id']]), json.dumps(meta),
         ]
         result = subprocess.run([str(x) for x in args], capture_output=True, text=True)
@@ -213,7 +216,7 @@ if json.loads(sys.argv[4]):
         report['withdrawals']=withdrawal_preview(sys.argv[2],meta['paths']['state'],json.load(settings)['household'],expected)
 print(json.dumps(report))
 """
-    args = [release / 'venv/bin/python', '-I', '-c', code, release, archive, json.dumps(expected), json.dumps(action == 'prepare'), json.dumps(meta)]
+    args = [release / 'venv/bin/python', '-I', '-B', '-c', code, release, archive, json.dumps(expected), json.dumps(action == 'prepare'), json.dumps(meta)]
     if action == 'apply':
         # The applying process owns its locks itself. Killing this installer
         # cannot release ownership while its surviving child still writes.
@@ -230,7 +233,7 @@ if expected.get('kind') == 'bundled' and expected.get('normalizer_version') != R
 extra = {'preparation': json.loads(sys.argv[6])} if len(sys.argv) > 6 else {}
 apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),expected,allow_removals=json.loads(sys.argv[5]),**extra)
 """
-        args = [release / 'venv/bin/python', '-I', '-c', code, release, archive,
+        args = [release / 'venv/bin/python', '-I', '-B', '-c', code, release, archive,
                 json.dumps(meta), json.dumps(expected), json.dumps(allow_removals)]
         if preparation is not None:
             args.append(json.dumps(preparation))
@@ -246,7 +249,7 @@ apply_recipe_pack(Path(sys.argv[2]),json.loads(sys.argv[3]),expected,allow_remov
 def recipe_collection_remove_command(release, meta):
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import remove_recipe_collection; remove_recipe_collection(json.loads(sys.argv[2]))"
     result = subprocess.run(
-        [str(release / 'venv/bin/python'), '-I', '-c', code, str(release), json.dumps(meta)],
+        [str(release / 'venv/bin/python'), '-I', '-B', '-c', code, str(release), json.dumps(meta)],
         capture_output=True,
         text=True,
     )
@@ -262,7 +265,7 @@ def recipe_collection_remove_command(release, meta):
 def local_recipe_collection_remove_command(release, meta, expected):
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import remove_recipe_pack; remove_recipe_pack(json.loads(sys.argv[2]),json.loads(sys.argv[3]))"
     result = subprocess.run(
-        [str(release / 'venv/bin/python'), '-I', '-c', code, str(release),
+        [str(release / 'venv/bin/python'), '-I', '-B', '-c', code, str(release),
          json.dumps(meta), json.dumps(expected)],
         capture_output=True,
         text=True,
@@ -516,7 +519,7 @@ def assert_stopped(meta):
 
 def service_args(meta, release=None):
     root = Path(release or meta['code_root'])
-    result = [str(root / 'venv/bin/python'), '-I', str(root / 'service.py')]
+    result = [str(root / 'venv/bin/python'), '-I', '-B', str(root / 'service.py')]
     for key, value in meta['paths'].items():
         result += ['--' + key.replace('_', '-'), value]
     for key, value in meta.get("browser_launch", {}).items():
@@ -648,6 +651,28 @@ def copy_data(source, target):
     shutil.copytree(source, target)
 
 
+def sync_backup_tree(destination):
+    for root, _directories, files in os.walk(destination, topdown=False):
+        for name in files:
+            descriptor = os.open(Path(root) / name, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        descriptor = os.open(root, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    # backup() can create several missing parent directories as well.
+    for directory in destination.parents:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
 def backup(meta, destination):
     destination = Path(destination).resolve()
     state = Path(meta['paths']['state']).resolve()
@@ -717,27 +742,7 @@ def history_maintenance(meta, action, preview=None, destination=None):
         _atomic_json(archive_path, document)
         if json.loads(archive_path.read_text()) != document:
             raise RuntimeError('history archive verification failed; nothing archived')
-        # Recovery verifies the archive against its copied state. Make every
-        # backup file durable, then directories bottom-up, before compaction.
-        for root, _directories, files in os.walk(destination, topdown=False):
-            for name in files:
-                descriptor = os.open(Path(root) / name, os.O_RDONLY | os.O_NOFOLLOW)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-            descriptor = os.open(root, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        # backup() can create several missing parent directories as well.
-        for directory in destination.parents:
-            descriptor = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+        sync_backup_tree(destination)
         _atomic_json(path, after)
         return {**report(planned), 'archived': True, 'archive': str(archive_path)}
 
@@ -747,12 +752,22 @@ def history_command(meta, action, preview=None, destination=None):
     if not (release / 'history_retention.py').is_file():
         raise RuntimeError('update the installed runtime before history maintenance')
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import history_maintenance; print(json.dumps(history_maintenance(*json.loads(sys.argv[2]))))"
-    result = subprocess.run([str(release / 'venv/bin/python'), '-I', '-c', code,
+    result = subprocess.run([str(release / 'venv/bin/python'), '-I', '-B', '-c', code,
                              str(release), json.dumps([meta, action, preview, str(destination) if destination else None])],
                             capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError('history maintenance failed: ' + (result.stderr or result.stdout).strip()[-2000:])
     return json.loads(result.stdout)
+
+
+def configure_installed_bytecode(release):
+    # Every supported launcher uses this wheel-locked venv. Its site startup
+    # prevents ordinary imports from creating new runnable cache files after
+    # qualification, including direct invocations that omit interpreter -B.
+    run(release / 'venv/bin/python', '-I', '-B', '-c',
+        "import pathlib,sys,sysconfig; p=pathlib.Path(sysconfig.get_path('purelib')); "
+        "assert p.resolve().is_relative_to(pathlib.Path(sys.prefix).resolve()); "
+        "(p/'000-meal-concierge-bytecode.pth').write_text('import sys; sys.dont_write_bytecode = True\\n')")
 
 
 def stage_release(code_root, uv_binary=None):
@@ -768,8 +783,9 @@ def stage_release(code_root, uv_binary=None):
     run(uv, '--no-config', 'venv', '--python', PYTHON, release / 'venv')
     run(uv, '--no-config', 'pip', 'sync', '--link-mode', 'copy', '--require-hashes', '--only-binary', ':all:',
         '--python', release / 'venv/bin/python', release / 'runtime-requirements.txt')
+    configure_installed_bytecode(release)
     # Check both versions AND the actual loaded modules inside this private venv.
-    run(release / 'venv/bin/python', '-I', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
+    run(release / 'venv/bin/python', '-I', '-B', '-c', "import sys,importlib.metadata as m,pathlib,mcp,mcp.types; assert sys.version_info[:3]==(3,12,12); assert m.version('mcp')==m.version('mcp-types')=='2.2.0'; assert all(pathlib.Path(x.__file__).is_relative_to(sys.prefix) for x in [mcp,mcp.types]); print('runtime:',sys.version.split()[0],m.version('mcp'),m.version('mcp-types'),mcp.__file__,mcp.types.__file__)")
     from build_identity import create, MANIFEST
     write_json(release / MANIFEST, create(SOURCE, release, PYTHON))
     marker.unlink()
@@ -778,7 +794,7 @@ def stage_release(code_root, uv_binary=None):
 
 def migrate(release, meta):
     code = "import sys,json; sys.path.insert(0,sys.argv[1]); from install import migrate_owned; migrate_owned(json.loads(sys.argv[2]))"
-    run(release / 'venv/bin/python', '-I', '-c', code, release, json.dumps(meta))
+    run(release / 'venv/bin/python', '-I', '-B', '-c', code, release, json.dumps(meta))
 
 
 def migrate_owned(meta):
@@ -786,8 +802,26 @@ def migrate_owned(meta):
     from service import config
     from recipes import RecipeStore
     with data_ownership(meta):
+        operation_id = meta.get('_migration_operation')
+        if operation_id:
+            from runtime_rollback import state_fingerprint
+            pending = Path(meta['home']) / 'pending-install.json'
+            record = bounded_json(pending, 8 * 1024 * 1024)
+            operation = record['update_operation']
+            if operation['id'] != operation_id or operation['phase'] != 'prepared':
+                raise RuntimeError('interrupted migration operation changed')
+            state_path = Path(meta['paths']['state'])
+            if operation['prior_identity'] is not None and state_fingerprint(state_path) != operation['before_state_sha256']:
+                # Uncertified changes appeared since the preimage was taken.
+                # Migrate forward without making an old household restorable.
+                operation['prior_identity'] = None
+                write_json(pending, record)
         state = StateStore(Path(meta['paths']['state']), config(Path(meta['paths']['config'])))
         RecipeStore(state.directory / 'recipes.sqlite3', str(state.config['household'])).search(limit=1)
+        if operation_id:
+            operation.update(phase='migrated', after_state_sha256=state_fingerprint(state.directory))
+            write_json(pending, record)
+
 
 
 def program_preflight_owned(meta):
@@ -1347,7 +1381,7 @@ def main():
         env = {'MEAL_CONCIERGE_SOCKET': meta['paths']['socket']}
         if os.environ.get('MEAL_CONCIERGE_EMAIL_CONFIG'):
             env['MEAL_CONCIERGE_EMAIL_CONFIG'] = str(Path(os.environ['MEAL_CONCIERGE_EMAIL_CONFIG']).expanduser().resolve())
-        print(json.dumps({'command': str(current / 'venv/bin/python'), 'args': ['-I', str(current / 'mcp_server.py')], 'env': env, 'skill': str(current / 'skill/SKILL.md')}, indent=2)); return
+        print(json.dumps({'command': str(current / 'venv/bin/python'), 'args': ['-I', '-B', str(current / 'mcp_server.py')], 'env': env, 'skill': str(current / 'skill/SKILL.md')}, indent=2)); return
     if args.action in {'prepare-program', 'prepare-recipes'}:
         # External 'run' owns the lifecycle lock for the entire service session.
         # Preparation only writes staged artifacts and uses the separate code lock.
@@ -1368,7 +1402,7 @@ def main():
     with file_lock(home / '.installer.lock'):
         path = home / 'runtime.json'
         pending = home / 'pending-install.json'
-        manifest = path if path.exists() else pending
+        manifest = pending if args.action == 'update' and pending.exists() else path if path.exists() else pending
         settings = None
         prepared_release = None
         if manifest.exists():
@@ -1376,6 +1410,7 @@ def main():
             if args.manager is not None and (args.manager == 'external') != (meta['manager'] == 'external'):
                 raise RuntimeError('existing installation manager differs; no implicit ownership transfer')
             settings = meta.pop('initial_config', None)
+            meta.pop('update_operation', None)
             if args.action == 'install' and path.exists():
                 raise RuntimeError('existing installation; use attach or an explicit stopped-service update')
             if args.action == 'connect-store':
@@ -1577,47 +1612,92 @@ def main():
 
 
 def publish(meta, path, home, settings, uv_binary=None, prepared_release=None):
-    release = prepared_release or stage_release(Path(meta['code_root']), uv_binary)
-    previous = (bounded_json(path) if path.exists() and not any((home / name).exists()
-                for name in ('maintenance.json', 'pending-install.json')) else None)
-    destination = None
+    from build_identity import read
+    from runtime_rollback import arm, old_identity, preimage_fingerprint, state_fingerprint
+    pending = home / 'pending-install.json'
+    maintenance = home / 'maintenance.json'
+    prior_pending = bounded_json(pending, 8 * 1024 * 1024) if pending.exists() else {}
+    operation = prior_pending.get('update_operation')
+    code = Path(meta['code_root'])
+    if operation is not None:
+        release = Path(operation['candidate'])
+        if (operation.get('format') != 1 or not re.fullmatch(r'[0-9a-f]{32}', operation['id'])
+                or release.is_symlink() or release.parent.resolve() != code.resolve()
+                or not re.fullmatch(r'release-[0-9a-f]{32}', release.name)
+                or prepared_release is not None and Path(prepared_release) != release):
+            raise RuntimeError('interrupted update belongs to a different program')
+        if candidate_identity(release) != operation['candidate_identity']:
+            raise RuntimeError('interrupted candidate changed; preserve the original backup')
+    else:
+        release = prepared_release or stage_release(code, uv_binary)
     with offline(meta):
+        if operation and operation['phase'] == 'published':
+            if bounded_json(path) != operation['published_manifest'] or (code / 'current').resolve() != release.resolve():
+                raise RuntimeError('interrupted publication no longer matches the selected runtime')
+            maintenance.unlink(missing_ok=True)
+            pending.unlink()
+            return
         if path.exists():
-            # No maintenance marker or authoritative data changes precede a
-            # successful final rehearsal under the existing offline owner.
             preflight_program(release, meta)
-        meta['paths']['maintenance'] = str(home / 'maintenance.json')
-        # Persist the exact owner before any unit publication or data migration.
-        # A killed first installation resumes with `update`, without rediscovery.
-        write_json(home / 'pending-install.json', {**meta, 'initial_config': settings})
+        meta['paths']['maintenance'] = str(maintenance)
+        if operation is None:
+            # Legacy pending records cannot prove the state of the pre-update
+            # installation. They can finish forward but can never arm rollback.
+            previous = bounded_json(path) if path.exists() and not prior_pending and not maintenance.exists() else None
+            prior = Path(previous['release']) if previous and previous.get('release') else None
+            destination = None
+            if Path(meta['paths']['state']).exists():
+                destination = home / 'backups' / ('before-' + uuid.uuid4().hex)
+                backup(meta, destination)
+                sync_backup_tree(destination)
+                print('Offline backup:', destination)
+            operation = {'format': 1, 'id': uuid.uuid4().hex, 'phase': 'prepared', 'candidate': str(release),
+                         'candidate_identity': read(release), 'previous_manifest': previous,
+                         'prior_identity': old_identity(prior) if prior and prior.is_dir() and destination else None,
+                         'backup': str(destination) if destination else None,
+                         'preimage_sha256': preimage_fingerprint(destination) if destination else None,
+                         'before_state_sha256': state_fingerprint(destination / 'state') if destination else None}
+            prior_pending = {**meta, 'initial_config': settings, 'update_operation': operation}
+            write_json(pending, prior_pending)
+        if operation['phase'] not in {'prepared', 'migrated'}:
+            raise RuntimeError('interrupted update phase is unknown')
+        destination = Path(operation['backup']) if operation['backup'] else None
+        if destination and (destination.is_symlink() or destination.parent.resolve() != (home / 'backups').resolve()
+                or not re.fullmatch(r'before-[0-9a-f]{32}', destination.name)
+                or preimage_fingerprint(destination) != operation['preimage_sha256']):
+            raise RuntimeError('original update backup changed; preserve all journals')
         if not Path(meta['paths']['config']).exists():
             write_json(meta['paths']['config'], settings)
-        if Path(meta['paths']['state']).exists():
-            destination = home / 'backups' / ('before-' + uuid.uuid4().hex)
-            backup(meta, destination)
-            print('Offline backup:', destination)
-        write_json(home / 'maintenance.json', {'candidate': str(release), 'reason': 'offline update incomplete; repair before starting'})
-    # The writing child owns its locks; parent death cannot free them early.
-    # Maintenance remains set across this handoff and the subsequent publication.
-    migrate(release, meta)
+        write_json(maintenance, {'candidate': str(release), 'operation': operation['id'],
+                                 'reason': 'offline update incomplete; repair before starting'})
+    if operation['phase'] == 'prepared':
+        # Child owns its locks. A retry of a partially completed migration
+        # uses the same selected release and never replaces the original backup.
+        migrate(release, {**meta, '_migration_operation': operation['id'], 'home': str(home)})
     with offline(meta):
+        prior_pending = bounded_json(pending, 8 * 1024 * 1024)
+        operation = prior_pending['update_operation']
+        if operation['prior_identity'] is not None and (
+                operation['phase'] != 'migrated' or operation.get('after_state_sha256') != state_fingerprint(Path(meta['paths']['state']))):
+            operation['prior_identity'] = None
+            write_json(pending, prior_pending)
         write_unit(meta)
-        current = Path(meta['code_root']) / 'current'
+        current = code / 'current'
         replacement = current.with_name('.current-' + uuid.uuid4().hex)
         replacement.symlink_to(release.name)
         os.replace(replacement, current)
-        if previous and destination:
-            from runtime_rollback import arm
-            arm(home, meta, previous, destination, release)
+        if operation['prior_identity'] is not None:
+            arm(home, meta, operation['previous_manifest'], destination, release, operation['id'], operation['prior_identity'])
         meta['previous_release'] = meta.get('release')
         meta['release'] = str(release)
-        from build_identity import read
         build = read(release)
         if build.get('installed_runtime_sha256'):
             meta['runtime_identity'] = {key: build[key] for key in ('source_sha256', 'installed_runtime_sha256', 'dependencies_sha256')}
         write_json(path, meta)
-        (home / 'maintenance.json').unlink()
-        (home / 'pending-install.json').unlink()
+        operation.update(phase='published', published_manifest=meta)
+        write_json(pending, prior_pending)
+        maintenance.unlink()
+        pending.unlink()
     print('Installed, stopped. Start explicitly; attach prints agent configuration without changing it.')
     print('Recipe collection is optional. Use prepare-recipes while running, then import-recipes --prepared ID while stopped.')
 
