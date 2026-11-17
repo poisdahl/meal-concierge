@@ -110,7 +110,11 @@ class GrokRuntimeTests(unittest.IsolatedAsyncioTestCase):
             (self.root / 'data/lose-cancel-response').touch()
             uncertain = await client.call_tool('meal_concierge_orders', {
                 'action': 'cancel_confirm', 'order_id': 'mc09-original-order', 'confirmation_id': confirmation})
-            self.assertTrue(uncertain.is_error)
+            self.assertFalse(uncertain.is_error, uncertain)
+            outcome = json.loads(uncertain.content[0].text)
+            self.assertFalse(outcome['ok'], outcome)
+            self.assertEqual(outcome['status'], 'outcome_unknown')
+            self.assertEqual(outcome['outcome'], 'unknown')
         async with self.client() as client:
             result = await self.call(client, 'orders', action='cancel_reconcile',
                                      order_id='mc09-original-order', confirmation_id=confirmation)
